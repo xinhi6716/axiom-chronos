@@ -7,7 +7,7 @@ import time
 
 from axiom.home import ENGINE, axiom_home, resolve
 
-PLUGIN = 'ouroboros'
+PLUGIN = 'chronos'
 BRIDGE = f'mcp__plugin_{PLUGIN}_bridge__'
 BRIDGE_SERVER = f'plugin:{PLUGIN}:bridge'
 TOOLS = ['Agent', 'Read', 'Glob', 'Grep', 'Write', 'Bash'] + [

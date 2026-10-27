@@ -18,14 +18,14 @@ def emit(event):
 
 
 bridge_status = 'failed' if scenario == 'no-bridge' else 'connected'
-emit({'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'plugin:ouroboros:bridge', 'status': bridge_status}]})
+emit({'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': bridge_status}]})
 if scenario == 'crash':
     sys.exit(3)
 emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [
-    {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'ouroboros:dispatcher', 'description': 'Dispatch wish'}}]}})
+    {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [
-    {'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_ouroboros_bridge__orch', 'input': {'project': 'p', 'args': ['unit', 'add', 'u1']}},
-    {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_ouroboros_bridge__codex_run',
+    {'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'project': 'p', 'args': ['unit', 'add', 'u1']}},
+    {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run',
      'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py\nVERIFY  python -m unittest'}},
     {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {'file_path': 'x'}}]}})
 emit({'type': 'user', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})

@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "axiom-ouroboros"
+name = "axiom-chronos"
 version = "0.1.0"
 description = "Grant wishes on a codebase: Claude Code coordinates, Codex builds, Gemini explains, and every run is remembered."
 readme = "README.md"
@@ -14,7 +14,7 @@ authors = [{ name = "xinhi6716" }]
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/xinhi6716/axiom-ouroboros"
+Repository = "https://github.com/xinhi6716/axiom-chronos"
 
 [project.scripts]
 axiom = "axiom.cli:main"

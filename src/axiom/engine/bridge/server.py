@@ -1,4 +1,4 @@
-"""Axiom Ouroboros bridge: a dependency-free MCP stdio server exposing Codex, agy, orch and memory as typed tools."""
+"""Axiom Chronos bridge: a dependency-free MCP stdio server exposing Codex, agy, orch and memory as typed tools."""
 import atexit
 import json
 import os
@@ -15,7 +15,7 @@ from codex_app import SANDBOXES, CodexAppServer  # noqa: E402
 from memory import Memory  # noqa: E402
 from procs import BridgeError, data_home, resolve_command  # noqa: E402
 
-SERVER_INFO = {'name': 'ouroboros-bridge', 'version': '0.1.0'}
+SERVER_INFO = {'name': 'chronos-bridge', 'version': '0.1.0'}
 ROLES = ('terra', 'sol')
 DEFAULT_AGY_MODEL = 'gemini-4-argon-medium'
 

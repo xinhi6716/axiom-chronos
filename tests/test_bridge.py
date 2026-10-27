@@ -287,7 +287,7 @@ class McpStdioTests(unittest.TestCase):
 
     def test_full_session(self):
         init = self.rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 't', 'version': '0'}})
-        self.assertEqual(init['result']['serverInfo']['name'], 'ouroboros-bridge')
+        self.assertEqual(init['result']['serverInfo']['name'], 'chronos-bridge')
         self.proc.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         names = [tool['name'] for tool in self.rpc('tools/list')['result']['tools']]
         self.assertEqual(names, ['codex_run', 'gemini_preview', 'orch', 'memory_record', 'memory_search', 'memory_get',

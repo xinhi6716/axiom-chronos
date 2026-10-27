@@ -1,8 +1,8 @@
-# Axiom Ouroboros
+# Axiom Chronos
 
 [English](README.md) · [繁體中文](README.zh-TW.md)
 
-Make a wish on your codebase. Axiom Ouroboros runs it as a small team of models: Claude Code coordinates, Codex writes the code, Gemini explains the outcome in plain words, and every finished piece is remembered for the next wish.
+Make a wish on your codebase. Axiom Chronos runs it as a small team of models: Claude Code coordinates, Codex writes the code, Gemini explains the outcome in plain words, and every finished piece is remembered for the next wish.
 
 ```
 axiom wish add a --stats flag to cli.py that prints done/total
@@ -40,7 +40,7 @@ Each Claude session loads only Axiom's own engine: your other Claude Code plugin
 Requires Python 3.10+, [Claude Code](https://claude.com/claude-code), the Codex CLI, [Bun](https://bun.sh), and optionally Antigravity (`agy`) for plain-language reports. Sign in to `claude` and `codex` first.
 
 ```
-pipx install git+https://github.com/xinhi6716/axiom-ouroboros
+pipx install git+https://github.com/xinhi6716/axiom-chronos
 axiom doctor
 ```
 

@@ -1,8 +1,8 @@
 {
-  "name": "ouroboros",
-  "displayName": "Axiom Ouroboros",
+  "name": "chronos",
+  "displayName": "Axiom Chronos",
   "version": "0.1.0",
-  "description": "Engine of Axiom Ouroboros, loaded by the axiom CLI for each session.",
+  "description": "Engine of Axiom Chronos, loaded by the axiom CLI for each session.",
   "author": {
     "name": "xinhi6716"
   },

@@ -11,7 +11,7 @@ from collections import defaultdict
 from procs import BridgeError, kill_tree, require_directory
 
 SANDBOXES = ('read-only', 'workspace-write')
-CLIENT_INFO = {'name': 'axiom-ouroboros', 'title': 'Axiom Ouroboros', 'version': '0.1.0'}
+CLIENT_INFO = {'name': 'axiom-chronos', 'title': 'Axiom Chronos', 'version': '0.1.0'}
 _DEAD = object()
 
 
@@ -242,7 +242,7 @@ class CodexAppServer:
         try:
             self._request('turn/interrupt', {'threadId': thread_id, 'turnId': turn_id}, timeout=30)
         except BridgeError as exc:
-            print(f'ouroboros bridge: interrupt failed: {exc.message}', file=sys.stderr)
+            print(f'chronos bridge: interrupt failed: {exc.message}', file=sys.stderr)
 
     @staticmethod
     def _record_item(report, item):

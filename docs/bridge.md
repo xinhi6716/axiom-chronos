@@ -1,6 +1,6 @@
 # The bridge
 
-A dependency-free MCP stdio server that lets Claude Code drive Codex and Antigravity (agy) through typed tools instead of ad-hoc shell calls. The engine's plugin manifest registers it as `bridge`, so its tools appear as `mcp__plugin_ouroboros_bridge__<tool>`. Source: [src/axiom/engine/bridge](../src/axiom/engine/bridge).
+A dependency-free MCP stdio server that lets Claude Code drive Codex and Antigravity (agy) through typed tools instead of ad-hoc shell calls. The engine's plugin manifest registers it as `bridge`, so its tools appear as `mcp__plugin_chronos_bridge__<tool>`. Source: [src/axiom/engine/bridge](../src/axiom/engine/bridge).
 
 | Tool | Backend | Use |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ A dependency-free MCP stdio server that lets Claude Code drive Codex and Antigra
 | `memory_record`, `memory_search`, `memory_get`, `memory_digest` | SQLite FTS5 (trigram) in the same data directory | Long-run memory: verified units distilled for later briefs, and a one-line-per-wish history per project. Entries index the wish verbatim, so English entries are found by Chinese queries; CJK query runs are split into bigrams. Each entry hashes its files and reports `stale` once they change |
 | `bridge_status` | `--version` probes | Resolved Codex, agy and Bun executables, Java/TLC readiness, and whether the app-server is up |
 
-`axiom wish` runs the [wish skill](../src/axiom/engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../src/axiom/engine/agents/dispatcher.md) (`ouroboros:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../src/axiom/engine/agents/memory-keeper.md) (`ouroboros:memory-keeper`, Haiku) then records what later units can reuse.
+`axiom wish` runs the [wish skill](../src/axiom/engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../src/axiom/engine/agents/dispatcher.md) (`chronos:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../src/axiom/engine/agents/memory-keeper.md) (`chronos:memory-keeper`, Haiku) then records what later units can reuse.
 
 On Windows, the Codex sandbox cannot start Microsoft Store (MSIX) apps: launching the Store builds of `pwsh` or `python` directly fails with `CreateProcessAsUserW failed: 5` every time, while System32 `powershell.exe` and `cmd.exe` work. Codex runs worker commands through `pwsh` when one is on PATH, so a machine whose only PowerShell 7 is the Store build leaves workers unable to run VERIFY; the dispatcher then reruns it, so results stay trustworthy.
 

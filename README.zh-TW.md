@@ -1,8 +1,8 @@
-# Axiom Ouroboros
+# Axiom Chronos
 
 [English](README.md) · [繁體中文](README.zh-TW.md)
 
-對你的程式碼許願。Axiom Ouroboros 用一支小型的模型團隊完成它：Claude Code 統籌、Codex 寫程式、Gemini 用白話說明結果，每個完成的部分都會被記住，留給下一個願望使用。
+對你的程式碼許願。Axiom Chronos 用一支小型的模型團隊完成它：Claude Code 統籌、Codex 寫程式、Gemini 用白話說明結果，每個完成的部分都會被記住，留給下一個願望使用。
 
 ```
 axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
@@ -24,7 +24,7 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 需要 Python 3.10 以上、[Claude Code](https://claude.com/claude-code)、Codex CLI、[Bun](https://bun.sh)；Antigravity（`agy`）是選配，用來產生白話報告。請先登入 `claude` 和 `codex`。
 
 ```
-pipx install git+https://github.com/xinhi6716/axiom-ouroboros
+pipx install git+https://github.com/xinhi6716/axiom-chronos
 axiom doctor
 ```
 

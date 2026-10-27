@@ -11,8 +11,8 @@ def main(argv=None):
         # Windows consoles default to a legacy code page; wishes and answers are often not in it.
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='replace')
-    parser = argparse.ArgumentParser(prog='axiom', description='Axiom Ouroboros: grant wishes on a codebase.')
-    parser.add_argument('--version', action='version', version=f'axiom-ouroboros {__version__}')
+    parser = argparse.ArgumentParser(prog='axiom', description='Axiom Chronos: grant wishes on a codebase.')
+    parser.add_argument('--version', action='version', version=f'axiom-chronos {__version__}')
     commands = parser.add_subparsers(dest='command', required=True)
 
     wish = commands.add_parser('wish', help='carry out a wish on the project: dispatch, verify, explain, remember')

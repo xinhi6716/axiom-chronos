@@ -40,10 +40,10 @@ class WishTests(unittest.TestCase):
         self.assertEqual(self.wish()[0], 0)
         launch = json.loads(self.record.read_text(encoding='utf-8'))
         argv = launch['argv']
-        self.assertEqual(argv[argv.index('-p') + 1], '/ouroboros:wish 幫 todo 加統計功能')
+        self.assertEqual(argv[argv.index('-p') + 1], '/chronos:wish 幫 todo 加統計功能')
         self.assertEqual(Path(argv[argv.index('--plugin-dir') + 1]), ENGINE)
         self.assertEqual(argv[argv.index('--setting-sources') + 1], 'local')
-        self.assertIn('mcp__plugin_ouroboros_bridge__codex_run', argv[argv.index('--allowedTools') + 1].split(','))
+        self.assertIn('mcp__plugin_chronos_bridge__codex_run', argv[argv.index('--allowedTools') + 1].split(','))
         self.assertEqual(argv[argv.index('--model') + 1], 'opus')
         self.assertEqual(Path(launch['cwd']), self.project)
         self.assertEqual(launch['env'], {'AXIOM_DATA_HOME': str(self.root / 'home'), 'AXIOM_PYTHON': sys.executable})
@@ -51,11 +51,11 @@ class WishTests(unittest.TestCase):
 
     def test_progress_shows_steps_and_the_answer(self):
         _, text = self.wish()
-        self.assertIn('> ouroboros:dispatcher: Dispatch wish', text)
+        self.assertIn('> chronos:dispatcher: Dispatch wish', text)
         self.assertIn('  - orch unit add u1', text)
         self.assertIn('  - codex terra: todo.py defines stats(items).', text)
         self.assertNotIn('Read', text)
-        self.assertIn('< ouroboros:dispatcher finished', text)
+        self.assertIn('< chronos:dispatcher finished', text)
         self.assertIn('統計功能已完成。', text)
         self.assertIn('$0.36', text)
         logs = list((self.root / 'home' / 'logs').glob('*-wish.jsonl'))
@@ -74,7 +74,7 @@ class WishTests(unittest.TestCase):
             status = cli.main(['wish', '--project', str(self.project), '在', 'cli.py', '加', '--pending', '參數'])
         self.assertEqual(status, 0)
         argv = json.loads(self.record.read_text(encoding='utf-8'))['argv']
-        self.assertEqual(argv[argv.index('-p') + 1], '/ouroboros:wish 在 cli.py 加 --pending 參數')
+        self.assertEqual(argv[argv.index('-p') + 1], '/chronos:wish 在 cli.py 加 --pending 參數')
 
     def test_missing_claude_is_reported(self):
         with patch.dict(os.environ, {'AXIOM_CLAUDE_CMD': ''}), patch('shutil.which', return_value=None):
