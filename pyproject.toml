@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axiom-ouroboros"
+version = "0.1.0"
+description = "Grant wishes on a codebase: Claude Code coordinates, Codex builds, Gemini explains, and every run is remembered."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "licenses/*"]
+requires-python = ">=3.10"
+authors = [{ name = "xinhi6716" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/xinhi6716/axiom-ouroboros"
+
+[project.scripts]
+axiom = "axiom.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+axiom = [
+    "engine/.claude-plugin/*.json",
+    "engine/*.md",
+    "engine/agents/*.md",
+    "engine/skills/*/*.md",
+    "engine/bridge/*.py",
+    "engine/vendor/pstack/poteto-mode/scripts/*",
+    "engine/vendor/pstack/poteto-mode/scripts/orch/*",
+]
