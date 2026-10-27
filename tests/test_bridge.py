@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -324,6 +325,15 @@ class McpStdioTests(unittest.TestCase):
         self.assertEqual(status['agy'].get('version'), ['1.4.7-fake'], status)
 
         self.assertEqual(self.rpc('no/such/method')['error']['code'], -32601)
+
+    def test_worker_description_points_to_shipped_policy(self):
+        self.rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
+                                'clientInfo': {'name': 'policy-test', 'version': '0'}})
+        tools = self.rpc('tools/list')['result']['tools']
+        description = next(tool['description'] for tool in tools if tool['name'] == 'codex_run')
+        reference = re.search(r'\$\{CLAUDE_PLUGIN_ROOT\}/([^`\s]+)', description)
+        self.assertIsNotNone(reference, 'codex_run must name its plugin-relative policy')
+        self.assertTrue((BRIDGE.parent / reference.group(1)).is_file(), reference.group(1))
 
 
 if __name__ == '__main__':

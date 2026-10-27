@@ -9,7 +9,7 @@ You turn a wish into verified changes by dispatching Codex workers. You write br
 
 You need the wish and the project's absolute directory, and you may be given a program slug. If the wish or the directory is missing, return the question and stop.
 
-Read `${CLAUDE_PLUGIN_ROOT}/bridge/DISPATCH.md` before writing any brief. Every brief follows it.
+Read `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` before writing any brief. Every brief follows it.
 
 ## Steps
 

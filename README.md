@@ -1,81 +1,120 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/readme-cover-dark-mobile.svg" />
-    <source media="(max-width: 600px)" srcset="assets/readme-cover-mobile.svg" />
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme-cover-dark.svg" />
-    <img src="assets/readme-cover.svg" width="1000" alt="Axiom Chronos — beta codebase workflow, with an original celestial time emblem" />
-  </picture>
-</p>
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/readme-cover-dark-mobile.svg" />
+  <source media="(max-width: 600px)" srcset="assets/readme-cover-mobile.svg" />
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme-cover-dark.svg" />
+  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — beta codebase workflow beneath a celestial hourglass and architectural halo" />
+</picture></p>
 
-# Axiom Chronos
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a><br /><a href="#begin">Begin</a> · <a href="#the-work">The work</a> · <a href="#record-review">Record &amp; review</a> · <a href="#horizon">Horizon</a></p>
 
-**Make a wish on your codebase. Follow what changed.**
+<p align="center">Claude Code coordinates. Codex builds.<br />Optional Gemini reports explain what happened.</p>
 
-[English](README.md) · [繁體中文](README.zh-TW.md)
+Chronos turns a code-change request into scoped work, recorded checks and useful context for the next wish.
 
-> **Beta · 0.1.0b1.** Commands, state layout and agent behaviour may change between releases. The Codex build step has so far been verified on small projects only. Review what a wish changed before you commit it.
+> **Beta · 0.1.0b1.** Commands, state and agent behaviour may change. The initial project report describes small-project Codex runs only; the repository tests use scripted stand-ins. Review every change before committing.
 
-[Install](#install) · [Use](#use) · [How it works](#how-a-wish-runs) · [State & review](#state--review) · [Roadmap](#status) · [Bridge reference](docs/bridge.md)
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-1-dark.svg" /><img src="assets/chronos-threshold-1.svg" width="1200" alt="" /></picture></p>
 
-Chronos brings a small team of models to a code change: **Claude Code coordinates, Codex builds, and optional Gemini reports explain the result.** A memory keeper saves useful, verified work for later wishes.
+<a id="begin"></a>
+<a id="install"></a>
 
-```sh
-axiom wish add a --stats flag to cli.py that prints done/total
-```
+## I · Begin
 
-## Install
+Start small, in a project whose tests you can run.
 
-Requires Python 3.10+, [Claude Code](https://claude.com/claude-code), the Codex CLI, [Bun](https://bun.sh), and optionally Antigravity (`agy`) for plain-language reports. Sign in to `claude` and `codex` first.
+Requires Python 3.10+, [Claude Code](https://claude.com/claude-code), the Codex CLI and [Bun](https://bun.sh). Sign in to `claude` and `codex` first.
 
 ```sh
 pipx install git+https://github.com/xinhi6716/axiom-chronos
 axiom doctor
 ```
 
-`axiom doctor` checks the required tools, SQLite memory support and the state directory, then says what to fix. It does not run a wish. Missing `agy` is a warning rather than a required-dependency failure.
+Then, from your project directory:
 
-**Windows:** Codex cannot run commands through a Microsoft Store build of PowerShell; doctor flags it and gives the MSI install command. See [the bridge notes](docs/bridge.md).
+```sh
+axiom wish add a --stats flag to cli.py that prints done/total
+```
 
-## Use
+**Keep a checkpoint first.** A wish can edit files and call your signed-in model services. Use only project material you are allowed to share with those services.
 
-Start with a small change in a project whose tests you can run.
+<details>
+<summary><strong>Setup notes</strong> — optional reports and Windows</summary>
+
+`axiom doctor` checks tools, SQLite memory support and the state directory; it does not run a wish. Antigravity (`agy`) is optional. Without its Gemini preview, the core can show the dispatcher report.
+
+The package declares Python 3.10+. CI runs Python 3.12; Python 3.10 runtime compatibility has not been independently tested. SQLite must support FTS5 and JSON.
+
+On Windows, Codex cannot run commands through a Microsoft Store build of PowerShell. Doctor flags it and gives the MSI install command. See [the bridge notes](docs/bridge.md).
+
+</details>
+
+<a id="use"></a>
+
+<details>
+<summary><strong>Options &amp; more examples</strong></summary>
 
 ```sh
 cd your-project
-axiom wish 幫 todo 加一個統計功能
+axiom wish add a statistics command to todo
 axiom wish --project ../other --model sonnet rename calc to compute_total everywhere
 ```
 
-Put options **before** the wish. Everything after them belongs to the wish, including flag names.
+Put options **before** the wish. Everything after them is wish text, including flag names.
 
-| Option | Purpose |
-| --- | --- |
-| `--project PATH` | Choose the project directory; defaults to the current directory. |
-| `--model MODEL` | Choose the core Claude model; defaults to `opus`. |
-| `--max-turns N` | Set the core session's turn limit; defaults to `60`. |
-
-The dispatcher is instructed to ask before dispatching if a wish leaves an interface or data choice open, such as a public function, command-line flag, output or file format.
-
-**A wish can edit your project and call your signed-in model services.** Use material you are allowed to share with those services, keep a clean checkpoint, and review the diff and test results before committing.
-
-## How a wish runs
-
-The beta engine separates the work into a few clear roles.
-
-| Step | Role | What it does |
+| Option | Default | Purpose |
 | --- | --- | --- |
-| **01 · Remember** | Claude Code core · Opus by default | Reads the project's history and hands the wish to the dispatcher. |
-| **02 · Scope** | Dispatcher · Sonnet | Writes a `GOAL · SCOPE · VERIFY` brief for each unit and includes relevant memory. |
-| **03 · Build** | Codex workers · `terra` role | Works in ephemeral threads. A `sol` integration unit is used only if the full suite fails after more than one unit changed files. |
-| **04 · Check** | Dispatcher | Checks that VERIFY ran successfully in the command record, or reruns it; a worker's claim is not evidence. |
-| **05 · Explain & retain** | Gemini via optional `agy` + memory keeper · Haiku | Rewrites reports in plain language and saves reusable verified work. If the preview fails, the core shows the dispatcher report. |
-| **06 · Answer** | Claude Code core | Checks the explanation against the reported facts and returns the result. |
+| `--project PATH` | Current directory | Choose the project. |
+| `--model MODEL` | `opus` | Choose the core Claude model. |
+| `--max-turns N` | `60` | Limit core-session turns. |
 
-Each Claude session is configured to load Axiom's own engine with local settings. Codex workers use lean mode by default, which requests that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. See [bridge contracts](docs/bridge.md#contracts) for the implementation boundaries.
+</details>
 
-## State & review
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-2-dark.svg" /><img src="assets/chronos-threshold-2.svg" width="1200" alt="" /></picture></p>
 
-State lives in `~/.axiom`; set `AXIOM_HOME` to move it.
+<a id="the-work"></a>
+<a id="how-a-wish-runs"></a>
+
+## II · The work
+
+A brief names the **goal**, the files in **scope**, and the command that will **verify** the result. The dispatcher is instructed to ask first when an interface or data choice is still open.
+
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
+  <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
+  <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
+  <img src="assets/chronos-process.svg" width="1200" alt="Designed beta flow: scope the work, build in Codex threads, check command evidence, and remember useful verified work. Review changes before accepting them." />
+</picture></p>
+
+<details>
+<summary><strong>Who does what</strong> — roles and boundaries</summary>
+
+| Role | Work |
+| --- | --- |
+| Claude Code core · Opus by default | Reads project history, delegates the wish and checks the final explanation against the reported facts. |
+| Dispatcher · Sonnet | Writes `GOAL · SCOPE · VERIFY` briefs and includes relevant memory. It checks the command record or reruns VERIFY. |
+| Codex workers · `terra` role | Works in ephemeral threads. A `sol` integration unit is used only if the full suite fails after more than one unit changed files. |
+| Optional Gemini via `agy` | Rewrites reports in plain language. If the preview fails, the core shows the dispatcher report. |
+| Memory keeper · Haiku | Saves reusable work from verified units for later wishes. |
+
+Claude sessions load Axiom's engine with local settings. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. See [bridge contracts](docs/bridge.md#contracts).
+
+</details>
+
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-3-dark.svg" /><img src="assets/chronos-threshold-3.svg" width="1200" alt="" /></picture></p>
+
+<a id="record-review"></a>
+<a id="state--review"></a>
+
+## III · Record &amp; review
+
+**Read the diff. Check what VERIFY ran. Resolve open questions.**
+
+A worker's claim is not evidence, and a completed model session does not guarantee a correct change. Look for failed units before you accept the result.
+
+State stays in `~/.axiom`; use `AXIOM_HOME` to choose another location.
+
+<details>
+<summary><strong>What is kept</strong> — work records, memory and logs</summary>
 
 ```text
 ~/.axiom/
@@ -84,26 +123,34 @@ State lives in `~/.axiom`; set `AXIOM_HOME` to move it.
 └── logs/          Raw session events, one log per run
 ```
 
-Memory entries retain the wish and record hashes of the referenced files so later lookups can flag stale content. Logs and reports may contain project material; inspect them before sharing.
+Memory retains the wish and hashes of referenced files, so later lookups can flag stale content. Logs and reports may contain project material; inspect them before sharing.
 
-**Before you accept a change:** read the diff, check what VERIFY actually ran, and look for failed units or unanswered questions. A completed model session is not a guarantee that the requested change is correct.
+</details>
 
-## Status
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-4-dark.svg" /><img src="assets/chronos-threshold-4.svg" width="1200" alt="" /></picture></p>
 
-| Available in this beta | Planned, not available as commands yet |
-| --- | --- |
-| `axiom wish` · `axiom doctor` | `ask` · `review` · `research` · `catchup` · `evolve` |
+<a id="horizon"></a>
+<a id="status"></a>
 
-The roadmap also includes folding the 65 skills of [axiom-forge](https://github.com/xinhi6716/axiom-forge) into the stages that use them. Those integrations are future work, not part of this beta's command set.
+## IV · Horizon
 
-## Explore the engine
+**Here now:** `axiom wish` · `axiom doctor`
+
+**Still ahead:** `ask` · `review` · `research` · `catchup` · `evolve`
+
+The roadmap includes bringing [Axiom Atropos](https://github.com/xinhi6716/axiom-atropos) skills into the stages that use them. These commands and integrations are future work, not shipped beta features.
+
+<details>
+<summary><strong>Explore the engine &amp; verification</strong></summary>
 
 [Bridge reference](docs/bridge.md) · [Dispatch policy](src/axiom/engine/DISPATCH.md) · [Wish workflow](src/axiom/engine/skills/wish/SKILL.md) · [Tests](tests/)
 
-The Python tests use scripted stand-ins for Claude, Codex and `agy`. Passing those tests checks protocol and local behaviour; it does not establish live model performance or full end-to-end reliability.
+The Python tests use scripted stand-ins for Claude, Codex and `agy`. Passing them checks protocol and local behaviour, not live model performance or full end-to-end reliability.
 
-## Credits
+</details>
 
-Work tracking runs on `orch` from poteto's [Pstack](https://github.com/cursor/plugins/tree/main/pstack) (MIT), vendored unchanged under `src/axiom/engine/vendor/pstack`. See [licenses](licenses/).
+---
 
-**[MIT License](LICENSE).** The original Chronos identity follows Axiom's Celestial Order visual language. [Asset notices](assets/ASSET_NOTICES.txt).
+Work tracking uses `orch` from poteto's [Pstack](https://github.com/cursor/plugins/tree/main/pstack), vendored unchanged under `src/axiom/engine/vendor/pstack`. [Credits &amp; licenses](licenses/).
+
+[MIT License](LICENSE) · Original Axiom Celestial Order identity · [Asset notices](assets/ASSET_NOTICES.txt)

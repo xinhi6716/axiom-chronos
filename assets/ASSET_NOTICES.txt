@@ -1,10 +1,10 @@
-Axiom Chronos identity assets —2026-10-27
+Axiom — Celestial Order editorial refinement, 2026-10-27
 
-The Axiom Chronos hourglass/meridian symbol and header compositions are original editable SVG constructions for xinhi6716, within the selected Celestial Order identity. No external logo, stock symbol or historical religious artwork was copied. The original first-party geometry is supplied under the repository's LICENSE; no trademark clearance, historical authenticity or endorsement is asserted.
+Original editable vector geometry created for xinhi6716. The selected design uses luminous ivory, antique gold and ceremonial construction. Temple/keystone, hourglass/meridian, spindle/thread, measured balance, ritual shears, seed/light, tree/root and serpent-return shapes are original constructions, not traced religious artifacts or external brand artwork. No bitmap artwork, remote image, animation or external font is required. Original construction is not a claim of historical authenticity or trademark clearance.
 
-Responsive header SVGs include outlined DejaVu Serif/Sans/Sans Mono glyphs; no font binary is bundled. Font license follows.
+Axiom is the mother brand. Moirai groups Axiom Clotho, planned Axiom Lachesis (without self-evolution or RAG) and Axiom Atropos, the selected new name of the existing Axiom Forge skill pack. Aether groups planned Axiom Genesis (research-specialized RSI), Axiom Ouroboros (general agent-application self-iteration/evolution including skills) and Axiom Yggdrasil (database). All Aether products remain unbuilt; no unlimited self-improvement or deployed capability is implied. Axiom Chronos is an existing beta flagship with wish and doctor entry points; evolve and research remain future work, with no implemented RSI capability claimed. The repository URLs are axiom-clotho and axiom-atropos after authorized renames. Existing package and host identifiers are retained for compatibility; these assets do not change runtime behavior.
 
-The header labels the actual beta with wish and doctor. Evolve/research are future work; no implemented RSI capability or unlimited self-improvement is claimed.
+SVG headers include DejaVu Serif, Sans and Sans Mono glyph outlines, under the font notice below. No font binary is bundled. Original first-party vectors may be incorporated under the destination repository's existing license; existing upstream artwork/licenses remain separate and unchanged.
 
 Font source: https://dejavu-fonts.github.io/
 
@@ -15,7 +15,7 @@ Upstream-Author: Stepan Roh <src@users.sourceforge.net> (original author),
 Source: https://dejavu-fonts.github.io/
 
 Files: *
-Copyright: Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
+Copyright: Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. 
  Bitstream Vera is a trademark of Bitstream, Inc.
  DejaVu changes are in public domain.
 License: bitstream-vera
@@ -59,3 +59,5 @@ License: bitstream-vera
  without prior written authorization from the Gnome Foundation or Bitstream
  Inc., respectively. For further information, contact: fonts at gnome dot
  org.
+
+

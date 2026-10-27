@@ -24,7 +24,7 @@ TOOLS = [
         'name': 'codex_run',
         'description': (
             'Run one Codex turn in a fresh ephemeral thread and return a structured report. '
-            'Write `brief` per bridge/DISPATCH.md (GOAL, SCOPE, VERIFY): the worker sees nothing else. '
+            'Write `brief` per `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` (GOAL, SCOPE, VERIFY): the worker sees nothing else. '
             'Use role terra for modular units and role sol for integration. '
             'Status is completed, failed, interrupted, timeout or bridge_error; anything but completed carries `error`.'),
         'inputSchema': {

@@ -44,7 +44,7 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 
 ## Configuration
 
-The bridge resolves `codex` and `agy` from `PATH`. Override either with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. The server is launched with `python`; Python 3.11 or newer is required.
+The bridge resolves `codex` and `agy` from `PATH`. Override either with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. The plugin launches the bridge with the same Python interpreter as the CLI. The package declares Python 3.10 or newer; memory also needs SQLite 3.34+ with FTS5 trigram support, which `axiom doctor` checks. The current CI runs on Python 3.12, so the declared minimum is not a claim that CI exercises every supported Python version.
 
 ## Tests
 

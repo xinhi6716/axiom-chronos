@@ -1,8 +1,10 @@
 """Exercise the axiom CLI against a scripted claude that records how it was launched."""
+import ast
 import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,31 @@ from axiom import cli, doctor, session  # noqa: E402
 from axiom.home import ENGINE  # noqa: E402
 
 FAKE_CLAUDE = json.dumps([sys.executable, '-I', str(HERE / 'fakes' / 'fake_claude.py')])
+
+
+class EngineContractTests(unittest.TestCase):
+    def test_dispatcher_reads_the_shipped_policy(self):
+        dispatcher = (ENGINE / 'agents' / 'dispatcher.md').read_text(encoding='utf-8')
+        reference = re.search(r'Read `\$\{CLAUDE_PLUGIN_ROOT\}/([^`]+)`', dispatcher)
+        self.assertIsNotNone(reference, 'dispatcher must name its plugin-relative policy')
+        self.assertTrue((ENGINE / reference.group(1)).is_file(), reference.group(1))
+
+    def test_documented_python_minimum_matches_package(self):
+        metadata = (HERE.parent / 'pyproject.toml').read_text(encoding='utf-8')
+        minimum = re.search(r'^requires-python = ">=(\d+\.\d+)"$', metadata, re.MULTILINE).group(1)
+        for name in ('README.md', 'README.zh-TW.md', 'docs/bridge.md'):
+            with self.subTest(document=name):
+                document = (HERE.parent / name).read_text(encoding='utf-8')
+                self.assertIn(f'Python {minimum}', document)
+
+    def test_sources_parse_at_declared_python_minimum(self):
+        # This checks grammar, not runtime API compatibility or live integrations.
+        metadata = (HERE.parent / 'pyproject.toml').read_text(encoding='utf-8')
+        minimum = re.search(r'^requires-python = ">=(\d+\.\d+)"$', metadata, re.MULTILINE).group(1)
+        version = tuple(map(int, minimum.split('.')))
+        for source in (HERE.parent / 'src').rglob('*.py'):
+            with self.subTest(source=source.relative_to(HERE.parent)):
+                ast.parse(source.read_text(encoding='utf-8'), filename=str(source), feature_version=version)
 
 
 class WishTests(unittest.TestCase):
