@@ -2,6 +2,8 @@
 
 [English](README.md) · [繁體中文](README.zh-TW.md)
 
+> **Beta.** Axiom Chronos is in testing. Commands, state layout and agent behaviour may change between releases, and the Codex build step has so far been verified on small projects only. Review what a wish changed before you commit it.
+
 Make a wish on your codebase. Axiom Chronos runs it as a small team of models: Claude Code coordinates, Codex writes the code, Gemini explains the outcome in plain words, and every finished piece is remembered for the next wish.
 
 ```
@@ -60,7 +62,7 @@ State lives in `~/.axiom` (set `AXIOM_HOME` to move it): orch stores with every 
 
 ## Status
 
-0.1.0 ships `axiom wish` and `axiom doctor`. Next, the rest of the pipeline becomes commands — `ask`, `review`, `research`, `catchup`, `evolve` — and the 65 skills of [axiom-forge](https://github.com/xinhi6716/axiom-forge) are folded into the stages that use them rather than offered as a list.
+0.1.0b1, a beta, ships `axiom wish` and `axiom doctor`. Next, the rest of the pipeline becomes commands — `ask`, `review`, `research`, `catchup`, `evolve` — and the 65 skills of [axiom-forge](https://github.com/xinhi6716/axiom-forge) are folded into the stages that use them rather than offered as a list.
 
 ## Credits
 

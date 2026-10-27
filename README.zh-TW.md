@@ -2,6 +2,8 @@
 
 [English](README.md) · [繁體中文](README.zh-TW.md)
 
+> **測試版。** Axiom Chronos 仍在測試中。指令、狀態檔的結構和代理的行為在不同版本之間都可能改變，Codex 施工這一步目前也只在小型專案上驗證過。願望完成後，請先檢查它改了什麼再 commit。
+
 對你的程式碼許願。Axiom Chronos 用一支小型的模型團隊完成它：Claude Code 統籌、Codex 寫程式、Gemini 用白話說明結果，每個完成的部分都會被記住，留給下一個願望使用。
 
 ```
@@ -44,7 +46,7 @@ axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_to
 
 ## 進度
 
-0.1.0 提供 `axiom wish` 和 `axiom doctor`。接下來會把流程的其他階段做成指令（`ask`、`review`、`research`、`catchup`、`evolve`），並把 [axiom-forge](https://github.com/xinhi6716/axiom-forge) 的 65 個 skill 整合進各階段，而不是一份清單。
+0.1.0b1 是測試版，提供 `axiom wish` 和 `axiom doctor`。接下來會把流程的其他階段做成指令（`ask`、`review`、`research`、`catchup`、`evolve`），並把 [axiom-forge](https://github.com/xinhi6716/axiom-forge) 的 65 個 skill 整合進各階段，而不是一份清單。
 
 ## 致謝
 

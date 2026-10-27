@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axiom-chronos"
-version = "0.1.0"
+version = "0.1.0b1"
 description = "Grant wishes on a codebase: Claude Code coordinates, Codex builds, Gemini explains, and every run is remembered."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "licenses/*"]
 requires-python = ">=3.10"
 authors = [{ name = "xinhi6716" }]
+classifiers = ["Development Status :: 4 - Beta"]
 dependencies = []
 
 [project.urls]
