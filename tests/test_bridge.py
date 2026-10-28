@@ -51,6 +51,7 @@ class CodexAppServerTests(unittest.TestCase):
                                               'plugins': ['keepme@personal', 'panel@personal'], 'mcp_servers': ['node_repl']})
         self.assertEqual(json.loads(report['final_message'])['config']['skills'], {'max_context_tokens': 1})
         self.assertEqual(json.loads(report['final_message'])['config']['web_search'], 'disabled')
+        self.assertEqual(json.loads(report['final_message'])['disabled_plugin_ids'], ['keepme@personal', 'panel@personal'])
         self.assertEqual(report['started_mcp_servers'], [])
         self.assertEqual(report['usage']['totalTokens'], 1240)
 
@@ -64,6 +65,7 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(kept['started_mcp_servers'], ['keepme'])
         inherited = self.run_brief('GOAL inherit', lean=False)
         self.assertIsNone(inherited['disabled'])
+        self.assertIsNone(json.loads(inherited['final_message'])['disabled_plugin_ids'])
         self.assertEqual(sorted(inherited['started_mcp_servers']), ['codex_apps', 'keepme', 'node_repl', 'panel'])
 
     def test_output_schema_is_parsed(self):

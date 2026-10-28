@@ -159,6 +159,9 @@ class CodexAppServer:
                 turn_params['effort'] = effort
             if output_schema is not None:
                 turn_params['outputSchema'] = output_schema
+            if disabled:
+                # Remote plugins ignore plugins.<id>.enabled in config; only the turn's disabled list stops their MCP servers.
+                turn_params['disabledPluginIds'] = disabled['plugins']
             turn_id = self._request('turn/start', turn_params, timeout=120)['turn']['id']
             report = self._collect(thread_id, turn_id, output_schema is not None, timeout_s, disabled)
             report['model'] = model
@@ -170,8 +173,9 @@ class CodexAppServer:
         """A brief carries everything a worker needs, so drop context it would otherwise pay for on every call.
 
         Measured on a one-word brief: plugins, MCP servers and apps cost ~6.1k input tokens, the web_search tool
-        ~2.5k, the skills catalog ~1.9k, goals ~0.6k and the personality section ~0.4k. The base instructions
-        (~3.5k) stay, because they teach the shell and patch tools the worker relies on.
+        ~2.5k, the skills catalog ~1.9k, goals ~0.6k and the personality section ~0.4k. A remote plugin's MCP server
+        (data-analytics, ~0.8k) stops only through the turn's disabledPluginIds. The base instructions (~3.5k) stay,
+        because they teach the shell and patch tools the worker relies on.
         """
         installed = self._request('plugin/installed', {'cwds': [cwd]}, timeout=60)
         plugins = sorted(plugin['id'] for market in installed.get('marketplaces') or [] for plugin in market.get('plugins') or []

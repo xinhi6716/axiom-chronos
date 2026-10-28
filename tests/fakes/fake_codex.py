@@ -87,7 +87,8 @@ for line in sys.stdin:
                                   'changes': [{'path': 'src/mod.py', 'kind': {'type': 'add'}, 'diff': ''}]})
         usage = {'inputTokens': 1200, 'cachedInputTokens': 800, 'outputTokens': 40, 'reasoningOutputTokens': 10, 'totalTokens': 1240, 'cacheWriteInputTokens': 0}
         send({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'total': usage, 'last': usage}}})
-        echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id]}
+        echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
+                'disabled_plugin_ids': params.get('disabledPluginIds')}
         final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
         item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
         complete(thread_id, turn_id)
