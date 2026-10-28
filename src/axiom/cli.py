@@ -21,6 +21,8 @@ def main(argv=None):
     wish.add_argument('--max-turns', type=int, default=60)
     wish.add_argument('--no-architect', action='store_true',
                       help='skip the Opus module map; the dispatcher splits the wish on its own')
+    wish.add_argument('--astra', action='store_true',
+                      help='Astra plans the changes first; a second judge and Opus rule on the plan before any work')
     # Everything after the options is the wish, so a wish that names a flag such as --pending stays intact.
     wish.add_argument('text', nargs=argparse.REMAINDER, help='the wish, in any language; put options before it')
 
@@ -42,7 +44,8 @@ def main(argv=None):
     if not os.path.isdir(project):
         parser.error(f'--project is not a directory: {project}')
     try:
-        text = ('[no-architect] ' if getattr(args, 'no_architect', False) else '') + ' '.join(args.text)
+        markers = [m for m, on in (('[no-architect] ', getattr(args, 'no_architect', False)), ('[astra] ', getattr(args, 'astra', False))) if on]
+        text = ''.join(markers) + ' '.join(args.text)
         return session.run(args.command, text, project, args.model, args.max_turns)
     except session.SessionError as exc:
         sys.stderr.write(f'axiom: {exc}\n')

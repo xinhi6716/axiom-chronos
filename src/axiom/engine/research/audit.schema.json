@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changes", "out_of_scope"],
+  "properties": {
+    "summary": {"type": "string"},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "area", "location", "evidence", "problem", "change", "verify"],
+        "properties": {
+          "id": {"type": "string"},
+          "area": {"type": "string", "enum": ["design", "feature", "algorithm", "correctness", "performance", "tests"]},
+          "location": {"type": "string"},
+          "evidence": {"type": "string"},
+          "problem": {"type": "string"},
+          "change": {"type": "string"},
+          "verify": {"type": "string"}
+        }
+      }
+    },
+    "out_of_scope": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -109,6 +109,12 @@ class WishTests(unittest.TestCase):
         argv = json.loads(self.record.read_text(encoding='utf-8'))['argv']
         self.assertEqual(argv[argv.index('-p') + 1], '/chronos:wish [no-architect] add x')
 
+    def test_astra_marks_the_wish_after_no_architect(self):
+        with patch.dict(os.environ, {'FAKE_CLAUDE_SCENARIO': 'ok'}), patch('sys.stdout', io.StringIO()):
+            self.assertEqual(cli.main(['wish', '--project', str(self.project), '--astra', '--no-architect', 'add', 'x']), 0)
+        argv = json.loads(self.record.read_text(encoding='utf-8'))['argv']
+        self.assertEqual(argv[argv.index('-p') + 1], '/chronos:wish [no-architect] [astra] add x')
+
     def test_research_runs_the_research_skill(self):
         with patch.dict(os.environ, {'FAKE_CLAUDE_SCENARIO': 'ok'}), patch('sys.stdout', io.StringIO()):
             self.assertEqual(cli.main(['research', '--project', str(self.project), 'RRAM', '因果']), 0)

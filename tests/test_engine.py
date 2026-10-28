@@ -45,11 +45,12 @@ class EngineReferenceTests(unittest.TestCase):
             elif isinstance(node, list):
                 for value in node:
                     yield from objects(value)
-        plan = json.loads((ENGINE / 'research' / 'plan.schema.json').read_text(encoding='utf-8'))
-        for node in objects(plan):
-            with self.subTest(properties=sorted(node['properties'])):
-                self.assertIs(node.get('additionalProperties'), False)
-                self.assertEqual(sorted(node['required']), sorted(node['properties']))
+        for name in ('plan.schema.json', 'audit.schema.json'):
+            schema = json.loads((ENGINE / 'research' / name).read_text(encoding='utf-8'))
+            for node in objects(schema):
+                with self.subTest(schema=name, properties=sorted(node['properties'])):
+                    self.assertIs(node.get('additionalProperties'), False)
+                    self.assertEqual(sorted(node['required']), sorted(node['properties']))
         review = json.loads((ENGINE / 'research' / 'review.schema.json').read_text(encoding='utf-8'))
         self.assertEqual(review['properties']['verdict']['enum'], ['pass', 'revise', 'reject'])
 
