@@ -1,3 +1,19 @@
+Axiom Chronos — celestial / ritual refinement, 2026-10-28
+
+The current README covers reuse the exact first-party Chronos emblem from the
+owner-selected Axiom profile R2 identity: broad opposed hourglass bowls, two
+cast phase rims and a single inclined orbit. No architectural arch, pedestal,
+raster generation, raster tracing, stock mark or remote image is used. The
+layout is original editable SVG geometry with DejaVu glyph outlines. The
+process strip shows only Scope, Build, Verify and Remember; explanatory and
+safety information remains in the READMEs. English and Traditional Chinese
+share the same responsive light/dark art. This is an identity metaphor, not a
+scientific instrument or a claim of production maturity. Chronos remains beta.
+
+Earlier assets are retained for compatibility; the four decorative threshold
+images are no longer inserted between README sections. Existing font and
+upstream notices are preserved below.
+
 Axiom — Celestial Order editorial refinement, 2026-10-27
 
 Original editable vector geometry created for xinhi6716. The selected design uses luminous ivory, antique gold and ceremonial construction. Temple/keystone, hourglass/meridian, spindle/thread, measured balance, ritual shears, seed/light, tree/root and serpent-return shapes are original constructions, not traced religious artifacts or external brand artwork. No bitmap artwork, remote image, animation or external font is required. Original construction is not a claim of historical authenticity or trademark clearance.

@@ -2,18 +2,14 @@
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/readme-cover-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/readme-cover-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/readme-cover-dark.svg" />
-  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — 程式碼願望流程測試版，以天體沙漏與建築光環呈現" />
+  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — 程式碼願望流程測試版，以原創天體時間軸呈現" />
 </picture></p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a><br /><a href="#begin">開始</a> · <a href="#the-work">流程</a> · <a href="#record-review">記錄與檢查</a> · <a href="#horizon">下一步</a></p>
 
-<p align="center">Claude Code 統籌，Codex 施工。<br />選配的 Gemini 報告，用白話說清楚結果。</p>
-
 Chronos 把程式碼修改請求分成範圍明確的工作，留下檢查紀錄，也保存下一個願望用得上的內容。
 
 > **測試版 · 0.1.0b1。** 指令、狀態與代理行為仍可能改變。專案最初的說明只回報了小型專案的 Codex 執行經驗；倉庫測試使用腳本替身。每次修改都請先檢查，再 commit。
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-1-dark.svg" /><img src="assets/chronos-threshold-1.svg" width="1200" alt="" /></picture></p>
 
 <a id="begin"></a>
 <a id="安裝"></a>
@@ -69,8 +65,6 @@ axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_to
 
 </details>
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-2-dark.svg" /><img src="assets/chronos-threshold-2.svg" width="1200" alt="" /></picture></p>
-
 <a id="the-work"></a>
 <a id="一個願望怎麼跑"></a>
 
@@ -88,6 +82,8 @@ axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_to
 <details>
 <summary><strong>誰負責什麼</strong> — 角色與邊界</summary>
 
+Claude Code 統籌，Codex 施工。選配的 Gemini 報告，用白話說清楚結果。
+
 | 角色 | 工作 |
 | --- | --- |
 | Claude Code 核心，預設 Opus | 讀取專案歷史、交付願望，並用回報的事實核對最終說明。 |
@@ -99,8 +95,6 @@ axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_to
 Claude session 載入 Axiom 引擎與 local settings。Codex worker 預設採用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context，詳見 [bridge contracts](docs/bridge.md#contracts)。
 
 </details>
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-3-dark.svg" /><img src="assets/chronos-threshold-3.svg" width="1200" alt="" /></picture></p>
 
 <a id="record-review"></a>
 <a id="狀態與檢查"></a>
@@ -126,8 +120,6 @@ Worker 自稱成功不是證據；模型 session 結束，也不保證修改正�
 記憶保留願望與相關檔案的雜湊值，讓後續查詢能標示過期內容。紀錄與報告可能含有專案資料，分享前請先檢查。
 
 </details>
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-4-dark.svg" /><img src="assets/chronos-threshold-4.svg" width="1200" alt="" /></picture></p>
 
 <a id="horizon"></a>
 <a id="進度"></a>

@@ -2,18 +2,14 @@
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/readme-cover-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/readme-cover-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/readme-cover-dark.svg" />
-  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — beta codebase workflow beneath a celestial hourglass and architectural halo" />
+  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — public beta, with an original celestial time-axis emblem" />
 </picture></p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a><br /><a href="#begin">Begin</a> · <a href="#the-work">The work</a> · <a href="#record-review">Record &amp; review</a> · <a href="#horizon">Horizon</a></p>
 
-<p align="center">Claude Code coordinates. Codex builds.<br />Optional Gemini reports explain what happened.</p>
-
 Chronos turns a code-change request into scoped work, recorded checks and useful context for the next wish.
 
 > **Beta · 0.1.0b1.** Commands, state and agent behaviour may change. The initial project report describes small-project Codex runs only; the repository tests use scripted stand-ins. Review every change before committing.
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-1-dark.svg" /><img src="assets/chronos-threshold-1.svg" width="1200" alt="" /></picture></p>
 
 <a id="begin"></a>
 <a id="install"></a>
@@ -69,8 +65,6 @@ Put options **before** the wish. Everything after them is wish text, including f
 
 </details>
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-2-dark.svg" /><img src="assets/chronos-threshold-2.svg" width="1200" alt="" /></picture></p>
-
 <a id="the-work"></a>
 <a id="how-a-wish-runs"></a>
 
@@ -88,6 +82,8 @@ A brief names the **goal**, the files in **scope**, and the command that will **
 <details>
 <summary><strong>Who does what</strong> — roles and boundaries</summary>
 
+Claude Code coordinates. Codex builds. Optional Gemini reports explain what happened.
+
 | Role | Work |
 | --- | --- |
 | Claude Code core · Opus by default | Reads project history, delegates the wish and checks the final explanation against the reported facts. |
@@ -99,8 +95,6 @@ A brief names the **goal**, the files in **scope**, and the command that will **
 Claude sessions load Axiom's engine with local settings. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. See [bridge contracts](docs/bridge.md#contracts).
 
 </details>
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-3-dark.svg" /><img src="assets/chronos-threshold-3.svg" width="1200" alt="" /></picture></p>
 
 <a id="record-review"></a>
 <a id="state--review"></a>
@@ -126,8 +120,6 @@ State stays in `~/.axiom`; use `AXIOM_HOME` to choose another location.
 Memory retains the wish and hashes of referenced files, so later lookups can flag stale content. Logs and reports may contain project material; inspect them before sharing.
 
 </details>
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chronos-threshold-4-dark.svg" /><img src="assets/chronos-threshold-4.svg" width="1200" alt="" /></picture></p>
 
 <a id="horizon"></a>
 <a id="status"></a>
