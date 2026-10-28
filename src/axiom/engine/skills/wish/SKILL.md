@@ -9,14 +9,15 @@ argument-hint: <wish>
 
 Wish: $ARGUMENTS
 
-1. If the wish is empty, ask for it and stop.
+1. If the wish is empty, ask for it and stop. If it starts with `[no-architect]`, drop that marker and skip step 3.
 2. Name the program with a lowercase slug of the project directory's name. Call the bridge `memory_digest` tool for it. If the wish refers to earlier work, find it there.
-3. Hand the wish, verbatim, the absolute path of the current project directory, the slug and any digest lines the wish refers to, to the `chronos:dispatcher` agent. Do not plan, scope or edit the project yourself.
-4. If the dispatcher returns a question, put it to the user and stop.
-5. Read every file in `<store>/reports/` from the dispatcher's report. In parallel:
+3. Unless the wish touches a single responsibility (one function, one flag, one file), call the bridge `orch` tool with `["init"]` for the slug, and give the `chronos:architect` agent the wish, the project directory and the returned store path. If it returns a question, put it to the user and stop.
+4. Hand the wish, verbatim, the absolute path of the current project directory, the slug, the module map path if there is one, and any digest lines the wish refers to, to the `chronos:dispatcher` agent. Do not plan, scope or edit the project yourself.
+5. If the dispatcher returns a question, put it to the user and stop.
+6. Read every file in `<store>/reports/` from the dispatcher's report. In parallel:
    - Start the `chronos:memory-keeper` agent with the store path, the slug, the project directory and the wish.
    - Call the bridge `gemini_preview` tool without `cwd`. Its prompt is this line, then the wish, the dispatcher's report and those files:
 
      Rewrite the work reports below for the person who made the wish, in the wish's language and in plain words: what was done, how it turned out, and what they need to decide.
 
-6. Show Gemini's text. Under it, list from the dispatcher's report the changed files, the full test result and the choices the dispatcher decided, and what the memory keeper recorded. Where Gemini's text disagrees with those facts, correct it from the facts. If `gemini_preview` fails, show the dispatcher's report and say the plain-language preview failed.
+7. Show Gemini's text. Under it, list from the dispatcher's report the changed files, the per-module acceptance results if there was a map, the full test result and whether sol ran, the choices the dispatcher decided, and what the memory keeper recorded. Where Gemini's text disagrees with those facts, correct it from the facts. If `gemini_preview` fails, show the dispatcher's report and say the plain-language preview failed.

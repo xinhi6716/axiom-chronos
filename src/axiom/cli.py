@@ -19,6 +19,8 @@ def main(argv=None):
     wish.add_argument('--project', default=os.getcwd(), help='project directory (default: current directory)')
     wish.add_argument('--model', default='opus', help='model for the core session (default: opus)')
     wish.add_argument('--max-turns', type=int, default=60)
+    wish.add_argument('--no-architect', action='store_true',
+                      help='skip the Opus module map; the dispatcher splits the wish on its own')
     # Everything after the options is the wish, so a wish that names a flag such as --pending stays intact.
     wish.add_argument('text', nargs=argparse.REMAINDER, help='the wish, in any language; put options before it')
 
@@ -33,7 +35,8 @@ def main(argv=None):
     if not os.path.isdir(project):
         parser.error(f'--project is not a directory: {project}')
     try:
-        return session.run('wish', ' '.join(args.text), project, args.model, args.max_turns)
+        text = ('[no-architect] ' if args.no_architect else '') + ' '.join(args.text)
+        return session.run('wish', text, project, args.model, args.max_turns)
     except session.SessionError as exc:
         sys.stderr.write(f'axiom: {exc}\n')
         return 2
