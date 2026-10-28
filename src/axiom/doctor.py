@@ -38,6 +38,22 @@ def windows_shell():
     return 'pwsh', True, OPTIONAL, command[0]
 
 
+def linux_runner():
+    """Windows runs skip POSIX-only tests; review findings and Linux runs catch what they hide."""
+    command = resolve('AXIOM_WSL_CMD', 'wsl.exe')
+    if command is None:
+        return 'linux', False, OPTIONAL, 'no WSL; full suites run on Windows only, where POSIX-only tests are skipped'
+    try:
+        done = subprocess.run(command + ['-e', 'sh', '-c', 'test -x "$HOME/.axiom/linux-venv/bin/python"'], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 'linux', False, OPTIONAL, f'WSL did not answer: {exc}'
+    if done.returncode != 0:
+        return 'linux', False, OPTIONAL, ('WSL has no ~/.axiom/linux-venv. Inside WSL: uv venv ~/.axiom/linux-venv, '
+                                          'then install the project test dependencies into it')
+    return 'linux', True, OPTIONAL, 'WSL ~/.axiom/linux-venv (full suites also run on Linux)'
+
+
 def sqlite_trigram():
     db = sqlite3.connect(':memory:')
     try:
@@ -71,7 +87,7 @@ def checks():
         home_writable(),
     ]
     if os.name == 'nt':
-        found.append(windows_shell())
+        found.extend([windows_shell(), linux_runner()])
     return found
 
 

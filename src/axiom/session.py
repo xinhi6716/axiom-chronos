@@ -11,7 +11,8 @@ PLUGIN = 'chronos'
 BRIDGE = f'mcp__plugin_{PLUGIN}_bridge__'
 BRIDGE_SERVER = f'plugin:{PLUGIN}:bridge'
 TOOLS = ['Agent', 'Read', 'Glob', 'Grep', 'Write', 'Bash'] + [
-    BRIDGE + name for name in ('codex_run', 'gemini_preview', 'orch', 'memory_record', 'memory_search', 'memory_get', 'memory_digest')]
+    BRIDGE + name for name in ('codex_run', 'gemini_preview', 'review_code', 'run_on_linux', 'orch',
+                               'memory_record', 'memory_search', 'memory_get', 'memory_digest')]
 
 
 class SessionError(Exception):

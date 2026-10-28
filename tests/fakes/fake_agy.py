@@ -41,6 +41,10 @@ if 'AGY_ERROR' in prompt:
     emit({'event': 'result', 'result': {'conversation_id': 'c1', 'status': 'ERROR', 'response': '', 'error': 'model refused'}})
     sys.exit(0)
 result = {'conversation_id': 'c1', 'status': 'SUCCESS', 'response': f'echo: {prompt}', 'usage': {'total_tokens': 1}}
-if schema is not None:
+if schema is not None and 'findings' in schema.get('properties', {}):
+    # A careless reviewer: claims pass even when it reports a blocker, so the bridge must derive the verdict.
+    findings = [{'check': 'vacuous_check', 'severity': 'blocker', 'location': 'spec.tla:3', 'evidence': 'NEEDS_FIX', 'fix': 'set it'}] if 'NEEDS_FIX' in prompt else []
+    result['structured_output'] = {'verdict': 'pass', 'findings': findings}
+elif schema is not None:
     result['structured_output'] = {'answer': prompt, 'schema_keys': sorted(schema.get('properties', {}))}
 emit({'event': 'result', 'result': result})

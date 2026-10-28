@@ -10,7 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agy_print  # noqa: E402
+import linux  # noqa: E402
 import orch_cli  # noqa: E402
+import review  # noqa: E402
 from codex_app import SANDBOXES, CodexAppServer  # noqa: E402
 from memory import Memory  # noqa: E402
 from procs import BridgeError, data_home, resolve_command  # noqa: E402
@@ -79,6 +81,38 @@ TOOLS = [
                 'args': {'type': 'array', 'items': {'type': 'string'}, 'description': 'orch arguments, e.g. ["unit", "add", "u1", "--track", "build"].'},
             },
             'required': ['project', 'args'],
+        },
+    },
+    {
+        'name': 'review_code',
+        'description': ('Have a Gemini model, a different family from the Codex workers, review files against the contract they '
+                        'were built to: contract mismatches, checks that cannot fail, untested promises and platform dependence. '
+                        'Pass every file of the module, tests included. The verdict is fail when any finding is a blocker or major.'),
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'project_dir': {'type': 'string'},
+                'paths': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Files relative to project_dir, tests included.'},
+                'contract': {'type': 'string', 'description': "The module's CONTRACT and the global rules, or the wish when there is no map."},
+                'model': {'type': 'string', 'default': 'gemini-4-argon-high'},
+                'timeout_s': {'type': 'integer', 'minimum': 60, 'default': 900},
+            },
+            'required': ['project_dir', 'paths', 'contract'],
+        },
+    },
+    {
+        'name': 'run_on_linux',
+        'description': ('Run `python <args>` in the project on Linux through WSL, with ~/.axiom/linux-venv. Windows runs skip or '
+                        'mask POSIX-only tests, so a full suite that passes here can still fail on Linux. Status unavailable means '
+                        'there is no Linux runner, which is not a pass.'),
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'project_dir': {'type': 'string'},
+                'args': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Arguments to python, e.g. [".axiom-experiment/check_baseline.py"].'},
+                'timeout_s': {'type': 'integer', 'minimum': 60, 'default': 1800},
+            },
+            'required': ['project_dir', 'args'],
         },
     },
     {
@@ -166,6 +200,12 @@ class Bridge:
             return agy_print.run(
                 resolve_command('AXIOM_AGY_CMD', 'agy'), args.get('prompt'), args.get('cwd'),
                 args.get('model') or DEFAULT_AGY_MODEL, args.get('json_schema'), int(args.get('timeout_s') or 600))
+        if name == 'review_code':
+            return review.review(args.get('project_dir'), args.get('paths'), args.get('contract'),
+                                 args.get('model') or 'gemini-4-argon-high', int(args.get('timeout_s') or 900),
+                                 resolve_command('AXIOM_AGY_CMD', 'agy'))
+        if name == 'run_on_linux':
+            return linux.run(args.get('project_dir'), args.get('args'), int(args.get('timeout_s') or 1800))
         if name.startswith('memory_'):
             memory = Memory(data_home())
             if name == 'memory_record':

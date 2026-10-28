@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from unittest.mock import patch
 import sys
 import tempfile
 import unittest
@@ -14,7 +15,9 @@ BRIDGE = HERE.parent / 'src' / 'axiom' / 'engine' / 'bridge'
 sys.path.insert(0, str(BRIDGE))
 
 import agy_print  # noqa: E402
+import linux  # noqa: E402
 import orch_cli  # noqa: E402
+import review  # noqa: E402
 from memory import Memory, query_terms  # noqa: E402
 from codex_app import CodexAppServer  # noqa: E402
 from procs import BridgeError, resolve_command  # noqa: E402
@@ -22,6 +25,7 @@ from procs import BridgeError, resolve_command  # noqa: E402
 FAKE_CODEX = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_codex.py')]
 FAKE_AGY = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_agy.py')]
 FAKE_BUN = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_bun.py')]
+FAKE_WSL = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_wsl.py')]
 
 
 class CodexAppServerTests(unittest.TestCase):
@@ -250,6 +254,58 @@ class MemoryTests(unittest.TestCase):
             self.memory.get(999)
 
 
+class ReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'spec.tla').write_text('VARIABLE x\nInit == x = FALSE\nNEEDS_FIX\n', encoding='utf-8')
+        (self.root / 'ok.py').write_text('def f():\n    return 1\n', encoding='utf-8')
+
+    def run_review(self, paths, contract='x must be able to become TRUE'):
+        return review.review(str(self.root), paths, contract, 'gemini-4-argon-high', command=FAKE_AGY)
+
+    def test_verdict_follows_findings_not_the_reviewer(self):
+        failed = self.run_review(['spec.tla'])
+        self.assertEqual((failed['verdict'], failed['findings'][0]['severity']), ('fail', 'blocker'))
+        self.assertEqual(self.run_review(['ok.py'])['verdict'], 'pass')
+
+    def test_files_are_sent_inline_from_inside_the_project_only(self):
+        for paths in (['../outside.py'], ['missing.py'], []):
+            with self.subTest(paths=paths), self.assertRaises(BridgeError):
+                self.run_review(paths)
+        with self.assertRaises(BridgeError):
+            self.run_review(['ok.py'], contract=' ')
+        (self.root / 'big.py').write_bytes(b'#' * (review.MAX_FILE_BYTES + 1))
+        with self.assertRaises(BridgeError):
+            self.run_review(['big.py'])
+
+
+class LinuxTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        (Path(self.temp.name) / 'probe.py').write_text('import sys, os\nprint(os.getcwd())\nsys.exit(int(sys.argv[1]))\n', encoding='utf-8')
+        env = patch.dict(os.environ, {'AXIOM_WSL_CMD': json.dumps(FAKE_WSL)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_runs_in_the_project_and_reports_exit_code(self):
+        ok = linux.run(self.temp.name, ['probe.py', '0'])
+        self.assertEqual(ok['status'], 'completed')
+        self.assertEqual(Path(ok['output_tail'].strip()).resolve(), Path(self.temp.name).resolve())
+        failed = linux.run(self.temp.name, ['probe.py', '3'])
+        self.assertEqual((failed['status'], failed['exit_code'], failed['error']['kind']), ('failed', 3, 'linux_command_failed'))
+
+    def test_missing_runner_is_unavailable_not_a_pass(self):
+        with patch.dict(os.environ, {'FAKE_WSL_NO_VENV': '1'}):
+            self.assertEqual(linux.run(self.temp.name, ['probe.py', '0'])['status'], 'unavailable')
+        with patch.dict(os.environ, {'AXIOM_WSL_CMD': ''}), patch('procs.shutil.which', return_value=None), patch('linux.os.name', 'nt'):
+            self.assertEqual(linux.run(self.temp.name, ['probe.py', '0'])['status'], 'unavailable')
+        with self.assertRaises(BridgeError):
+            linux.run(self.temp.name, [])
+
+
 class ResolveCommandTests(unittest.TestCase):
     def test_override_must_be_json_array(self):
         os.environ['AXIOM_TEST_CMD'] = 'not json'
@@ -293,8 +349,8 @@ class McpStdioTests(unittest.TestCase):
         self.assertEqual(init['result']['serverInfo']['name'], 'chronos-bridge')
         self.proc.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         names = [tool['name'] for tool in self.rpc('tools/list')['result']['tools']]
-        self.assertEqual(names, ['codex_run', 'gemini_preview', 'orch', 'memory_record', 'memory_search', 'memory_get',
-                                 'memory_digest', 'bridge_status'])
+        self.assertEqual(names, ['codex_run', 'gemini_preview', 'orch', 'review_code', 'run_on_linux', 'memory_record',
+                                 'memory_search', 'memory_get', 'memory_digest', 'bridge_status'])
         recorded = self.rpc('tools/call', {'name': 'memory_record', 'arguments': {
             'project': 'demo', 'project_dir': self.temp.name, 'unit': 'u1', 'title': 'slugify', 'summary': '把標題轉成網址代稱',
             'body': 'slugify(text) -> str', 'wish': 'add slugify'}})['result']['structuredContent']
