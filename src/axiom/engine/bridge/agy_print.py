@@ -73,9 +73,11 @@ def _run(command, prompt, cwd, model, json_schema, timeout_s):
         report['status'] = 'failed'
         report['error'] = {'kind': 'agy_' + str(result.get('status', 'unknown')).lower(), 'message': result.get('error') or ''}
     elif not (report['response'] or '').strip() and report['structured_output'] is None:
-        # A SUCCESS turn can spend its whole budget on thinking and tool calls and say nothing.
+        # A SUCCESS turn can spend its whole budget on thinking, or stop when headless mode auto-denies a tool it
+        # asked for; agy says which on stderr, so pass that on.
         report['status'] = 'failed'
-        report['error'] = {'kind': 'empty_response', 'message': 'agy reported SUCCESS but returned no text'}
+        tail = '\n'.join(line for line in stderr[-5:] if line.strip())
+        report['error'] = {'kind': 'empty_response', 'message': ('agy reported SUCCESS but returned no text\n' + tail).strip()}
     return report
 
 

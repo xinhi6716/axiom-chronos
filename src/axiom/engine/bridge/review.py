@@ -4,8 +4,9 @@ from pathlib import Path
 import agy_print
 from procs import BridgeError, require_directory
 
-MAX_FILE_BYTES = 80_000
-MAX_TOTAL_BYTES = 400_000
+MAX_FILE_BYTES = 60_000
+# One 134 KB review left Gemini 4 Argon High with 33.6k thinking tokens and no answer; review a module at a time.
+MAX_TOTAL_BYTES = 60_000
 CHECKS = ('contract_mismatch', 'vacuous_check', 'untested', 'platform')
 
 SCHEMA = {
@@ -27,9 +28,11 @@ SCHEMA = {
     },
 }
 
-INSTRUCTION = """Review the files below against the contract. Report every:
+INSTRUCTION = """Every file to review is included in this message; answer from it directly.
+
+Review the files below against the contract. Report every:
 - contract_mismatch: a name, signature, data shape, call to another component or invariant that differs from the contract;
-- vacuous_check: a test, assertion or formal invariant that cannot fail, for example a TLA+ variable that no action ever sets to the value the invariant forbids, or a test whose assertion holds whatever the code does;
+- vacuous_check: a test, assertion or formal invariant that cannot fail, for example a TLA+ variable that no action ever sets to the value the invariant forbids, a TLA+ invariant that restates the guard of the only action able to break it, or a test whose assertion holds whatever the code does;
 - untested: a promise in the contract that no test exercises;
 - platform: behaviour that depends on the operating system, path separators, or a fixed inventory of files.
 For each, give the severity (blocker, major or minor), the file and line or name, the evidence quoted from the code, and the fix. The verdict is fail when any finding is a blocker or major."""
@@ -56,7 +59,11 @@ def review(project_dir, paths, contract, model, timeout_s=900, command=None):
     if total > MAX_TOTAL_BYTES:
         raise BridgeError('invalid_argument', f'{total} bytes across {len(paths)} files; split the review (limit {MAX_TOTAL_BYTES})')
     prompt = f'{INSTRUCTION}\n\n=== CONTRACT\n{contract}\n\n' + '\n\n'.join(blocks)
-    result = agy_print.run(command, prompt, None, model, json_schema=SCHEMA, timeout_s=timeout_s)
+    for _ in range(2):
+        result = agy_print.run(command, prompt, None, model, json_schema=SCHEMA, timeout_s=timeout_s)
+        # An empty answer is a transient refusal or budget overrun, never a pass; one retry, then report it.
+        if (result.get('error') or {}).get('kind') != 'empty_response':
+            break
     if result['status'] != 'completed':
         return result
     findings = (result.get('structured_output') or {}).get('findings') or []
