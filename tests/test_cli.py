@@ -109,6 +109,13 @@ class WishTests(unittest.TestCase):
         argv = json.loads(self.record.read_text(encoding='utf-8'))['argv']
         self.assertEqual(argv[argv.index('-p') + 1], '/chronos:wish [no-architect] add x')
 
+    def test_research_runs_the_research_skill(self):
+        with patch.dict(os.environ, {'FAKE_CLAUDE_SCENARIO': 'ok'}), patch('sys.stdout', io.StringIO()):
+            self.assertEqual(cli.main(['research', '--project', str(self.project), 'RRAM', '因果']), 0)
+        argv = json.loads(self.record.read_text(encoding='utf-8'))['argv']
+        self.assertEqual(argv[argv.index('-p') + 1], '/chronos:research RRAM 因果')
+        self.assertEqual(argv[argv.index('--max-turns') + 1], '40')
+
     def test_missing_claude_is_reported(self):
         with patch.dict(os.environ, {'AXIOM_CLAUDE_CMD': ''}), patch('shutil.which', return_value=None):
             err = io.StringIO()

@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["question", "estimand", "causal_assumptions", "identification", "data_sources", "design", "claims", "falsification", "risks", "out_of_scope"],
+  "properties": {
+    "question": {"type": "string"},
+    "estimand": {"type": "string"},
+    "causal_assumptions": {"type": "array", "items": {"type": "string"}},
+    "identification": {"type": "string"},
+    "data_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "url", "access", "license"],
+        "properties": {
+          "name": {"type": "string"},
+          "url": {"type": "string"},
+          "access": {"type": "string"},
+          "license": {"type": "string"}
+        }
+      }
+    },
+    "design": {"type": "array", "items": {"type": "string"}},
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "evidence", "confidence"],
+        "properties": {
+          "claim": {"type": "string"},
+          "evidence": {"type": "string"},
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
+        }
+      }
+    },
+    "falsification": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "out_of_scope": {"type": "array", "items": {"type": "string"}}
+  }
+}

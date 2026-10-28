@@ -35,6 +35,24 @@ class EngineReferenceTests(unittest.TestCase):
         self.assertTrue(session.BRIDGE == prefix)
         self.assertEqual({t[len(prefix):] for t in session.TOOLS if t.startswith(prefix)} - served, set())
 
+    def test_plan_schema_meets_strict_structured_output_rules(self):
+        def objects(node):
+            if isinstance(node, dict):
+                if node.get('type') == 'object':
+                    yield node
+                for value in node.values():
+                    yield from objects(value)
+            elif isinstance(node, list):
+                for value in node:
+                    yield from objects(value)
+        plan = json.loads((ENGINE / 'research' / 'plan.schema.json').read_text(encoding='utf-8'))
+        for node in objects(plan):
+            with self.subTest(properties=sorted(node['properties'])):
+                self.assertIs(node.get('additionalProperties'), False)
+                self.assertEqual(sorted(node['required']), sorted(node['properties']))
+        review = json.loads((ENGINE / 'research' / 'review.schema.json').read_text(encoding='utf-8'))
+        self.assertEqual(review['properties']['verdict']['enum'], ['pass', 'revise', 'reject'])
+
     def test_named_agents_exist(self):
         agents = {re.search(r'^name:\s*(\S+)', p.read_text(encoding='utf-8'), re.M).group(1) for p in (ENGINE / 'agents').glob('*.md')}
         for path in TEXT_FILES:

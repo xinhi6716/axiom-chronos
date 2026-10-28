@@ -24,19 +24,26 @@ def main(argv=None):
     # Everything after the options is the wish, so a wish that names a flag such as --pending stays intact.
     wish.add_argument('text', nargs=argparse.REMAINDER, help='the wish, in any language; put options before it')
 
+    research = commands.add_parser('research', help='draft, review and rule on a research plan: Astra, then Gemini, then Opus')
+    research.add_argument('--project', default=os.getcwd(), help='project directory the research belongs to (default: current directory)')
+    research.add_argument('--model', default='opus', help='model for the core session (default: opus)')
+    research.add_argument('--max-turns', type=int, default=40)
+    research.add_argument('text', nargs=argparse.REMAINDER, help='the research question, in any language; put options before it')
+
     commands.add_parser('doctor', help='check the tools and state a wish needs')
 
     args = parser.parse_args(argv)
     if args.command == 'doctor':
         return doctor.main()
     if not args.text:
-        parser.error('wish: say what you want, e.g. axiom wish add a --stats flag to cli.py')
+        parser.error(f'{args.command}: say what you want, e.g. axiom {args.command} ' +
+                     ('add a --stats flag to cli.py' if args.command == 'wish' else 'how does oxide thickness affect RRAM endurance?'))
     project = os.path.abspath(args.project)
     if not os.path.isdir(project):
         parser.error(f'--project is not a directory: {project}')
     try:
-        text = ('[no-architect] ' if args.no_architect else '') + ' '.join(args.text)
-        return session.run('wish', text, project, args.model, args.max_turns)
+        text = ('[no-architect] ' if getattr(args, 'no_architect', False) else '') + ' '.join(args.text)
+        return session.run(args.command, text, project, args.model, args.max_turns)
     except session.SessionError as exc:
         sys.stderr.write(f'axiom: {exc}\n')
         return 2

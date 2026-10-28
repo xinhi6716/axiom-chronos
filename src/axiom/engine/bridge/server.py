@@ -16,7 +16,7 @@ from memory import Memory  # noqa: E402
 from procs import BridgeError, data_home, resolve_command  # noqa: E402
 
 SERVER_INFO = {'name': 'chronos-bridge', 'version': '0.1.0'}
-ROLES = ('terra', 'sol')
+ROLES = ('terra', 'sol', 'astra')
 DEFAULT_AGY_MODEL = 'gemini-4-argon-medium'
 
 TOOLS = [
@@ -25,7 +25,7 @@ TOOLS = [
         'description': (
             'Run one Codex turn in a fresh ephemeral thread and return a structured report. '
             'Write `brief` per `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` (GOAL, SCOPE, VERIFY): the worker sees nothing else. '
-            'Use role terra for modular units and role sol for integration. '
+            'Use role terra for modular units, role sol for integration and role astra for research plans and scientific rulings. '
             'Status is completed, failed, interrupted, timeout or bridge_error; anything but completed carries `error`.'),
         'inputSchema': {
             'type': 'object',
