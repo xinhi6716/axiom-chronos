@@ -1,3 +1,17 @@
+Axiom Chronos — shared celestial field refinement, 2026-10-28
+
+The four current README cover variants preserve the exact first-party Chronos
+hourglass, phase rims and inclined orbit. New first-party vector constellation
+framing and the shared ivory/midnight/gold palette match the Axiom family. The
+covers are artwork-only: the product name, beta status, scope and navigation
+remain accessible native README text. The four existing process strips have
+palette-only changes; every word, glyph, geometry and ordering is unchanged.
+No raster generation/tracing, remote image, scripts, filters or external font
+loads are introduced. This branding does not change behavior or imply that the
+complete Flagship vision is implemented. Existing licenses/notices follow intact.
+
+HISTORICAL NOTICES
+
 Axiom Chronos — celestial / ritual refinement, 2026-10-28
 
 The current README covers reuse the exact first-party Chronos emblem from the
