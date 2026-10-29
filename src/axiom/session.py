@@ -30,7 +30,7 @@ def command(skill, argument, model, max_turns):
         '--setting-sources', 'local',
         '--add-dir', str(axiom_home()),
         '--allowedTools', ','.join(TOOLS),
-        '--disallowedTools', 'PowerShell',
+        '--disallowedTools', 'PowerShell,ScheduleWakeup,CronCreate',
         '--output-format', 'stream-json', '--verbose',
         '--model', model,
         '--max-turns', str(max_turns),

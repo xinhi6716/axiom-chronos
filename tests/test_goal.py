@@ -57,6 +57,18 @@ class GoalHookTests(unittest.TestCase):
         self.assertIn('amends', self.prompt('再加一個測試')['hookSpecificOutput']['additionalContext'])
         self.assertEqual(self.stop()['decision'], 'block')
 
+    def test_question_follow_up_keeps_active_goal_blocked(self):
+        self.prompt('/chronos:wish 修 parser')
+        context = self.prompt('目前進度如何？')['hookSpecificOutput']['additionalContext']
+        self.assertNotIn('answer it', context)
+        self.assertEqual(self.stop()['decision'], 'block')
+
+    def test_task_notifications_do_not_reopen_the_goal(self):
+        self.prompt('/chronos:wish 修 parser')
+        self.close('done')
+        self.assertIsNone(self.prompt('<task-notification>\n<status>completed</status>\n</task-notification>'))
+        self.assertIsNone(self.stop())
+
     def test_ordinary_sessions_are_left_alone(self):
         self.assertIsNone(self.prompt('/chronos:research RRAM'))
         self.assertIsNone(self.stop())

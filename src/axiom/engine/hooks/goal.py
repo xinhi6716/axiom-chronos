@@ -22,10 +22,11 @@ def on_prompt(event):
         text = f'Chronos goal {session} is open for this wish. Reply in the language of the wish.'
         if os.environ.get('AXIOM_HEADLESS'):
             text += ' This run is headless: ask the user nothing.'
-    elif current:
+    elif current and not prompt.lstrip().startswith('<'):
+        # Task notifications and other harness messages arrive as tagged prompts; only the user amends a goal.
         current = goal.save(session, {**current, 'status': 'active', 'amendments': current['amendments'] + [prompt]})
         text = (f'This message amends Chronos goal {session}. Carry out any work it asks for through the chronos agents, '
-                'the same way as the wish. If it only asks a question, answer it and set the goal back to done.')
+                'the same way as the wish.')
     else:
         return None
     return {'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': text}}

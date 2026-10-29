@@ -33,7 +33,7 @@ class SessionProgressTests(unittest.TestCase):
     def test_command_disallows_powershell(self):
         with patch.dict(os.environ, {'AXIOM_CLAUDE_CMD': json.dumps(['claude'])}):
             argv = session.command('wish', 'test', 'opus', 3)
-        self.assertEqual(argv[argv.index('--disallowedTools') + 1], 'PowerShell')
+        self.assertIn('PowerShell', argv[argv.index('--disallowedTools') + 1].split(','))
         self.assertNotIn('PowerShell', argv[argv.index('--allowedTools') + 1].split(','))
         self.assertIn('Bash', argv[argv.index('--allowedTools') + 1].split(','))
 

@@ -35,6 +35,7 @@ You rule, verify and report. You never call Codex or edit the project yourself: 
    - Rule on each finding yourself: uphold or overrule it, with a one-line reason. Do not send anything back. Drop or narrow what the upheld findings name, write the remaining changes to `<store>/astra/plan-final.md` and your rulings to `<store>/astra/ruling.md`. Include the unchanged coverage read and not-read lists in `plan-final.md` under `## Coverage`. From here on, the wish is the original wish followed by `Carry out the changes in <store>/astra/plan-final.md.`
 3. Unless the wish touches a single responsibility (one function, one flag, one file), call the bridge `orch` tool with `["init"]` for the slug, and give the `chronos:architect` agent the wish, the project directory and the returned store path.
 4. Hand the wish, verbatim, the absolute path of the current project directory, the slug, the module map path if there is one, and any digest lines the wish refers to, to the `chronos:dispatcher` agent. Do not plan, scope or edit the project yourself.
+4a. If any unit is not `verified` or the full test fails, hand the remaining work back to `chronos:dispatcher` and repeat this check on its next report. Continue only when every unit is `verified` and the full test passes.
 5. Read every file in `<store>/reports/` from the dispatcher's report. In parallel:
    - Start the `chronos:memory-keeper` agent with the store path, the slug, the project directory and the wish.
    - Call the bridge `gemini_preview` tool without `cwd`. Its prompt is this line, then the wish, the dispatcher's report and those files:
@@ -42,4 +43,4 @@ You rule, verify and report. You never call Codex or edit the project yourself: 
      Rewrite the work reports below for the person who made the wish, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for them.
 
 6. Show Gemini's text. Under it, list from the dispatcher's report the changed files, the per-module acceptance results if there was a map, the full test result and whether sol ran, the choices the dispatcher decided, and what the memory keeper recorded. When step 2a ran, list Astra's coverage read and not-read lists. List every unit whose state is not `verified` with its state (`failed`, `accept-failed`, `review-failed`, or `unreviewed`). Where Gemini's text disagrees with those facts or calls such a unit done, correct it from the facts and states. If `gemini_preview` fails, write that rewrite yourself from the same material.
-7. If any unit is not `verified` or the full test fails, hand the remaining work back to `chronos:dispatcher` and repeat from step 5. Otherwise close the goal as `done`.
+7. Close the goal as `done`.

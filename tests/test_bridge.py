@@ -265,6 +265,18 @@ class ReviewTests(unittest.TestCase):
     def run_review(self, paths, contract='x must be able to become TRUE'):
         return review.review(str(self.root), paths, contract, 'gemini-4-argon-high', command=FAKE_AGY)
 
+    def test_structured_review_output(self):
+        cases = [(None, None), ({}, None), ({'verdict': 'fail', 'findings': []}, 'fail'),
+                 ({'verdict': 'pass', 'findings': []}, 'pass'), ({'findings': None}, None)]
+        for output, verdict in cases:
+            with self.subTest(output=output), patch.object(review.agy_print, 'run', return_value={
+                    'status': 'completed', 'structured_output': output, 'usage': None}):
+                result = self.run_review(['ok.py'])
+                self.assertEqual(result['verdict'], verdict)
+                if verdict is None:
+                    self.assertEqual(result['status'], 'failed')
+                    self.assertEqual(result['error']['kind'], 'no_review_output')
+
     def test_verdict_follows_findings_not_the_reviewer(self):
         failed = self.run_review(['spec.tla'])
         self.assertEqual((failed['verdict'], failed['findings'][0]['severity']), ('fail', 'blocker'))

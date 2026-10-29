@@ -66,8 +66,13 @@ def review(project_dir, paths, contract, model, timeout_s=900, command=None):
             break
     if result['status'] != 'completed':
         return result
-    findings = (result.get('structured_output') or {}).get('findings') or []
+    output = result.get('structured_output')
+    if not isinstance(output, dict) or not isinstance(output.get('findings'), list):
+        return {'status': 'failed', 'verdict': None, 'findings': [], 'reviewer': model,
+                'bytes_reviewed': total, 'usage': result.get('usage'),
+                'error': {'kind': 'no_review_output', 'message': 'Review output is missing a findings list'}}
+    findings = output['findings']
     serious = [f for f in findings if f.get('severity') in ('blocker', 'major')]
-    # The verdict follows the findings, so a reviewer cannot pass code it reported serious problems in.
-    return {'status': 'completed', 'verdict': 'fail' if serious else 'pass', 'findings': findings,
+    # A reviewer can fail code but never pass code it reported serious problems in.
+    return {'status': 'completed', 'verdict': 'fail' if serious or output.get('verdict') == 'fail' else 'pass', 'findings': findings,
             'reviewer': model, 'bytes_reviewed': total, 'usage': result.get('usage'), 'error': None}
