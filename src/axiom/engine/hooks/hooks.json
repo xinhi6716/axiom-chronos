@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "\"$AXIOM_PYTHON\" \"${CLAUDE_PLUGIN_ROOT}/hooks/goal.py\""}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "\"$AXIOM_PYTHON\" \"${CLAUDE_PLUGIN_ROOT}/hooks/goal.py\""}]}],
+    "PreToolUse": [{"matcher": "mcp__plugin_chronos_bridge__codex_run",
+                    "hooks": [{"type": "command", "command": "\"$AXIOM_PYTHON\" \"${CLAUDE_PLUGIN_ROOT}/hooks/goal.py\""}]}]
+  }
+}

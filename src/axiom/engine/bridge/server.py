@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agy_print  # noqa: E402
+import goal  # noqa: E402
 import linux  # noqa: E402
 import orch_cli  # noqa: E402
 import review  # noqa: E402
@@ -164,6 +165,16 @@ TOOLS = [
         },
     },
     {
+        'name': 'goal',
+        'description': ('Close the wish goal of this Claude session: status done once the wish is carried out and verified, or blocked '
+                        'with a note when it cannot go on without something only the user has. The session id is the one in the goal notice.'),
+        'inputSchema': {
+            'type': 'object',
+            'properties': {'session': {'type': 'string'}, 'status': {'type': 'string', 'enum': ['done', 'blocked']}, 'note': {'type': 'string'}},
+            'required': ['session', 'status'],
+        },
+    },
+    {
         'name': 'bridge_status',
         'description': ('Report which Codex, agy and Bun executables the bridge resolved and their versions, whether Java and '
                         'tla2tools.jar are configured for statechart, and whether the Codex app-server is running.'),
@@ -219,6 +230,8 @@ class Bridge:
                 return memory.digest(args.get('project'), args.get('add'))
         if name == 'orch':
             return orch_cli.run(resolve_command('AXIOM_BUN_CMD', 'bun'), args.get('project'), args.get('args'))
+        if name == 'goal':
+            return goal.set_status(args.get('session'), args.get('status'), args.get('note'))
         if name == 'bridge_status':
             return self.status()
         raise BridgeError('unknown_tool', f'unknown tool {name}')

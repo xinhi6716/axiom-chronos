@@ -12,7 +12,7 @@ BRIDGE = f'mcp__plugin_{PLUGIN}_bridge__'
 BRIDGE_SERVER = f'plugin:{PLUGIN}:bridge'
 TOOLS = ['Agent', 'Read', 'Glob', 'Grep', 'Write', 'Bash'] + [
     BRIDGE + name for name in ('codex_run', 'gemini_preview', 'review_code', 'run_on_linux', 'orch',
-                               'memory_record', 'memory_search', 'memory_get', 'memory_digest')]
+                               'memory_record', 'memory_search', 'memory_get', 'memory_digest', 'goal')]
 
 
 class SessionError(Exception):
@@ -40,7 +40,7 @@ def command(skill, argument, model, max_turns):
 def environment():
     home = axiom_home()
     home.mkdir(parents=True, exist_ok=True)
-    return {**os.environ, 'AXIOM_DATA_HOME': str(home), 'AXIOM_PYTHON': sys.executable}
+    return {**os.environ, 'AXIOM_DATA_HOME': str(home), 'AXIOM_PYTHON': sys.executable, 'AXIOM_HEADLESS': '1'}
 
 
 def run(skill, argument, project, model='opus', max_turns=60, out=None):

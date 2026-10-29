@@ -17,7 +17,7 @@ Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the u
 ## Before dispatch
 
 - Decide every open choice in GOAL or SCOPE. If two reasonable workers could deliver different results, the brief is not finished.
-- A field you cannot fill precisely means the unit is not ready. Split it, or ask the human; do not dispatch it.
+- A field you cannot fill precisely means the unit is not ready. Split it, or decide the missing choice and record it; do not dispatch it as is.
 - For deletions, SCOPE lists each path to delete.
 - A check that guards an invariant gets a negative control: VERIFY includes a case that breaks the invariant and expects the check to fail. Without one the check can be vacuous: in the first Clotho experiment a TLA+ invariant passed model checking because no action ever set the variable it forbade, and a no-raw-rows test passed because its request never contained rows.
 - VERIFY runs a test file, never inline code. Put the check in a test file listed in SCOPE and make VERIFY the test runner, such as `python -m unittest test_todo`. In the first end-to-end wish, both units used `python -c "..."` checks that broke on Windows shell quoting; the workers spent 106k and 157k input tokens working around them, one wrote and deleted a file outside SCOPE, and no test survived the unit.

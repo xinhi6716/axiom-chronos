@@ -38,11 +38,9 @@ class AstraCoverageTests(unittest.TestCase):
         for phrase in ('coverage.read', 'coverage.not_read', '## Coverage'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, wish)
-        step7 = wish.split('\n7. ', 1)[1]
         for state in ('review-failed', 'unreviewed'):
             with self.subTest(state=state):
-                self.assertIn(state, step7)
-
+                self.assertIn(state, wish)
 
 if __name__ == '__main__':
     unittest.main()

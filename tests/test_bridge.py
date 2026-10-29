@@ -350,7 +350,7 @@ class McpStdioTests(unittest.TestCase):
         self.proc.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         names = [tool['name'] for tool in self.rpc('tools/list')['result']['tools']]
         self.assertEqual(names, ['codex_run', 'gemini_preview', 'orch', 'review_code', 'run_on_linux', 'memory_record',
-                                 'memory_search', 'memory_get', 'memory_digest', 'bridge_status'])
+                                 'memory_search', 'memory_get', 'memory_digest', 'goal', 'bridge_status'])
         recorded = self.rpc('tools/call', {'name': 'memory_record', 'arguments': {
             'project': 'demo', 'project_dir': self.temp.name, 'unit': 'u1', 'title': 'slugify', 'summary': '把標題轉成網址代稱',
             'body': 'slugify(text) -> str', 'wish': 'add slugify'}})['result']['structuredContent']

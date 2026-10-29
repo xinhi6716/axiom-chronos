@@ -12,14 +12,14 @@ Question: $ARGUMENTS
 1. If the question is empty, ask for it and stop.
 2. Name the program with a lowercase slug of the project directory's name and call the bridge `orch` tool with `["init"]` for it. Research files go in `<store>/research/`.
 3. Read `${CLAUDE_PLUGIN_ROOT}/research/plan.schema.json` and `${CLAUDE_PLUGIN_ROOT}/research/review.schema.json`.
-4. Call the bridge `codex_run` tool with `role: "astra"`, `effort: "max"`, `sandbox: "read-only"`, `web_search: true`, `timeout_s: 3600`, `cwd` the project directory, `output_schema` the plan schema, and this brief:
+4. Give the `chronos:astra` agent the project directory, the plan schema path, the output path `<store>/research/plan.json`, web search on, and this brief:
 
    ```
    GOAL      A research plan for the question below, with every field of the output schema filled.
    QUESTION  <the question, verbatim>
    ```
 
-   Write its `structured_output` to `<store>/research/plan.json`. If the call fails or the model is not an Astra model, report that and stop.
+   If it reports a failure or a model that is not an Astra model, report that and stop.
 5. Call the bridge `gemini_preview` tool with `model: "gemini-4-argon-high"`, `json_schema` the review schema, and a prompt made of this paragraph, then the question, then the plan:
 
    Review this research plan against its question. Report each item that goes beyond the question (out_of_scope), claims more than its evidence supports (overclaim), cannot be shown wrong by any test the plan lists (unfalsifiable), or adds machinery the question does not need (complexity). Then give a verdict.
