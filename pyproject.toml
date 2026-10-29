@@ -31,6 +31,8 @@ axiom = [
     "engine/skills/*/*.md",
     "engine/research/*.json",
     "engine/bridge/*.py",
+    "engine/hooks/*.py",
+    "engine/hooks/*.json",
     "engine/vendor/pstack/poteto-mode/scripts/*",
     "engine/vendor/pstack/poteto-mode/scripts/orch/*",
 ]
