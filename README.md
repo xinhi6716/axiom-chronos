@@ -13,7 +13,7 @@
 
 Coordinate scoped code changes with Claude Code and Codex. Keep verification records and reusable project context.
 
-**Public beta · 0.1.0b1.** Review each diff before committing.
+**Public beta · 0.2.0-beta.1.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |
@@ -24,10 +24,10 @@ Coordinate scoped code changes with Claude Code and Codex. Keep verification rec
 
 ## Start
 
-You need Python 3.10+, [Claude Code](https://claude.com/claude-code), the Codex CLI and [Bun](https://bun.sh). Sign in to `claude` and `codex` first.
+You need [Claude Code](https://claude.com/claude-code) and the Codex CLI. Sign in to `claude` and `codex` first. Download the single `axiom` binary, or build and install it with Rust:
 
 ```sh
-pipx install git+https://github.com/xinhi6716/axiom-chronos
+cargo install --git https://github.com/xinhi6716/axiom-chronos --locked
 axiom doctor
 ```
 
@@ -42,7 +42,7 @@ axiom wish add a --stats flag to cli.py that prints done/total
 <details>
 <summary><strong>Setup details</strong></summary>
 
-`axiom doctor` checks tools, SQLite support and the state directory; it does not run a wish. SQLite needs FTS5 and JSON. The package declares Python 3.10+; current CI uses Python 3.12, so the declared minimum is not independently verified across all supported versions.
+`axiom doctor` checks tools, SQLite support and the state directory; it does not run a wish. SQLite needs FTS5 and JSON.
 
 Antigravity (`agy`) is optional. If its Gemini preview fails, the core can show the dispatcher report.
 
@@ -60,8 +60,10 @@ Describe one concrete change. The dispatcher writes a `GOAL · SCOPE · VERIFY` 
 
 Put CLI options **before** the wish. Everything after them is wish text, including flag names.
 
+For interjection, press Esc in interactive mode. In `axiom wish`, type a line and press Enter to send it into the running session: amend instructions, answer a question, or stop. Use `axiom research` for research.
+
 ```sh
-axiom wish --project ../other --model sonnet rename calc to compute_total everywhere
+axiom wish --project ../other rename calc to compute_total everywhere
 ```
 
 <details>
@@ -70,8 +72,7 @@ axiom wish --project ../other --model sonnet rename calc to compute_total everyw
 | Option | Default | Purpose |
 |---|---|---|
 | `--project PATH` | Current directory | Choose the project. |
-| `--model MODEL` | `opus` | Choose the core Claude model. |
-| `--max-turns N` | `60` | Limit core-session turns. |
+| `--max-turns N` | — | Limit core-session turns. |
 
 - **Claude Code core:** reads project history, delegates the wish and checks the final explanation against reported facts.
 - **Sonnet dispatcher:** scopes units, supplies relevant memory and verifies their command records.
@@ -120,17 +121,16 @@ Memory retains the wish and hashes of referenced files so later lookups can flag
 
 ## Current status
 
-**Available:** `axiom wish` and `axiom doctor`. Commands, state and agent behavior may change during beta.
+**Available:** `axiom wish`, `axiom research` and `axiom doctor`. Commands, state and agent behavior may change during beta.
 
-**Planned:** `ask`, `review`, `research`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped beta features.
+**Planned:** `ask`, `review`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped beta features.
 
 Tests use scripted stand-ins for Claude, Codex and `agy`; they check protocols and local behavior. The initial project report covers small-project Codex runs only. Neither establishes live-model performance or full end-to-end reliability.
 
-[Bridge reference](docs/bridge.md) · [Dispatch policy](src/axiom/engine/DISPATCH.md) · [Wish workflow](src/axiom/engine/skills/wish/SKILL.md) · [Tests](tests/)
+[Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Tests](tests/)
 
 ---
 
 [MIT License](LICENSE) · [Credits and licenses](licenses/) · [Asset notices](assets/ASSET_NOTICES.txt)
 
-Work tracking uses poteto’s [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`, vendored unchanged under `src/axiom/engine/vendor/pstack`. The visual identity is original Axiom Celestial Order artwork.
-
+Work tracking reimplements poteto’s [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch` in Rust, in process. The visual identity is original Axiom Celestial Order artwork.

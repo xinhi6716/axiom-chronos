@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${AXIOM_BIN:-axiom}\" hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${AXIOM_BIN:-axiom}\" hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${AXIOM_BIN:-axiom}\" hook"
+          }
+        ]
+      }
+    ]
+  }
+}

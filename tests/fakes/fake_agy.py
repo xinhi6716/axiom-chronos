@@ -1,5 +1,6 @@
 """Scripted stand-in for `agy` print mode; the prompt text selects the scenario."""
 import json
+import os
 import sys
 import time
 
@@ -17,6 +18,14 @@ if '--json-schema' in args:
         schema = json.load(handle)
 event = json.loads(sys.stdin.readline())
 prompt = event['message']['content']
+pid_path = os.environ.get('FAKE_AGY_PID')
+if pid_path:
+    with open(pid_path, 'w', encoding='utf-8') as handle:
+        handle.write(str(os.getpid()))
+count_path = os.environ.get('FAKE_AGY_COUNT')
+if count_path:
+    with open(count_path, 'a', encoding='utf-8') as handle:
+        handle.write('1\n')
 
 
 def emit(payload):
@@ -41,7 +50,11 @@ if 'AGY_ERROR' in prompt:
     emit({'event': 'result', 'result': {'conversation_id': 'c1', 'status': 'ERROR', 'response': '', 'error': 'model refused'}})
     sys.exit(0)
 result = {'conversation_id': 'c1', 'status': 'SUCCESS', 'response': f'echo: {prompt}', 'usage': {'total_tokens': 1}}
-if schema is not None and 'findings' in schema.get('properties', {}):
+if 'FAKE_AGY_STRUCTURED' in os.environ:
+    result['structured_output'] = json.loads(os.environ['FAKE_AGY_STRUCTURED'])
+elif 'AGY_BADSHAPE' in prompt and schema is not None:
+    result['structured_output'] = {}
+elif schema is not None and 'findings' in schema.get('properties', {}):
     # A careless reviewer: claims pass even when it reports a blocker, so the bridge must derive the verdict.
     findings = [{'check': 'vacuous_check', 'severity': 'blocker', 'location': 'spec.tla:3', 'evidence': 'NEEDS_FIX', 'fix': 'set it'}] if 'NEEDS_FIX' in prompt else []
     result['structured_output'] = {'verdict': 'pass', 'findings': findings}

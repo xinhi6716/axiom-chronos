@@ -1,0 +1,18 @@
+{
+  "name": "chronos",
+  "displayName": "Axiom Chronos",
+  "version": "0.2.0-beta.1",
+  "description": "Engine of Axiom Chronos, loaded by the axiom CLI for each session.",
+  "author": {
+    "name": "xinhi6716"
+  },
+  "license": "MIT",
+  "mcpServers": {
+    "bridge": {
+      "command": "${AXIOM_BIN:-axiom}",
+      "args": [
+        "bridge"
+      ]
+    }
+  }
+}

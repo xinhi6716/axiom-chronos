@@ -13,7 +13,7 @@
 
 用 Claude Code 與 Codex 協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
 
-**公開測試版 · 0.1.0b1。** 每次 commit 前請檢查 diff。
+**公開測試版 · 0.2.0-beta.1。** 每次 commit 前請檢查 diff。
 
 | 01 · 準備 | 02 · 描述 | 03 · 檢查 |
 | --- | --- | --- |
@@ -25,10 +25,10 @@
 
 ## 開始
 
-需要 Python 3.10 以上、[Claude Code](https://claude.com/claude-code)、Codex CLI 與 [Bun](https://bun.sh)。請先登入 `claude` 和 `codex`。
+需要 [Claude Code](https://claude.com/claude-code) 與 Codex CLI；請先登入 `claude` 和 `codex`。下載單一 `axiom` 執行檔，或使用 Rust 建置安裝：
 
 ```sh
-pipx install git+https://github.com/xinhi6716/axiom-chronos
+cargo install --git https://github.com/xinhi6716/axiom-chronos --locked
 axiom doctor
 ```
 
@@ -43,7 +43,7 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 <details>
 <summary><strong>環境與安裝補充</strong></summary>
 
-`axiom doctor` 檢查工具、SQLite 功能與狀態目錄，不會執行願望。SQLite 需支援 FTS5 與 JSON。套件宣告 Python 3.10+；目前 CI 使用 Python 3.12，未逐一獨立驗證所有宣告支援的版本。
+`axiom doctor` 檢查工具、SQLite 功能與狀態目錄，不會執行願望。SQLite 需支援 FTS5 與 JSON。
 
 Antigravity（`agy`）是選配。Gemini 預覽失敗時，核心可改顯示調度報告。
 
@@ -63,8 +63,10 @@ Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 C
 
 CLI 選項放在願望**前面**。後面的文字都是願望內容，包括參數名稱。
 
+Interjection（插話）：互動模式按 Esc；使用 `axiom wish` 時輸入一行並按 Enter，即可送入執行中的 session，用於修改指示、回答問題或停止。也可用 `axiom research` 進行研究。
+
 ```sh
-axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_total
+axiom wish --project ../other 把 calc 全部改名成 compute_total
 ```
 
 <details>
@@ -73,8 +75,7 @@ axiom wish --project ../other --model sonnet 把 calc 全部改名成 compute_to
 | 選項 | 預設 | 用途 |
 |---|---|---|
 | `--project PATH` | 目前目錄 | 指定專案。 |
-| `--model MODEL` | `opus` | 指定核心 Claude 模型。 |
-| `--max-turns N` | `60` | 限制核心 session 回合數。 |
+| `--max-turns N` | — | 限制核心 session 回合數。 |
 
 - **Claude Code 核心：**讀取專案歷史、交付願望，以回報事實核對最後說明。
 - **Sonnet 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
@@ -125,17 +126,16 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 
 ## 狀態
 
-**目前提供：**`axiom wish` 與 `axiom doctor`。測試期間指令、狀態與代理行為仍可能改變。
+**目前提供：**`axiom wish`、`axiom research` 與 `axiom doctor`。測試期間指令、狀態與代理行為仍可能改變。
 
-**仍在規劃：**`ask`、`review`、`research`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的測試版功能。
+**仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的測試版功能。
 
 測試以腳本替身模擬 Claude、Codex 與 `agy`，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
 
-[Bridge 技術文件](docs/bridge.md) · [派工規則](src/axiom/engine/DISPATCH.md) · [Wish 流程](src/axiom/engine/skills/wish/SKILL.md) · [測試](tests/)
+[Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [測試](tests/)
 
 ---
 
 [MIT 授權](LICENSE) · [來源與授權](licenses/) · [素材聲明](assets/ASSET_NOTICES.txt)
 
-工作追蹤採用 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`，原樣收錄於 `src/axiom/engine/vendor/pstack`。視覺識別為原創 Axiom Celestial Order 圖像。
-
+工作追蹤以 Rust 在程序內重新實作 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`。視覺識別為原創 Axiom Celestial Order 圖像。

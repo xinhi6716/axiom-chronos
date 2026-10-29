@@ -7,3 +7,4 @@ dist/
 venv/
 node_modules/
 .poteto-mode-tools-install-key
+/target/

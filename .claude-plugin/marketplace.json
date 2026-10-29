@@ -9,9 +9,9 @@
   "plugins": [
     {
       "name": "chronos",
-      "source": "./src/axiom/engine",
+      "source": "./engine",
       "description": "Wish and research commands: Opus maps modules, Sonnet dispatches Codex workers, every result is verified.",
-      "version": "0.1.0-beta.1"
+      "version": "0.2.0-beta.1"
     }
   ]
 }
