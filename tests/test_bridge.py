@@ -20,7 +20,7 @@ import orch_cli  # noqa: E402
 import review  # noqa: E402
 from memory import Memory, query_terms  # noqa: E402
 from codex_app import CodexAppServer  # noqa: E402
-from procs import BridgeError, resolve_command  # noqa: E402
+from procs import BridgeError, require_slug, resolve_command  # noqa: E402
 
 FAKE_CODEX = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_codex.py')]
 FAKE_AGY = [sys.executable, '-I', str(HERE / 'fakes' / 'fake_agy.py')]
@@ -392,6 +392,14 @@ class McpStdioTests(unittest.TestCase):
         reference = re.search(r'\$\{CLAUDE_PLUGIN_ROOT\}/([^`\s]+)', description)
         self.assertIsNotNone(reference, 'codex_run must name its plugin-relative policy')
         self.assertTrue((BRIDGE.parent / reference.group(1)).is_file(), reference.group(1))
+
+
+class SlugTests(unittest.TestCase):
+    def test_directory_names_with_underscores_are_slugs(self):
+        require_slug('project', 'ml_rram')
+        for bad in ('ML_RRAM', '_x', '../x', 'a/b', ''):
+            with self.subTest(bad=bad), self.assertRaises(BridgeError):
+                require_slug('project', bad)
 
 
 if __name__ == '__main__':

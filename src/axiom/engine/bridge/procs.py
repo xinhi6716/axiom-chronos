@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-SLUG = re.compile(r'[a-z0-9][a-z0-9-]{0,63}')
+SLUG = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}')
 
 
 class BridgeError(Exception):
@@ -54,7 +54,7 @@ def kill_tree(proc):
 
 def require_slug(name, value):
     if not SLUG.fullmatch(value or ''):
-        raise BridgeError('invalid_argument', f'{name} must be a lowercase slug: letters, digits and hyphens')
+        raise BridgeError('invalid_argument', f'{name} must be a lowercase slug: letters, digits, hyphens and underscores')
 
 
 def data_home():
