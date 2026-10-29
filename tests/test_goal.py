@@ -23,6 +23,8 @@ class GoalHookTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.env = {**os.environ, 'AXIOM_DATA_HOME': self.temp.name}
         self.env.pop('AXIOM_HEADLESS', None)
+        # Hooks must not depend on UTF-8 mode: CI's Windows console is cp1252.
+        self.env.update(PYTHONUTF8='0', PYTHONIOENCODING='cp1252')
 
     def hook(self, event, **extra):
         proc = subprocess.run([sys.executable, str(ENGINE / 'hooks' / 'goal.py')], input=json.dumps({'session_id': SESSION, **event}),

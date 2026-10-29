@@ -50,11 +50,12 @@ def on_tool(event):
 
 
 def main():
-    event = json.load(sys.stdin)
+    # Claude Code sends UTF-8; the console code page would mangle a wish that is not in it.
+    event = json.loads(sys.stdin.buffer.read())
     handler = {'UserPromptSubmit': on_prompt, 'Stop': on_stop, 'PreToolUse': on_tool}[event['hook_event_name']]
     reply = handler(event)
     if reply:
-        sys.stdout.write(json.dumps(reply, ensure_ascii=False))
+        sys.stdout.write(json.dumps(reply))
 
 
 if __name__ == '__main__':
