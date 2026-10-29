@@ -15,6 +15,10 @@ Coordinate scoped code changes with Claude Code and Codex. Keep verification rec
 
 **Public beta · 0.1.0b1.** Review each diff before committing.
 
+| 01 · Prepare | 02 · Describe | 03 · Review |
+| --- | --- | --- |
+| Check the environment with `axiom doctor`. | Give `axiom wish` one concrete change. | Inspect the diff and verification record. |
+
 <a id="begin"></a>
 <a id="install"></a>
 
@@ -129,3 +133,4 @@ Tests use scripted stand-ins for Claude, Codex and `agy`; they check protocols a
 [MIT License](LICENSE) · [Credits and licenses](licenses/) · [Asset notices](assets/ASSET_NOTICES.txt)
 
 Work tracking uses poteto’s [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`, vendored unchanged under `src/axiom/engine/vendor/pstack`. The visual identity is original Axiom Celestial Order artwork.
+

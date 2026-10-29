@@ -15,6 +15,10 @@
 
 **公開測試版 · 0.1.0b1。** 每次 commit 前請檢查 diff。
 
+| 01 · 準備 | 02 · 描述 | 03 · 檢查 |
+| --- | --- | --- |
+| 用 `axiom doctor` 檢查環境。 | 交給 `axiom wish` 一項具體修改。 | 檢查 diff 與實際驗證紀錄。 |
+
 <a id="begin"></a>
 <a id="install"></a>
 <a id="安裝"></a>
@@ -134,3 +138,4 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 [MIT 授權](LICENSE) · [來源與授權](licenses/) · [素材聲明](assets/ASSET_NOTICES.txt)
 
 工作追蹤採用 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`，原樣收錄於 `src/axiom/engine/vendor/pstack`。視覺識別為原創 Axiom Celestial Order 圖像。
+
