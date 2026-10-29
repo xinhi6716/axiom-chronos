@@ -75,6 +75,10 @@ class CodexAppServerTests(unittest.TestCase):
     def test_output_schema_is_parsed(self):
         report = self.run_brief('GOAL structured', output_schema={'type': 'object'})
         self.assertEqual(report['structured_output'], {'answer': 'ok'})
+        self.assertIsNone(report['final_message'])
+        report = self.run_brief('GOAL structured')
+        self.assertIsNone(report['structured_output'])
+        self.assertIsNotNone(report['final_message'])
 
     def test_usage_limit_surfaces_as_failure(self):
         report = self.run_brief('LIMIT')
@@ -107,7 +111,9 @@ class CodexAppServerTests(unittest.TestCase):
 
     def test_roles_resolve_from_the_account_model_list(self):
         self.assertEqual(self.codex.resolve_model('terra'), 'gpt-5.6-terra')
-        self.assertEqual(self.codex.resolve_model('sol'), 'gpt-6-luna')
+        with self.assertRaises(BridgeError) as caught:
+            self.codex.resolve_model('sol')
+        self.assertEqual(caught.exception.kind, 'model_not_found')
 
     def test_rejects_missing_model(self):
         with self.assertRaises(BridgeError) as caught:
@@ -267,7 +273,9 @@ class ReviewTests(unittest.TestCase):
 
     def test_structured_review_output(self):
         cases = [(None, None), ({}, None), ({'verdict': 'fail', 'findings': []}, 'fail'),
-                 ({'verdict': 'pass', 'findings': []}, 'pass'), ({'findings': None}, None)]
+                 ({'verdict': 'pass', 'findings': []}, 'pass'), ({'findings': None}, None),
+                 ({'findings': []}, None), ({'verdict': 'maybe', 'findings': []}, None),
+                 ({'verdict': 'pass', 'findings': [{'severity': 'major'}]}, 'fail')]
         for output, verdict in cases:
             with self.subTest(output=output), patch.object(review.agy_print, 'run', return_value={
                     'status': 'completed', 'structured_output': output, 'usage': None}):

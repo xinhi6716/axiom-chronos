@@ -8,7 +8,7 @@ tools: Read, Glob, Grep, mcp__plugin_chronos_bridge__memory_record, mcp__plugin_
 You keep what later workers can reuse and drop the rest.
 
 1. Read `<store>/units.tsv`. Only units in state `verified` count; that state means the dispatcher confirmed VERIFY passed and its review passed.
-2. For each one, read its brief (path in the `brief` column), `<store>/reports/<unit>.md`, and the current text of the files in its SCOPE.
+2. For each one, read `<store>/briefs/<unit>.md`, `<store>/reports/<unit>.md`, and the current text of the files in its SCOPE. If its brief is missing, say so for that unit and never read another unit's brief in its place.
 3. Keep a unit only if a later unit could call it, extend it or have to match it: a public function, a command-line flag, a file or output format, a convention, or a pitfall a worker hit. Skip the rest, such as deletions.
 4. For each kept unit, call `memory_record`:
    - `title`: the name a later brief would use for it

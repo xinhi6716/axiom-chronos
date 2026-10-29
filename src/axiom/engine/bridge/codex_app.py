@@ -125,16 +125,13 @@ class CodexAppServer:
         return f'\nstderr:\n{tail}' if tail else ''
 
     def resolve_model(self, role):
-        """Map a role to the newest listed model whose id names it, else the account default; ids differ per account."""
+        """Map a role to the first listed model whose id names it; ids differ per account."""
         self.ensure_started()
         models = self._request('model/list', {}, timeout=60).get('data') or []
         named = [m['id'] for m in models if role in m['id']]
         if named:
             return named[0]
-        default = next((m['id'] for m in models if m.get('isDefault')), None)
-        if default is None:
-            raise BridgeError('model_not_found', f'no model for role {role!r} and no account default in model/list')
-        return default
+        raise BridgeError('model_not_found', f'no model for role {role!r} in model/list')
 
     def run(self, brief, cwd, model, sandbox, effort=None, output_schema=None, developer_instructions=None, timeout_s=1800,
             lean=True, keep_plugins=(), web_search=False):
@@ -238,6 +235,7 @@ class CodexAppServer:
                 if structured and report['final_message'] is not None:
                     try:
                         report['structured_output'] = json.loads(report['final_message'])
+                        report['final_message'] = None
                     except json.JSONDecodeError as exc:
                         report['error'] = report['error'] or {'kind': 'invalid_structured_output', 'message': str(exc)}
                 return report

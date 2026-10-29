@@ -67,10 +67,11 @@ def review(project_dir, paths, contract, model, timeout_s=900, command=None):
     if result['status'] != 'completed':
         return result
     output = result.get('structured_output')
-    if not isinstance(output, dict) or not isinstance(output.get('findings'), list):
+    if (not isinstance(output, dict) or not isinstance(output.get('findings'), list)
+            or output.get('verdict') not in ('pass', 'fail')):
         return {'status': 'failed', 'verdict': None, 'findings': [], 'reviewer': model,
                 'bytes_reviewed': total, 'usage': result.get('usage'),
-                'error': {'kind': 'no_review_output', 'message': 'Review output is missing a findings list'}}
+                'error': {'kind': 'no_review_output', 'message': 'Review output is missing a valid verdict or findings list'}}
     findings = output['findings']
     serious = [f for f in findings if f.get('severity') in ('blocker', 'major')]
     # A reviewer can fail code but never pass code it reported serious problems in.
