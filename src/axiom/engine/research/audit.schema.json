@@ -1,9 +1,18 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "changes", "out_of_scope"],
+  "required": ["summary", "coverage", "changes", "out_of_scope"],
   "properties": {
     "summary": {"type": "string"},
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read", "not_read"],
+      "properties": {
+        "read": {"type": "array", "items": {"type": "string"}},
+        "not_read": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "changes": {
       "type": "array",
       "items": {

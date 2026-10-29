@@ -30,6 +30,7 @@ def command(skill, argument, model, max_turns):
         '--setting-sources', 'local',
         '--add-dir', str(axiom_home()),
         '--allowedTools', ','.join(TOOLS),
+        '--disallowedTools', 'PowerShell',
         '--output-format', 'stream-json', '--verbose',
         '--model', model,
         '--max-turns', str(max_turns),
@@ -74,6 +75,8 @@ class Renderer:
         self.out = out
         self.result = None
         self.agents = {}
+        self.codex_calls = {}
+        self.codex_usage = {}
 
     def line(self, depth, text):
         self.out.write('  ' * depth + text + '\n')
@@ -90,6 +93,9 @@ class Renderer:
             depth = 1 if event.get('parent_tool_use_id') else 0
             for block in (event.get('message') or {}).get('content') or []:
                 if block.get('type') == 'tool_use':
+                    if block.get('name') == BRIDGE + 'codex_run':
+                        args = block.get('input') or {}
+                        self.codex_calls[block.get('id')] = (args.get('role') or args.get('model'), depth)
                     text = self.describe(block)
                     if text:
                         self.line(depth, text)
@@ -97,11 +103,41 @@ class Renderer:
             for block in (event.get('message') or {}).get('content') or []:
                 if block.get('type') == 'tool_result' and block.get('tool_use_id') in self.agents:
                     self.line(0, f'< {self.agents.pop(block["tool_use_id"])} finished')
+                if block.get('type') == 'tool_result' and block.get('tool_use_id') in self.codex_calls:
+                    self.codex_result(block)
         elif kind == 'result':
             self.result = event
             self.out.write('\n' + (event.get('result') or '') + '\n')
             usage = ', '.join(f'{model} ${info.get("costUSD", 0):.2f}' for model, info in (event.get('modelUsage') or {}).items())
             self.out.write(f'\n{event.get("duration_ms", 0) / 1000:.0f}s · ${event.get("total_cost_usd") or 0:.2f}' + (f' ({usage})' if usage else '') + '\n')
+            if self.codex_usage:
+                totals = ', '.join(f'{model} {inp:,} in ({cached:,} cached) / {out:,} out'
+                                   for model, (inp, cached, out) in self.codex_usage.items())
+                self.out.write(f'codex tokens: {totals}\n')
+
+    def codex_result(self, block):
+        content = block.get('content')
+        if isinstance(content, list):
+            content = ''.join(item.get('text', '') for item in content
+                              if isinstance(item, dict) and item.get('type') == 'text')
+        try:
+            report = json.loads(content)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(report, dict):
+            return
+        role, depth = self.codex_calls[block['tool_use_id']]
+        structured = report.get('structured_output')
+        coverage = structured.get('coverage') if isinstance(structured, dict) else None
+        if isinstance(coverage, dict) and isinstance(coverage.get('read'), list) and isinstance(coverage.get('not_read'), list):
+            self.line(depth + 1, 'astra read: ' + ('; '.join(coverage['read']) or '(none)'))
+            self.line(depth + 1, 'astra did not read: ' + ('; '.join(coverage['not_read']) or '(none)'))
+        usage = report.get('usage')
+        if isinstance(usage, dict):
+            model = report.get('model') or role or 'codex'
+            old = self.codex_usage.get(model, (0, 0, 0))
+            self.codex_usage[model] = tuple(a + usage.get(key, 0) for a, key in
+                                            zip(old, ('inputTokens', 'cachedInputTokens', 'outputTokens')))
 
     def describe(self, block):
         name, args = block.get('name', ''), block.get('input') or {}
@@ -112,8 +148,11 @@ class Renderer:
         if name.startswith(BRIDGE):
             tool = name[len(BRIDGE):]
             if tool == 'codex_run':
-                goal = next((l for l in (args.get('brief') or '').splitlines() if l.startswith('GOAL')), '').removeprefix('GOAL').strip()
-                return f'- codex {args.get("role") or args.get("model")}: {goal[:100]}'
+                lines = (args.get('brief') or '').splitlines()
+                goal = next((line for line in lines if line.startswith('GOAL')), None)
+                label = goal.removeprefix('GOAL').strip() if goal is not None else next(
+                    (line.strip() for line in lines if line.strip()), '(no brief)')
+                return f'- codex {args.get("role") or args.get("model")}: {label[:100]}'
             if tool == 'orch':
                 return f'- orch {" ".join(args.get("args") or [])[:100]}'
             return f'- {tool}'
