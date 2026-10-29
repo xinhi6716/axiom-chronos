@@ -1,0 +1,17 @@
+{
+  "name": "axiom-chronos",
+  "owner": {
+    "name": "xinhi6716"
+  },
+  "metadata": {
+    "description": "Axiom Chronos (beta): grant wishes on a codebase from inside Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "chronos",
+      "source": "./src/axiom/engine",
+      "description": "Wish and research commands: Opus maps modules, Sonnet dispatches Codex workers, every result is verified.",
+      "version": "0.1.0-beta.1"
+    }
+  ]
+}
