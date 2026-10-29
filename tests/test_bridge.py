@@ -300,7 +300,7 @@ class LinuxTests(unittest.TestCase):
     def test_missing_runner_is_unavailable_not_a_pass(self):
         with patch.dict(os.environ, {'FAKE_WSL_NO_VENV': '1'}):
             self.assertEqual(linux.run(self.temp.name, ['probe.py', '0'])['status'], 'unavailable')
-        with patch.dict(os.environ, {'AXIOM_WSL_CMD': ''}), patch('procs.shutil.which', return_value=None), patch('linux.os.name', 'nt'):
+        with patch.dict(os.environ, {'AXIOM_WSL_CMD': ''}), patch('procs.shutil.which', return_value=None), patch('linux.ON_WINDOWS', True):
             self.assertEqual(linux.run(self.temp.name, ['probe.py', '0'])['status'], 'unavailable')
         with self.assertRaises(BridgeError):
             linux.run(self.temp.name, [])

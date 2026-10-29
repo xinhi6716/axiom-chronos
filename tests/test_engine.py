@@ -20,7 +20,7 @@ TEXT_FILES = [p for p in ENGINE.rglob('*') if p.suffix in ('.md', '.json') and '
 class EngineReferenceTests(unittest.TestCase):
     def test_plugin_root_paths_exist(self):
         for path in TEXT_FILES:
-            for ref in re.findall(r'\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`"\')]+)', path.read_text(encoding='utf-8')):
+            for ref in re.findall(r'\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`"\'\\)]+)', path.read_text(encoding='utf-8')):
                 with self.subTest(file=path.relative_to(ENGINE).as_posix(), ref=ref):
                     self.assertTrue((ENGINE / ref).is_file())
 

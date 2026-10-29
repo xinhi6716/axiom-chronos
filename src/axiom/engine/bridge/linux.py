@@ -8,11 +8,12 @@ from procs import BridgeError, require_directory, resolve_command
 # Resolved inside WSL, so the Windows side never needs the Linux user's home directory.
 PYTHON_IN_WSL = '$HOME/.axiom/linux-venv/bin/python'
 TAIL = 4000
+ON_WINDOWS = os.name == 'nt'
 
 
 def command_for(project_dir, args):
     """Through WSL on Windows; a POSIX host already runs its tests on POSIX."""
-    if os.name != 'nt' and not os.environ.get('AXIOM_WSL_CMD'):
+    if not ON_WINDOWS and not os.environ.get('AXIOM_WSL_CMD'):
         return None
     try:
         wsl = resolve_command('AXIOM_WSL_CMD', 'wsl.exe')
@@ -28,7 +29,7 @@ def run(project_dir, args, timeout_s=1800):
         raise BridgeError('invalid_argument', 'args must be a non-empty array of strings passed to python, e.g. ["-m", "unittest"]')
     argv = command_for(Path(project_dir).resolve(), args)
     if argv is None:
-        reason = 'WSL is not installed' if os.name == 'nt' else 'this host is not Windows; run the command locally'
+        reason = 'WSL is not installed' if ON_WINDOWS else 'this host is not Windows; run the command locally'
         return {'status': 'unavailable', 'reason': reason, 'error': None}
     try:
         done = subprocess.run(argv, cwd=project_dir, stdin=subprocess.DEVNULL, capture_output=True,
