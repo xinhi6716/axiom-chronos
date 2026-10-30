@@ -40,6 +40,16 @@ first = incoming.get()
 if first is None:
     sys.exit(0)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'failed' if scenario == 'no-bridge' else 'connected'}]})
+if scenario == 'limit':
+    emit({'type': 'result', 'is_error': True, 'result': "You've hit your usage limit"})
+    sys.exit(0)
+if scenario == 'resume':
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    goal['status'] = 'done'
+    path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': 'done'})
+    sys.exit(0)
 if scenario == 'crash':
     sys.exit(3)
 if scenario == 'interrupt':

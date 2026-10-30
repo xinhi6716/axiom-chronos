@@ -291,7 +291,7 @@ fn classify_stop_interrupts_inflight_codex() {
         invoke(
             &worker,
             "codex_run",
-            json!({"cwd":cwd,"role":"terra","brief":"SLOW"}),
+            json!({"cwd":cwd,"role":"terra","sandbox":"read-only","brief":"SLOW"}),
         )
     });
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -302,7 +302,6 @@ fn classify_stop_interrupts_inflight_codex() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
-    std::thread::sleep(Duration::from_millis(100));
     axiom::goal::interject(temp.path(), "s", "stop").unwrap();
     let stopped = invoke(&b, "goal", json!({"session":"s","classify":"stop"}));
     check(&stopped, "completed");
@@ -456,7 +455,7 @@ fn ping_precedes_slow_call_reply() {
     let capture = out.0.clone();
     let requests = format!(
         "{}\n{}\n",
-        json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","brief":"SLOW"}}}),
+        json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"SLOW"}}}),
         json!({"id":2,"method":"ping"})
     );
     assert_eq!(serve(config(temp.path()), Cursor::new(requests), out), 0);
@@ -487,7 +486,7 @@ fn serve_stops_codex_process() {
     ]);
     let request = format!(
         "{}\n",
-        json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","brief":"hello"}}})
+        json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}})
     );
     assert_eq!(
         serve(c, Cursor::new(request), Sink(Arc::new(Mutex::new(vec![])))),
@@ -630,4 +629,73 @@ fn classify_stop_cancels_hanging_agy() {
         "{result}"
     );
     assert!(Instant::now() < deadline);
+}
+#[test]
+fn agy_stop_is_scoped_to_its_bridge() {
+    use std::time::{Duration, Instant};
+    let temp = common::temp();
+    let wrapper = temp.path().join("wrapper.py");
+    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
+    let make_bridge = |name: &str| {
+        let mut c = config(temp.path());
+        c.agy = Ok(vec![
+            common::python(),
+            wrapper.to_string_lossy().into_owned(),
+            temp.path().join(name).to_string_lossy().into_owned(),
+            common::repo_root()
+                .join("tests/fakes/fake_agy.py")
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+        Arc::new(Bridge::new(c))
+    };
+    let a = make_bridge("a.pid");
+    let b = make_bridge("b.pid");
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let release = temp.path().join("release");
+    let start = |bridge: Arc<Bridge>| {
+        let prompt = format!("AGY_WAIT:{}", release.display());
+        std::thread::spawn(move || {
+            invoke(
+                &bridge,
+                "gemini_preview",
+                json!({
+                    "prompt":prompt,"json_schema":{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}
+                }),
+            )
+        })
+    };
+    let one = start(a.clone());
+    let two = start(b);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut pids = Vec::new();
+    for name in ["a.pid", "b.pid"] {
+        loop {
+            if let Some(pid) = fs::read_to_string(temp.path().join(name))
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                pids.push(pid);
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let pid = pids[0];
+    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
+    check(
+        &invoke(&a, "goal", json!({"session":"s","classify":"stop"})),
+        "completed",
+    );
+    let cancelled = one.join().unwrap();
+    assert_eq!(
+        cancelled["structuredContent"]["error"]["kind"],
+        "agy_no_result"
+    );
+    assert!(!axiom::base::proc::pid_alive(pid));
+    fs::write(release, "release").unwrap();
+    let completed = two.join().unwrap();
+    check(&completed, "completed");
+    assert!(completed["structuredContent"]["structured_output"]["answer"].is_string());
 }

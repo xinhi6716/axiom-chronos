@@ -4,7 +4,6 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
-    time::Instant,
 };
 
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
@@ -160,7 +159,7 @@ fn dispatch_agent_and_task() {
         let h = d.path();
         open(h);
         goal::set_mode(h, "s", "change").unwrap();
-        assert!(call(h, &sub(dispatch(name))).is_none());
+        denial(call(h, &sub(dispatch(name))));
         assert!(!goal::load(h, "s").unwrap().unwrap().dispatched);
         assert!(call(h, &dispatch(name)).is_none());
         assert!(goal::load(h, "s").unwrap().unwrap().dispatched);
@@ -180,7 +179,7 @@ fn mode_restrictions() {
             for agent in [false, true] {
                 let e = dispatch(name);
                 let e = if agent { sub(e) } else { e };
-                if mode == Some("change") {
+                if mode == Some("change") && !agent {
                     assert!(call(h, &e).is_none());
                 } else {
                     denial(call(h, &e));
@@ -206,6 +205,27 @@ fn mode_restrictions() {
                 assert!(call(h, &if agent { sub(e) } else { e }).is_none());
             }
         }
+    }
+}
+#[test]
+fn nested_agents_only_reviewer() {
+    let d = tempfile::tempdir().unwrap();
+    let reason = "Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.";
+    for name in ["Agent", "Task"] {
+        for input in [
+            json!({}),
+            json!({"subagent_type":null}),
+            json!({"subagent_type":"chronos:dispatcher"}),
+            json!({"subagent_type":"chronos:reviewer "}),
+        ] {
+            let e = sub(tool(name, input));
+            assert_eq!(denial(hook::handle(&e, None, false)), reason);
+            assert_eq!(denial(call(d.path(), &e)), reason);
+        }
+        let reviewer = sub(tool(name, json!({"subagent_type":"chronos:reviewer"})));
+        assert!(hook::handle(&reviewer, None, false).is_none());
+        assert!(call(d.path(), &reviewer).is_none());
+        assert!(call(d.path(), &dispatch(name)).is_none());
     }
 }
 #[test]
@@ -334,21 +354,6 @@ fn bash_contract() {
             assert!(call(empty.path(), &e).is_none(), "{c}");
         }
     }
-}
-#[test]
-fn handle_timing() {
-    let d = tempfile::tempdir().unwrap();
-    let h = d.path();
-    open(h);
-    let e = tool("Bash", json!({"command":"ls 2>/dev/null"}));
-    let mut times = Vec::new();
-    for _ in 0..20 {
-        let start = Instant::now();
-        assert!(call(h, &e).is_none());
-        times.push(start.elapsed());
-    }
-    times.sort();
-    println!("handle median: {:?}", (times[9] + times[10]) / 2);
 }
 #[test]
 fn stdin_invalid_and_unknown_exit_zero() {

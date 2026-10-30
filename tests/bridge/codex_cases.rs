@@ -91,7 +91,7 @@ fn unit_build_reuse_and_gates() {
         .unwrap()
         .iter()
         .any(|e| e.kind == "verify" && e.command == "echo bridge-verify"));
-    orch::record_review(&store, &["bridgeunit".into()], "claude-review", true).unwrap();
+    orch::record_review(&store, &["bridgeunit".into()], "claude-review", true, &repo).unwrap();
     let evidence = fs::read(store.join("reports/bridgeunit.evidence.tsv")).unwrap();
     let turns = fs::read_to_string(&log)
         .unwrap()
@@ -160,7 +160,7 @@ fn sol_and_astra_restrictions() {
     assert!(!dest.exists());
     let good = invoke(
         &b,
-        json!({"project":"demo","cwd":repo,"role":"astra","model":"gpt-6-astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
+        json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","model":"gpt-6-astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
     );
     assert_eq!(good["status"], "completed", "{good}");
     assert_eq!(
@@ -175,8 +175,14 @@ fn independent_units_overlap() {
     let (repo, _) = fixture(
         home,
         &[
-            ("overlapone", "GOAL SLOW\nSCOPE one.txt\nVERIFY echo ok\n"),
-            ("overlaptwo", "GOAL SLOW\nSCOPE two.txt\nVERIFY echo ok\n"),
+            (
+                "overlapone",
+                "GOAL BARRIER\nSCOPE one.txt\nVERIFY echo ok\n",
+            ),
+            (
+                "overlaptwo",
+                "GOAL BARRIER\nSCOPE two.txt\nVERIFY echo ok\n",
+            ),
         ],
     );
     let log = home.join("codex.log");
@@ -203,22 +209,58 @@ fn independent_units_overlap() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let starts: Vec<f64> = events
+    let starts: Vec<_> = events
         .iter()
-        .filter(|e| e["method"] == "turn/start")
-        .map(|e| e["time"].as_f64().unwrap())
+        .enumerate()
+        .filter(|(_, e)| e["method"] == "turn/start")
+        .map(|(i, _)| i)
         .collect();
-    let ends: Vec<f64> = events
+    let ends: Vec<_> = events
         .iter()
-        .filter(|e| e["method"] == "fake/complete")
-        .map(|e| e["time"].as_f64().unwrap())
+        .enumerate()
+        .filter(|(_, e)| e["method"] == "fake/complete")
+        .map(|(i, _)| i)
         .collect();
     assert_eq!(starts.len(), 2);
     assert_eq!(ends.len(), 2);
-    assert!(
-        starts.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            < ends.iter().copied().fold(f64::INFINITY, f64::min)
+    assert!(starts.iter().max() < ends.iter().min());
+    for start in events.iter().filter(|e| e["method"] == "turn/start") {
+        let thread = &start["params"]["threadId"];
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["method"] == "fake/complete"
+                    && e["params"]["threadId"] == *thread
+                    && e["params"]["turnId"].is_string())
+                .count(),
+            1
+        );
+    }
+    let serial = common::temp();
+    let (repo, _) = fixture(
+        serial.path(),
+        &[
+            (
+                "overlapone",
+                "GOAL BARRIER\nSCOPE one.txt\nVERIFY echo ok\n",
+            ),
+            (
+                "overlaptwo",
+                "GOAL BARRIER\nSCOPE two.txt\nVERIFY echo ok\n",
+            ),
+        ],
     );
+    let b = bridge(serial.path());
+    let first = invoke(
+        &b,
+        json!({"project":"demo","unit":"overlapone","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(first["status"], "failed", "{first}");
+    let second = invoke(
+        &b,
+        json!({"project":"demo","unit":"overlaptwo","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(second["status"], "completed", "{second}");
 }
 #[test]
 fn codex_role_and_validation_and_limit() {
@@ -226,12 +268,12 @@ fn codex_role_and_validation_and_limit() {
     let b = bridge(temp.path());
     let ok = invoke(
         &b,
-        json!({"cwd":temp.path(),"role":"terra","brief":"hello"}),
+        json!({"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}),
     );
     assert_eq!(ok["model"], "gpt-6.10-terra", "{ok}");
     for args in [
         json!({"cwd":temp.path(),"brief":"hi"}),
-        json!({"cwd":"missing","role":"terra","brief":"hi"}),
+        json!({"cwd":"missing","role":"terra","sandbox":"read-only","brief":"hi"}),
         json!({"cwd":temp.path(),"role":"terra"}),
     ] {
         assert_eq!(invoke(&b, args)["error"]["kind"], "invalid_argument");
@@ -239,7 +281,7 @@ fn codex_role_and_validation_and_limit() {
     let limited = call(
         &b,
         "codex_run",
-        &json!({"cwd":temp.path(),"role":"terra","brief":"LIMIT"}),
+        &json!({"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"LIMIT"}),
     );
     assert_eq!(limited["isError"], true);
     assert_eq!(limited["structuredContent"]["status"], "failed");
@@ -256,7 +298,7 @@ fn astra_rejects_destinations_outside_store() {
     ] {
         let r = invoke(
             &b,
-            json!({"project":"demo","cwd":repo,"role":"astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
+            json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
         );
         assert_eq!(r["error"]["kind"], "invalid_argument", "{r}");
         assert!(!dest.exists());
@@ -341,7 +383,7 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
 
 fn logged_bridge(home: &Path, log: &Path) -> Bridge {
     let wrapper = home.join("logged_codex.py");
-    fs::write(&wrapper, "import os,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\np=sys.argv[2]\ns=open(p,encoding='utf8').read()\ns=s.replace(\"def complete(thread_id, turn_id, status='completed', error=None):\", \"def complete(thread_id, turn_id, status='completed', error=None):\\n    with open(os.environ['FAKE_CODEX_LOG'], 'a', encoding='utf8') as f: f.write(json.dumps({'method':'fake/complete','time':time.monotonic()})+'\\\\n')\")\nexec(compile(s,p,'exec'))\n").unwrap();
+    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nsys.argv=sys.argv[2:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
     Bridge::new(Config {
         data_home: Some(home.into()),
         codex: Ok(vec![
@@ -405,10 +447,7 @@ fn sol_requires_failing_fulltest() {
     let temp = common::temp();
     let (repo, store) = fixture(
         temp.path(),
-        &[(
-            "solunit",
-            "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n",
-        )],
+        &[("solunit", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")],
     );
     let b = bridge(temp.path());
     let args =
@@ -433,7 +472,7 @@ fn astra_save_records_only_astra() {
     assert!(!store.join("reports/_stages.evidence.tsv").exists());
     let ok = invoke(
         &b,
-        json!({"project":"demo","cwd":repo,"role":"astra","model":"gpt-6-astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
+        json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","model":"gpt-6-astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
     );
     assert_eq!(ok["status"], "completed", "{ok}");
     assert!(ok.get("structured_output").is_none());
@@ -457,7 +496,7 @@ fn astra_missing_structured_output_records_failure() {
     let dest = store.join("astra/missing.json");
     let r = invoke(
         &bridge(temp.path()),
-        json!({"project":"demo","cwd":repo,"role":"astra","brief":"test","save_to":dest}),
+        json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","brief":"test","save_to":dest}),
     );
     assert_eq!(r["status"], "failed", "{r}");
     assert!(!dest.exists());
@@ -491,7 +530,91 @@ fn astra_preserves_coverage() {
     let dest = store.join("astra/coverage.json");
     let r = invoke(
         &Bridge::new(c),
-        json!({"project":"demo","cwd":repo,"role":"astra","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
+        json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","brief":"test","save_to":dest,"output_schema":{"type":"object"}}),
     );
     assert_eq!(r["coverage"], json!({"units":3}), "{r}");
+}
+
+#[test]
+fn unbound_writing_run_is_refused_before_codex_starts() {
+    let temp = common::temp();
+    let (repo, store) = fixture(temp.path(), &[]);
+    let marker = temp.path().join("started");
+    let wrapper = temp.path().join("marker.py");
+    fs::write(&wrapper, "import pathlib,runpy,sys\npathlib.Path(sys.argv[1]).write_text('started')\nsys.argv=sys.argv[2:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
+    let b = Bridge::new(Config {
+        data_home: Some(temp.path().into()),
+        codex: Ok(vec![
+            common::python(),
+            wrapper.to_string_lossy().into_owned(),
+            marker.to_string_lossy().into_owned(),
+            common::repo_root()
+                .join("tests/fakes/fake_codex.py")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
+        agy: Ok(common::fake("fake_agy")),
+        wsl: None,
+        on_windows: false,
+    });
+    for choice in [
+        json!({"role":"terra"}),
+        json!({"role":"sol","sandbox":"workspace-write"}),
+        json!({"model":"gpt-6-terra","sandbox":"workspace-write"}),
+    ] {
+        let mut args = json!({"cwd":repo,"brief":"hello"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(choice.as_object().unwrap().clone());
+        let r = invoke(&b, args);
+        assert_eq!(r["error"]["kind"], "unbound_write", "{r}");
+        assert!(!marker.exists());
+    }
+    let r = invoke(
+        &b,
+        json!({"project":"demo","cwd":repo,"role":"astra","sandbox":"read-only","brief":"hello","save_to":store.join("plan.json"),"output_schema":{"type":"object"}}),
+    );
+    assert_eq!(r["status"], "completed", "{r}");
+    assert!(marker.exists());
+}
+
+#[test]
+fn creative_goal_requires_architect() {
+    let temp = common::temp();
+    let (repo, store) = fixture(
+        temp.path(),
+        &[(
+            "creativeunit",
+            "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n",
+        )],
+    );
+    let mut goal = axiom::goal::open(
+        temp.path(),
+        "creative",
+        "[creative] build",
+        Some(repo.to_str().unwrap()),
+    )
+    .unwrap();
+    goal.project = Some("demo".into());
+    fs::write(
+        temp.path().join("goals/creative.json"),
+        serde_json::to_vec(&goal).unwrap(),
+    )
+    .unwrap();
+    let b = bridge(temp.path());
+    let args = json!({"project":"demo","unit":"creativeunit","cwd":repo,"role":"terra"});
+    assert_eq!(
+        invoke(&b, args.clone())["error"]["kind"],
+        "architect_required"
+    );
+    fs::write(store.join("modules.md"), "architecture").unwrap();
+    assert_eq!(invoke(&b, args.clone())["error"]["kind"], "astra_gate");
+    orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
+    orch::record_stage(&store, "second_review", "review", true).unwrap();
+    fs::create_dir_all(store.join("astra")).unwrap();
+    for name in ["plan.json", "review.json", "ruling.md", "plan-final.md"] {
+        fs::write(store.join("astra").join(name), "ok").unwrap();
+    }
+    let result = invoke(&b, args);
+    assert_eq!(result["state"], "built", "{result}");
 }

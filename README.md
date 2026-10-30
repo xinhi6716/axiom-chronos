@@ -66,6 +66,8 @@ For interjection, press Esc in interactive mode. In `axiom wish`, type a line an
 axiom wish --project ../other rename calc to compute_total everywhere
 ```
 
+`axiom wish --resume <session-id>` resumes a session; `axiom wish --creative` starts creative exploration.
+
 <details>
 <summary><strong>Options and roles</strong></summary>
 
@@ -73,6 +75,8 @@ axiom wish --project ../other rename calc to compute_total everywhere
 |---|---|---|
 | `--project PATH` | Current directory | Choose the project. |
 | `--max-turns N` | — | Limit core-session turns. |
+| `--resume <session-id>` | — | Resume a previous wish session. |
+| `--creative` | — | Explore and select a small evidence-backed increment. |
 
 - **Claude Code core:** reads project history, delegates the wish and checks the final explanation against reported facts.
 - **Sonnet dispatcher:** scopes units, supplies relevant memory and verifies their command records.

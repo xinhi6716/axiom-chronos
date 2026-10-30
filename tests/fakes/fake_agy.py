@@ -34,6 +34,11 @@ def emit(payload):
 
 
 emit({'event': 'init', 'conversation_id': 'c1'})
+if prompt.startswith('AGY_WAIT:'):
+    release = prompt[len('AGY_WAIT:'):]
+    deadline = time.monotonic() + 30
+    while not os.path.exists(release) and time.monotonic() < deadline:
+        time.sleep(0.01)
 if 'AGY_HANG' in prompt:
     time.sleep(60)
 if 'AGY_SILENT' in prompt:

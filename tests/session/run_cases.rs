@@ -122,6 +122,22 @@ fn execute(
         record["messages"][0]["message"]["content"][0]["text"],
         "/chronos:wish 幫 todo 加統計功能"
     );
+    if scenario == "continue" {
+        let prompt = record["messages"][1]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(prompt.starts_with(axiom::session::CONTINUE_TAG));
+        let before = goal::load(&home, SESSION).unwrap().unwrap().amendments;
+        axiom::hook::handle(
+            &serde_json::json!({"hook_event_name":"UserPromptSubmit", "session_id":SESSION, "prompt":prompt}),
+            Some(&home),
+            true,
+        );
+        assert_eq!(
+            goal::load(&home, SESSION).unwrap().unwrap().amendments,
+            before
+        );
+    }
     let mut record = record;
     record["log_path"] = paths[0].to_string_lossy().to_string().into();
     record["home"] = home.to_string_lossy().to_string().into();
@@ -235,8 +251,10 @@ fn blocked_goal() {
     assert!(out.lines().any(|l| l == "goal blocked: need input"));
 }
 #[test]
-fn invalid_goal_is_ignored() {
-    assert_eq!(execute("bad-goal", empty(), false).0, 0);
+fn invalid_goal_is_reported() {
+    let (code, out, _, _) = execute("bad-goal", empty(), false);
+    assert_eq!(code, 1);
+    assert!(out.contains("goal error: invalid_json:"));
 }
 
 #[test]
@@ -253,18 +271,18 @@ fn existing_log_is_not_overwritten() {
         bin: temp.path().join("axiom"),
     };
     std::fs::create_dir_all(home.join("logs")).unwrap();
-    let iso = axiom::base::now_iso();
-    let stamp = format!(
-        "{}{}{}-{}{}{}",
-        &iso[0..4],
-        &iso[5..7],
-        &iso[8..10],
-        &iso[11..13],
-        &iso[14..16],
-        &iso[17..19]
-    );
-    let original = home.join("logs").join(format!("{stamp}-wish.jsonl"));
-    std::fs::write(&original, "sentinel").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for second in (now - 60)..=(now + 60) {
+        let stamp = axiom::session::log_stamp(second, axiom::session::local_offset_secs(second));
+        std::fs::write(
+            home.join("logs").join(format!("{stamp}-wish.jsonl")),
+            "sentinel",
+        )
+        .unwrap();
+    }
     let mut out = Vec::new();
     assert_eq!(
         run(
@@ -279,7 +297,6 @@ fn existing_log_is_not_overwritten() {
         .unwrap(),
         0
     );
-    assert_eq!(std::fs::read_to_string(&original).unwrap(), "sentinel");
     let output = String::from_utf8(out).unwrap();
     let actual = Path::new(
         output
@@ -287,18 +304,14 @@ fn existing_log_is_not_overwritten() {
             .find_map(|l| l.strip_prefix("log: "))
             .unwrap(),
     );
-    assert_ne!(actual, original);
-    if actual
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .starts_with(&stamp)
-    {
-        assert_eq!(
-            actual.file_name().unwrap().to_string_lossy(),
-            format!("{stamp}-wish-1.jsonl")
-        );
-    }
+    let name = actual.file_name().unwrap().to_str().unwrap();
+    let stamp = name
+        .strip_suffix("-wish-1.jsonl")
+        .expect("collision must use suffix 1");
+    assert_eq!(
+        std::fs::read_to_string(home.join("logs").join(format!("{stamp}-wish.jsonl"))).unwrap(),
+        "sentinel"
+    );
 }
 
 #[test]
@@ -324,6 +337,7 @@ fn interrupt_kills_process_tree() {
         home: temp.path().join("home"),
         bin: temp.path().join("axiom"),
     };
+    goal::open(&config.home, SESSION, "test", None).unwrap();
     let mut out = Vec::new();
     let code = run(
         &config,
@@ -337,7 +351,19 @@ fn interrupt_kills_process_tree() {
     .unwrap();
     trigger.join().unwrap();
     assert_eq!(code, 130);
+    let note = goal::load(&config.home, SESSION)
+        .unwrap()
+        .unwrap()
+        .note
+        .unwrap();
+    assert_eq!(
+        note,
+        format!("interrupted by the user. Resume with: axiom wish --resume {SESSION}")
+    );
     let output = String::from_utf8(out).unwrap();
+    assert!(output
+        .lines()
+        .any(|line| line == format!("goal blocked: {note}")));
     let path = output
         .lines()
         .find_map(|l| l.strip_prefix("log: "))
@@ -358,5 +384,139 @@ fn interrupt_kills_process_tree() {
             !axiom::base::proc::pid_alive(id),
             "process {id} remains alive"
         );
+    }
+}
+
+#[test]
+fn local_log_stamp() {
+    assert_eq!(
+        axiom::session::log_stamp(1793312048, 28800),
+        "20261030-061408"
+    );
+    assert_eq!(axiom::session::log_stamp(1793312048, 0), "20261029-221408");
+}
+#[test]
+fn interrupted_and_resume() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let record = temp.path().join("record");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::remove_var("FAKE_CLAUDE_SESSION");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+    };
+    for scenario in ["limit", "crash"] {
+        goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
+        goal::interject(&home, SESSION, "amendment").unwrap();
+        std::env::set_var("FAKE_CLAUDE_SCENARIO", scenario);
+        let mut output = Vec::new();
+        let code = run(
+            &config,
+            "wish",
+            "original",
+            temp.path(),
+            None,
+            empty(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(code, if scenario == "limit" { 1 } else { 3 });
+        let g = goal::load(&home, SESSION).unwrap().unwrap();
+        assert_eq!(g.status, "blocked");
+        assert_eq!(g.reason.as_deref(), Some("interrupted"));
+        let cause = if scenario == "limit" {
+            "claude reported an error: You've hit your usage limit"
+        } else {
+            "claude exited 3 without a result"
+        };
+        let note = format!("{cause}. Resume with: axiom wish --resume {SESSION}");
+        assert_eq!(g.note.as_deref(), Some(note.as_str()));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output
+            .lines()
+            .any(|line| line == format!("goal blocked: {note}")));
+        assert!(output
+            .lines()
+            .any(|line| line == format!("resume: axiom wish --resume {SESSION}")));
+    }
+    std::fs::remove_dir_all(home.join("logs")).unwrap();
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
+    let mut resume_output = Vec::new();
+    assert_eq!(
+        axiom::session::resume(&config, SESSION, Some(17), empty(), &mut resume_output).unwrap(),
+        0
+    );
+    let output = String::from_utf8(resume_output).unwrap();
+    let log = output
+        .lines()
+        .find_map(|line| line.strip_prefix("log: "))
+        .unwrap();
+    assert!(Path::new(log)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .ends_with("-wish.jsonl"));
+    let record: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    let i = argv.iter().position(|v| v == "--max-turns").unwrap();
+    assert_eq!(argv[i + 1], "17");
+    assert_eq!(
+        std::fs::canonicalize(record["cwd"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(temp.path()).unwrap()
+    );
+    let prompt = record["messages"][0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.starts_with(axiom::session::CONTINUE_TAG));
+    axiom::hook::handle(
+        &serde_json::json!({"hook_event_name":"UserPromptSubmit", "session_id":SESSION, "prompt":prompt}),
+        Some(&home),
+        true,
+    );
+    let g = goal::load(&home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "done");
+    assert_eq!(g.wish, "original");
+    assert_eq!(g.amendments, ["amendment"]);
+    std::fs::write(home.join("goals").join(format!("{SESSION}.json")), "{").unwrap();
+    assert_eq!(
+        axiom::session::resume(&config, SESSION, None, empty(), &mut Vec::new())
+            .unwrap_err()
+            .kind,
+        "invalid_json"
+    );
+}
+
+#[test]
+fn resume_rejects_missing_done_and_missing_cwd() {
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+    };
+    let attempt =
+        |id| axiom::session::resume(&config, id, None, empty(), &mut Vec::new()).unwrap_err();
+    assert_eq!(attempt("missing").kind, "not_found");
+    goal::open(&home, "done", "wish", None).unwrap();
+    goal::set_status(&home, "done", "done", None).unwrap();
+    let err = attempt("done");
+    assert_eq!(err.kind, "invalid_argument");
+    assert!(err.message.contains("is already done"));
+    for cwd in [
+        None,
+        Some(temp.path().join("nonexistent").to_str().unwrap().to_owned()),
+    ] {
+        goal::open(&home, "no-cwd", "wish", cwd.as_deref()).unwrap();
+        let err = attempt("no-cwd");
+        assert_eq!(err.kind, "invalid_argument");
+        assert!(err.message.contains("has no project directory"));
     }
 }

@@ -7,6 +7,22 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 #[test]
 fn required_phrases_are_present() {
     let cases = [
+        ("agents/dispatcher.md", "Call `codex_run` yourself"),
+        ("agents/dispatcher.md", "Never forward Codex work through another agent"),
+        ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),
+        ("agents/dispatcher.md", "`cargo fetch --locked`"),
+        ("agents/dispatcher.md", "`cargo test --locked --offline`"),
+        ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
+        ("skills/wish/SKILL.md", "`[creative]`"),
+        ("skills/wish/SKILL.md", "run step 2, then step 2a, then step 3 always"),
+        ("skills/wish/SKILL.md", "at most three candidates"),
+        ("skills/wish/SKILL.md", "the existing capability, the missing link, the code location, the user-visible value, and a falsifiable acceptance check"),
+        ("skills/wish/SKILL.md", "evidence strength, then direct user value, then reuse of what exists"),
+        ("skills/wish/SKILL.md", "exactly one smallest increment"),
+        ("skills/wish/SKILL.md", "In creative mode `[no-architect]` is ignored"),
+        ("skills/wish/SKILL.md", "declare the mode after the ruling"),
+        ("skills/wish/SKILL.md", "no follow-up exploration"),
+        ("skills/wish/SKILL.md", "`area: feature`"),
         ("agents/dispatcher.md", "including fix and sol units"),
         ("agents/dispatcher.md", "`orch` `[\"map\"]`"),
         ("agents/dispatcher.md", "`orch` `[\"ready\"]`"),
@@ -44,6 +60,9 @@ fn required_phrases_are_present() {
 #[test]
 fn deleted_rules_have_enforcing_tests() {
     let cases = [
+        ("skills/wish/SKILL.md", "If any unit is not `verified` or the full test fails", "orch/lifecycle_cases.rs::ready_lists_waiting_units_with_next_step"),
+        ("agents/dispatcher.md", "general-purpose", "hook.rs::nested_agents_only_reviewer"),
+        ("agents/dispatcher.md", "time.sleep", "bridge/codex_cases.rs::unbound_writing_run_is_refused_before_codex_starts"),
         ("DISPATCH.md", "For deletions, SCOPE lists each path to delete.", "orch/lifecycle_cases.rs::lifecycle_reuse_scope_and_limit"),
         ("DISPATCH.md", "The worker's report is a claim.", "orch/lifecycle_cases.rs::lifecycle_reuse_scope_and_limit"),
         ("agents/architect.md", "Order the modules so each depends only on earlier ones and on existing code.", "orch/parse_cases.rs::map_rejections_name_module"),
@@ -92,7 +111,7 @@ fn reviewer_tools_are_read_only() {
     let frontmatter = frontmatter.split_once("\n---").unwrap().0;
     let tools: Vec<_> = frontmatter
         .lines()
-        .filter_map(|line| line.strip_prefix("tools:"))
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:"))
         .collect();
     assert_eq!(tools, [" Read, Glob, Grep"]);
 }

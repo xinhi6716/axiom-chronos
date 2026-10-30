@@ -98,6 +98,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     if save.is_some() && (project.is_none() || role != Some("astra") || unit.is_some()) {
         return Err(invalid("save_to requires project and astra role"));
     }
+    if unit.is_none() && string(a, "sandbox").unwrap_or("workspace-write") != "read-only" {
+        return Err(Failure::new("unbound_write", "a writing codex_run needs project and unit; register the unit with orch and dispatch it by id"));
+    }
     let store = project.map(|p| orch::store_for(b.home()?, p)).transpose()?;
     let dest = match (save, &store) {
         (Some(s), Some(root)) => Some(destination(root, s)?),
@@ -121,8 +124,18 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut attempt = 0;
     let mut guard = UnitGuard(None);
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
-        let required = goal::find_active(b.home()?, project.unwrap())?
-            .is_some_and(|(_, g)| goal::astra_requested(&g));
+        let active = goal::find_active(b.home()?, project.unwrap())?;
+        if active
+            .as_ref()
+            .is_some_and(|(_, g)| goal::creative_requested(g))
+            && !root.join("modules.md").exists()
+        {
+            return Err(Failure::new(
+                "architect_required",
+                "creative goal requires modules.md",
+            ));
+        }
+        let required = active.is_some_and(|(_, g)| goal::astra_requested(&g));
         match orch::begin_unit(root, u, r, Path::new(cwd), required)? {
             orch::Begin::Reused => {
                 return Ok(json!({"status":"completed","unit":u,"state":"verified","reused":true}))

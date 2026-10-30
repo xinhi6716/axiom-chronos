@@ -174,7 +174,11 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     })()
     .unwrap_or_default();
     let _ = std::fs::remove_file(index);
-    result
+    if result.is_empty() {
+        result
+    } else {
+        format!("tree:{result}")
+    }
 }
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
@@ -256,7 +260,7 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
             "full",
             &command,
             result.exit_code,
-            git(repo, &["rev-parse", "HEAD"]),
+            snapshot(repo, &[".".into()]),
         ),
     )?;
     Ok(result)
@@ -266,6 +270,7 @@ pub fn record_review(
     units: &[String],
     reviewer: &str,
     pass: bool,
+    repo: &Path,
 ) -> Res<Vec<(String, String)>> {
     let existing = read_units(store)?;
     let mut commits = Vec::new();
@@ -284,10 +289,8 @@ pub fn record_review(
             ));
         }
         commits.push(
-            rs.iter()
-                .rev()
-                .find(|r| r.kind == "verify")
-                .map(|r| r.commit.clone())
+            unit_brief(store, unit)
+                .map(|brief| snapshot(repo, &brief.scope))
                 .unwrap_or_default(),
         );
     }
@@ -336,6 +339,12 @@ pub fn astra_gate(store: &Path) -> Res<()> {
     ] {
         if !store.join(file).is_file() {
             return Err(Failure::new("astra_gate", format!("missing {file}")));
+        }
+    }
+    for file in ["astra/review.json", "astra/ruling.md"] {
+        let contents = std::fs::read_to_string(store.join(file)).map_err(io)?;
+        if contents.trim().is_empty() {
+            return Err(Failure::new("astra_gate", format!("empty {file}")));
         }
     }
     Ok(())

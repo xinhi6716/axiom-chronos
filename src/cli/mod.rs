@@ -18,12 +18,35 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         Err(e) => return usage(e),
     };
     let mut turns = (skill == "research").then_some(40);
-    let (mut no_architect, mut astra) = (false, false);
+    let (mut no_architect, mut astra, mut creative, mut resume, mut project_set) =
+        (false, false, false, None, false);
+    if skill == "wish" && args.iter().any(|a| a == "--resume") {
+        let mut j = 0;
+        let mut seen = false;
+        while j < args.len() {
+            match args[j].as_str() {
+                "--resume" if !seen && j + 1 < args.len() && !args[j + 1].starts_with('-') => {
+                    seen = true;
+                    j += 2;
+                }
+                "--max-turns" if j + 1 < args.len() => {
+                    j += 2;
+                }
+                _ => return usage("--resume takes only a session id"),
+            }
+        }
+        if !seen {
+            return usage("--resume takes only a session id");
+        }
+    }
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--project" => match value(args, &mut i, "--project") {
-                Ok(v) => project = v.into(),
+                Ok(v) => {
+                    project = v.into();
+                    project_set = true;
+                }
                 Err(e) => return usage(e),
             },
             "--max-turns" => match value(args, &mut i, "--max-turns").and_then(|s| {
@@ -33,6 +56,11 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
                 Ok(v) => turns = Some(v),
                 Err(e) => return usage(e),
             },
+            "--resume" if skill == "wish" => match value(args, &mut i, "--resume") {
+                Ok(v) if resume.is_none() => resume = Some(v),
+                _ => return usage("--resume takes only a session id"),
+            },
+            "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
             "--astra" if skill == "wish" => astra = true,
             "--" => {
@@ -44,7 +72,22 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
-    if i == args.len() {
+    if let Some(id) = resume {
+        if i != args.len() || project_set || no_architect || astra || creative {
+            return usage("--resume takes only a session id");
+        }
+        return match session::resume(
+            &session::Config::from_env(),
+            &id,
+            turns,
+            Box::new(io::BufReader::new(io::stdin())),
+            &mut io::stdout(),
+        ) {
+            Ok(code) => code,
+            Err(e) => usage(e.message),
+        };
+    }
+    if i == args.len() && !creative {
         return usage(format!(
             "{skill}: say what you want, e.g. axiom {skill} {}",
             if skill == "wish" {
@@ -66,12 +109,23 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             project.display()
         ));
     }
-    let text = format!(
-        "{}{}{}",
-        if no_architect { "[no-architect] " } else { "" },
-        if astra { "[astra] " } else { "" },
-        args[i..].join(" ")
-    );
+    let text = if creative {
+        format!(
+            "[creative]{}",
+            if i == args.len() {
+                String::new()
+            } else {
+                format!(" {}", args[i..].join(" "))
+            }
+        )
+    } else {
+        format!(
+            "{}{}{}",
+            if no_architect { "[no-architect] " } else { "" },
+            if astra { "[astra] " } else { "" },
+            args[i..].join(" ")
+        )
+    };
     match session::run(
         &session::Config::from_env(),
         skill,

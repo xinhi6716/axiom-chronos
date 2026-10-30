@@ -69,6 +69,8 @@ Interjection（插話）：互動模式按 Esc；使用 `axiom wish` 時輸入�
 axiom wish --project ../other 把 calc 全部改名成 compute_total
 ```
 
+`axiom wish --resume <session-id>` 繼續 session；`axiom wish --creative` 啟動創意探索。
+
 <details>
 <summary><strong>選項與角色分工</strong></summary>
 
@@ -76,6 +78,8 @@ axiom wish --project ../other 把 calc 全部改名成 compute_total
 |---|---|---|
 | `--project PATH` | 目前目錄 | 指定專案。 |
 | `--max-turns N` | — | 限制核心 session 回合數。 |
+| `--resume <session-id>` | — | 繼續先前的願望 session。 |
+| `--creative` | — | 探索並選擇有證據支持的小幅改進。 |
 
 - **Claude Code 核心：**讀取專案歷史、交付願望，以回報事實核對最後說明。
 - **Sonnet 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。

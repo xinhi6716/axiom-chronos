@@ -124,7 +124,7 @@ fn records_and_gates() {
     append_evidence(&p, "u", &row("run", "gpt-worker", 0, "", "2000-01-01")).unwrap();
     append_evidence(&p, "u", &row("verify", "test", 0, "", "2000-01-02")).unwrap();
     assert_eq!(
-        record_review(&p, &["u".into()], "gpt-review", true)
+        record_review(&p, &["u".into()], "gpt-review", true, &p)
             .unwrap_err()
             .kind,
         "same_family"
@@ -141,6 +141,13 @@ fn records_and_gates() {
     for f in ["plan.json", "review.json", "ruling.md", "plan-final.md"] {
         fs::write(p.join("astra").join(f), "").unwrap();
     }
+    assert_eq!(
+        astra_gate(&p).unwrap_err().message,
+        "empty astra/review.json"
+    );
+    fs::write(p.join("astra/review.json"), "{} ").unwrap();
+    assert_eq!(astra_gate(&p).unwrap_err().message, "empty astra/ruling.md");
+    fs::write(p.join("astra/ruling.md"), "ruling").unwrap();
     assert!(astra_gate(&p).is_ok());
     set_unit_state(&p, "u", "verified").unwrap();
     append_evidence(&p, "_full", &row("full", "test", 0, "", "1999")).unwrap();
@@ -152,17 +159,14 @@ fn records_and_gates() {
 }
 
 #[test]
-fn review_uses_latest_verify_commit_without_repo() {
+fn review_identity_empty_when_brief_unreadable() {
     let p = temp();
     setup(&p);
     append_evidence(&p, "u", &row("run", "gpt-worker", 0, "", "1")).unwrap();
     append_evidence(&p, "u", &row("verify", "test", 0, "verified-tree", "2")).unwrap();
     fs::remove_file(p.join("brief.txt")).unwrap();
-    record_review(&p, &["u".into()], "claude-review", true).unwrap();
-    assert_eq!(
-        evidence(&p, "u").unwrap().last().unwrap().commit,
-        "verified-tree"
-    );
+    record_review(&p, &["u".into()], "claude-review", true, &p).unwrap();
+    assert_eq!(evidence(&p, "u").unwrap().last().unwrap().commit, "");
     fs::remove_dir_all(p).unwrap();
 }
 
@@ -179,4 +183,63 @@ fn accept_checks_all_briefs_before_command() {
     assert!(!marker.exists());
     assert!(evidence(&p, "u").unwrap().is_empty());
     fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn identities_are_current_git_trees() {
+    let root = temp();
+    let repo = root.join("repo");
+    let store = root.join("store");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    setup(&store);
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("file.txt"), "one").unwrap();
+    append_evidence(&store, "u", &row("run", "gpt-worker", 0, "", "1")).unwrap();
+    let verify = snapshot(&repo, &["file.txt".into()]);
+    append_evidence(&store, "u", &row("verify", "test", 0, &verify, "2")).unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    let full_path = store.join("reports/_full.evidence.tsv");
+    let first_full = fs::read_to_string(&full_path)
+        .unwrap()
+        .lines()
+        .last()
+        .unwrap()
+        .split('\t')
+        .nth(3)
+        .unwrap()
+        .to_string();
+    fs::write(repo.join("file.txt"), "two").unwrap();
+    record_review(&store, &["u".into()], "claude-review", true, &repo).unwrap();
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    let rows = evidence(&store, "u").unwrap();
+    let review = &rows.last().unwrap().commit;
+    assert_ne!(&verify, review);
+    let full = fs::read_to_string(full_path).unwrap();
+    let last_full = full.lines().last().unwrap().split('\t').nth(3).unwrap();
+    assert_ne!(first_full, last_full);
+    for identity in [
+        &verify,
+        &rows.iter().find(|r| r.kind == "accept").unwrap().commit,
+        review,
+        &first_full,
+        &last_full.to_string(),
+    ] {
+        let hash = identity.strip_prefix("tree:").unwrap();
+        assert_eq!(hash.len(), 40);
+        let output = Command::new("git")
+            .args(["cat-file", "-t", hash])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tree");
+    }
+    fs::remove_dir_all(root).unwrap();
 }

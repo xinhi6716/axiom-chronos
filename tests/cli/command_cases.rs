@@ -297,3 +297,48 @@ fn wish_usage_and_overrides() {
     assert_eq!(argv[i + 1], "7");
     assert_eq!(v["cwd"], t.path().to_string_lossy().as_ref());
 }
+
+#[test]
+fn creative_and_resume_usage() {
+    let t = common::temp();
+    let record = t.path().join("record");
+    for (args, expected) in [
+        (vec!["wish", "--creative"], "/chronos:wish [creative]"),
+        (
+            vec!["wish", "--creative", "invent", "x"],
+            "/chronos:wish [creative] invent x",
+        ),
+        (
+            vec!["wish", "--creative", "--no-architect", "--astra", "x"],
+            "/chronos:wish [creative] x",
+        ),
+    ] {
+        let o = command(t.path())
+            .args(args)
+            .env(
+                "AXIOM_CLAUDE_CMD",
+                serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+            )
+            .env("FAKE_CLAUDE_RECORD", &record)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
+    }
+    for args in [
+        vec!["wish", "--resume", "id", "text"],
+        vec!["wish", "text", "--resume", "id"],
+        vec!["wish", "--resume", "id", "--project", "."],
+        vec!["wish", "--creative", "--resume", "id"],
+        vec!["wish", "--resume", "id", "--astra"],
+        vec!["wish", "--resume", "id", "--no-architect"],
+    ] {
+        let o = command(t.path()).args(args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("axiom: --resume takes only a session id")
+        );
+    }
+}

@@ -15,6 +15,7 @@ fn run(
         "gemini-4-argon-medium",
         schema,
         timeout,
+        &agy::Children::new(),
     )
     .unwrap()
 }
@@ -59,9 +60,17 @@ fn results_and_validation() {
         "empty_response"
     );
     assert_eq!(
-        agy::run(&common::fake("fake_agy"), " ", cwd, "m", None, 1)
-            .unwrap_err()
-            .kind,
+        agy::run(
+            &common::fake("fake_agy"),
+            " ",
+            cwd,
+            "m",
+            None,
+            1,
+            &agy::Children::new()
+        )
+        .unwrap_err()
+        .kind,
         "invalid_argument"
     );
 }
@@ -96,6 +105,7 @@ fn timeout_and_cancel_kill_child() {
         "m",
         None,
         2,
+        &agy::Children::new(),
     )
     .unwrap();
     assert_eq!(result["status"], "timeout");
@@ -104,18 +114,37 @@ fn timeout_and_cancel_kill_child() {
     std::fs::remove_file(&pidfile).unwrap();
     let command = pid_command(&pidfile);
     let cwd = dir.path().to_owned();
+    let children = std::sync::Arc::new(agy::Children::new());
+    let worker_children = children.clone();
     let thread = std::thread::spawn(move || {
-        agy::run(&command, "AGY_HANG", Some(&cwd), "m", None, 30).unwrap()
+        agy::run(
+            &command,
+            "AGY_HANG",
+            Some(&cwd),
+            "m",
+            None,
+            30,
+            &worker_children,
+        )
+        .unwrap()
     });
     let start = std::time::Instant::now();
-    while !pidfile.exists() && start.elapsed() < std::time::Duration::from_secs(10) {
+    let pid: u32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            break pid;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
         std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let pid: u32 = std::fs::read_to_string(&pidfile).unwrap().parse().unwrap();
+    };
     let start = std::time::Instant::now();
-    agy::cancel_all();
+    children.cancel();
     let result = thread.join().unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(result["status"], "bridge_error");
+    assert_eq!(result["error"]["kind"], "agy_no_result");
     assert!(!axiom::base::proc::pid_alive(pid));
+    assert_eq!(children.len(), 0);
 }

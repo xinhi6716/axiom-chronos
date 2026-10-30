@@ -13,6 +13,31 @@ if '--version' in sys.argv:
 
 pending_turns = {}
 send_lock = threading.Lock()
+log_lock = threading.Lock()
+barrier = threading.Condition()
+barrier_count = 0
+
+
+def log_record(method, params):
+    path = os.getenv('FAKE_CODEX_LOG')
+    if not path:
+        return
+    with log_lock:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                fd = os.open(path + '.lock', os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except (FileExistsError, PermissionError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('fake codex log lock timeout')
+                time.sleep(0.01)
+        try:
+            with open(path, 'a', encoding='utf-8') as log:
+                log.write(json.dumps({'method': method, 'params': params, 'time': time.monotonic()}) + '\n')
+        finally:
+            os.close(fd)
+            os.unlink(path + '.lock')
 
 
 def send(message):
@@ -26,6 +51,7 @@ def item(thread_id, turn_id, payload):
 
 
 def complete(thread_id, turn_id, status='completed', error=None):
+    log_record('fake/complete', {'threadId': thread_id, 'turnId': turn_id, 'status': status})
     send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn_id, 'status': status, 'error': error, 'items': []}}})
 
 
@@ -36,9 +62,8 @@ thread_params = {}
 for line in sys.stdin:
     message = json.loads(line)
     method, params = message.get('method'), message.get('params') or {}
-    if method and os.getenv('FAKE_CODEX_LOG'):
-        with open(os.environ['FAKE_CODEX_LOG'], 'a', encoding='utf-8') as log:
-            log.write(json.dumps({'method': method, 'params': params, 'time': time.monotonic()}) + '\n')
+    if method:
+        log_record(method, params)
     if method is None:
         if 'error' in message:
             thread_id, turn_id = pending_turns.pop('approval')
@@ -82,6 +107,20 @@ for line in sys.stdin:
             sys.exit(7)
         if 'HANG' in text:
             pending_turns[turn_id] = (thread_id, turn_id)
+            continue
+        if 'BARRIER' in text:
+            with barrier:
+                barrier_count += 1
+                barrier.notify_all()
+            def finish_barrier(tid=thread_id, turn=turn_id):
+                with barrier:
+                    ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
+                if ready:
+                    item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
+                    complete(tid, turn)
+                else:
+                    complete(tid, turn, 'failed', {'message': 'barrier timeout'})
+            threading.Thread(target=finish_barrier, daemon=True).start()
             continue
         if 'SLOW' in text:
             pending_turns[turn_id] = (thread_id, turn_id)

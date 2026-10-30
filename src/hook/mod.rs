@@ -176,12 +176,18 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
         "PreToolUse" => {
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
             let agent = event.get("agent_id").is_some();
+            let input = event.get("tool_input").unwrap_or(&Value::Null);
+            if agent
+                && matches!(tool, "Agent" | "Task")
+                && input.get("subagent_type").and_then(Value::as_str) != Some("chronos:reviewer")
+            {
+                return deny("Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.");
+            }
             if tool == CODEX && !agent {
                 return deny("codex_run is for the chronos agents. Hand building to chronos:dispatcher and Astra plans to chronos:astra.");
             }
             let home = home?;
             let g = goal::load(home, session).ok()??;
-            let input = event.get("tool_input").unwrap_or(&Value::Null);
             let mode = g.mode.as_deref();
             let dispatcher = (tool == "Agent" || tool == "Task")
                 && input.get("subagent_type").and_then(Value::as_str) == Some("chronos:dispatcher");

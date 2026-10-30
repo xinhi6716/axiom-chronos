@@ -29,12 +29,14 @@ impl Config {
 pub struct Bridge {
     pub config: Config,
     codex: Mutex<Option<Arc<AppServer>>>,
+    pub(crate) children: crate::agy::Children,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
         Self {
             config,
             codex: Mutex::new(None),
+            children: crate::agy::Children::new(),
         }
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {
@@ -58,6 +60,7 @@ impl Bridge {
             .map_or(false, |c| c.alive())
     }
     pub fn cancel(&self) {
+        self.children.cancel();
         if let Some(c) = self
             .codex
             .lock()

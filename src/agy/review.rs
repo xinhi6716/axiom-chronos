@@ -45,6 +45,7 @@ pub fn review(
     model: &str,
     timeout_s: u64,
     command: &[String],
+    children: &super::Children,
 ) -> Res<Value> {
     let root = base::require_directory(project_dir)?;
     if contract.trim().is_empty() {
@@ -95,7 +96,15 @@ pub fn review(
         "{INSTRUCTION}\n\n=== CONTRACT\n{contract}\n\n{}",
         blocks.join("\n\n")
     );
-    let mut result = super::print::run(command, &prompt, None, model, Some(&schema()), timeout_s)?;
+    let mut result = super::print::run(
+        command,
+        &prompt,
+        None,
+        model,
+        Some(&schema()),
+        timeout_s,
+        children,
+    )?;
     if result["status"] != "completed" {
         if result["error"]["kind"] == "invalid_structured_output" {
             return Ok(

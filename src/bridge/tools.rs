@@ -75,6 +75,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                     model,
                     a.get("json_schema"),
                     timeout(a, 600),
+                    &b.children,
                 )
             });
             let mut result = match result {
@@ -141,6 +142,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 model,
                 timeout(a, 900),
                 &b.config.agy.clone()?,
+                &b.children,
             )?;
             if r["status"] == "completed" && a.get("units").is_some() && opt(a, "project").is_some()
             {
@@ -149,6 +151,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                     &arr(a, "units")?,
                     model,
                     r["verdict"] == "pass",
+                    std::path::Path::new(s(a, "project_dir")),
                 )?;
                 r["states"] = json!(states
                     .into_iter()
@@ -208,7 +211,6 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 let g = goal::classify(home, session, v)?;
                 if v == "stop" {
                     b.cancel();
-                    agy::cancel_all();
                 }
                 json!(g)
             } else {

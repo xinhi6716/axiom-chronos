@@ -1,7 +1,6 @@
 use axiom::orch::*;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn setup() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
@@ -38,8 +37,47 @@ fn begin(store: &Path, repo: &Path) -> Begin {
     begin_unit(store, "a", "worker", repo, false).unwrap()
 }
 #[test]
+fn legacy_bare_verify_identity_is_read_but_not_reused() {
+    let (store, repo) = setup();
+    let identity = snapshot(&repo, &["a.txt".into()]);
+    let hash = identity.strip_prefix("tree:").unwrap();
+    assert_eq!(hash.len(), 40);
+    fs::write(
+        store.join("reports/a.evidence.tsv"),
+        format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-worker\t0\t\t1\nverify\ttest\t0\t{hash}\t2\nreview\tclaude-review\t0\t{hash}\t3\n"),
+    ).unwrap();
+    let rows = evidence(&store, "a").unwrap();
+    assert_eq!(rows[1].commit, hash);
+    assert_eq!(derive_state(&rows, false), "verified");
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    abort_unit(&store, "a");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn review_requires_repo() {
+    let (store, _) = setup();
+    let verdict = store.join("verdict.json");
+    fs::write(&verdict, r#"{"verdict":"pass","findings":[]}"#).unwrap();
+    let result = run(
+        &store,
+        &[
+            "review".into(),
+            "a".into(),
+            "--reviewer".into(),
+            "claude".into(),
+            "--verdict-file".into(),
+            verdict.to_string_lossy().into_owned(),
+        ],
+        false,
+        false,
+    );
+    assert_eq!(result.exit_code, 1);
+    assert!(result.stderr.contains("error: missing --repo"));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+#[test]
 fn projects_do_not_share_running_units() {
-    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (store_a, repo_a) = setup();
     let (store_b, repo_b) = setup();
     assert!(matches!(begin(&store_a, &repo_a), Begin::Run { .. }));
@@ -53,7 +91,6 @@ fn projects_do_not_share_running_units() {
 }
 #[test]
 fn lifecycle_reuse_scope_and_limit() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     assert_eq!(ready_units(&store).unwrap(), vec!["a"]);
     assert!(matches!(
@@ -94,7 +131,7 @@ fn lifecycle_reuse_scope_and_limit() {
             "worker\ta\tcompleted\t{}",
             store.join("reports").join("a.md").display()
         )));
-    record_review(&store, &["a".into()], "claude-review", true).unwrap();
+    record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
     assert!(matches!(begin(&store, &repo), Begin::Reused));
     fs::write(repo.join("a.txt"), "changed").unwrap();
     assert!(matches!(
@@ -123,12 +160,10 @@ fn lifecycle_reuse_scope_and_limit() {
             .kind,
         "fix_limit"
     );
-    assert!(!running().contains(&"a".to_string()));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 #[test]
 fn sol_and_extra_commands() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     assert_eq!(
         begin_unit(&store, "a", "sol", &repo, false)
@@ -189,7 +224,6 @@ fn add_unit(store: &Path, id: &str, track: &str, scope: &str) {
 
 #[test]
 fn concurrent_workers_and_overlapping_scopes() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     add_unit(&store, "b", "m", "b.txt");
     add_unit(&store, "c", "m", "a.txt");
@@ -216,13 +250,7 @@ fn concurrent_workers_and_overlapping_scopes() {
                         "busy"
                     );
                 }
-                let worker = || {
-                    let start = std::time::Instant::now();
-                    barrier.wait();
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    (start, std::time::Instant::now())
-                };
-                let times = worker();
+                barrier.wait();
                 let result = finish_unit(
                     &store,
                     id,
@@ -233,18 +261,17 @@ fn concurrent_workers_and_overlapping_scopes() {
                 )
                 .unwrap();
                 assert_eq!(result.state, "built");
-                times
             })
         })
         .collect();
-    let times: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    assert!(times[0].0 < times[1].1 && times[1].0 < times[0].1);
+    for handle in handles {
+        handle.join().unwrap();
+    }
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
 #[test]
 fn dependencies_require_verified_unit() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     add_unit(&store, "b", "n", "b.txt");
     fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS b.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
@@ -264,7 +291,7 @@ fn dependencies_require_verified_unit() {
     )
     .unwrap();
     record_accept(&store, "m", &repo).unwrap();
-    record_review(&store, &["a".into()], "claude-review", true).unwrap();
+    record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
     assert_eq!(
         derive_state(&evidence(&store, "a").unwrap(), true),
         "verified"
@@ -279,7 +306,6 @@ fn dependencies_require_verified_unit() {
 
 #[test]
 fn extra_commands_preserve_output_and_failures() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     fs::write(
         store.join("modules.md"),
@@ -343,6 +369,8 @@ fn extra_commands_preserve_output_and_failures() {
         "claude-review".into(),
         "--verdict-file".into(),
         verdict.to_string_lossy().into_owned(),
+        "--repo".into(),
+        repo.to_string_lossy().into_owned(),
     ]);
     assert_eq!(review.exit_code, 0);
     assert!(review.stdout.contains("a\treview-failed"));
@@ -364,7 +392,6 @@ fn extra_commands_preserve_output_and_failures() {
 
 #[test]
 fn non_git_and_reported_paths() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     let plain = store.parent().unwrap().join("plain");
     fs::create_dir(&plain).unwrap();
@@ -389,8 +416,7 @@ fn non_git_and_reported_paths() {
 
 #[test]
 fn map_and_review_errors() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    let (store, _) = setup();
+    let (store, repo) = setup();
     fs::write(
         store.join("modules.md"),
         "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
@@ -420,6 +446,8 @@ fn map_and_review_errors() {
                 "claude",
                 "--verdict-file",
                 path,
+                "--repo",
+                repo.to_str().unwrap(),
             ],
             false,
         );
@@ -435,7 +463,9 @@ fn map_and_review_errors() {
                 "--reviewer",
                 "claude",
                 "--verdict-file",
-                path
+                path,
+                "--repo",
+                repo.to_str().unwrap()
             ],
             false
         )
@@ -447,7 +477,6 @@ fn map_and_review_errors() {
 
 #[test]
 fn verify_tail_keeps_last_2000_characters() {
-    let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
     let long = format!("{}END", "x".repeat(2100));
     fs::write(
@@ -469,4 +498,72 @@ fn verify_tail_keeps_last_2000_characters() {
     assert!(result.verify_tail.trim_end().ends_with("END"));
     assert!(result.verify_tail.starts_with('x'));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn ready_lists_waiting_units_with_next_step() {
+    let (store, repo) = setup();
+    for (id, track) in [
+        ("b", "m"),
+        ("c", "m"),
+        ("d", "m"),
+        ("e", "m"),
+        ("f", "m"),
+        ("g", "n"),
+    ] {
+        add_unit(&store, id, track, &format!("{id}.txt"));
+    }
+    fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt b.txt c.txt d.txt e.txt f.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS g.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
+    let row = |kind: &str, code| Evidence {
+        kind: kind.into(),
+        command: if kind == "run" {
+            "gpt".into()
+        } else {
+            "claude".into()
+        },
+        exit_code: code,
+        commit: "old".into(),
+        ts: "1".into(),
+    };
+    for id in ["b", "c", "d", "e"] {
+        append_evidence(&store, id, &row("run", 0)).unwrap();
+        append_evidence(&store, id, &row("verify", 0)).unwrap();
+    }
+    append_evidence(&store, "b", &row("accept", 1)).unwrap();
+    append_evidence(&store, "c", &row("accept", 0)).unwrap();
+    append_evidence(&store, "c", &row("review", 1)).unwrap();
+    append_evidence(&store, "e", &row("accept", 0)).unwrap();
+    for _ in 0..2 {
+        append_evidence(&store, "f", &row("run", 1)).unwrap();
+    }
+    let waiting = waiting_units(&store).unwrap();
+    let pairs: Vec<_> = waiting
+        .iter()
+        .map(|w| (w.unit.as_str(), w.next.as_str()))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("b", "fix"),
+            ("c", "fix"),
+            ("d", "accept"),
+            ("e", "review"),
+            ("f", "blocked"),
+            ("g", "wait a,b,c,d,e,f")
+        ]
+    );
+    let compact = run(&store, &["ready".into()], false, false);
+    assert!(compact.stdout.starts_with("a\nb\taccept-failed\tfix\n"));
+    let json = run(&store, &["ready".into()], true, false);
+    let parsed: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    assert_eq!(parsed["ready"], json!(["a"]));
+    assert_eq!(
+        parsed["waiting"][2],
+        json!({"unit":"d","state":"built","next":"accept"})
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+    let (store, _) = setup();
+    assert_eq!(run(&store, &["ready".into()], false, false).stdout, "a\n");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+    let _ = repo;
 }

@@ -243,3 +243,74 @@ fn find_active_selects_newest_matching_project() {
         "second"
     );
 }
+
+#[test]
+fn interrupt_reopen_and_markers() {
+    let t = tempfile::tempdir().unwrap();
+    for (wish, creative, astra) in [
+        ("[creative] x", true, true),
+        ("[no-architect] [creative] x", true, true),
+        ("[astra] x", false, true),
+        ("x", false, false),
+    ] {
+        let g = axiom::goal::open(t.path(), "markers", wish, None).unwrap();
+        assert_eq!(axiom::goal::creative_requested(&g), creative);
+        assert_eq!(axiom::goal::astra_requested(&g), astra);
+    }
+    axiom::goal::interject(t.path(), "markers", "amend").unwrap();
+    let file = t.path().join("goals/markers.json");
+    let mut data: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    data["project"] = "project".into();
+    data["mode"] = "creative".into();
+    data["mode_locked"] = true.into();
+    data["asked"] = true.into();
+    data["dispatched"] = true.into();
+    data["unknown_key"] = serde_json::json!({"retained": true});
+    std::fs::write(&file, serde_json::to_vec(&data).unwrap()).unwrap();
+    assert!(axiom::goal::interrupt(t.path(), "missing", "crash")
+        .unwrap()
+        .is_none());
+    let g = axiom::goal::interrupt(t.path(), "markers", "crash")
+        .unwrap()
+        .unwrap();
+    assert_eq!(g.reason.as_deref(), Some("interrupted"));
+    assert_eq!(
+        g.note.as_deref(),
+        Some("crash. Resume with: axiom wish --resume markers")
+    );
+    assert!(g.interjection.is_none());
+    let before = std::fs::read(t.path().join("goals/markers.json")).unwrap();
+    assert!(axiom::goal::interrupt(t.path(), "markers", "again")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        before,
+        std::fs::read(t.path().join("goals/markers.json")).unwrap()
+    );
+    let g = axiom::goal::reopen(t.path(), "markers").unwrap();
+    assert_eq!(g.status, "active");
+    assert_eq!(g.amendments, ["amend"]);
+    assert_eq!(g.project.as_deref(), Some("project"));
+    assert_eq!(g.mode.as_deref(), Some("creative"));
+    assert!(g.mode_locked && g.asked && g.dispatched);
+    assert_eq!(
+        g.other["unknown_key"],
+        serde_json::json!({"retained": true})
+    );
+    assert!(g.note.is_none() && g.reason.is_none() && g.interjection.is_none());
+    axiom::goal::set_status(t.path(), "markers", "done", None).unwrap();
+    let done_before = std::fs::read(&file).unwrap();
+    assert!(axiom::goal::interrupt(t.path(), "markers", "crash")
+        .unwrap()
+        .is_none());
+    assert_eq!(std::fs::read(&file).unwrap(), done_before);
+    assert_eq!(
+        axiom::goal::reopen(t.path(), "markers").unwrap_err().kind,
+        "invalid_argument"
+    );
+    assert_eq!(
+        axiom::goal::reopen(t.path(), "missing").unwrap_err().kind,
+        "not_found"
+    );
+}

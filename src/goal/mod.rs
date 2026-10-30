@@ -102,6 +102,37 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     save(home, session, &goal)?;
     Ok(goal)
 }
+pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
+    let Some(mut goal) = load(home, session)? else {
+        return Ok(None);
+    };
+    if goal.status != "active" {
+        return Ok(None);
+    }
+    goal.status = "blocked".into();
+    goal.reason = Some("interrupted".into());
+    goal.note = Some(format!(
+        "{cause}. Resume with: axiom wish --resume {session}"
+    ));
+    goal.interjection = None;
+    save(home, session, &goal)?;
+    Ok(Some(goal))
+}
+pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
+    let mut goal = required(home, session)?;
+    if goal.status == "done" {
+        return Err(Failure::new(
+            "invalid_argument",
+            format!("goal {session} is already done"),
+        ));
+    }
+    goal.status = "active".into();
+    goal.note = None;
+    goal.reason = None;
+    goal.interjection = None;
+    save(home, session, &goal)?;
+    Ok(goal)
+}
 pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> {
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
@@ -247,6 +278,20 @@ pub fn find_active(home: &Path, project: &str) -> Res<Option<(String, Goal)>> {
     }
     Ok(newest.map(|(_, session, goal)| (session, goal)))
 }
+fn marker(goal: &Goal, wanted: &str) -> bool {
+    let mut rest = goal.wish.trim_start();
+    while rest.starts_with('[') {
+        let Some(end) = rest.find(']') else { break };
+        if &rest[..=end] == wanted {
+            return true;
+        }
+        rest = rest[end + 1..].trim_start();
+    }
+    false
+}
+pub fn creative_requested(goal: &Goal) -> bool {
+    marker(goal, "[creative]")
+}
 pub fn astra_requested(goal: &Goal) -> bool {
-    goal.wish.starts_with("[astra]") || goal.wish.starts_with("[no-architect] [astra]")
+    marker(goal, "[astra]") || creative_requested(goal)
 }

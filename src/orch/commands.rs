@@ -22,12 +22,20 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         match cmd {
             "ready" => {
                 let ids = ready_units(store)?;
-                let text = if ids.is_empty() {
+                let waiting = waiting_units(store)?;
+                let mut text: String = if ids.is_empty() {
                     "(none ready)".into()
                 } else {
                     ids.join("\n")
                 };
-                Ok((0, text, serde_json::json!(ids)))
+                for w in &waiting {
+                    text.push_str(&format!("\n{}\t{}\t{}", w.unit, w.state, w.next));
+                }
+                Ok((
+                    0,
+                    text,
+                    serde_json::json!({"ready": ids, "waiting": waiting}),
+                ))
             }
             "accept" | "fulltest" => {
                 let repo = Path::new(option("--repo")?);
@@ -62,6 +70,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 ))
             }
             "review" => {
+                let repo = Path::new(option("--repo")?);
                 let reviewer = option("--reviewer")?;
                 let path = option("--verdict-file")?;
                 let units: Vec<String> = args
@@ -91,7 +100,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                             s.eq_ignore_ascii_case("blocker") || s.eq_ignore_ascii_case("major")
                         })
                     });
-                let rows = record_review(store, &units, reviewer, pass)?;
+                let rows = record_review(store, &units, reviewer, pass, repo)?;
                 let text = rows
                     .iter()
                     .map(|(u, s)| format!("{u}\t{s}"))

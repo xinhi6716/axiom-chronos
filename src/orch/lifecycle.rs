@@ -201,6 +201,56 @@ pub fn ready_units(store: &Path) -> Res<Vec<String>> {
     }
     Ok(result)
 }
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Waiting {
+    pub unit: String,
+    pub state: String,
+    pub next: String,
+}
+
+pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
+    let ready = ready_units(store)?;
+    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
+    let units = read_units(store)?;
+    let mut waiting = Vec::new();
+    for u in &units {
+        let rows = evidence(store, &u.id)?;
+        let needs = needs_accept(store, &u.id)?;
+        let state = derive_state(&rows, needs);
+        if state == "verified" || ready.contains(&u.id) {
+            continue;
+        }
+        let next = if active.contains_key(&key(store, &u.id)) {
+            "running".to_string()
+        } else if state == "built" {
+            let verify = rows.iter().rposition(|r| r.kind == "verify");
+            if needs && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept")) {
+                "accept".into()
+            } else {
+                "review".into()
+            }
+        } else if state == "accept-failed" || state == "review-failed" {
+            "fix".into()
+        } else {
+            let missing = dependencies(store, u, &units)?;
+            if !missing.is_empty() {
+                format!("wait {}", missing.join(","))
+            } else if rows.iter().filter(|r| r.kind == "run").count() >= 2
+                || unit_brief(store, &u.id).is_err()
+            {
+                "blocked".into()
+            } else {
+                "busy".into()
+            }
+        };
+        waiting.push(Waiting {
+            unit: u.id.clone(),
+            state,
+            next,
+        });
+    }
+    Ok(waiting)
+}
 pub fn finish_unit(
     store: &Path,
     unit: &str,

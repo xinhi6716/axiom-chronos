@@ -16,6 +16,7 @@ fn review_verdict_and_failures() {
             "model",
             20,
             &common::fake("fake_agy"),
+            &agy::Children::new(),
         )
         .unwrap()
     };
@@ -55,8 +56,17 @@ fn paths_and_size_limits() {
     let count = dir.path().join("count");
     let command = count_command(&count);
     let root = dir.path().to_str().unwrap();
-    let review =
-        |paths: &[String], contract: &str| agy::review(root, paths, contract, "m", 20, &command);
+    let review = |paths: &[String], contract: &str| {
+        agy::review(
+            root,
+            paths,
+            contract,
+            "m",
+            20,
+            &command,
+            &agy::Children::new(),
+        )
+    };
     for paths in [
         vec![],
         vec!["missing".into()],
@@ -95,6 +105,7 @@ fn empty_response_calls_agy_once() {
         "m",
         20,
         &command,
+        &agy::Children::new(),
     )
     .unwrap();
     assert_eq!(result["error"]["fallback"], true);
@@ -131,6 +142,7 @@ fn structured_output_cases() {
             "m",
             20,
             &command,
+            &agy::Children::new(),
         )
         .unwrap();
         assert_eq!(result["verdict"].as_str(), expected, "{output}");

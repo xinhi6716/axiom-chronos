@@ -4,19 +4,37 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 type SharedChild = Arc<Mutex<Child>>;
-fn registry() -> &'static Mutex<Vec<SharedChild>> {
-    static CHILDREN: OnceLock<Mutex<Vec<SharedChild>>> = OnceLock::new();
-    CHILDREN.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct State {
+    epoch: u64,
+    children: Vec<SharedChild>,
 }
-pub fn cancel_all() {
-    let children = registry().lock().unwrap_or_else(|e| e.into_inner()).clone();
-    for child in children {
-        base::proc::kill_tree(&mut child.lock().unwrap_or_else(|e| e.into_inner()));
+#[derive(Default)]
+pub struct Children {
+    state: Mutex<State>,
+}
+impl Children {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.epoch = state.epoch.wrapping_add(1);
+        for child in &state.children {
+            base::proc::kill_tree(&mut child.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .children
+            .len()
     }
 }
 struct Cleanup {
@@ -33,13 +51,15 @@ impl Drop for Cleanup {
         }
     }
 }
-struct Registered(SharedChild);
-impl Drop for Registered {
+struct Registered<'a>(&'a Children, SharedChild);
+impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        registry()
+        self.0
+            .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|c| !Arc::ptr_eq(c, &self.0));
+            .children
+            .retain(|c| !Arc::ptr_eq(c, &self.1));
     }
 }
 fn io_failure(e: impl std::fmt::Display) -> Failure {
@@ -52,6 +72,34 @@ pub fn run(
     model: &str,
     json_schema: Option<&Value>,
     timeout_s: u64,
+    children: &Children,
+) -> Res<Value> {
+    let epoch = children
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .epoch;
+    run_at_epoch(
+        command,
+        prompt,
+        cwd,
+        model,
+        json_schema,
+        timeout_s,
+        children,
+        epoch,
+    )
+}
+
+fn run_at_epoch(
+    command: &[String],
+    prompt: &str,
+    cwd: Option<&Path>,
+    model: &str,
+    json_schema: Option<&Value>,
+    timeout_s: u64,
+    children: &Children,
+    epoch: u64,
 ) -> Res<Value> {
     if prompt.trim().is_empty() {
         return Err(Failure::new("invalid_argument", "prompt is empty"));
@@ -97,6 +145,7 @@ pub fn run(
         serde_json::to_writer(&mut file, schema).map_err(io_failure)?;
         cmd.arg("--json-schema").arg(path);
     }
+    let mut state = children.state.lock().unwrap_or_else(|e| e.into_inner());
     let mut child = cmd
         .arg("-p=")
         .current_dir(dir)
@@ -105,6 +154,13 @@ pub fn run(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(io_failure)?;
+    if state.epoch != epoch {
+        base::proc::kill_tree(&mut child);
+        let _ = child.wait();
+        return Ok(
+            json!({"status":"bridge_error","error":{"kind":"cancelled","message":"agy run cancelled"}}),
+        );
+    }
     let mut stdin = child
         .stdin
         .take()
@@ -118,11 +174,9 @@ pub fn run(
         .take()
         .ok_or_else(|| Failure::new("process", "missing stderr"))?;
     let child = Arc::new(Mutex::new(child));
-    registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(child.clone());
-    let _registered = Registered(child.clone());
+    state.children.push(child.clone());
+    drop(state);
+    let _registered = Registered(children, child.clone());
     let reader = |mut stream: Box<dyn Read + Send>| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -245,4 +299,26 @@ pub fn run(
         report["error"] = json!({"kind":kind,"message":message});
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancellation_between_entry_and_spawn() {
+        let children = Children::new();
+        let epoch = children.state.lock().unwrap().epoch;
+        children.cancel();
+        let command = vec![std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        let result =
+            run_at_epoch(&command, "hello", None, "m", None, 10, &children, epoch).unwrap();
+        assert_eq!(
+            result,
+            json!({"status":"bridge_error","error":{"kind":"cancelled","message":"agy run cancelled"}})
+        );
+        assert_eq!(children.len(), 0);
+    }
 }
