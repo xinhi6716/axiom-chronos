@@ -64,6 +64,56 @@ fn fixture(home: &Path, units: &[(&str, &str)]) -> (std::path::PathBuf, std::pat
     (repo, store)
 }
 #[test]
+fn writing_unit_obeys_active_goal_intent() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, store) = fixture(
+        home,
+        &[(
+            "intentunit",
+            "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n",
+        )],
+    );
+    let b = bridge(home);
+    let args = json!({"project":"demo","unit":"intentunit","cwd":repo,"role":"terra"});
+    let mut g = axiom::goal::open(home, "intent", "build", Some(repo.to_str().unwrap())).unwrap();
+    g.project = Some("demo".into());
+    for mode in [None, Some("review"), Some("answer")] {
+        g.mode = mode.map(str::to_owned);
+        fs::write(
+            home.join("goals/intent.json"),
+            serde_json::to_vec(&g).unwrap(),
+        )
+        .unwrap();
+        let result = invoke(&b, args.clone());
+        assert_eq!(result["error"]["kind"], "goal_mode", "{mode:?}: {result}");
+    }
+    g.mode = Some("change".into());
+    fs::write(
+        home.join("goals/intent.json"),
+        serde_json::to_vec(&g).unwrap(),
+    )
+    .unwrap();
+    axiom::goal::interject(home, "intent", "wait").unwrap();
+    let result = invoke(&b, args.clone());
+    assert_eq!(result["error"]["kind"], "pending_interjection", "{result}");
+    assert!(fs::read_to_string(store.join("units.tsv"))
+        .unwrap()
+        .contains("\tpending\t"));
+    let readonly = invoke(
+        &b,
+        json!({"cwd":repo,"role":"terra","sandbox":"read-only","brief":"inspect"}),
+    );
+    assert_eq!(readonly["status"], "completed", "{readonly}");
+    fs::write(
+        home.join("goals/intent.json"),
+        serde_json::to_vec(&g).unwrap(),
+    )
+    .unwrap();
+    let result = invoke(&b, args);
+    assert_eq!(result["state"], "built", "{result}");
+}
+#[test]
 fn unit_build_reuse_and_gates() {
     let temp = common::temp();
     let home = temp.path();
@@ -141,6 +191,7 @@ fn sol_and_astra_restrictions() {
     )
     .unwrap();
     g.project = Some("demo".into());
+    g.mode = Some("change".into());
     fs::write(
         home.join("goals/session.json"),
         serde_json::to_vec(&g).unwrap(),
@@ -415,6 +466,7 @@ fn astra_gate_requires_every_prerequisite() {
         let mut g =
             axiom::goal::open(home, "s", "[astra] build", Some(repo.to_str().unwrap())).unwrap();
         g.project = Some("demo".into());
+        g.mode = Some("change".into());
         fs::write(home.join("goals/s.json"), serde_json::to_vec(&g).unwrap()).unwrap();
         if missing != 0 {
             orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
@@ -746,6 +798,7 @@ fn creative_goal_requires_architect() {
     )
     .unwrap();
     goal.project = Some("demo".into());
+    goal.mode = Some("change".into());
     fs::write(
         temp.path().join("goals/creative.json"),
         serde_json::to_vec(&goal).unwrap(),

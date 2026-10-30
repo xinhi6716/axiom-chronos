@@ -39,7 +39,7 @@ fn setup(p: &Path) {
 #[test]
 fn state_table() {
     let run = row("run", "gpt-worker", 0, "", "1");
-    let verify = row("verify", "test", 0, "", "2");
+    let verify = row("verify", "test", 0, "a", "2");
     let review = row("review", "claude-review", 0, "a", "3");
     assert_eq!(derive_state(&[], false), "pending");
     assert_eq!(derive_state(&[row("run", "x", 1, "", "")], false), "failed");
@@ -100,6 +100,40 @@ fn state_table() {
     );
 }
 #[test]
+fn mismatched_evidence_cannot_verify() {
+    let run = row("run", "gpt-worker", 0, "", "1");
+    let verify = row("verify", "test", 0, "a", "2");
+    let accept = row("accept", "test", 0, "a", "3");
+    let review = row("review", "claude-review", 0, "a", "4");
+    assert_eq!(
+        derive_state(
+            &[
+                run.clone(),
+                verify.clone(),
+                row("review", "claude-review", 0, "b", "3")
+            ],
+            false
+        ),
+        "built"
+    );
+    assert_eq!(
+        derive_state(
+            &[
+                run.clone(),
+                verify.clone(),
+                row("accept", "test", 0, "b", "3"),
+                review.clone()
+            ],
+            true
+        ),
+        "built"
+    );
+    assert_eq!(
+        derive_state(&[run, verify, accept, review], true),
+        "verified"
+    );
+}
+#[test]
 fn snapshot_tracks_worktree() {
     let p = temp();
     assert!(snapshot(&p, &["file.txt".into()]).is_empty());
@@ -116,6 +150,81 @@ fn snapshot_tracks_worktree() {
     fs::write(p.join("file.txt"), "two").unwrap();
     assert_ne!(a, snapshot(&p, &["file.txt".into()]));
     fs::remove_dir_all(p).unwrap();
+}
+#[test]
+fn repo_done_gate_checks_unit_and_full_source_identities() {
+    let root = temp();
+    let repo = root.join("repo");
+    let store = root.join("store");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(&store).unwrap();
+    setup(&store);
+    fs::create_dir(store.join("inbox")).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("file.txt"), "verified").unwrap();
+    begin_unit(&store, "u", "worker", &repo, false).unwrap();
+    finish_unit(
+        &store,
+        "u",
+        &repo,
+        "worker",
+        "gpt-worker",
+        &serde_json::json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    record_review(&store, &["u".into()], "claude-review", true, &repo).unwrap();
+    let full_identity = snapshot(&repo, &[".".into()]);
+    append_evidence(
+        &store,
+        "_full",
+        &row("full", "test", 0, &full_identity, "9999"),
+    )
+    .unwrap();
+    append_evidence(&store, "_stages", &row("rewrite", "model", 0, "", "9999")).unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    assert_eq!(
+        done_gate_in_repo(&store, true, None).unwrap_err().kind,
+        "not_done"
+    );
+    fs::write(repo.join("file.txt"), "changed").unwrap();
+    assert!(done_gate(&store, true).is_ok()); // Legacy wrapper retains its API/behavior.
+    assert!(done_gate_in_repo(&store, true, Some(&repo))
+        .unwrap_err()
+        .message
+        .contains("stale verification"));
+    fs::write(repo.join("file.txt"), "verified").unwrap();
+    fs::write(repo.join("other.txt"), "not covered by full test").unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo))
+        .unwrap_err()
+        .message
+        .contains("stale full"));
+    append_evidence(&store, "_full", &row("full", "test", 0, "", "9999")).unwrap();
+    assert_eq!(
+        done_gate_in_repo(&store, true, Some(&repo))
+            .unwrap_err()
+            .kind,
+        "not_done"
+    );
+    append_evidence(
+        &store,
+        "_full",
+        &row("full", "test", 0, &snapshot(&repo, &[".".into()]), "9999"),
+    )
+    .unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    assert_eq!(
+        done_gate_in_repo(&store, true, Some(&root))
+            .unwrap_err()
+            .kind,
+        "not_done"
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn records_and_gates() {
@@ -154,7 +263,7 @@ fn records_and_gates() {
     assert_eq!(done_gate(&p, false).unwrap_err().kind, "not_done");
     append_evidence(&p, "_full", &row("full", "test", 0, "", "9999")).unwrap();
     append_evidence(&p, "_stages", &row("rewrite", "x", 1, "", "9999")).unwrap();
-    assert!(done_gate(&p, false).is_ok());
+    assert_eq!(done_gate(&p, false).unwrap_err().kind, "not_done");
     fs::remove_dir_all(p).unwrap();
 }
 
@@ -259,8 +368,8 @@ fn independent_codex_roles_and_aliases() {
             derive_state(
                 &[
                     row("run", worker, 0, "", "1"),
-                    row("verify", "test", 0, "", "2"),
-                    row("review", reviewer, 0, "", "3")
+                    row("verify", "test", 0, "a", "2"),
+                    row("review", reviewer, 0, "a", "3")
                 ],
                 false
             ),
@@ -302,7 +411,7 @@ fn review_rejects_every_historical_writer_role_across_versions() {
     }
     assert_eq!(
         record_review(&p, &["u".into()], "gpt-6-astra", true, &p).unwrap()[0].1,
-        "verified"
+        "built"
     );
     fs::remove_dir_all(p).unwrap();
 }

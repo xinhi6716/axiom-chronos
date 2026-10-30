@@ -51,6 +51,10 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if rest[v].exit_code != 0 {
         return "failed".into();
     }
+    let identity = &rest[v].commit;
+    if identity.is_empty() {
+        return "built".into();
+    }
     let mut start = v + 1;
     if needs_accept {
         match rest[start..].iter().rposition(|r| r.kind == "accept") {
@@ -59,6 +63,9 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
                 start += a + 1;
                 if rest[start - 1].exit_code != 0 {
                     return "accept-failed".into();
+                }
+                if rest[start - 1].commit != *identity {
+                    return "built".into();
                 }
             }
         }
@@ -70,6 +77,9 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     let Some(last) = reviews.last() else {
         return "built".into();
     };
+    if last.commit != *identity {
+        return "built".into();
+    }
     let current: Vec<_> = reviews.iter().filter(|r| r.commit == last.commit).collect();
     if current.iter().any(|r| r.exit_code != 0) {
         return "review-failed".into();
@@ -209,6 +219,33 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
     parse_map(&text).map_err(invalid)
+}
+pub(crate) fn contract_identity(store: &Path, unit: &str) -> Res<String> {
+    let brief = unit_brief(store, unit)?;
+    let u = read_units(store)?
+        .into_iter()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    let module = if store.join("modules.md").exists() {
+        map(store)?
+            .modules
+            .into_iter()
+            .find(|m| m.id == u.track)
+            .map(|m| (m.contract, m.accept_command))
+    } else {
+        None
+    };
+    Ok(serde_json::to_string(&(brief.text, module)).unwrap())
+}
+pub(crate) fn current_contract(store: &Path, unit: &str, rows: &[Evidence]) -> Res<bool> {
+    let Some(run) = rows.iter().rposition(|r| r.kind == "run") else {
+        return Ok(false);
+    };
+    let expected = contract_identity(store, unit)?;
+    Ok(rows[run + 1..]
+        .iter()
+        .find(|r| r.kind == "contract")
+        .is_some_and(|r| r.command == expected))
 }
 pub fn needs_accept(store: &Path, unit: &str) -> Res<bool> {
     let u = read_units(store)?
@@ -389,11 +426,16 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
             Ok(())
         };
     }
-    let unfinished: Vec<_> = units
-        .iter()
-        .filter(|u| u.state != "verified")
-        .map(|u| format!("{}={}", u.id, u.state))
-        .collect();
+    let mut unfinished = Vec::new();
+    for u in &units {
+        let evidence = evidence(store, &u.id)?;
+        if u.state != "verified"
+            || derive_state(&evidence, needs_accept(store, &u.id)?) != "verified"
+            || !current_contract(store, &u.id, &evidence).unwrap_or(false)
+        {
+            unfinished.push(format!("{}={}", u.id, u.state));
+        }
+    }
     if !unfinished.is_empty() {
         return Err(Failure::new("not_done", unfinished.join(", ")));
     }
@@ -420,6 +462,45 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
         .any(|r| r.kind == "rewrite" && r.ts > latest)
     {
         return Err(Failure::new("not_done", "missing current rewrite stage"));
+    }
+    Ok(())
+}
+
+/// Additionally require unit verification and the full test to cover current sources.
+pub fn done_gate_in_repo(store: &Path, change_mode: bool, repo: Option<&Path>) -> Res<()> {
+    done_gate(store, change_mode)?;
+    if !store.join("units.tsv").exists() {
+        return Ok(());
+    }
+    let units = read_units(store)?;
+    if units.is_empty() {
+        return Ok(());
+    }
+    let repo = repo.ok_or_else(|| Failure::new("not_done", "missing goal cwd"))?;
+    for unit in units {
+        let identity = snapshot(repo, &unit_brief(store, &unit.id)?.scope);
+        if identity.is_empty()
+            || !evidence(store, &unit.id)?
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .is_some_and(|r| r.commit == identity)
+        {
+            return Err(Failure::new(
+                "not_done",
+                format!("stale verification: {}", unit.id),
+            ));
+        }
+    }
+    let identity = snapshot(repo, &[".".into()]);
+    if identity.is_empty()
+        || !full_evidence(store)?
+            .iter()
+            .rev()
+            .find(|r| r.kind == "full")
+            .is_some_and(|r| r.commit == identity)
+    {
+        return Err(Failure::new("not_done", "stale full test"));
     }
     Ok(())
 }

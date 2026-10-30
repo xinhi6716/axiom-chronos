@@ -469,8 +469,33 @@ fn sol_writer_fallback_uses_astra_max_and_returns_actual_model_while_critic_stay
         ),
     )
     .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "input.txt"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        if args[0] == "init" {
+            std::fs::write(h.temp.path().join("input.txt"), "fixture").unwrap();
+        }
+        assert!(std::process::Command::new("git")
+            .current_dir(h.temp.path())
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let identity = axiom::orch::snapshot(h.temp.path(), &["input.txt".into()]);
     // Sol is historical, not latest; it still contributed to the reviewed unit.
-    std::fs::write(store.join("reports/u.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6.1-sol\t0\told\t1\nrun\tgpt-6.1-terra\t0\tnew\t2\nverify\ttest\t0\tnew\t3\n").unwrap();
+    std::fs::write(store.join("reports/u.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6.1-sol\t0\told\t1\nrun\tgpt-6.1-terra\t0\tnew\t2\nverify\ttest\t0\t{identity}\t3\n")).unwrap();
     let (code, out) = h.execute(empty(), None);
     assert_eq!(code, 1, "{out}");
     let threads = h.requests("thread/start");
@@ -975,7 +1000,7 @@ fn host_allows_planning_before_mode_but_not_project_writes_or_dispatch() {
 }
 
 #[test]
-fn research_completion_is_plan_only_without_weakening_wish_gates() {
+fn readonly_workflows_ignore_old_units_without_weakening_change_gates() {
     for skill in ["research", "wish"] {
         let h = Harness::new("ok");
         let project = axiom::base::slug_for_dir(h.temp.path());
@@ -1016,18 +1041,29 @@ fn research_completion_is_plan_only_without_weakening_wish_gates() {
             &mut output,
         )
         .unwrap();
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&output));
+        assert_eq!(h.goal().status, "done");
+        assert_eq!(h.goal().mode.as_deref(), Some("answer"));
+        assert_eq!(h.requests("turn/start").len(), 1);
         if skill == "research" {
-            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&output));
-            assert_eq!(h.goal().status, "done");
-            assert_eq!(h.requests("turn/start").len(), 1);
             let turns = h.requests("turn/start");
             let workflow = turns[0]["input"][1]["text"].as_str().unwrap();
             assert!(workflow.contains("Declare goal mode answer"));
             assert!(workflow.contains("plan-only"));
-        } else {
-            assert_eq!(code, 1);
-            assert_ne!(h.goal().status, "done");
-            assert_eq!(h.goal().reason.as_deref(), Some("interrupted"));
         }
+        axiom::goal::open(
+            &h.config.home,
+            "change-control",
+            "implement",
+            h.temp.path().to_str(),
+        )
+        .unwrap();
+        axiom::goal::set_mode(&h.config.home, "change-control", "change").unwrap();
+        assert_eq!(
+            axiom::goal::set_status(&h.config.home, "change-control", "done", None)
+                .unwrap_err()
+                .kind,
+            "not_done"
+        );
     }
 }

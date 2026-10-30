@@ -43,6 +43,12 @@ fn check(r: &Value, status: &str) {
     }
 }
 fn fixture(home: &std::path::Path) {
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(home)
+        .status()
+        .unwrap()
+        .success());
     let store = home.join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("brief.md");
@@ -178,7 +184,9 @@ fn review_records_state() {
     fixture(temp.path());
     let b = Bridge::new(config(temp.path()));
     fs::create_dir_all(temp.path().join("orchestrate/demo/reports")).unwrap();
-    fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\tabc\t1\nverify\ttest\t0\tabc\t2\n").unwrap();
+    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
+    assert!(!identity.is_empty());
+    fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n")).unwrap();
     let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract"});
     let ok = invoke(&b, "review_code", args.clone());
     check(&ok, "completed");
@@ -542,7 +550,9 @@ fn review_blocker_and_units_without_project() {
     assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
     assert!(!store.join("reports/u3.evidence.tsv").exists());
     fs::create_dir_all(store.join("reports")).unwrap();
-    fs::write(store.join("reports/u3.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\tabc\t1\nverify\ttest\t0\tabc\t2\n").unwrap();
+    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
+    assert!(!identity.is_empty());
+    fs::write(store.join("reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n")).unwrap();
     let failed = invoke(
         &b,
         "review_code",
@@ -597,9 +607,11 @@ fn codex_review_models_and_schema() {
             json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":contract,"model":"gemini-old"}),
         )
     };
+    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
+    assert!(!identity.is_empty());
     fs::write(
         store.join("reports/u3.evidence.tsv"),
-        "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t\t2\n",
+        format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n"),
     )
     .unwrap();
     let r = review("contract");

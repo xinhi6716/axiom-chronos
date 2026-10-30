@@ -51,6 +51,52 @@ fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
     normalize(&p).starts_with(normalize(home))
 }
 
+fn shell_words(command: &str) -> Option<Vec<Vec<String>>> {
+    let mut segments = vec![Vec::new()];
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && quote != Some('\'') {
+            let next = chars.next()?;
+            if next == '\n' {
+                continue;
+            }
+            if quote == Some('"') && !"$`\"\\".contains(next) {
+                word.push('\\');
+            }
+            word.push(next);
+            started = true;
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_none() && (c == '\'' || c == '"') {
+            quote = Some(c);
+            started = true;
+        } else if c == '$' || c == '`' || (quote.is_none() && "*?[]{}()".contains(c)) {
+            return None;
+        } else if quote.is_none() && (c.is_whitespace() || "&|;".contains(c)) {
+            if started {
+                segments.last_mut()?.push(std::mem::take(&mut word));
+                started = false;
+            }
+            if "&|;\n\r".contains(c) {
+                segments.push(Vec::new());
+            }
+        } else {
+            word.push(c);
+            started = true;
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        segments.last_mut()?.push(word);
+    }
+    Some(segments)
+}
+
 pub fn read_only_bash(command: &str) -> bool {
     if command.contains("$(") || command.contains('`') {
         return false;
@@ -62,8 +108,11 @@ pub fn read_only_bash(command: &str) -> bool {
     if cleaned.contains('>') || cleaned.contains('<') {
         return false;
     }
-    for segment in cleaned.split(['&', '|', ';', '\n', '\r']) {
-        let mut words = segment.split_whitespace().peekable();
+    let Some(segments) = shell_words(&cleaned) else {
+        return false;
+    };
+    for segment in segments {
+        let mut words = segment.iter().map(String::as_str).peekable();
         while words.peek().is_some_and(|w| {
             w.split_once('=').is_some_and(|(k, _)| {
                 !k.is_empty()
@@ -75,7 +124,7 @@ pub fn read_only_bash(command: &str) -> bool {
             words.next();
         }
         let Some(cmd) = words.next() else {
-            if !segment.trim().is_empty() {
+            if !segment.is_empty() {
                 return false;
             }
             continue;
@@ -117,10 +166,57 @@ pub fn read_only_bash(command: &str) -> bool {
                 }) {
                     return false;
                 }
-                if matches!(subcommand, Some("diff" | "log" | "show"))
-                    && words.any(|w| w == "--output" || w.starts_with("--output="))
-                {
-                    return false;
+                if matches!(subcommand, Some("diff" | "log" | "show")) {
+                    let mut no_external = false;
+                    let mut no_textconv = false;
+                    for w in words {
+                        if w == "--" {
+                            break;
+                        }
+                        let option = w.split('=').next().unwrap_or(w);
+                        if option.starts_with("--")
+                            && option.len() > 2
+                            && ("--output".starts_with(option) || w.starts_with("--output="))
+                        {
+                            return false;
+                        }
+                        match w {
+                            "--no-ext-diff" => no_external = true,
+                            "--ext-diff" => no_external = false,
+                            "--no-textconv" => no_textconv = true,
+                            "--textconv" => no_textconv = false,
+                            _ if option.starts_with("--")
+                                && option.len() > 2
+                                && ("--ext-diff".starts_with(option)
+                                    || "--textconv".starts_with(option)) =>
+                            {
+                                return false
+                            }
+                            _ => (),
+                        }
+                    }
+                    if !no_external || !no_textconv {
+                        return false;
+                    }
+                } else if subcommand == Some("blame") {
+                    let mut no_textconv = false;
+                    for w in words {
+                        if w == "--" {
+                            break;
+                        }
+                        let option = w.split('=').next().unwrap_or(w);
+                        if option == "--no-textconv" {
+                            no_textconv = true;
+                        } else if option.starts_with("--")
+                            && option.len() > 2
+                            && "--textconv".starts_with(option)
+                        {
+                            return false;
+                        }
+                    }
+                    if !no_textconv {
+                        return false;
+                    }
                 }
             }
             _ => return false,

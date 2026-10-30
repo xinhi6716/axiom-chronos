@@ -1,6 +1,7 @@
 use super::*;
 use crate::base::{self, Failure, Res};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -23,7 +24,10 @@ struct Claim {
     // Units of different projects never block or excuse each other.
     store: PathBuf,
     scope: Vec<String>,
-    dirty: BTreeSet<String>,
+    // Scopes whose claims overlapped this run, including peers already released.
+    peers: Vec<String>,
+    dirty: HashMap<String, String>,
+    contract: String,
 }
 static RUNNING: OnceLock<Mutex<HashMap<String, Claim>>> = OnceLock::new();
 fn key(store: &Path, unit: &str) -> String {
@@ -57,6 +61,19 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     }
     Ok(result)
 }
+fn dirty_identities(repo: &Path) -> Res<HashMap<String, String>> {
+    dirty(repo)?
+        .into_iter()
+        .map(|path| {
+            let identity = match std::fs::read(repo.join(&path)) {
+                Ok(bytes) => format!("sha256:{:x}", Sha256::digest(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+                Err(e) => return Err(Failure::new("io", format!("{path}: {e}"))),
+            };
+            Ok((path, identity))
+        })
+        .collect()
+}
 fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
     if !store.join("modules.md").exists() {
         return Ok(vec![]);
@@ -71,6 +88,11 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
         .map(|m| m.depends.as_slice())
         .unwrap_or(&[]);
     let mut missing = Vec::new();
+    for dep in deps {
+        if !units.iter().any(|u| &u.track == dep) {
+            missing.push(dep.clone());
+        }
+    }
     for other in units.iter().filter(|x| deps.contains(&x.track)) {
         if derive_state(
             &evidence(store, &other.id)?,
@@ -109,6 +131,7 @@ pub fn begin_unit(
         return Err(Failure::new("busy", format!("scope busy: {unit}")));
     }
     if derive_state(&rows, needs_accept(store, unit)?) == "verified"
+        && super::evidence::current_contract(store, unit, &rows)?
         && rows
             .iter()
             .rev()
@@ -141,14 +164,18 @@ pub fn begin_unit(
     if astra_required {
         astra_gate(store)?;
     }
-    active.insert(
-        key(store, unit),
-        Claim {
-            store: store.to_path_buf(),
-            scope: brief.scope.clone(),
-            dirty: dirty(repo)?,
-        },
-    );
+    let mut claim = Claim {
+        store: store.to_path_buf(),
+        scope: brief.scope.clone(),
+        peers: Vec::new(),
+        dirty: dirty_identities(repo)?,
+        contract: super::evidence::contract_identity(store, unit)?,
+    };
+    for peer in active.values_mut().filter(|c| c.store == store) {
+        claim.peers.extend(peer.scope.clone());
+        peer.peers.extend(brief.scope.clone());
+    }
+    active.insert(key(store, unit), claim);
     Ok(Begin::Run {
         brief,
         attempt: count as u32 + 1,
@@ -267,19 +294,12 @@ pub fn finish_unit(
     }
     let _release = Release(store, unit);
     let brief = unit_brief(store, unit)?;
-    let (before, others) = {
+    let (before, contract) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
             .ok_or_else(|| Failure::new("not_found", "unit is not running"))?;
-        (
-            c.dirty.clone(),
-            active
-                .iter()
-                .filter(|(id, c)| c.store == store && **id != key(store, unit))
-                .flat_map(|(_, c)| c.scope.clone())
-                .collect::<Vec<_>>(),
-        )
+        (c.dirty.clone(), c.contract.clone())
     };
     let status = report
         .get("status")
@@ -302,6 +322,7 @@ pub fn finish_unit(
             String::new(),
         ),
     )?;
+    append_evidence(store, unit, &mk("contract", &contract, 0, String::new()))?;
     let dir = store.join("reports");
     std::fs::create_dir_all(&dir).map_err(|e| Failure::new("io", e.to_string()))?;
     let md = dir.join(format!("{unit}.md"));
@@ -319,7 +340,22 @@ pub fn finish_unit(
     base::atomic_write(&dir.join(format!("{unit}.json")), &json)
         .map_err(|e| Failure::new("io", e.to_string()))?;
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
-    let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
+    let after = dirty_identities(repo)?;
+    // Include peers that started while completion evidence/dirty contents were collected.
+    let others = claims()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key(store, unit))
+        .ok_or_else(|| Failure::new("not_found", "unit is not running"))?
+        .peers
+        .clone();
+    let mut outside_scope: BTreeSet<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|p| before.get(*p) != after.get(*p))
+        .filter(|p| !covers(&brief.scope, p) && !covers(&others, p))
+        .cloned()
+        .collect();
     if let Some(changes) = report.get("file_changes").and_then(Value::as_array) {
         for c in changes {
             if let Some(p) = c.get("path").and_then(Value::as_str) {
@@ -329,14 +365,14 @@ pub fn finish_unit(
                 } else {
                     p
                 };
-                paths.insert(p.to_string_lossy().replace('\\', "/"));
+                let p = p.to_string_lossy().replace('\\', "/");
+                if !covers(&brief.scope, &p) {
+                    outside_scope.insert(p);
+                }
             }
         }
     }
-    let outside_scope: Vec<_> = paths
-        .into_iter()
-        .filter(|p| !covers(&brief.scope, p) && !covers(&others, p))
-        .collect();
+    let outside_scope: Vec<_> = outside_scope.into_iter().collect();
     append_evidence(
         store,
         unit,

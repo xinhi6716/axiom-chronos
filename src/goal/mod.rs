@@ -39,6 +39,10 @@ pub struct Interjection {
     pub prompt: String,
     pub prior_status: String,
     pub prior_note: Option<String>,
+    #[serde(default)]
+    pub prior_mode: Option<String>,
+    #[serde(default)]
+    pub prior_mode_locked: bool,
 }
 
 fn path(home: &Path, session: &str) -> Res<PathBuf> {
@@ -154,14 +158,26 @@ pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> 
     if prompt.trim_start().starts_with('<') {
         return Ok(None);
     }
-    let (prior_status, prior_note) = match goal.interjection.take() {
-        Some(pending) => (pending.prior_status, pending.prior_note),
-        None => (goal.status.clone(), goal.note.clone()),
+    let (prior_status, prior_note, prior_mode, prior_mode_locked) = match goal.interjection.take() {
+        Some(pending) => (
+            pending.prior_status,
+            pending.prior_note,
+            pending.prior_mode,
+            pending.prior_mode_locked,
+        ),
+        None => (
+            goal.status.clone(),
+            goal.note.clone(),
+            goal.mode.clone(),
+            goal.mode_locked,
+        ),
     };
     goal.interjection = Some(Interjection {
         prompt: prompt.into(),
         prior_status,
         prior_note,
+        prior_mode,
+        prior_mode_locked,
     });
     goal.amendments.push(prompt.into());
     goal.status = "active".into();
@@ -181,6 +197,8 @@ pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
         "answer" => {
             goal.status = pending.prior_status;
             goal.note = pending.prior_note;
+            goal.mode = pending.prior_mode;
+            goal.mode_locked = pending.prior_mode_locked;
             if let Some(i) = goal.amendments.iter().rposition(|a| a == &pending.prompt) {
                 goal.amendments.remove(i);
             }
@@ -240,14 +258,12 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
         ));
     }
     let mut goal = required(home, session)?;
-    if status == "done"
-        && !(goal.other.get("workflow").and_then(Value::as_str) == Some("research")
-            && goal.mode.as_deref() == Some("answer"))
-    {
+    if status == "done" && !matches!(goal.mode.as_deref(), Some("answer" | "review")) {
         if let Some(project) = &goal.project {
-            crate::orch::done_gate(
+            crate::orch::done_gate_in_repo(
                 &crate::orch::store_for(home, project)?,
                 goal.mode.as_deref() == Some("change"),
+                goal.cwd.as_deref().map(Path::new),
             )?;
         }
     }

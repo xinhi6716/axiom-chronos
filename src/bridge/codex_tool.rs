@@ -125,6 +125,20 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut guard = UnitGuard(None);
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         let active = goal::find_active(b.home()?, project.unwrap())?;
+        if let Some((_, g)) = &active {
+            if g.interjection.is_some() {
+                return Err(Failure::new(
+                    "pending_interjection",
+                    "classify the pending interjection before starting a writing unit",
+                ));
+            }
+            if g.mode.as_deref() != Some("change") {
+                return Err(Failure::new(
+                    "goal_mode",
+                    "a writing unit requires change goal mode",
+                ));
+            }
+        }
         if active
             .as_ref()
             .is_some_and(|(_, g)| goal::creative_requested(g))
