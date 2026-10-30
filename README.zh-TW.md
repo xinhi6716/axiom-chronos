@@ -11,9 +11,9 @@
 
 <p align="center"><a href="#begin">開始</a> · <a href="#the-work">使用</a> · <a href="#status">狀態</a></p>
 
-用 Claude Code 與 Codex 協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
+用僅依賴 Codex 的 Rust 執行環境協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
 
-**公開測試版 · 0.2.0-beta.1。** 每次 commit 前請檢查 diff。
+**公開測試版（beta）· 0.2.0-codex.1。** 每次 commit 前請檢查 diff。
 
 | 01 · 準備 | 02 · 描述 | 03 · 檢查 |
 | --- | --- | --- |
@@ -25,12 +25,21 @@
 
 ## 開始
 
-需要 [Claude Code](https://claude.com/claude-code) 與 Codex CLI；請先登入 `claude` 和 `codex`。下載單一 `axiom` 執行檔，或使用 Rust 建置安裝：
+需要 Codex CLI，並登入可使用所需模型的帳號。在此 Codex-only checkout 的根目錄使用 Rust 從本機建置安裝單一 `axiom` 執行檔：
 
 ```sh
-cargo install --git https://github.com/xinhi6716/axiom-chronos --locked
+cargo install --path . --locked
 axiom doctor
 ```
+
+若要在 Codex 內使用原生 wish／research 技能，安裝 `axiom` 後，在此儲存庫根目錄執行：
+
+```sh
+codex plugin marketplace add . --json
+codex plugin add chronos@axiom-chronos-codex --json
+```
+
+這會註冊 Codex 包裝技能；原有的 `axiom` CLI 仍可獨立使用。
 
 在你能執行測試的專案目錄中：
 
@@ -45,7 +54,7 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 
 `axiom doctor` 檢查工具、SQLite 功能與狀態目錄，不會執行願望。SQLite 需支援 FTS5 與 JSON。
 
-Antigravity（`agy`）是選配。Gemini 預覽失敗時，核心可改顯示調度報告。
+`gemini_preview` 是 Codex 角色的相容名稱，不需要 Gemini 或 Antigravity。
 
 Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 Codex 無法用它執行 worker 指令。請依 [bridge 說明](docs/bridge.md)改用 MSI 版。
 
@@ -59,7 +68,7 @@ Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 C
 
 ## 使用方式
 
-描述一項具體修改。調度代理編寫 `GOAL · SCOPE · VERIFY` brief，交給 Codex worker，再檢查指令紀錄或執行 VERIFY。其指示要求遇到未定的介面或資料選擇時先提問。
+描述一項具體修改。調度代理編寫 `GOAL · SCOPE · VERIFY` brief，交給 Codex worker，再檢查指令紀錄或執行 VERIFY。核心僅對專案和願望無法解決的重大選擇先提問；後續選擇會留下紀錄。
 
 CLI 選項放在願望**前面**。後面的文字都是願望內容，包括參數名稱。
 
@@ -77,17 +86,19 @@ axiom wish --project ../other 把 calc 全部改名成 compute_total
 | 選項 | 預設 | 用途 |
 |---|---|---|
 | `--project PATH` | 目前目錄 | 指定專案。 |
-| `--max-turns N` | — | 限制核心 session 回合數。 |
+| `--max-turns N` | — | 限制各 host thread 的模型／工具步數；達上限即停止並提供續接指令。 |
 | `--resume <session-id>` | — | 繼續先前的願望 session。 |
 | `--creative` | — | 探索並選擇有證據支持的小幅改進。 |
+| `--no-architect` | 關閉 | 非創意願望跳過架構代理。 |
+| `--astra` | 關閉 | 先執行獨立 Astra 規劃與裁定流程。 |
 
-- **Claude Code 核心：**讀取專案歷史、交付願望，以回報事實核對最後說明。
-- **Sonnet 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
+- **Astra max 核心：**持續執行整個 session、委派工作並負責最終裁定；另一個獨立 Astra max 規劃 thread 起草研究與可選的願望計畫。
+- **Terra high 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
 - **Codex `terra` worker：**在用完即丟的 thread 工作。只有多個 unit 改檔且全專案測試失敗時，才派 `sol` 整合。
-- **選配 `agy` 的 Gemini：**將報告改寫成白話。
-- **Haiku 記憶代理：**保存已驗證 unit 中可重用的工作。
+- **Sol／Astra 工程審查：**以不同於撰寫者的角色審查；不同於原版跨模型家族審查，此版本均使用 OpenAI Codex。Sol 也審查計畫，Luna 改寫報告。
+- **Luna 記憶代理：**保存已驗證 unit 中可重用的工作；Luna 內容代理可處理授權的非工程文件、圖片與整理。
 
-Claude session 載入引擎與 local settings。Codex worker 預設使用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context。詳見 [bridge contracts](docs/bridge.md#contracts)。
+Rust host 載入嵌入指示、替換相容佔位符，並透過原有 hooks 與唯讀代理 sandbox 執行限制。Codex worker 預設使用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context。詳見 [bridge contracts](docs/bridge.md#contracts)。
 
 <p align="center"><picture>
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
@@ -134,7 +145,7 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 
 **仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的測試版功能。
 
-測試以腳本替身模擬 Claude、Codex 與 `agy`，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
+測試以腳本替身檢查協定與本機行為。早期小型專案報告及 lean mode 測量屬歷史紀錄，並非此 Codex-only 執行環境的新測量。
 
 [Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [測試](tests/)
 

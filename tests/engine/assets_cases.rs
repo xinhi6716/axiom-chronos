@@ -129,12 +129,17 @@ fn coverage_ok(schema: &Value) -> bool {
 }
 #[test]
 fn schemas_are_strict_and_coverage_has_negative_control() {
-    for name in ["plan", "audit"] {
+    for name in ["plan", "audit", "review"] {
         strict(&json_asset(&format!("research/{name}.schema.json")));
     }
     assert_eq!(
         json_asset("research/review.schema.json")["properties"]["verdict"]["enum"],
         json!(["pass", "revise", "reject"])
+    );
+    assert_eq!(
+        json_asset("research/review.schema.json")["properties"]["findings"]["items"]["properties"]
+            ["check"]["enum"],
+        json!(["out_of_scope", "overclaim", "unfalsifiable", "complexity"])
     );
     let mut audit = json_asset("research/audit.schema.json");
     assert!(coverage_ok(&audit));
@@ -147,13 +152,14 @@ fn schemas_are_strict_and_coverage_has_negative_control() {
 
 #[test]
 fn models_and_binary_configuration() {
-    for (agent, model) in [
-        ("architect", "opus"),
-        ("dispatcher", "sonnet"),
-        ("astra", "sonnet"),
-        ("critic", "sonnet"),
-        ("reviewer", "sonnet"),
-        ("memory-keeper", "haiku"),
+    for (agent, model, effort) in [
+        ("architect", "astra", "max"),
+        ("dispatcher", "terra", "high"),
+        ("astra", "astra", "max"),
+        ("critic", "sol", "high"),
+        ("reviewer", "sol", "high"),
+        ("memory-keeper", "luna", "low"),
+        ("content", "luna", "low"),
     ] {
         let text = asset(&format!("agents/{agent}.md"));
         let front = text.split("---").nth(1).unwrap();
@@ -163,9 +169,15 @@ fn models_and_binary_configuration() {
                 .any(|line| line.trim() == format!("model: {model}")),
             "{agent}"
         );
+        assert!(
+            front
+                .lines()
+                .any(|line| line.trim() == format!("effort: {effort}")),
+            "{agent}"
+        );
     }
     let plugin = json_asset(".claude-plugin/plugin.json");
-    assert_eq!(plugin["version"], "0.2.0-beta.1");
+    assert_eq!(plugin["version"], "0.2.0-codex.1");
     assert_eq!(
         plugin["mcpServers"]["bridge"],
         json!({"command":"${AXIOM_BIN:-axiom}","args":["bridge"]})
@@ -186,7 +198,7 @@ fn models_and_binary_configuration() {
     )
     .unwrap();
     assert_eq!(marketplace["plugins"][0]["source"], "./engine");
-    assert_eq!(marketplace["plugins"][0]["version"], "0.2.0-beta.1");
+    assert_eq!(marketplace["plugins"][0]["version"], "0.2.0-codex.1");
     for (path, text) in engine::FILES {
         for forbidden in ["AXIOM_PYTHON", "bun", "vendor", "orch.ts"] {
             assert!(!text.contains(forbidden), "{path}: {forbidden}");

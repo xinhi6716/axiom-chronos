@@ -4,7 +4,7 @@
 
 <p><a href="#tools">Tools</a> · <a href="#contracts">Contracts</a> · <a href="#configuration">Configuration</a> · <a href="#tests">Tests</a></p>
 
-`axiom bridge` runs an MCP stdio server that lets Claude Code drive Codex and Antigravity (agy) through typed tools instead of ad-hoc shell calls. The engine's plugin manifest registers it as `bridge`, so its tools appear as `mcp__plugin_chronos_bridge__<tool>`. Source: [engine/bridge](../engine/bridge).
+`axiom bridge` exposes typed tools backed by the Rust host and Codex. The external MCP compatibility tool names remain `mcp__plugin_chronos_bridge__<tool>`. The session host instead exposes legal dynamic aliases `chronos_<tool>` (Codex reserves the `mcp__` prefix), then maps them back to the unchanged bridge and hook names. Source: [src/bridge](../src/bridge).
 
 <a id="tools"></a>
 
@@ -13,14 +13,25 @@
 | Tool | Backend | Use |
 | --- | --- | --- |
 | `codex_run` | one long-lived `codex app-server` (JSON-RPC over stdio), one ephemeral thread per call | Send a brief to a `terra` worker or a `sol` integrator; the role resolves to a model the signed-in account lists |
-| `gemini_preview` | `agy` print mode, NDJSON in and out | Rewrite worker reports into plain language: what was done, how it turned out, what the user must decide. Runs in an empty directory unless given `cwd`; plan mode is avoided because it answers with a plan document and a question |
+| `gemini_preview` | Codex (compatibility alias) | Sol second review or Luna rewrite; stage evidence records the actual model |
 | `orch` | in process | Units, inbox, gates and status for one program; the store lives under `CLAUDE_PLUGIN_DATA` (or `AXIOM_DATA_HOME`) so it survives plugin updates |
 | `memory_record`, `memory_search`, `memory_get`, `memory_digest` | SQLite FTS5 (trigram) in the same data directory | Long-run memory: verified units distilled for later briefs, and a one-line-per-wish history per project. Original-wish text remains searchable even when summaries are English. CJK query runs become bigrams; matching uses stored terms, not translation. Each entry hashes its files and reports `stale` once they change |
-| `bridge_status` | `--version` probes | Resolved Codex and agy executables and whether the app-server is up |
+| `review_code` | Codex Sol or Astra | Review all supplied files against the contract using a different engineering role from the writer |
+| `run_on_linux` | local Linux / WSL | Run Python verification on Linux when available |
+| `goal` | Rust host | Declare mode and close a wish with recorded evidence |
+| `bridge_status` | status probes | Report runtime status |
 
-`axiom wish` runs the [wish skill](../engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../engine/agents/dispatcher.md) (`chronos:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../engine/agents/memory-keeper.md) (`chronos:memory-keeper`, Haiku) then records what later units can reuse.
+`axiom wish` runs the [wish skill](../engine/skills/wish/SKILL.md) in a persistent Astra max Codex core. The Terra high [dispatcher](../engine/agents/dispatcher.md) dispatches independent ready units directly in parallel, checks evidence and uses a Sol integrator only under the full-suite failure rule. Luna records reusable verified work. A fresh ephemeral, independent Astra max planner per Agent call handles research and optional wish planning with a strict schema; the host saves its output and records stage evidence, while the core makes the final ruling.
 
-Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`, `agy_error`). agy exits 0 on failed turns, so the bridge reads the result event rather than the exit code.
+`review_code` selects an engineering model distinct from the actual writer (Sol or Astra). This is distinct-role review within OpenAI Codex, not the original cross-family review. Reviewer fallback records the actual model, not an agent alias. The Rust host enforces the original hooks and read-only sandboxes for core and agents; it parses role model/effort metadata, strips frontmatter and substitutes compatibility placeholders.
+
+The persistent core alone is resumed. Its token usage in the summary is the cumulative thread total on resume, not just usage since resuming. Each planner call gets a fresh context, working directory and web-search policy; no planner cache or sidecar is reused. Research declares answer mode and ends after its plan/review/ruling, without inheriting engineering-unit/full-test completion gates from previous wishes in the same project.
+
+Luna content can read UTF-8 documents and inspect images using native `view_image`, then write UTF-8 reports/documents. The root may call content with exact `output_paths`, or authorize paths on its dispatcher Agent call; the dispatcher may pass only a subset to content. This does not grant dispatcher project-write authority. No binary image-generation/editing subsystem is provided.
+
+`--max-turns N` is a conservative per-host-thread model/tool-step budget: each `turn/start` and each dynamic tool callback consumes one step; native tool `item/started` events also consume steps (dynamic lifecycle events are not counted twice). Parallel tool calls count individually. Exhaustion interrupts the active turns, cancels outstanding work and retains the persistent root for resume. This is not an exact count of provider-internal inference turns, which app-server does not expose. Worker calls retain their existing separate timeout contract.
+
+Results report status and errors; model availability depends on the signed-in account.
 
 <a id="contracts"></a>
 
@@ -30,14 +41,14 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 - A workspace-writing `codex_run` without a bound project and unit is refused with `unbound_write` before Codex starts.
 - `cwd` must be an existing absolute directory; give each writer its own worktree.
 - `sandbox` is `read-only` or `workspace-write`. The bridge never exposes `danger-full-access`, and `approvalPolicy` is fixed to `never`; stray approval requests are refused and listed in `refused_requests`.
-- Codex threads are ephemeral, so workers keep no memory between calls.
-- `lean` (default on) changes that thread only: it asks the app-server which plugins and configured MCP servers are enabled and turns them all off, along with the apps connector, goals, the skills catalog, the personality section and the web search tool (`web_search: true` keeps it). `keep_plugins` exempts named plugins. Remote plugins (marketplaces such as `openai-curated-remote`) ignore that config switch, so lean mode also sends their ids as the turn's `disabledPluginIds`; on an account with one remote MCP server this cut a one-word call from 10,410 to 9,630 input tokens. The report lists what was disabled, which MCP servers actually started, and the thread's token `usage`.
+- Worker/planner threads are ephemeral, so they keep no memory between calls; the root remains persistent. Native delegation (`multi_agent` and `multi_agent_v2`) is disabled on every host and worker thread, including non-lean workers. Host native shell execution is disabled (`shell_tool`, `unified_exec`); native `view_image` remains enabled.
+- `lean` (default on) changes that thread only: it asks the app-server which plugins and configured MCP servers are enabled and turns them all off, along with the apps connector, goals, the skills catalog, the personality section and the web search tool (`web_search: true` keeps it). `keep_plugins` exempts named plugins. Remote plugins (marketplaces such as `openai-curated-remote`) ignore that config switch, so lean mode also sends their ids as every turn's `disabledPluginIds`, including continuation and resume; a historical run on an account with one remote MCP server went from 10,410 to 9,630 input tokens for a one-word call; this is not a measurement of the new runtime. The report lists what was disabled, which MCP servers actually started, and the thread's token `usage`.
 - Upstream API rejections that Codex labels `other` are reported by their provider code, such as `model_not_found`. Available models depend on the signed-in account; `model/list` is the source of truth.
 
 Codex's base instructions (~3.5k tokens) stay in place because they teach the shell and patch tools.
 
 <details>
-<summary><strong>Recorded lean-mode measurements</strong></summary>
+<summary><strong>Historical lean-mode measurements (not new runtime measurements)</strong></summary>
 
 Measured with `gpt-5.6-terra` at low effort:
 
@@ -52,7 +63,7 @@ Measured with `gpt-5.6-terra` at low effort:
 
 ## III · Configuration
 
-The bridge resolves `codex` and `agy` from `PATH`. Override either with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. Memory needs SQLite with FTS5 trigram support, which `axiom doctor` checks.
+The bridge resolves `codex` from `PATH`. Override it with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. Memory needs SQLite with FTS5 trigram support, which `axiom doctor` checks.
 
 ### Windows · PowerShell
 
@@ -64,10 +75,12 @@ The fix is PowerShell 7 from its MSI. winget installs the MSIX build by default 
 winget install --id Microsoft.PowerShell --exact --installer-type wix
 ```
 
-Restart Claude Code afterwards so the bridge's Codex app-server sees the new PATH.
+Restart the axiom session afterwards so its Codex app-server sees the new PATH.
 
 <a id="tests"></a>
 
 ## IV · Tests
 
-`cargo test` runs the backends and the MCP session against scripted stand-ins in `tests/fakes/`.
+Rewriters and reviewers process only supplied text in an isolated empty directory, with role-specific instructions forbidding tools, filesystem search and edits; structured schemas and actual token usage are preserved.
+
+`cargo test --locked --offline` runs the backends and the MCP session against scripted stand-ins in `tests/fakes/`.

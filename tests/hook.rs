@@ -210,7 +210,7 @@ fn mode_restrictions() {
 #[test]
 fn nested_agents_only_reviewer() {
     let d = tempfile::tempdir().unwrap();
-    let reason = "Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.";
+    let reason = "Only designated reviewer/content children may be started; never forward engineering through another agent.";
     for name in ["Agent", "Task"] {
         for input in [
             json!({}),
@@ -397,4 +397,39 @@ fn stdin_invalid_and_unknown_exit_zero() {
             assert!(stdout.is_empty());
         }
     }
+}
+
+#[test]
+fn host_roles_allow_pre_mode_home_and_require_mode_and_exact_content_authority() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    open(&home);
+    let mut write = sub(tool("Write", json!({"file_path":home.join("artifact")})));
+    for role in ["core", "architect"] {
+        write["agent_role"] = json!(role);
+        assert!(call(&home, &write).is_none());
+        write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
+        denial(call(&home, &write));
+        write["tool_input"]["file_path"] = json!(home.join("artifact"));
+    }
+    write["agent_role"] = json!("content");
+    write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
+    write["authorized_output_path"] = write["tool_input"]["file_path"].clone();
+    denial(call(&home, &write));
+    goal::set_mode(&home, "s", "change").unwrap();
+    write["agent_role"] = json!("dispatcher");
+    write["tool_input"]["file_path"] = json!(home.join("artifact"));
+    assert!(call(&home, &write).is_none());
+    write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
+    denial(call(&home, &write));
+    write["agent_role"] = json!("content");
+    write["authorized_output_path"] = write["tool_input"]["file_path"].clone();
+    assert!(call(&home, &write).is_none());
+    write["tool_input"]["file_path"] = json!(d.path().join("other.rs"));
+    denial(call(&home, &write));
+    let mut content = sub(tool("Agent", json!({"subagent_type":"chronos:content"})));
+    content["agent_role"] = json!("dispatcher");
+    assert!(call(&home, &content).is_none());
+    content["agent_role"] = json!("memory-keeper");
+    denial(call(&home, &content));
 }

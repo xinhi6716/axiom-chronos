@@ -18,17 +18,7 @@ pub struct RunRequest {
 }
 
 impl AppServer {
-    pub fn run(&self, req: &RunRequest) -> Res<Value> {
-        base::require_directory(&req.cwd)?;
-        if !SANDBOXES.contains(&req.sandbox.as_str())
-            || req.brief.trim().is_empty()
-            || req.model.trim().is_empty()
-        {
-            return Err(Failure::new(
-                "invalid_argument",
-                "invalid sandbox, empty brief, or empty model",
-            ));
-        }
+    pub(crate) fn thread_start_params(&self, req: &RunRequest) -> Res<(Value, Value)> {
         let mut thread = json!({"model":req.model,"ephemeral":true,"sandbox":req.sandbox,"approvalPolicy":"never","cwd":req.cwd});
         if let Some(s) = req
             .developer_instructions
@@ -76,6 +66,24 @@ impl AppServer {
         } else {
             Value::Null
         };
+        // Bridge dispatch is the only delegation path, including non-lean workers.
+        thread["config"]["features"]["multi_agent"] = json!(false);
+        thread["config"]["features"]["multi_agent_v2"] = json!(false);
+        thread["config"]["features"]["view_image"] = json!(true);
+        Ok((thread, disabled))
+    }
+    pub fn run(&self, req: &RunRequest) -> Res<Value> {
+        base::require_directory(&req.cwd)?;
+        if !SANDBOXES.contains(&req.sandbox.as_str())
+            || req.brief.trim().is_empty()
+            || req.model.trim().is_empty()
+        {
+            return Err(Failure::new(
+                "invalid_argument",
+                "invalid sandbox, empty brief, or empty model",
+            ));
+        }
+        let (thread, disabled) = self.thread_start_params(req)?;
         let started = self.request("thread/start", thread)?;
         let thread_id = started
             .pointer("/thread/id")

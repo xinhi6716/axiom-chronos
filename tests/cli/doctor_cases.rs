@@ -2,7 +2,7 @@ use crate::common;
 use std::process::Command;
 
 fn doctor(home: &std::path::Path) -> Command {
-    let fake = serde_json::to_string(&common::fake("fake_claude")).unwrap();
+    let fake = serde_json::to_string(&common::fake("fake_codex_session")).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_axiom"));
     command
         .arg("doctor")
@@ -30,8 +30,8 @@ fn all_present_and_missing_codex() {
     );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("trigram"));
-    assert!(text.contains("claude"));
-    assert!(text.lines().any(|line| line.starts_with("ok   claude")));
+    assert!(!text.contains("claude"));
+    assert!(text.lines().any(|line| line.starts_with("ok   codex")));
     let output = doctor(temp.path())
         .env("AXIOM_CODEX_CMD", "")
         .env("PATH", "")
@@ -55,13 +55,13 @@ fn optional_and_required_failures() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("warn agy"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("agy"));
     let output = doctor(temp.path())
         .env("AXIOM_CLAUDE_CMD", &missing)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ERR  claude"));
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("claude"));
     let file = temp.path().join("file");
     std::fs::write(&file, "x").unwrap();
     let output = doctor(&file).output().unwrap();

@@ -27,53 +27,31 @@ pub const TOOLS: [&str; 16] = [
 ];
 
 pub struct Config {
-    pub claude: Res<Vec<String>>,
+    pub codex: Res<Vec<String>>,
     pub home: PathBuf,
     pub bin: PathBuf,
 }
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            claude: base::resolve_command("AXIOM_CLAUDE_CMD", "claude"),
+            codex: base::resolve_command("AXIOM_CODEX_CMD", "codex"),
             home: base::axiom_home(),
             bin: std::env::current_exe().unwrap_or_default(),
         }
     }
 }
-pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Res<Vec<String>> {
-    let mut cmd = config.claude.clone().map_err(|e| {
+pub fn command(config: &Config, _plugin_dir: &Path, _max_turns: Option<u32>) -> Res<Vec<String>> {
+    let mut cmd = config.codex.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
                 "not_installed",
-                "claude is not on PATH; install Claude Code and sign in with `claude`",
+                "codex is not on PATH; install the Codex CLI and sign in",
             )
         } else {
             e
         }
     })?;
-    cmd.extend([
-        "-p".into(),
-        "--input-format".into(),
-        "stream-json".into(),
-        "--output-format".into(),
-        "stream-json".into(),
-        "--verbose".into(),
-        "--plugin-dir".into(),
-        plugin_dir.to_string_lossy().into_owned(),
-        "--setting-sources".into(),
-        "local".into(),
-        "--add-dir".into(),
-        config.home.to_string_lossy().into_owned(),
-        "--allowedTools".into(),
-        TOOLS.join(","),
-        "--disallowedTools".into(),
-        "PowerShell,ScheduleWakeup,CronCreate".into(),
-        "--model".into(),
-        "opus".into(),
-    ]);
-    if let Some(n) = max_turns {
-        cmd.extend(["--max-turns".into(), n.to_string()]);
-    }
+    cmd.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
     Ok(cmd)
 }
 pub fn user_message(text: &str) -> String {
@@ -109,18 +87,123 @@ pub struct Renderer {
     agents: BTreeMap<String, String>,
     calls: BTreeMap<String, (String, usize)>,
     usage: BTreeMap<String, (u64, u64, u64)>,
+    thread_models: BTreeMap<String, String>,
+    resumed: bool,
 }
 impl Renderer {
-    pub(super) fn is_error(&self) -> bool {
-        self.result
-            .as_ref()
-            .and_then(|v| v["is_error"].as_bool())
-            .unwrap_or(false)
-    }
     pub fn new() -> Self {
         Self::default()
     }
     pub fn event(&mut self, event: &Value, out: &mut dyn Write) {
+        match event["hostEvent"].as_str() {
+            Some("threadStarted") => {
+                self.resumed |= event["resumed"] == true;
+                self.thread_models
+                    .insert(s(&event["threadId"]).into(), s(&event["model"]).into());
+                return;
+            }
+            Some("toolStarted") => {
+                let depth = usize::from(event["role"] != "core");
+                let name = s(&event["tool"]);
+                let args = &event["arguments"];
+                if name == "Agent" {
+                    line(
+                        out,
+                        depth,
+                        &format!(
+                            "> {}: {}",
+                            s(&args["subagent_type"]),
+                            short(s(&args["prompt"]))
+                        ),
+                    );
+                } else {
+                    line(
+                        out,
+                        depth,
+                        &format!("- {}", name.strip_prefix(BRIDGE).unwrap_or(name)),
+                    );
+                }
+                return;
+            }
+            Some("toolFinished") => {
+                if event["tool"] == "Agent" {
+                    line(
+                        out,
+                        usize::from(event["role"] != "core"),
+                        "< agent finished",
+                    );
+                } else {
+                    let name = s(&event["tool"]);
+                    let name = name
+                        .strip_prefix("chronos_")
+                        .or_else(|| name.strip_prefix(BRIDGE))
+                        .unwrap_or(name);
+                    if matches!(name, "codex_run" | "gemini_preview" | "review_code") {
+                        if let Some(items) = event["result"]["contentItems"].as_array() {
+                            for item in items.iter().filter(|i| i["type"] == "inputText") {
+                                if let Ok(report) = serde_json::from_str::<Value>(s(&item["text"]))
+                                {
+                                    let key = format!(
+                                        "bridge:{}:{}",
+                                        s(&event["threadId"]),
+                                        event
+                                            .get("toolCallId")
+                                            .or_else(|| event.get("callId"))
+                                            .unwrap_or(event)
+                                    );
+                                    self.bridge_usage(&report, key);
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            _ => (),
+        }
+        if let Some(method) = event["method"].as_str() {
+            let p = &event["params"];
+            match method {
+                "item/tool/call" => {
+                    let name = s(&p["tool"]);
+                    let args = &p["arguments"];
+                    if name == "Agent" {
+                        line(
+                            out,
+                            0,
+                            &format!(
+                                "> {}: {}",
+                                s(&args["subagent_type"]),
+                                short(s(&args["prompt"]))
+                            ),
+                        );
+                    } else {
+                        line(
+                            out,
+                            0,
+                            &format!("- {}", name.strip_prefix(BRIDGE).unwrap_or(name)),
+                        );
+                    }
+                }
+                "item/completed" if p["item"]["type"] == "agentMessage" => {
+                    line(out, 0, s(&p["item"]["text"]))
+                }
+                "thread/tokenUsage/updated" => {
+                    let u = &p["tokenUsage"]["total"];
+                    let key = p["threadId"].as_str().unwrap_or("core").to_owned();
+                    self.usage.insert(
+                        key,
+                        (
+                            u["inputTokens"].as_u64().unwrap_or(0),
+                            u["cachedInputTokens"].as_u64().unwrap_or(0),
+                            u["outputTokens"].as_u64().unwrap_or(0),
+                        ),
+                    );
+                }
+                _ => (),
+            }
+            return;
+        }
         match s(&event["type"]) {
             "system" if s(&event["subtype"]) == "init" => {
                 let bridge = event["mcp_servers"]
@@ -204,7 +287,7 @@ impl Renderer {
                         if let Some(agent) = self.agents.remove(id) {
                             line(out, 0, &format!("< {agent} finished"));
                         }
-                        if let Some((role, depth)) = self.calls.get(id).cloned() {
+                        if let Some((role, depth)) = self.calls.remove(id) {
                             self.codex_result(b, &role, depth, out);
                         }
                     }
@@ -216,6 +299,39 @@ impl Renderer {
             }
             _ => {}
         }
+    }
+    fn bridge_usage(&mut self, report: &Value, key: String) {
+        if report["reused"] == true {
+            return;
+        }
+        let Some(u) = report["usage"].as_object() else {
+            return;
+        };
+        let Some(model) = report["model"]
+            .as_str()
+            .filter(|m| !m.is_empty())
+            .or_else(|| report["reviewer"].as_str().filter(|m| !m.is_empty()))
+        else {
+            return;
+        };
+        // A report's usage is the actual thread total. Replace, don't add, if the
+        // same result/total arrives twice or native events already cover its thread.
+        let key = report["thread_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&key)
+            .to_owned();
+        self.thread_models.insert(key.clone(), model.into());
+        self.usage.insert(
+            key,
+            (
+                u.get("inputTokens").and_then(Value::as_u64).unwrap_or(0),
+                u.get("cachedInputTokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                u.get("outputTokens").and_then(Value::as_u64).unwrap_or(0),
+            ),
+        );
     }
     fn codex_result(&mut self, block: &Value, role: &str, depth: usize, out: &mut dyn Write) {
         let content = &block["content"];
@@ -269,31 +385,16 @@ impl Renderer {
         }
     }
     pub fn summary(&self, out: &mut dyn Write) {
-        if let Some(result) = &self.result {
-            let duration = result["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
-            let cost = result["total_cost_usd"].as_f64().unwrap_or(0.0);
-            let models = result["modelUsage"]
-                .as_object()
-                .map(|m| {
-                    m.iter()
-                        .map(|(k, v)| format!("{k} ${:.2}", v["costUSD"].as_f64().unwrap_or(0.0)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let _ = writeln!(
-                out,
-                "\n{duration:.0}s · ${cost:.2}{}",
-                if models.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({models})")
-                }
-            );
-        }
         if !self.usage.is_empty() {
-            let totals = self
-                .usage
+            let mut models = BTreeMap::<String, (u64, u64, u64)>::new();
+            for (thread, (i, c, o)) in &self.usage {
+                let model = self.thread_models.get(thread).unwrap_or(thread);
+                let total = models.entry(model.clone()).or_default();
+                total.0 += i;
+                total.1 += c;
+                total.2 += o;
+            }
+            let totals = models
                 .iter()
                 .map(|(m, (i, c, o))| {
                     format!(
@@ -306,6 +407,12 @@ impl Renderer {
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "codex tokens: {totals}");
+            if self.resumed {
+                let _ = writeln!(
+                    out,
+                    "usage includes cumulative totals for resumed threads, not new-run cost"
+                );
+            }
         }
     }
 }

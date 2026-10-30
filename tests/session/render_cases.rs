@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[test]
 fn command_and_message() {
     let config = Config {
-        claude: Ok(vec!["claude".into()]),
+        codex: Ok(vec!["codex".into()]),
         home: PathBuf::from("home"),
         bin: PathBuf::new(),
     };
@@ -29,44 +29,15 @@ fn command_and_message() {
         "mcp__plugin_chronos_bridge__goal",
     ];
     assert_eq!(TOOLS, tools);
-    let expected: Vec<String> = [
-        "claude",
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--plugin-dir",
-        "plugin",
-        "--setting-sources",
-        "local",
-        "--add-dir",
-        "home",
-        "--allowedTools",
-        &tools.join(","),
-        "--disallowedTools",
-        "PowerShell,ScheduleWakeup,CronCreate",
-        "--model",
-        "opus",
-        "--max-turns",
-        "3",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    assert_eq!(args, expected);
-    assert_eq!(
-        command(&config, Path::new("plugin"), None).unwrap(),
-        expected[..expected.len() - 2]
-    );
+    assert_eq!(args, vec!["codex", "app-server", "--listen", "stdio://"]);
+    assert_eq!(command(&config, Path::new("plugin"), None).unwrap(), args);
     let msg: Value = serde_json::from_str(&user_message("中文\r\n")).unwrap();
     assert_eq!(msg["message"]["content"][0]["text"], "中文\r\n");
 }
 #[test]
 fn not_installed_message() {
     let config = Config {
-        claude: Err(axiom::base::Failure::new("not_installed", "missing")),
+        codex: Err(axiom::base::Failure::new("not_installed", "missing")),
         home: PathBuf::new(),
         bin: PathBuf::new(),
     };
@@ -74,7 +45,7 @@ fn not_installed_message() {
         command(&config, Path::new("plugin"), None)
             .unwrap_err()
             .message,
-        "claude is not on PATH; install Claude Code and sign in with `claude`"
+        "codex is not on PATH; install the Codex CLI and sign in"
     );
 }
 
@@ -197,7 +168,7 @@ fn progress_and_last_summary() {
         text.contains("- codex astra: inspect\n  astra read: one\n  astra did not read: (none)")
     );
     assert!(text.contains("codex tokens: astra 1,050 in (200 cached) / 32 out"));
-    assert!(text.contains("2s · $0.50"));
+    assert!(!text.contains("$"));
     assert!(!text.contains("$0.30"));
 }
 #[test]
@@ -215,5 +186,75 @@ fn structured_coverage_array_result_and_summed_tokens() {
     );
     r.event(&json!({"type":"result","result":"second","duration_ms":2000,"total_cost_usd":0.5,"modelUsage":{"opus":{"costUSD":0.4}}}), &mut out);
     r.summary(&mut out);
-    assert_eq!(String::from_utf8(out).unwrap(), "  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n\nfirst\n\nsecond\n\n2s · $0.50 (opus $0.40)\ncodex tokens: model-x 2,000 in (400 cached) / 60 out\n");
+    assert_eq!(String::from_utf8(out).unwrap(), "  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n\nfirst\n\nsecond\ncodex tokens: model-x 2,000 in (400 cached) / 60 out\n");
+}
+
+#[test]
+fn native_agents_and_billed_bridge_reports_aggregate_once_with_actual_units() {
+    let mut r = Renderer::new();
+    let mut out = Vec::new();
+    for (thread, model, resumed) in [
+        ("root", "gpt-6-astra", true),
+        ("agent", "gpt-6-terra", false),
+    ] {
+        r.event(
+            &json!({"hostEvent":"threadStarted","threadId":thread,"model":model,"resumed":resumed}),
+            &mut out,
+        );
+        for _ in 0..2 {
+            r.event(&json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"tokenUsage":{"total":{"inputTokens":1000,"cachedInputTokens":700,"outputTokens":100}}}}), &mut out);
+        }
+    }
+    let finish = |tool: &str, id: &str, report: Value| json!({"hostEvent":"toolFinished","threadId":"root","toolCallId":id,"tool":tool,"result":{"success":false,"contentItems":[{"type":"inputText","text":report.to_string()}]}});
+    let usage = json!({"inputTokens":120,"cachedInputTokens":80,"outputTokens":7});
+    // Native Agent reports repeat the native event totals: never add them again.
+    r.event(
+        &finish(
+            "Agent",
+            "agent-call",
+            json!({"model":"gpt-6-terra","thread_id":"agent","usage":usage}),
+        ),
+        &mut out,
+    );
+    for (tool, model, thread, id) in [
+        ("chronos_codex_run", "gpt-6-terra", "worker", "one"),
+        ("chronos_gemini_preview", "gpt-6-luna", "rewrite", "two"),
+        ("chronos_review_code", "gpt-6.1-sol", "review", "three"),
+    ] {
+        let report = if tool.ends_with("review_code") {
+            json!({"status":"failed","reviewer":model,"thread_id":thread,"usage":usage})
+        } else {
+            json!({"status":"failed","model":model,"thread_id":thread,"usage":usage})
+        };
+        let event = finish(tool, id, report);
+        r.event(&event, &mut out);
+        r.event(&event, &mut out);
+    }
+    // Also support reports without thread ids, replacing repeated call results.
+    let extra = finish(
+        "chronos_codex_run",
+        "four",
+        json!({"model":"gpt-6-terra","usage":usage}),
+    );
+    r.event(&extra, &mut out);
+    r.event(&extra, &mut out);
+    r.event(
+        &finish(
+            "chronos_codex_run",
+            "reuse",
+            json!({"reused":true,"state":"verified","model":"gpt-6-terra","usage":usage}),
+        ),
+        &mut out,
+    );
+    r.event(
+        &finish(
+            "chronos_gemini_preview",
+            "no-call",
+            json!({"status":"bridge_error","error":{"kind":"invalid_argument"}}),
+        ),
+        &mut out,
+    );
+    out.clear();
+    r.summary(&mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "codex tokens: gpt-6-astra 1,000 in (700 cached) / 100 out, gpt-6-luna 120 in (80 cached) / 7 out, gpt-6-terra 1,240 in (860 cached) / 114 out, gpt-6.1-sol 120 in (80 cached) / 7 out\nusage includes cumulative totals for resumed threads, not new-run cost\n");
 }

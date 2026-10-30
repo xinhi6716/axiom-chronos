@@ -457,6 +457,156 @@ fn sol_requires_failing_fulltest() {
     let r = invoke(&b, args);
     assert_eq!(r["state"], "built", "{r}");
 }
+
+fn wait_pids(path: &Path) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(ids) = fs::read_to_string(path)
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .filter(|ids| ids.len() == 2)
+        {
+            return ids;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "verifier never started: {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn cancellation_reaps_running_verify_accept_and_fulltest_without_cancelling_other_bridge() {
+    for mode in ["verify", "accept", "fulltest"] {
+        let temp = common::temp();
+        let home = temp.path();
+        let script = home.join("verifier.py");
+        fs::write(&script, "import os,sys,time,subprocess\nfrom pathlib import Path\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\nPath(sys.argv[1]).write_text(f'{os.getpid()} {p.pid}')\nwhile not Path(sys.argv[2]).exists(): time.sleep(.01)\np.terminate()\np.wait()\n").unwrap();
+        let pids = home.join("pids");
+        let release = home.join("release");
+        let cmd = format!(
+            "\"{}\" \"{}\" \"{}\" \"{}\"",
+            common::python(),
+            script.display(),
+            pids.display(),
+            release.display()
+        );
+        let (repo, store) = fixture(
+            home,
+            &[(
+                "cancelunit",
+                &format!("GOAL build\nSCOPE src/mod.py\nVERIFY {cmd}\n"),
+            )],
+        );
+        fs::write(store.join("modules.md"), format!("## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `{cmd}`\nFULL TEST `{cmd}`\n")).unwrap();
+        let b = Arc::new(bridge(home));
+        let other_home = home.join("other");
+        fs::create_dir(&other_home).unwrap();
+        fs::create_dir_all(orch::store_for(&other_home, "demo").unwrap()).unwrap();
+        let other = Arc::new(bridge(&other_home));
+        let other_pids = home.join("other-pids");
+        let other_release = home.join("other-release");
+        let other_cmd = format!(
+            "\"{}\" \"{}\" \"{}\" \"{}\"",
+            common::python(),
+            script.display(),
+            other_pids.display(),
+            other_release.display()
+        );
+        let other_job = {
+            let b = other.clone();
+            let repo = repo.clone();
+            std::thread::spawn(move || {
+                call(
+                    &b,
+                    "orch",
+                    &json!({"project":"demo","args":["fulltest","--repo",repo,"--command",other_cmd]}),
+                )
+            })
+        };
+        let other_ids = wait_pids(&other_pids);
+        let job = {
+            let b = b.clone();
+            let repo = repo.clone();
+            std::thread::spawn(move || {
+                if mode == "verify" {
+                    invoke(
+                        &b,
+                        json!({"project":"demo","unit":"cancelunit","cwd":repo,"role":"terra"}),
+                    )
+                } else {
+                    let args = if mode == "accept" {
+                        json!(["accept", "m", "--repo", repo])
+                    } else {
+                        json!(["fulltest", "--repo", repo])
+                    };
+                    call(&b, "orch", &json!({"project":"demo","args":args}))["structuredContent"]
+                        .clone()
+                }
+            })
+        };
+        let ids = wait_pids(&pids);
+        // VERIFY only starts after the worker's completed model report was persisted.
+        if mode == "verify" {
+            let report: Value =
+                serde_json::from_slice(&fs::read(store.join("reports/cancelunit.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["status"], "completed");
+        }
+        b.cancel();
+        let result = job.join().unwrap();
+        assert_eq!(result["status"], "failed", "{mode}: {result}");
+        for pid in ids {
+            assert!(
+                !axiom::base::proc::pid_alive(pid),
+                "{mode}: verifier process {pid} survived cancellation"
+            );
+        }
+        for pid in other_ids {
+            assert!(
+                axiom::base::proc::pid_alive(pid),
+                "other Bridge's verifier was cancelled"
+            );
+        }
+        fs::write(&other_release, "release").unwrap();
+        let other_result = other_job.join().unwrap();
+        assert_eq!(
+            other_result["structuredContent"]["status"], "completed",
+            "{other_result}"
+        );
+        let rows = if mode == "fulltest" {
+            fs::read_to_string(store.join("reports/_full.evidence.tsv")).unwrap()
+        } else {
+            fs::read_to_string(store.join("reports/cancelunit.evidence.tsv")).unwrap()
+        };
+        assert!(
+            rows.lines().any(|line| line.starts_with(&format!(
+                "{}\t",
+                if mode == "fulltest" { "full" } else { mode }
+            )) && line.split('\t').nth(2) != Some("0")),
+            "{rows}"
+        );
+        assert!(orch::read_units(&store)
+            .unwrap()
+            .iter()
+            .all(|u| u.state != "verified"));
+        // A late verification cannot cross the cancellation boundary and launch.
+        let late = call(
+            &b,
+            "orch",
+            &json!({"project":"demo","args":["fulltest","--repo",repo,"--command","echo late > late-marker"]}),
+        );
+        assert_eq!(late["structuredContent"]["status"], "failed");
+        assert!(!repo.join("late-marker").exists());
+    }
+}
 #[test]
 fn astra_save_records_only_astra() {
     let temp = common::temp();

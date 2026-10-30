@@ -57,7 +57,10 @@ fn completed_and_lean_configuration() {
     assert_eq!(p["approvalPolicy"], "never");
     assert_eq!(p["cwd"], dir.path().to_string_lossy().as_ref());
     assert_eq!(p["developerInstructions"], "instructions");
-    assert_eq!(p["config"]["features"], json!({"apps":false,"goals":false}));
+    assert_eq!(
+        p["config"]["features"],
+        json!({"apps":false,"goals":false,"multi_agent":false,"multi_agent_v2":false,"view_image":true})
+    );
     assert_eq!(p["config"]["personality"], "none");
     assert_eq!(echo["config"]["skills"]["max_context_tokens"], 1);
     assert_eq!(echo["config"]["web_search"], "disabled");
@@ -76,6 +79,11 @@ fn completed_and_lean_configuration() {
     req.lean = false;
     let inherited = server.run(&req).unwrap();
     assert!(inherited["disabled"].is_null());
+    let echo: Value = serde_json::from_str(inherited["final_message"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        echo["thread_params"]["config"]["features"],
+        json!({"multi_agent":false,"multi_agent_v2":false,"view_image":true})
+    );
     assert_eq!(
         inherited["started_mcp_servers"].as_array().unwrap().len(),
         4

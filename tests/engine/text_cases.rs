@@ -5,12 +5,30 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 }
 
 #[test]
+fn creative_ruling_and_mode_precede_artifact_writes_and_architect() {
+    let text = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md"),
+    )
+    .unwrap();
+    let ruling = text.find("Rule on each finding yourself").unwrap();
+    let choice = text.find("choose exactly one smallest increment").unwrap();
+    let mode = text.find("declare the mode after the ruling").unwrap();
+    let review = text
+        .find("write the review to `<store>/astra/review.json`")
+        .unwrap();
+    let final_plan = text.find("`<store>/astra/plan-final.md`").unwrap();
+    let rulings = text.find("`<store>/astra/ruling.md`").unwrap();
+    let architect = text.find("3. In creative mode always").unwrap();
+    assert!(ruling < choice && choice < mode && mode < review);
+    assert!(mode < final_plan && mode < rulings && rulings < architect);
+}
+
+#[test]
 fn required_phrases_are_present() {
     let cases = [
         ("agents/dispatcher.md", "Call `codex_run` yourself"),
-        ("agents/dispatcher.md", "Never forward Codex work through another agent"),
+        ("agents/dispatcher.md", "Never forward engineering Codex work through another agent"),
         ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),
-        ("agents/dispatcher.md", "`cargo fetch --locked`"),
         ("agents/dispatcher.md", "`cargo test --locked --offline`"),
         ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
         ("skills/wish/SKILL.md", "`[creative]`"),
@@ -40,7 +58,11 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "`review-failed`, or `unreviewed`"),
         ("skills/research/SKILL.md", "output path `<store>/research/plan.json`"),
         ("skills/research/SKILL.md", "`stage: \"second_review\"`"),
-        ("agents/astra.md", "`save_to` the given path"),
+        ("agents/astra.md", "do not call `codex_run`"),
+        ("agents/content.md", "exact files authorized by `output_paths`"),
+        ("agents/dispatcher.md", "<actual model returned by the agent>"),
+        ("skills/research/SKILL.md", "`schema_path`"),
+        ("skills/wish/SKILL.md", "`subagent_type: \"chronos:astra\"`"),
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("engine");
     for (asset, phrase) in cases {
@@ -66,8 +88,6 @@ fn deleted_rules_have_enforcing_tests() {
         ("DISPATCH.md", "For deletions, SCOPE lists each path to delete.", "orch/lifecycle_cases.rs::lifecycle_reuse_scope_and_limit"),
         ("DISPATCH.md", "The worker's report is a claim.", "orch/lifecycle_cases.rs::lifecycle_reuse_scope_and_limit"),
         ("agents/architect.md", "Order the modules so each depends only on earlier ones and on existing code.", "orch/parse_cases.rs::map_rejections_name_module"),
-        ("agents/astra.md", "Write its `structured_output` to the given path.", "bridge/codex_cases.rs::astra_save_records_only_astra"),
-        ("agents/astra.md", "or the model is not an Astra model", "bridge/codex_cases.rs::sol_and_astra_restrictions"),
         ("agents/reviewer.md", "You change nothing.", "engine/text_cases.rs::reviewer_tools_are_read_only"),
         ("agents/reviewer.md", "and the verdict is `fail` when any finding is a blocker or major", "agy/review_cases.rs::review_verdict_and_failures"),
         ("agents/memory-keeper.md", "Only units in state `verified` count; that state means the dispatcher confirmed VERIFY passed and its review passed.", "memory.rs::record_search_stale_digest_and_validation"),

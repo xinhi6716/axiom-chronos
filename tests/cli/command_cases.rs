@@ -30,31 +30,50 @@ fn wish_and_research() {
         let o = command(temp.path())
             .args(args)
             .env(
-                "AXIOM_CLAUDE_CMD",
-                serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+                "AXIOM_CODEX_CMD",
+                serde_json::to_string(&common::fake("fake_codex_session")).unwrap(),
             )
-            .env("FAKE_CLAUDE_RECORD", &record)
+            .env("FAKE_CODEX_RECORD", &record)
             .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-        assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
-        let argv = v["argv"].as_array().unwrap();
-        let index = argv.iter().position(|v| v == "--max-turns");
-        match turns {
-            Some(turns) => assert_eq!(argv[index.unwrap() + 1], turns),
-            None => assert!(index.is_none()),
-        }
+        assert_eq!(
+            v["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["method"] == "turn/start")
+                .unwrap()["params"]["input"][0]["text"],
+            expected
+        );
+        let root = v["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["method"] == "turn/start")
+            .unwrap()["params"]["threadId"]
+            .as_str()
+            .unwrap();
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("sessions").join(format!("{root}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata["max_turns"].as_u64(),
+            turns.map(|s| s.parse::<u64>().unwrap())
+        );
+        assert_eq!(v["argv"].as_array().unwrap().last().unwrap(), "stdio://");
     }
     let o = command(temp.path())
         .args(["wish", "x"])
         .env("PATH", "")
-        .env_remove("AXIOM_CLAUDE_CMD")
+        .env_remove("AXIOM_CODEX_CMD")
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("claude is not on PATH"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("codex is not on PATH"));
 }
 #[test]
 fn wish_rejects_model_without_starting_session() {
@@ -63,10 +82,10 @@ fn wish_rejects_model_without_starting_session() {
     let o = command(t.path())
         .args(["wish", "--model", "opus", "x"])
         .env(
-            "AXIOM_CLAUDE_CMD",
-            serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+            "AXIOM_CODEX_CMD",
+            serde_json::to_string(&common::fake("fake_codex_session")).unwrap(),
         )
-        .env("FAKE_CLAUDE_RECORD", &record)
+        .env("FAKE_CODEX_RECORD", &record)
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
@@ -100,7 +119,7 @@ fn bridge_hook_and_unicode_path() {
     std::fs::copy(env!("CARGO_BIN_EXE_axiom"), &exe).unwrap();
     assert_eq!(
         Command::new(&exe).arg("--version").output().unwrap().stdout,
-        b"axiom-chronos 0.2.0-beta.1 (beta)\n"
+        format!("axiom-chronos {} (beta)\n", env!("CARGO_PKG_VERSION")).as_bytes()
     );
     let input = format!(
         "{}\n{}\n",
@@ -134,12 +153,11 @@ fn bridge_hook_and_unicode_path() {
     assert!(o.status.success());
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
-    let fake = serde_json::to_string(&common::fake("fake_claude")).unwrap();
+    let fake = serde_json::to_string(&common::fake("fake_codex_session")).unwrap();
     let o = Command::new(&exe)
         .arg("doctor")
         .env("AXIOM_HOME", t.path())
         .env("AXIOM_DATA_HOME", t.path())
-        .env("AXIOM_CLAUDE_CMD", &fake)
         .env("AXIOM_CODEX_CMD", &fake)
         .env("AXIOM_AGY_CMD", &fake)
         .env("AXIOM_WSL_CMD", &fake)
@@ -279,23 +297,31 @@ fn wish_usage_and_overrides() {
         .arg(t.path())
         .args(["--max-turns", "7", "text", "--model", "--max-turns"])
         .env(
-            "AXIOM_CLAUDE_CMD",
-            serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+            "AXIOM_CODEX_CMD",
+            serde_json::to_string(&common::fake("fake_codex_session")).unwrap(),
         )
-        .env("FAKE_CLAUDE_RECORD", &record)
+        .env("FAKE_CODEX_RECORD", &record)
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
     assert_eq!(
-        v["messages"][0]["message"]["content"][0]["text"],
+        v["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["method"] == "turn/start")
+            .unwrap()["params"]["input"][0]["text"],
         "/chronos:wish text --model --max-turns"
     );
-    let argv = v["argv"].as_array().unwrap();
-    let i = argv.iter().position(|v| v == "--max-turns").unwrap();
-    assert_eq!(argv[i + 1], "7");
-    assert_eq!(v["cwd"], t.path().to_string_lossy().as_ref());
+    let core = v["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(core["params"]["cwd"], t.path().to_string_lossy().as_ref());
 }
 
 #[test]
@@ -316,16 +342,24 @@ fn creative_and_resume_usage() {
         let o = command(t.path())
             .args(args)
             .env(
-                "AXIOM_CLAUDE_CMD",
-                serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+                "AXIOM_CODEX_CMD",
+                serde_json::to_string(&common::fake("fake_codex_session")).unwrap(),
             )
-            .env("FAKE_CLAUDE_RECORD", &record)
+            .env("FAKE_CODEX_RECORD", &record)
             .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(o.status.success());
         let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-        assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
+        assert_eq!(
+            v["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["method"] == "turn/start")
+                .unwrap()["params"]["input"][0]["text"],
+            expected
+        );
     }
     for args in [
         vec!["wish", "--resume", "id", "text"],

@@ -102,6 +102,20 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     save(home, session, &goal)?;
     Ok(goal)
 }
+/// Research has its own plan/review/ruling workflow, not engineering unit gates.
+/// Only the host may select this at session creation; bridge goal inputs cannot.
+pub(crate) fn open_research(
+    home: &Path,
+    session: &str,
+    question: &str,
+    cwd: Option<&str>,
+) -> Res<Goal> {
+    let mut goal = open(home, session, question, cwd)?;
+    goal.other
+        .insert("workflow".into(), Value::String("research".into()));
+    save(home, session, &goal)?;
+    Ok(goal)
+}
 pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
@@ -226,7 +240,10 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
         ));
     }
     let mut goal = required(home, session)?;
-    if status == "done" {
+    if status == "done"
+        && !(goal.other.get("workflow").and_then(Value::as_str) == Some("research")
+            && goal.mode.as_deref() == Some("answer"))
+    {
         if let Some(project) = &goal.project {
             crate::orch::done_gate(
                 &crate::orch::store_for(home, project)?,

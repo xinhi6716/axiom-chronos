@@ -11,9 +11,9 @@
 
 <p align="center"><a href="#begin">Start</a> · <a href="#the-work">Use</a> · <a href="#status">Status</a></p>
 
-Coordinate scoped code changes with Claude Code and Codex. Keep verification records and reusable project context.
+Coordinate scoped code changes with the Codex-only Rust runtime. Keep verification records and reusable project context.
 
-**Public beta · 0.2.0-beta.1.** Review each diff before committing.
+**Public beta · 0.2.0-codex.1.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |
@@ -24,12 +24,21 @@ Coordinate scoped code changes with Claude Code and Codex. Keep verification rec
 
 ## Start
 
-You need [Claude Code](https://claude.com/claude-code) and the Codex CLI. Sign in to `claude` and `codex` first. Download the single `axiom` binary, or build and install it with Rust:
+You need the Codex CLI, signed in to an account with the required models. From the root of this Codex-only checkout, build and install the single `axiom` binary locally with Rust:
 
 ```sh
-cargo install --git https://github.com/xinhi6716/axiom-chronos --locked
+cargo install --path . --locked
 axiom doctor
 ```
+
+Optionally expose wish/research as native Codex skills. From this repository root, after installing `axiom`:
+
+```sh
+codex plugin marketplace add . --json
+codex plugin add chronos@axiom-chronos-codex --json
+```
+
+This registers the Codex wrapper; the same `axiom` CLI remains available.
 
 From a project whose tests you can run:
 
@@ -44,7 +53,7 @@ axiom wish add a --stats flag to cli.py that prints done/total
 
 `axiom doctor` checks tools, SQLite support and the state directory; it does not run a wish. SQLite needs FTS5 and JSON.
 
-Antigravity (`agy`) is optional. If its Gemini preview fails, the core can show the dispatcher report.
+The `gemini_preview` name is a compatibility alias for Codex roles; it does not require Gemini or Antigravity.
 
 On Windows, doctor flags Microsoft Store PowerShell because Codex cannot use it to run worker commands. Use the MSI build as described in the [bridge notes](docs/bridge.md).
 
@@ -56,7 +65,7 @@ On Windows, doctor flags Microsoft Store PowerShell because Codex cannot use it 
 
 ## How to use it
 
-Describe one concrete change. The dispatcher writes a `GOAL · SCOPE · VERIFY` brief, sends it to a Codex worker, then checks the command record or runs VERIFY. Its instructions require it to ask first about unresolved interface or data choices.
+Describe one concrete change. The dispatcher writes a `GOAL · SCOPE · VERIFY` brief, sends it to a Codex worker, then checks the command record or runs VERIFY. The core asks only about material choices the project and wish cannot resolve; later choices are recorded.
 
 Put CLI options **before** the wish. Everything after them is wish text, including flag names.
 
@@ -74,17 +83,19 @@ axiom wish --project ../other rename calc to compute_total everywhere
 | Option | Default | Purpose |
 |---|---|---|
 | `--project PATH` | Current directory | Choose the project. |
-| `--max-turns N` | — | Limit core-session turns. |
+| `--max-turns N` | — | Bound model/tool steps per host thread; reaching the bound stops the session with resume instructions. |
 | `--resume <session-id>` | — | Resume a previous wish session. |
 | `--creative` | — | Explore and select a small evidence-backed increment. |
+| `--no-architect` | Off | Skip the architect for non-creative wishes. |
+| `--astra` | Off | Run the independent Astra planning and ruling flow first. |
 
-- **Claude Code core:** reads project history, delegates the wish and checks the final explanation against reported facts.
-- **Sonnet dispatcher:** scopes units, supplies relevant memory and verifies their command records.
+- **Astra max core:** persists for the session, delegates work and owns the final ruling. A separate Astra max planner drafts research and optional wish plans.
+- **Terra high dispatcher:** scopes units, supplies relevant memory and verifies their command records.
 - **Codex `terra` workers:** work in ephemeral threads. A `sol` integration unit is used only when the full suite fails after more than one unit changed files.
-- **Optional Gemini via `agy`:** rewrites reports in plain language.
-- **Haiku memory keeper:** saves reusable work from verified units.
+- **Sol/Astra engineering reviewer:** reviews with a distinct role from the writer; unlike the original different-family review, all models here are OpenAI Codex. Sol also reviews plans; Luna rewrites reports.
+- **Luna memory keeper:** saves reusable work from verified units. Luna content can handle authorized nonengineering documents, images and organization.
 
-Claude sessions load the engine with local settings. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. [Bridge contracts](docs/bridge.md#contracts).
+The Rust host loads embedded instructions, substitutes compatibility placeholders, and enforces the original hooks and read-only agent sandboxes. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. [Bridge contracts](docs/bridge.md#contracts).
 
 <p align="center"><picture>
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
@@ -129,7 +140,7 @@ Memory retains the wish and hashes of referenced files so later lookups can flag
 
 **Planned:** `ask`, `review`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped beta features.
 
-Tests use scripted stand-ins for Claude, Codex and `agy`; they check protocols and local behavior. The initial project report covers small-project Codex runs only. Neither establishes live-model performance or full end-to-end reliability.
+Tests use scripted stand-ins to check protocols and local behavior. Earlier small-project reports and lean-mode measurements are historical, not measurements of this Codex-only runtime.
 
 [Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Tests](tests/)
 

@@ -15,6 +15,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../engine/agents/astra.md"),
     ),
     (
+        "agents/content.md",
+        include_str!("../../engine/agents/content.md"),
+    ),
+    (
         "agents/critic.md",
         include_str!("../../engine/agents/critic.md"),
     ),

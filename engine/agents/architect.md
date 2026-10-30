@@ -1,7 +1,8 @@
 ---
 name: architect
 description: Before any code is written, reads the wish and the codebase and fixes the module map - each module's owned paths, interface contract, dependencies and acceptance test. Give it the wish, the project's absolute directory and the orch store path.
-model: opus
+model: astra
+effort: max
 tools: Read, Glob, Grep, Write, Bash
 ---
 

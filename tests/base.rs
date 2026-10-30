@@ -121,6 +121,19 @@ fn shell_and_schema() {
 }
 #[test]
 fn process_tree() {
+    if let Ok(mode) = std::env::var("AXIOM_TEST_CANCEL_TREE") {
+        if mode == "sleep" {
+            std::thread::sleep(Duration::from_secs(30));
+        } else {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "process_tree", "--nocapture"])
+                .env("AXIOM_TEST_CANCEL_TREE", "sleep")
+                .spawn()
+                .unwrap();
+            std::fs::write(mode, format!("{} {}", std::process::id(), child.id())).unwrap();
+        }
+        return;
+    }
     let dir = common::temp();
     let pidfile = dir.path().join("pid");
     let script="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); open(sys.argv[1],'w').write(str(p.pid)); time.sleep(60)";
@@ -154,6 +167,109 @@ fn process_tree() {
     }
     assert!(!proc::pid_alive(parent));
     assert!(!proc::pid_alive(grandchild));
+}
+
+#[test]
+fn cancelled_scope_blocks_late_spawn_without_affecting_standalone_or_nested_scope() {
+    let dir = common::temp();
+    let cancelled = proc::Cancellation::default();
+    let independent = proc::Cancellation::default();
+    cancelled.cancel();
+    cancelled.scope(|| {
+        let r = proc::run_shell(
+            "echo late > must-not-exist",
+            dir.path(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_ne!(r.exit_code, 0);
+        assert!(!dir.path().join("must-not-exist").exists());
+        independent.scope(|| {
+            assert_eq!(
+                proc::run_shell("echo independent", dir.path(), Duration::from_secs(2))
+                    .unwrap()
+                    .exit_code,
+                0
+            )
+        });
+        assert_ne!(
+            proc::run_shell("echo late", dir.path(), Duration::from_secs(2))
+                .unwrap()
+                .exit_code,
+            0
+        );
+    });
+    assert_eq!(
+        proc::run_shell("echo standalone", dir.path(), Duration::from_secs(2))
+            .unwrap()
+            .exit_code,
+        0
+    );
+}
+
+#[test]
+fn cancellation_kills_descendants_even_after_verifier_shell_exits() {
+    let dir = common::temp();
+    let pids = dir.path().join("pids");
+    let executable = std::env::current_exe().unwrap();
+    #[cfg(windows)]
+    let command = format!(
+        "set \"AXIOM_TEST_CANCEL_TREE={}\" && \"{}\" --exact process_tree --nocapture",
+        pids.display(),
+        executable.display()
+    );
+    #[cfg(unix)]
+    let command = format!(
+        "AXIOM_TEST_CANCEL_TREE='{}' '{}' --exact process_tree --nocapture",
+        pids.display(),
+        executable.display()
+    );
+    let cancellation = proc::Cancellation::default();
+    let worker = cancellation.clone();
+    let cwd = dir.path().to_owned();
+    let job = std::thread::spawn(move || {
+        worker.scope(|| proc::run_shell(&command, &cwd, Duration::from_secs(5)).unwrap())
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let ids = loop {
+        if let Some(ids) = std::fs::read_to_string(&pids)
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .filter(|ids| ids.len() == 2)
+        {
+            break ids;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    while proc::pid_alive(ids[0]) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !proc::pid_alive(ids[0]),
+        "intermediate verifier has not exited"
+    );
+    assert!(proc::pid_alive(ids[1]), "descendant must still be running");
+    let cancelled_at = std::time::Instant::now();
+    cancellation.cancel();
+    let result = job.join().unwrap();
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(5),
+        "cancellation waited for natural descendant exit"
+    );
+    assert_ne!(
+        result.exit_code, 0,
+        "cancelled pipe draining must not report success"
+    );
+    assert!(
+        !proc::pid_alive(ids[1]),
+        "descendant survived cancellation after parent exit"
+    );
 }
 
 #[test]

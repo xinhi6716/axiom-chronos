@@ -12,6 +12,8 @@ if '--version' in sys.argv:
     sys.exit(0)
 
 pending_turns = {}
+dynamic_calls = {}
+dynamic_results = {}
 send_lock = threading.Lock()
 log_lock = threading.Lock()
 barrier = threading.Condition()
@@ -65,12 +67,23 @@ for line in sys.stdin:
     if method:
         log_record(method, params)
     if method is None:
+        if message.get('id') in dynamic_calls:
+            thread_id, turn_id = dynamic_calls.pop(message['id'])
+            log_record('fake/tool_response', message)
+            result = message.get('result', {})
+            dynamic_results.setdefault(thread_id, []).append(result)
+            if not any(tid == thread_id for tid, _ in dynamic_calls.values()):
+                valid = all(r.get('success') is True and r.get('contentItems', [{}])[0].get('type') == 'inputText' for r in dynamic_results.pop(thread_id))
+                item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': 'dynamic complete'})
+                complete(thread_id, turn_id, 'completed' if valid else 'failed')
+            continue
         if 'error' in message:
             thread_id, turn_id = pending_turns.pop('approval')
             item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': 'approval refused'})
             complete(thread_id, turn_id)
         continue
     if method == 'initialize':
+        assert params.get('capabilities', {}).get('experimentalApi') is True
         send({'id': message['id'], 'result': {'userAgent': 'fake'}})
     elif method == 'model/list':
         if params.get('cursor'):
@@ -130,6 +143,12 @@ for line in sys.stdin:
                     item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'slow'})
                     complete(tid, turn)
             threading.Thread(target=finish_slow, daemon=True).start()
+            continue
+        if 'DYNAMIC' in text:
+            for n in range(2):
+                call_id = f'dynamic-{thread_id}-{n}'
+                dynamic_calls[call_id] = (thread_id, turn_id)
+                send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': thread_id, 'turnId': turn_id, 'callId': call_id, 'tool': 'test', 'arguments': {'n': n, 'threadId': thread_id}}})
             continue
         if 'APPROVAL' in text:
             pending_turns['approval'] = (thread_id, turn_id)

@@ -10,6 +10,32 @@ pub struct Evidence {
     pub ts: String,
 }
 
+fn codex_role(model: &str) -> Option<&'static str> {
+    ["terra", "sol", "astra", "luna"]
+        .into_iter()
+        .find(|role| crate::codex::role_matches(role, model))
+}
+fn same_reviewer(a: &str, b: &str) -> bool {
+    if a.starts_with("chronos:") || b.starts_with("chronos:") {
+        return true;
+    }
+    if codex_role(a) == Some("luna") || codex_role(b) == Some("luna") {
+        return true;
+    }
+    match (codex_role(a), codex_role(b)) {
+        (Some(x), Some(y)) => x == y,
+        (Some(_), None) => matches!(
+            base::family_of(b),
+            base::Family::OpenAi | base::Family::Unknown
+        ),
+        (None, Some(_)) => matches!(
+            base::family_of(a),
+            base::Family::OpenAi | base::Family::Unknown
+        ),
+        _ => base::family_of(a) == base::family_of(b),
+    }
+}
+
 pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     let Some(i) = rows.iter().rposition(|r| r.kind == "run") else {
         return "pending".into();
@@ -48,10 +74,10 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if current.iter().any(|r| r.exit_code != 0) {
         return "review-failed".into();
     }
-    if current
-        .iter()
-        .any(|r| base::family_of(&r.command) == base::family_of(&run.command))
-    {
+    if current.iter().any(|r| {
+        rows.iter()
+            .any(|writer| writer.kind == "run" && same_reviewer(&r.command, &writer.command))
+    }) {
         return "built".into();
     }
     "verified".into()
@@ -279,9 +305,10 @@ pub fn record_review(
             return Err(Failure::new("not_found", format!("unit {unit} not found")));
         }
         let rs = evidence(store, unit)?;
-        if rs
-            .iter()
-            .any(|r| r.kind == "run" && base::family_of(&r.command) == base::family_of(reviewer))
+        if codex_role(reviewer) == Some("luna")
+            || rs
+                .iter()
+                .any(|r| r.kind == "run" && same_reviewer(&r.command, reviewer))
         {
             return Err(Failure::new(
                 "same_family",

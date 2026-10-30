@@ -11,7 +11,7 @@ use std::{
 fn config(home: &std::path::Path) -> Config {
     Config {
         data_home: Some(home.into()),
-        codex: Ok(common::fake("fake_codex")),
+        codex: Ok(common::fake("fake_codex_review")),
         agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
@@ -201,19 +201,13 @@ fn bridge_status_and_missing_command() {
     let b = Bridge::new(config(temp.path()));
     let ok = invoke(&b, "bridge_status", json!({}));
     check(&ok, "completed");
-    assert_eq!(
-        ok["structuredContent"]["agy"]["version"],
-        json!(["1.4.7-fake"])
-    );
+    assert_eq!(ok["structuredContent"]["agy"]["status"], json!("disabled"));
     assert_eq!(ok["structuredContent"]["codex_app_server_running"], false);
     let mut c = config(temp.path());
     c.agy = Err(axiom::base::Failure::new("missing", "missing"));
     let missing = invoke(&Bridge::new(c), "bridge_status", json!({}));
     check(&missing, "completed");
-    assert_eq!(
-        missing["structuredContent"]["agy"]["error"]["kind"],
-        "missing"
-    );
+    assert_eq!(missing["structuredContent"]["agy"]["status"], "disabled");
 }
 #[test]
 fn goal_operations_and_mode_lock() {
@@ -388,7 +382,7 @@ fn preview_stage_and_absolute_save() {
     assert!(rows
         .lines()
         .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
-    fs::remove_file(&marker).unwrap();
+    assert!(!marker.exists());
     let bad = invoke(
         &b,
         "gemini_preview",
@@ -513,7 +507,7 @@ fn serve_stops_codex_process() {
 fn preview_run_error_records_failure() {
     let temp = common::temp();
     let mut c = config(temp.path());
-    c.agy = Err(axiom::base::Failure::new("missing", "missing"));
+    c.codex = Err(axiom::base::Failure::new("missing", "missing"));
     let r = invoke(
         &Bridge::new(c),
         "gemini_preview",
@@ -588,114 +582,194 @@ fn panic_in_tool_body_is_bridge_error() {
     check(&bad, "bridge_error");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "panic");
 }
+
 #[test]
-fn classify_stop_cancels_hanging_agy() {
-    use std::time::{Duration, Instant};
+fn codex_review_models_and_schema() {
     let temp = common::temp();
-    let pid = temp.path().join("pid");
-    let wrapper = temp.path().join("agy_wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
+    fixture(temp.path());
+    let b = Bridge::new(config(temp.path()));
+    let store = temp.path().join("orchestrate/demo");
+    fs::create_dir_all(store.join("reports")).unwrap();
+    let review = |contract: &str| {
+        invoke(
+            &b,
+            "review_code",
+            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":contract,"model":"gemini-old"}),
+        )
+    };
+    fs::write(
+        store.join("reports/u3.evidence.tsv"),
+        "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t\t2\n",
+    )
+    .unwrap();
+    let r = review("contract");
+    check(&r, "completed");
+    assert_eq!(r["structuredContent"]["reviewer"], "gpt-6-astra");
+    assert!(fs::read_to_string(store.join("reports/u3.evidence.tsv"))
+        .unwrap()
+        .contains("review\tgpt-6-astra\t"));
+    let invalid = review("EXTRA_FIELD");
+    check(&invalid, "failed");
+    assert_eq!(
+        invalid["structuredContent"]["error"]["kind"],
+        "no_review_output"
+    );
+    let preview = invoke(
+        &b,
+        "gemini_preview",
+        json!({"prompt":"hi","stage":"second_review","model":"gemini-old"}),
+    );
+    assert_eq!(preview["structuredContent"]["model"], "gpt-6-sol");
+    assert!(preview["structuredContent"]["thread_id"].is_string());
+    assert_eq!(
+        preview["structuredContent"]["conversation_id"],
+        preview["structuredContent"]["thread_id"]
+    );
+    assert!(preview["structuredContent"].get("response").is_some());
+    assert!(preview["structuredContent"].get("error").is_some());
+    let rewrite = invoke(
+        &b,
+        "gemini_preview",
+        json!({"prompt":"hi","stage":"rewrite"}),
+    );
+    assert_eq!(rewrite["structuredContent"]["model"], "gpt-6-luna");
+    assert_eq!(
+        rewrite["structuredContent"]["conversation_id"],
+        rewrite["structuredContent"]["thread_id"]
+    );
+    let rejected = invoke(
+        &b,
+        "review_code",
+        json!({"project_dir":temp.path(),"paths":["file.txt"],"contract":"x","model":"gpt-6-luna"}),
+    );
+    assert_eq!(
+        rejected["structuredContent"]["error"]["kind"],
+        "invalid_argument"
+    );
+}
+
+#[test]
+fn review_rejects_invalid_output_and_unsafe_or_oversized_files() {
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    fs::write(temp.path().join("one"), vec![b'x'; 30_001]).unwrap();
+    fs::write(temp.path().join("two"), vec![b'x'; 30_000]).unwrap();
+    let invoke_review = |paths: Vec<&str>, contract: &str| {
+        invoke(
+            &b,
+            "review_code",
+            json!({"project_dir":temp.path(),"paths":paths,"contract":contract}),
+        )
+    };
+    for contract in ["BADJSON", "WRONGSHAPE", "AGY_EMPTY"] {
+        let r = invoke_review(vec!["one"], contract);
+        check(&r, "failed");
+    }
+    let r = invoke_review(vec!["one", "two"], "contract");
+    assert_eq!(r["structuredContent"]["error"]["kind"], "too_large");
+    fs::write(temp.path().join("large"), vec![b'x'; 60_001]).unwrap();
+    let r = invoke_review(vec!["large"], "contract");
+    assert_eq!(r["structuredContent"]["error"]["kind"], "too_large");
+    let r = invoke_review(vec!["../outside"], "contract");
+    assert_eq!(r["structuredContent"]["error"]["kind"], "invalid_argument");
+}
+
+#[test]
+fn review_effort_and_forbidden_processes() {
+    let temp = common::temp();
+    let log = temp.path().join("calls.jsonl");
+    let forbidden = temp.path().join("forbidden");
+    let wrapper = temp.path().join("codex.py");
+    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
+    let forbidden_cmd = temp.path().join("forbidden.py");
+    fs::write(
+        &forbidden_cmd,
+        format!(
+            "open({:?},'w').write('invoked')\n",
+            forbidden.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
     let mut c = config(temp.path());
-    c.agy = Ok(vec![
+    c.codex = Ok(vec![
         common::python(),
         wrapper.to_string_lossy().into_owned(),
-        pid.to_string_lossy().into_owned(),
+        log.to_string_lossy().into_owned(),
         common::repo_root()
-            .join("tests/fakes/fake_agy.py")
+            .join("tests/fakes/fake_codex_review.py")
             .to_string_lossy()
             .into_owned(),
     ]);
-    let b = Arc::new(Bridge::new(c));
-    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
-    let worker = b.clone();
-    let handle = std::thread::spawn(move || {
-        invoke(
-            &worker,
-            "gemini_preview",
-            json!({"prompt":"AGY_HANG","timeout_s":60}),
-        )
-    });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !pid.exists() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
-    let stopped = invoke(&b, "goal", json!({"session":"s","classify":"stop"}));
-    check(&stopped, "completed");
-    let result = handle.join().unwrap();
-    assert_ne!(
-        result["structuredContent"]["status"], "completed",
-        "{result}"
-    );
-    assert!(Instant::now() < deadline);
-}
-#[test]
-fn agy_stop_is_scoped_to_its_bridge() {
-    use std::time::{Duration, Instant};
-    let temp = common::temp();
-    let wrapper = temp.path().join("wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let make_bridge = |name: &str| {
-        let mut c = config(temp.path());
-        c.agy = Ok(vec![
-            common::python(),
-            wrapper.to_string_lossy().into_owned(),
-            temp.path().join(name).to_string_lossy().into_owned(),
-            common::repo_root()
-                .join("tests/fakes/fake_agy.py")
-                .to_string_lossy()
-                .into_owned(),
-        ]);
-        Arc::new(Bridge::new(c))
-    };
-    let a = make_bridge("a.pid");
-    let b = make_bridge("b.pid");
-    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
-    let release = temp.path().join("release");
-    let start = |bridge: Arc<Bridge>| {
-        let prompt = format!("AGY_WAIT:{}", release.display());
-        std::thread::spawn(move || {
-            invoke(
-                &bridge,
-                "gemini_preview",
-                json!({
-                    "prompt":prompt,"json_schema":{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}
-                }),
-            )
-        })
-    };
-    let one = start(a.clone());
-    let two = start(b);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut pids = Vec::new();
-    for name in ["a.pid", "b.pid"] {
-        loop {
-            if let Some(pid) = fs::read_to_string(temp.path().join(name))
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                pids.push(pid);
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    let pid = pids[0];
-    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
+    c.agy = Ok(vec![
+        common::python(),
+        forbidden_cmd.to_string_lossy().into_owned(),
+    ]);
+    let b = Bridge::new(c);
+    fixture(temp.path());
+    let store = temp.path().join("orchestrate/demo");
+    fs::create_dir_all(store.join("reports")).unwrap();
+    fs::write(
+        store.join("reports/u3.evidence.tsv"),
+        "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t\t2\n",
+    )
+    .unwrap();
+    check(&invoke(&b, "bridge_status", json!({})), "completed");
     check(
-        &invoke(&a, "goal", json!({"session":"s","classify":"stop"})),
+        &invoke(
+            &b,
+            "gemini_preview",
+            json!({"prompt":"hi","stage":"second_review"}),
+        ),
         "completed",
     );
-    let cancelled = one.join().unwrap();
-    assert_eq!(
-        cancelled["structuredContent"]["error"]["kind"],
-        "agy_no_result"
+    check(
+        &invoke(
+            &b,
+            "review_code",
+            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"x"}),
+        ),
+        "completed",
     );
-    assert!(!axiom::base::proc::pid_alive(pid));
-    fs::write(release, "release").unwrap();
-    let completed = two.join().unwrap();
-    check(&completed, "completed");
-    assert!(completed["structuredContent"]["structured_output"]["answer"].is_string());
+    let rewrite = invoke(
+        &b,
+        "gemini_preview",
+        json!({"prompt":"supplied text only","stage":"rewrite"}),
+    );
+    check(&rewrite, "completed");
+    assert!(rewrite["structuredContent"]["usage"].is_object());
+    assert!(!forbidden.exists());
+    let events: Vec<Value> = fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let models: Vec<_> = events
+        .iter()
+        .filter(|e| e["method"] == "thread/start")
+        .map(|e| e["params"]["model"].as_str().unwrap())
+        .collect();
+    let efforts: Vec<_> = events
+        .iter()
+        .filter(|e| e["method"] == "turn/start")
+        .map(|e| e["params"]["effort"].as_str().unwrap())
+        .collect();
+    assert_eq!(models, ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]);
+    assert_eq!(efforts, ["high", "max", "high"]);
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|e| e["method"] == "thread/start")
+        .collect();
+    for event in &starts {
+        let instructions = event["params"]["developerInstructions"].as_str().unwrap();
+        assert!(instructions.contains("Process only the text supplied"));
+        assert!(instructions
+            .contains("Do not search or inspect the filesystem, use tools, or edit files"));
+        assert!(instructions.contains("JSON matching it"));
+        assert_eq!(event["params"]["sandbox"], "read-only");
+        assert_eq!(event["params"]["config"]["features"]["multi_agent"], false);
+    }
+    assert!(starts[2]["params"]["developerInstructions"]
+        .as_str()
+        .unwrap()
+        .contains("report rewriter"));
 }

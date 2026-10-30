@@ -1,5 +1,6 @@
 {
   "type": "object",
+  "additionalProperties": false,
   "required": ["verdict", "findings"],
   "properties": {
     "verdict": {"type": "string", "enum": ["pass", "revise", "reject"]},
@@ -7,6 +8,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["check", "item", "reason"],
         "properties": {
           "check": {"type": "string", "enum": ["out_of_scope", "overclaim", "unfalsifiable", "complexity"]},

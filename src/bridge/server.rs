@@ -28,15 +28,15 @@ impl Config {
 }
 pub struct Bridge {
     pub config: Config,
+    pub(crate) verification: base::proc::Cancellation,
     codex: Mutex<Option<Arc<AppServer>>>,
-    pub(crate) children: crate::agy::Children,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            verification: base::proc::Cancellation::default(),
             codex: Mutex::new(None),
-            children: crate::agy::Children::new(),
         }
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {
@@ -60,7 +60,7 @@ impl Bridge {
             .map_or(false, |c| c.alive())
     }
     pub fn cancel(&self) {
-        self.children.cancel();
+        self.verification.cancel();
         if let Some(c) = self
             .codex
             .lock()
@@ -92,7 +92,12 @@ pub fn tools() -> Value {
     a[9]["inputSchema"]["properties"]["classify"] = json!({"type":"string"});
     a[9]["inputSchema"]["properties"]["mode"] = json!({"type":"string"});
     a[9]["inputSchema"]["required"] = json!(["session"]);
-    a[10]["description"] = json!("Report Codex and agy executables and app-server status.");
+    a[1]["description"] = json!("Run a read-only Codex rewrite or independent second review in an empty context. Gemini model names are compatibility aliases; the result reports the resolved Codex model.");
+    a[3]["description"] = json!("Review files against their contract with a distinct Codex model role. A major or blocker finding fails the verdict. This is role independence within OpenAI, not cross-provider independence.");
+    a[1]["inputSchema"]["properties"]["cwd"]["description"] = json!(
+        "Optional directory validated for compatibility; the review runs in an empty directory."
+    );
+    a[10]["description"] = json!("Report Codex executable and app-server status; agy is disabled.");
     for (i, names) in [
         (0, vec!["project", "unit", "save_to", "stage"]),
         (1, vec!["project", "stage", "save_to"]),

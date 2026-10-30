@@ -243,3 +243,66 @@ fn identities_are_current_git_trees() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn independent_codex_roles_and_aliases() {
+    for (worker, reviewer, expected) in [
+        ("gpt-6-terra", "gpt-6-sol", "verified"),
+        ("gpt-6-sol", "gpt-6-astra", "verified"),
+        ("gpt-6-sol", "gpt-6.1-sol", "built"),
+        ("gpt-6-terra", "chronos:sonnet", "built"),
+        ("claude-worker", "chronos:reviewer", "built"),
+        ("gpt-6-terra", "gpt-6-luna", "built"),
+        ("gpt-6-terra", "claude-review", "verified"),
+    ] {
+        assert_eq!(
+            derive_state(
+                &[
+                    row("run", worker, 0, "", "1"),
+                    row("verify", "test", 0, "", "2"),
+                    row("review", reviewer, 0, "", "3")
+                ],
+                false
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn review_rejects_every_historical_writer_role_across_versions() {
+    let p = temp();
+    setup(&p);
+    for r in [
+        row("run", "gpt-6.1-terra", 0, "old", "1"),
+        row("verify", "test", 0, "old", "2"),
+        row("run", "gpt-6-sol", 0, "new", "3"),
+        row("verify", "test", 0, "new", "4"),
+        row("accept", "test", 0, "new", "5"),
+    ] {
+        append_evidence(&p, "u", &r).unwrap();
+    }
+    let before = evidence(&p, "u").unwrap();
+    for reviewer in [
+        "gpt-6.10-terra",
+        "gpt-6.1-sol",
+        "gpt-6-luna",
+        "chronos:reviewer",
+    ] {
+        assert_eq!(
+            record_review(&p, &["u".into()], reviewer, true, &p)
+                .unwrap_err()
+                .kind,
+            "same_family"
+        );
+        assert_eq!(evidence(&p, "u").unwrap().len(), before.len());
+        let mut legacy_rows = before.clone();
+        legacy_rows.push(row("review", reviewer, 0, "new", "6"));
+        assert_eq!(derive_state(&legacy_rows, true), "built");
+    }
+    assert_eq!(
+        record_review(&p, &["u".into()], "gpt-6-astra", true, &p).unwrap()[0].1,
+        "verified"
+    );
+    fs::remove_dir_all(p).unwrap();
+}

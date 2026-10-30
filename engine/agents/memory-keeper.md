@@ -1,7 +1,8 @@
 ---
 name: memory-keeper
 description: After a wish is done, distills its verified units into long-run memory for later briefs and adds one line to the project's history. Give it the orch store path, the program slug, the project's absolute directory and the wish.
-model: haiku
+model: luna
+effort: low
 tools: Read, Glob, Grep, mcp__plugin_chronos_bridge__memory_record, mcp__plugin_chronos_bridge__memory_digest
 ---
 

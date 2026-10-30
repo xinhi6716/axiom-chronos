@@ -4,14 +4,14 @@
     "name": "xinhi6716"
   },
   "metadata": {
-    "description": "Axiom Chronos (beta): grant wishes on a codebase from inside Claude Code."
+    "description": "Axiom Chronos (beta): grant wishes on a codebase using Codex."
   },
   "plugins": [
     {
       "name": "chronos",
       "source": "./engine",
-      "description": "Wish and research commands: Opus maps modules, Sonnet dispatches Codex workers, every result is verified.",
-      "version": "0.2.0-beta.1"
+      "description": "Wish and research workflows: Astra maps modules, Terra dispatches Codex workers, and verification is recorded.",
+      "version": "0.2.0-codex.1"
     }
   ]
 }

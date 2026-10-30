@@ -1,0 +1,11 @@
+{
+  "name": "axiom-chronos-codex",
+  "plugins": [
+    {
+      "name": "chronos",
+      "source": { "source": "local", "path": "./codex-plugin" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

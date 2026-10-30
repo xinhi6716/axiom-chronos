@@ -1,15 +1,17 @@
-use super::{command, user_message, Config, Renderer};
+use super::{
+    host::{self, Host},
+    Config, Renderer,
+};
 use crate::{
     base::{self, Failure, Res},
-    engine, goal, hook,
+    goal, hook,
 };
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, Write},
     path::Path,
-    process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Mutex,
     },
     time::Duration,
 };
@@ -18,6 +20,10 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[doc(hidden)]
+pub(super) fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 pub fn trigger_interrupt() {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
@@ -177,11 +183,30 @@ pub fn resume(
             )
         })?
         .to_path_buf();
+    // Preserve the originating workflow and bound when resuming research/creative work.
+    let metadata = match std::fs::read(config.home.join("sessions").join(format!("{session}.json")))
+    {
+        Ok(bytes) => Some(serde_json::from_slice::<serde_json::Value>(&bytes).map_err(failure)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(failure(e)),
+    };
+    let skill = metadata
+        .as_ref()
+        .and_then(|m| m["skill"].as_str())
+        .unwrap_or("wish");
+    let max_turns = max_turns.or_else(|| {
+        metadata
+            .as_ref()
+            .and_then(|m| m["max_turns"].as_u64())
+            .and_then(|n| u32::try_from(n).ok())
+    });
+    // Delay reopening until the executable/configuration checks have passed.
+    super::command(config, &cwd, max_turns)?;
     let goal = goal::reopen(&config.home, session)?;
     let prompt = format!("{CONTINUE_TAG} {}", hook::stop_reason(session, &goal));
     run_inner(
         config,
-        "wish",
+        skill,
         &prompt,
         &cwd,
         max_turns,
@@ -213,11 +238,9 @@ fn run_inner(
     resume: Option<&str>,
 ) -> Res<i32> {
     base::require_slug("skill", skill)?;
-    let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns)?;
-    if let Some(id) = resume {
-        argv.extend(["--resume".into(), id.into()]);
-    }
+    base::require_directory(&project.to_string_lossy())?;
+    // Validate the executable before opening state or launching any process.
+    super::command(config, project, max_turns)?;
     let logs = config.home.join("logs");
     std::fs::create_dir_all(&logs).map_err(failure)?;
     let now = std::time::SystemTime::now()
@@ -225,7 +248,7 @@ fn run_inner(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let stamp = log_stamp(now, local_offset_secs(now));
-    let (log_path, mut log) = (0u64..)
+    let (log_path, log) = (0u64..)
         .find_map(|n| {
             let suffix = if n == 0 {
                 String::new()
@@ -246,195 +269,241 @@ fn run_inner(
         .unwrap()?;
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();
-    let mut child = base::proc::command(&argv)
-        .current_dir(project)
-        .env("AXIOM_DATA_HOME", &config.home)
-        .env("AXIOM_HEADLESS", "1")
-        .env("AXIOM_BIN", &config.bin)
-        .env_remove("AXIOM_PYTHON")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| Failure::new("process", e.to_string()))?;
-    let mut stdin = child.stdin.take().unwrap();
-    if let Err(e) = stdin
-        .write_all(
-            user_message(&if resume.is_some() {
-                text.to_owned()
-            } else if text.is_empty() {
-                format!("/chronos:{skill}")
+    let host = Host::new(config, project, log, max_turns)?;
+    let skill_contract = match host.workflow(skill, text) {
+        Ok(contract) => contract,
+        Err(e) => {
+            host.shutdown();
+            return Err(e);
+        }
+    };
+    let session = match host.start("core", resume, skill == "research") {
+        Ok(id) => id,
+        Err(e) => {
+            host.shutdown();
+            if let Some(id) = resume {
+                goal::interrupt(&config.home, id, &format!("{}: {}", e.kind, e.message))?;
+                let _ = writeln!(
+                    out,
+                    "resume: axiom wish --resume {id}\nlog: {}",
+                    log_path.display()
+                );
+            }
+            return Err(e);
+        }
+    };
+    *host.root.lock().unwrap() = session.clone();
+    let mut opened = false;
+    let setup = (|| {
+        if resume.is_none() {
+            if goal::load(&config.home, &session)?.is_some() {
+                return Err(Failure::new(
+                    "already_exists",
+                    "thread already has a root goal",
+                ));
+            }
+            if skill == "research" {
+                goal::open_research(&config.home, &session, text, project.to_str())?;
             } else {
-                format!("/chronos:{skill} {text}")
-            })
-            .as_bytes(),
+                goal::open(&config.home, &session, text, project.to_str())?;
+            }
+            opened = true;
+        }
+        let state = config.home.join("sessions").join(format!("{session}.json"));
+        std::fs::create_dir_all(state.parent().unwrap()).map_err(failure)?;
+        base::atomic_write(
+            &state,
+            &serde_json::to_vec(
+                &serde_json::json!({"thread_id":session,"skill":skill,"max_turns":max_turns}),
+            )
+            .map_err(failure)?,
         )
-        .and_then(|_| stdin.flush())
-    {
-        base::proc::kill_tree(&mut child);
-        return Err(failure(e));
+        .map_err(failure)?;
+        host.register(&session, "core", vec![])
+    })();
+    if let Err(e) = setup {
+        host.shutdown();
+        if opened || resume.is_some() {
+            let _ = goal::interrupt(
+                &config.home,
+                &session,
+                &format!("{}: {}", e.kind, e.message),
+            );
+            let _ = writeln!(
+                out,
+                "resume: axiom wish --resume {session}\nlog: {}",
+                log_path.display()
+            );
+        }
+        return Err(e);
     }
-    let writer = Arc::new(Mutex::new(Some(stdin)));
-    let input_writer = Arc::clone(&writer);
+    let events = host.server.subscribe(&session);
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut line = String::new();
         loop {
             line.clear();
             match input.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {}
+                Ok(_) => (),
             }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut guard = input_writer.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(stdin) = guard.as_mut() else { break };
-            if stdin
-                .write_all(user_message(line).as_bytes())
-                .and_then(|_| stdin.flush())
-                .is_err()
-            {
+            let text = line.trim_end_matches(['\r', '\n']);
+            if !text.trim().is_empty() && tx.send(text.to_owned()).is_err() {
                 break;
             }
         }
-    });
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut bytes = Vec::new();
-            match reader.read_until(b'\n', &mut bytes) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if tx.send(bytes).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        // EOF is only input closure; the goal still controls session completion.
     });
     let mut renderer = Renderer::new();
-    let mut session = None::<String>;
-    let mut final_result = false;
-    let mut goal_error = None;
-    let mut cause = None;
-    let result: Res<i32> = loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            base::proc::kill_tree(&mut child);
-            cause = Some("interrupted by the user".to_string());
-            break Ok(130);
-        }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(bytes) => {
-                if let Err(e) = log.write_all(&bytes) {
-                    base::proc::kill_tree(&mut child);
-                    break Err(failure(e));
-                }
-                let Ok(event) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                    continue;
-                };
-                if event["type"] == "system" && event["subtype"] == "init" {
-                    session = event["session_id"].as_str().map(str::to_owned);
-                }
-                renderer.event(&event, out);
-                if event["type"] != "result" {
-                    continue;
-                }
-                if event["is_error"].as_bool().unwrap_or(false) {
-                    cause = Some(format!(
-                        "claude reported an error: {}",
-                        event["result"]
-                            .as_str()
-                            .unwrap_or("")
-                            .chars()
-                            .take(200)
-                            .collect::<String>()
-                    ));
-                    final_result = true;
-                } else if let Some(id) = session.as_deref() {
-                    match goal::load(&config.home, id) {
-                        Ok(Some(g)) if g.status == "active" => {
-                            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(stdin) = guard.as_mut() {
-                                if let Err(e) = stdin
-                                    .write_all(
-                                        user_message(&format!(
-                                            "{CONTINUE_TAG} {}",
-                                            hook::stop_reason(id, &g)
-                                        ))
-                                        .as_bytes(),
-                                    )
-                                    .and_then(|_| stdin.flush())
-                                {
-                                    base::proc::kill_tree(&mut child);
-                                    break Err(failure(e));
-                                }
-                            }
-                            continue;
-                        }
-                        Ok(Some(g)) if g.status == "blocked" => {
-                            let _ =
-                                writeln!(out, "goal blocked: {}", g.note.as_deref().unwrap_or(""));
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            goal_error = Some(e);
-                        }
-                    }
-                    final_result = true;
-                } else {
-                    final_result = true;
-                }
-                if final_result {
-                    writer.lock().unwrap_or_else(|e| e.into_inner()).take();
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let status = match child.wait() {
-                    Ok(s) => s,
-                    Err(e) => break Err(failure(e)),
-                };
-                if final_result {
-                    break Ok(if renderer.is_error() { 1 } else { 0 });
-                }
-                let code = status.code().filter(|c| *c != 0).unwrap_or(1);
-                cause = Some(format!("claude exited {code} without a result"));
-                let _ = writeln!(
-                    out,
-                    "\nclaude exited {code} without a result; raw events are in {}",
-                    log_path.display()
-                );
-                break Ok(code);
-            }
-        }
+    let mut prompt = if resume.is_some() {
+        text.to_owned()
+    } else {
+        format!("/chronos:{skill} {text}")
     };
-    writer.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if final_result {
-        renderer.summary(out);
+    let mut notice = Some(format!("Root session: {session}. Project: {}. Goal is already open. Follow this workflow:\n{skill_contract}",base::slug_for_dir(project)));
+    let mut cause = None;
+    let mut deferred = Vec::<String>::new();
+    let result: Res<i32> = (|| loop {
+        if interrupted() {
+            cause = Some("interrupted by the user".to_owned());
+            return Ok(130);
+        }
+        if host.budget_exhausted.load(Ordering::Acquire) || host.step(&session).is_err() {
+            cause = Some("maximum turns reached".to_owned());
+            return Ok(1);
+        }
+        let mut turn_input = vec![serde_json::json!({"type":"text","text":prompt})];
+        if let Some(notice) = notice.take() {
+            turn_input.push(serde_json::json!({"type":"text","text":notice}));
+        }
+        let started = host.server.request(
+            "turn/start",
+            host.turn_params(&session, serde_json::json!(turn_input), "max"),
+        )?;
+        let turn = started["turn"]["id"]
+            .as_str()
+            .ok_or_else(|| Failure::new("codex_rpc", "turn/start: missing turn id"))?
+            .to_owned();
+        host.server.register_turn(&session, &turn);
+        let mut report =
+            serde_json::json!({"status":null,"final_message":null,"usage":null,"error":null});
+        loop {
+            for notice in host.drain_notices() {
+                renderer.event(&notice, out);
+            }
+            if host.cancelled.load(Ordering::Acquire)
+                && !goal::load(&config.home, &session)?
+                    .is_some_and(|g| g.reason.as_deref() == Some("user_stop"))
+            {
+                return Err(Failure::new(
+                    "interrupted",
+                    "session callback failed or was cancelled",
+                ));
+            }
+            if host.budget_exhausted.load(Ordering::Acquire) {
+                cause = Some("maximum turns reached (model/tool step budget)".to_owned());
+                return Ok(1);
+            }
+            if interrupted() {
+                cause = Some("interrupted by the user".to_owned());
+                return Ok(130);
+            }
+            if goal::load(&config.home, &session)?
+                .is_some_and(|g| g.reason.as_deref() == Some("user_stop"))
+            {
+                host.bridge.cancel();
+                let g = goal::load(&config.home, &session)?.unwrap();
+                let _ = writeln!(out, "goal blocked: {}", g.note.unwrap_or_default());
+                return Ok(1);
+            }
+            while let Ok(line) = rx.try_recv() {
+                {
+                    let _goal = host.goal_lock.lock().unwrap();
+                    goal::interject(&config.home, &session, &line)?;
+                }
+                if let Err(e) = host.server.request("turn/steer",serde_json::json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":line}]})) {
+                    if e.kind != "codex_rpc" { return Err(e); }
+                    // Completion may race input. Submit the message at the next turn
+                    // boundary rather than losing it or reporting an artificial crash.
+                    host.log(&serde_json::json!({"hostEvent":"steerDeferred","threadId":session,"expectedTurnId":turn,"error":e.to_json()}))?;
+                    deferred.push(line);
+                }
+            }
+            let event = match events.recv_timeout(Duration::from_millis(50)) {
+                Ok(e) => e,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => {
+                    return Err(Failure::new(
+                        "codex_exited",
+                        "Codex app-server exited without a completed turn",
+                    ))
+                }
+            };
+            host.log(&event)?;
+            renderer.event(&event, out);
+            host.observe(&event)?;
+            host::record(&mut report, &event);
+            if event["method"] != "turn/completed" || event["params"]["turn"]["id"] != turn {
+                continue;
+            }
+            host.server.unregister_turn(&session, &turn);
+            break;
+        }
+        if report["status"] != "completed" {
+            cause = Some(format!(
+                "Codex turn {}: {}",
+                report["status"], report["error"]
+            ));
+            return Ok(1);
+        }
+        let g = goal::load(&config.home, &session)?
+            .ok_or_else(|| Failure::new("not_found", "root goal disappeared"))?;
+        match g.status.as_str() {
+            "active" => {
+                prompt = format!("{CONTINUE_TAG} {}", hook::stop_reason(&session, &g));
+                if !deferred.is_empty() {
+                    prompt.push_str("\nUser interjections received as the prior turn ended:\n");
+                    prompt.push_str(&std::mem::take(&mut deferred).join("\n"));
+                }
+            }
+            "done" => return Ok(0),
+            "blocked" => {
+                let _ = writeln!(out, "goal blocked: {}", g.note.unwrap_or_default());
+                return Ok(1);
+            }
+            _ => return Err(Failure::new("invalid_goal", "unknown goal status")),
+        }
+    })();
+    if let Err(e) = &result {
+        cause = Some(format!("{}: {}", e.kind, e.message));
     }
-    if let (Some(id), Some(cause)) = (session.as_deref(), cause.as_deref()) {
-        match goal::interrupt(&config.home, id, cause) {
+    host.shutdown();
+    for notice in host.drain_notices() {
+        renderer.event(&notice, out);
+    }
+    renderer.summary(out);
+    if let Some(cause) = cause {
+        match goal::interrupt(&config.home, &session, &cause) {
             Ok(Some(g)) => {
                 let _ = writeln!(
                     out,
-                    "goal blocked: {}\nresume: axiom wish --resume {id}",
+                    "goal blocked: {}\nresume: axiom wish --resume {session}",
                     g.note.unwrap_or_default()
                 );
             }
             Ok(None) => (),
-            Err(e) => goal_error = Some(e),
+            Err(e) => {
+                let _ = writeln!(out, "goal error: {}: {}", e.kind, e.message);
+            }
         }
     }
     let _ = writeln!(out, "\nlog: {}", log_path.display());
-    if let Some(e) = goal_error {
-        let _ = writeln!(out, "goal error: {}: {}", e.kind, e.message);
-        if matches!(result, Ok(0)) {
-            return Ok(1);
-        }
-    }
     let _ = out.flush();
-    result
+    match result {
+        Err(e) => {
+            let _ = writeln!(out, "session error: {}: {}", e.kind, e.message);
+            Ok(1)
+        }
+        ok => ok,
+    }
 }

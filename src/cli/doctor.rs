@@ -155,28 +155,12 @@ fn linux() -> Check {
 pub fn doctor(out: &mut dyn Write) -> i32 {
     let mut checks = vec![
         tool(
-            "claude",
-            "AXIOM_CLAUDE_CMD",
-            "claude",
-            true,
-            "runs every session",
-            "Install Claude Code and sign in with `claude`.",
-        ),
-        tool(
             "codex",
             "AXIOM_CODEX_CMD",
             "codex",
             true,
-            "terra and sol workers",
+            "sessions, agents and workers",
             "Install the Codex CLI and sign in.",
-        ),
-        tool(
-            "agy",
-            "AXIOM_AGY_CMD",
-            "agy",
-            false,
-            "plain-language reports",
-            "Install Antigravity; without it reports are shown as written.",
         ),
         sqlite(),
         state(),

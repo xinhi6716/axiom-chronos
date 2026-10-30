@@ -1,6 +1,5 @@
 use super::server::Bridge;
 use crate::{
-    agy,
     base::{Failure, Res},
     goal, linux,
     memory::{Memory, Record},
@@ -41,12 +40,12 @@ fn store(b: &Bridge, project: &str) -> Res<std::path::PathBuf> {
     orch::store_for(b.home()?, project)
 }
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
+    b.verification.scope(|| dispatch_inner(b, n, a))
+}
+fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
         "gemini_preview" => {
-            let model = opt(a, "model")
-                .filter(|x| !x.is_empty())
-                .unwrap_or("gemini-4-argon-medium");
             let project = opt(a, "project");
             let stage = opt(a, "stage");
             if let Some(t) = stage {
@@ -67,22 +66,33 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 )?),
                 None => None,
             };
-            let result = b.config.agy.clone().and_then(|command| {
-                agy::run(
-                    &command,
-                    s(a, "prompt"),
-                    opt(a, "cwd").map(Path::new),
-                    model,
-                    a.get("json_schema"),
-                    timeout(a, 600),
-                    &b.children,
-                )
-            });
+            let role = if stage == Some("second_review") {
+                "sol"
+            } else {
+                "luna"
+            };
+            let model = match super::review_run::model(b, opt(a, "model"), role) {
+                Ok(model) => model,
+                Err(e) => {
+                    if let (Some(root), Some(t)) = (&root, stage) {
+                        let _ = orch::record_stage(root, t, "", false);
+                    }
+                    return Err(e);
+                }
+            };
+            let result = super::review_run::run(
+                b,
+                s(a, "prompt"),
+                opt(a, "cwd").map(Path::new),
+                &model,
+                a.get("json_schema").filter(|v| !v.is_null()).cloned(),
+                timeout(a, 600),
+            );
             let mut result = match result {
                 Ok(result) => result,
                 Err(e) => {
                     if let (Some(root), Some(t)) = (&root, stage) {
-                        let _ = orch::record_stage(root, t, model, false);
+                        let _ = orch::record_stage(root, t, &model, false);
                     }
                     return Err(e);
                 }
@@ -106,7 +116,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 }
             }
             if let (Some(root), Some(t)) = (&root, stage) {
-                orch::record_stage(root, t, model, completed)?;
+                orch::record_stage(root, t, &model, completed)?;
             }
             Ok(result)
         }
@@ -132,27 +142,33 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             )
         }
         "review_code" => {
-            let model = opt(a, "model")
-                .filter(|x| !x.is_empty())
-                .unwrap_or("gemini-4-argon-high");
-            let mut r = agy::review(
+            let units = arr(a, "units")?;
+            let role = super::review_run::role(b, opt(a, "project"), &units)?;
+            let model = super::review_run::model(b, opt(a, "model"), role)?;
+            let mut r = super::review::review(
                 s(a, "project_dir"),
                 &arr(a, "paths")?,
                 s(a, "contract"),
-                model,
+                &model,
                 timeout(a, 900),
-                &b.config.agy.clone()?,
-                &b.children,
+                b,
             )?;
             if r["status"] == "completed" && a.get("units").is_some() && opt(a, "project").is_some()
             {
-                let states = orch::record_review(
+                let states = match orch::record_review(
                     &store(b, s(a, "project"))?,
-                    &arr(a, "units")?,
-                    model,
+                    &units,
+                    &model,
                     r["verdict"] == "pass",
                     std::path::Path::new(s(a, "project_dir")),
-                )?;
+                ) {
+                    Ok(states) => states,
+                    Err(e) => {
+                        r["status"] = json!("failed");
+                        r["error"] = e.to_json();
+                        return Ok(r);
+                    }
+                };
                 r["states"] = json!(states
                     .into_iter()
                     .collect::<std::collections::BTreeMap<_, _>>());
@@ -220,7 +236,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
         }
         "bridge_status" => {
             let mut result = json!({"status":"completed","codex_app_server_running":b.running()});
-            for (key, cmd) in [("codex", &b.config.codex), ("agy", &b.config.agy)] {
+            for (key, cmd) in [("codex", &b.config.codex)] {
                 result[key] = match cmd {
                     Err(e) => json!({"error":e.to_json()}),
                     Ok(c) => match crate::base::proc::command(c)
@@ -241,6 +257,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                     },
                 };
             }
+            result["agy"] = json!({"status":"disabled"});
             Ok(result)
         }
         _ => Err(Failure::new("unknown_tool", format!("unknown tool {n}"))),

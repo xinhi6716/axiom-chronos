@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+pub(crate) type ToolHandler = Arc<dyn Fn(&str, &Value) -> Value + Send + Sync>;
+
 pub const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 struct Connection {
     child: Mutex<Child>,
@@ -20,6 +22,7 @@ struct Connection {
     alive: AtomicBool,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     events: Mutex<HashMap<String, (Sender<Value>, Option<Receiver<Value>>)>>,
+    tools: Mutex<HashMap<String, ToolHandler>>,
 }
 pub struct AppServer {
     command: Vec<String>,
@@ -51,11 +54,14 @@ impl AppServer {
         })
     }
     pub fn close(&self) {
-        if let Some(c) = self.connection.lock().unwrap().take() {
+        let connection = self.connection.lock().unwrap().take();
+        if let Some(c) = connection {
             c.alive.store(false, Ordering::Release);
             proc::kill_tree(&mut c.child.lock().unwrap());
             c.pending.lock().unwrap().clear();
             c.events.lock().unwrap().clear();
+            let handlers = std::mem::take(&mut *c.tools.lock().unwrap());
+            drop(handlers);
         }
         self.turns.lock().unwrap().clear();
     }
@@ -90,6 +96,7 @@ impl AppServer {
             alive: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
+            tools: Mutex::new(HashMap::new()),
         });
         *self.connection.lock().unwrap() = Some(c.clone());
         let reader = c.clone();
@@ -107,10 +114,45 @@ impl AppServer {
                 };
                 if let Some(method) = msg.get("method").and_then(Value::as_str) {
                     if let Some(id) = msg.get("id") {
-                        let _ = Self::send(
-                            &reader,
-                            json!({"id":id,"error":{"code":-32601,"message":"axiom bridge grants no interactive approvals"}}),
-                        );
+                        let handler = if method == "item/tool/call" {
+                            msg.pointer("/params/threadId")
+                                .and_then(Value::as_str)
+                                .and_then(|thread_id| {
+                                    reader.tools.lock().unwrap().get(thread_id).cloned()
+                                })
+                        } else {
+                            None
+                        };
+                        if let (Some(handler), Some(tool), Some(args)) = (
+                            handler,
+                            msg.pointer("/params/tool").and_then(Value::as_str),
+                            msg.pointer("/params/arguments"),
+                        ) {
+                            let c = reader.clone();
+                            let id = id.clone();
+                            let tool = tool.to_owned();
+                            let args = args.clone();
+                            thread::spawn(move || {
+                                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&tool, &args)))
+                                    .unwrap_or_else(|_| json!({"contentItems":[{"type":"inputText","text":"tool handler failed"}],"success":false}));
+                                if c.alive.load(Ordering::Acquire) {
+                                    let _ = Self::send(&c, json!({"id":id,"result":result}));
+                                }
+                            });
+                        } else if method == "item/tool/call" {
+                            let _ = Self::send(
+                                &reader,
+                                json!({"id":id,"result":{"contentItems":[{"type":"inputText","text":"tool handler unavailable"}],"success":false}}),
+                            );
+                        } else {
+                            let _ = Self::send(
+                                &reader,
+                                json!({"id":id,"error":{"code":-32601,"message":"axiom bridge grants no interactive approvals"}}),
+                            );
+                        }
+                        if method == "item/tool/call" {
+                            continue;
+                        }
                     }
                     if let Some(id) = msg
                         .pointer("/params/threadId")
@@ -123,20 +165,21 @@ impl AppServer {
                     }
                     let _ = method;
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
-                    if let Some(thread_id) =
-                        msg.pointer("/result/thread/id").and_then(Value::as_str)
-                    {
-                        reader
-                            .events
-                            .lock()
-                            .unwrap()
-                            .entry(thread_id.to_owned())
-                            .or_insert_with(|| {
-                                let (tx, rx) = mpsc::channel();
-                                (tx, Some(rx))
-                            });
-                    }
-                    if let Some(tx) = reader.pending.lock().unwrap().remove(&id) {
+                    let mut pending = reader.pending.lock().unwrap();
+                    if let Some(tx) = pending.remove(&id) {
+                        if let Some(thread_id) =
+                            msg.pointer("/result/thread/id").and_then(Value::as_str)
+                        {
+                            reader
+                                .events
+                                .lock()
+                                .unwrap()
+                                .entry(thread_id.to_owned())
+                                .or_insert_with(|| {
+                                    let (tx, rx) = mpsc::channel();
+                                    (tx, Some(rx))
+                                });
+                        }
                         let _ = tx.send(msg);
                     }
                 }
@@ -144,6 +187,8 @@ impl AppServer {
             reader.alive.store(false, Ordering::Release);
             reader.pending.lock().unwrap().clear();
             reader.events.lock().unwrap().clear();
+            let handlers = std::mem::take(&mut *reader.tools.lock().unwrap());
+            drop(handlers);
         });
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
@@ -152,7 +197,7 @@ impl AppServer {
                 }
             }
         });
-        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
+        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
         Ok(c)
     }
     fn send(c: &Connection, message: Value) -> Res<()> {
@@ -215,6 +260,29 @@ impl AppServer {
     pub(crate) fn request(&self, method: &str, params: Value) -> Res<Value> {
         let c = self.ensure_started()?;
         self.request_on(&c, method, params)
+    }
+    pub(crate) fn register_tools(&self, thread_id: &str, handler: ToolHandler) -> Res<()> {
+        let connection = self.connection.lock().unwrap();
+        let c = connection
+            .as_ref()
+            .filter(|c| c.alive.load(Ordering::Acquire))
+            .ok_or_else(|| Failure::new("codex_exited", "codex app-server closed"))?;
+        let mut tools = c.tools.lock().unwrap();
+        if !c.alive.load(Ordering::Acquire) {
+            return Err(Failure::new("codex_exited", "codex app-server closed"));
+        }
+        let previous = tools.insert(thread_id.to_owned(), handler);
+        drop(tools);
+        drop(connection);
+        drop(previous);
+        Ok(())
+    }
+    pub(crate) fn unregister_tools(&self, thread_id: &str) {
+        let connection = self.connection.lock().unwrap().clone();
+        if let Some(c) = connection {
+            let handler = c.tools.lock().unwrap().remove(thread_id);
+            drop(handler);
+        }
     }
     pub(crate) fn subscribe(&self, thread_id: &str) -> Receiver<Value> {
         let Some(c) = self.connection.lock().unwrap().clone() else {
@@ -369,6 +437,103 @@ fn compare_versions(a: &str, b: &str, role: &str) -> std::cmp::Ordering {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn dynamic_calls_can_make_nested_requests_in_parallel() {
+        use std::sync::Barrier;
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let fake =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
+        let server = Arc::new(AppServer::with_request_timeout(
+            vec![
+                python.into(),
+                "-I".into(),
+                fake.to_string_lossy().into_owned(),
+            ],
+            Some(Duration::from_secs(5)),
+        ));
+        let started = server
+            .request("thread/start", json!({"model":"m"}))
+            .unwrap();
+        let id = started["thread"]["id"].as_str().unwrap();
+        let events = server.subscribe(id);
+        let barrier = Arc::new(Barrier::new(2));
+        let nested = server.clone();
+        server.register_tools(id, Arc::new(move |tool, args| {
+            assert_eq!(tool, "test");
+            barrier.wait();
+            let models = nested.request("model/list", json!({})).unwrap();
+            assert!(models["data"].is_array());
+            json!({"contentItems":[{"type":"inputText","text":args["n"].to_string()}],"success":true})
+        })).unwrap();
+        server
+            .request(
+                "turn/start",
+                json!({"threadId":id,"input":[{"type":"text","text":"DYNAMIC"}]}),
+            )
+            .unwrap();
+        loop {
+            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            if event["method"] == "turn/completed" {
+                assert_eq!(event["params"]["turn"]["status"], "completed");
+                break;
+            }
+        }
+        server.unregister_tools(id);
+        server.unsubscribe(id);
+    }
+
+    #[test]
+    fn dynamic_calls_are_routed_to_independent_threads() {
+        use std::sync::Barrier;
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let fake =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
+        let server = AppServer::with_request_timeout(
+            vec![
+                python.into(),
+                "-I".into(),
+                fake.to_string_lossy().into_owned(),
+            ],
+            Some(Duration::from_secs(5)),
+        );
+        let barrier = Arc::new(Barrier::new(4));
+        let mut threads = Vec::new();
+        for expected in ["first", "second"] {
+            let started = server
+                .request("thread/start", json!({"model":"m"}))
+                .unwrap();
+            let id = started["thread"]["id"].as_str().unwrap().to_owned();
+            let events = server.subscribe(&id);
+            let barrier = barrier.clone();
+            let handler_id = id.clone();
+            server.register_tools(&id, Arc::new(move |tool, args| {
+                assert_eq!(tool, "test");
+                assert_eq!(args["threadId"], handler_id);
+                barrier.wait();
+                json!({"contentItems":[{"type":"inputText","text":format!("{expected}:{}", args["n"])}],"success":true})
+            })).unwrap();
+            server
+                .request(
+                    "turn/start",
+                    json!({"threadId":id,"input":[{"type":"text","text":"DYNAMIC"}]}),
+                )
+                .unwrap();
+            threads.push((id, events));
+        }
+        for (id, events) in threads {
+            loop {
+                let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+                if event["method"] == "turn/completed" {
+                    assert_eq!(event["params"]["threadId"], id);
+                    assert_eq!(event["params"]["turn"]["status"], "completed");
+                    break;
+                }
+            }
+            server.unregister_tools(&id);
+            server.unsubscribe(&id);
+        }
+    }
 
     #[test]
     fn notifications_and_cancel_reach_the_registered_turn() {

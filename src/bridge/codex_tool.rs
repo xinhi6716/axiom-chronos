@@ -199,6 +199,8 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             json!({"kind":"verify_failed","message":"unit verification failed"})
         };
         let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":finished.state,"model":model,"attempt":attempt,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
+        result["thread_id"] = report["thread_id"].clone();
+        result["turn_id"] = report["turn_id"].clone();
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }
