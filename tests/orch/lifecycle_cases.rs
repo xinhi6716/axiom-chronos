@@ -38,6 +38,20 @@ fn begin(store: &Path, repo: &Path) -> Begin {
     begin_unit(store, "a", "worker", repo, false).unwrap()
 }
 #[test]
+fn projects_do_not_share_running_units() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (store_a, repo_a) = setup();
+    let (store_b, repo_b) = setup();
+    assert!(matches!(begin(&store_a, &repo_a), Begin::Run { .. }));
+    // Same unit id and scope in another project: neither busy nor excused by the first claim.
+    assert!(matches!(begin(&store_b, &repo_b), Begin::Run { .. }));
+    abort_unit(&store_a, "a");
+    abort_unit(&store_b, "a");
+    for store in [store_a, store_b] {
+        fs::remove_dir_all(store.parent().unwrap()).unwrap();
+    }
+}
+#[test]
 fn lifecycle_reuse_scope_and_limit() {
     let _guard = TEST_LOCK.lock().unwrap();
     let (store, repo) = setup();
@@ -153,7 +167,7 @@ fn sol_and_extra_commands() {
         begin_unit(&store, "a", "sol", &repo, false).unwrap(),
         Begin::Run { .. }
     ));
-    abort_unit("a");
+    abort_unit(&store, "a");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -259,7 +273,7 @@ fn dependencies_require_verified_unit() {
         begin_unit(&store, "b", "worker", &repo, false).unwrap(),
         Begin::Run { .. }
     ));
-    abort_unit("b");
+    abort_unit(&store, "b");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 

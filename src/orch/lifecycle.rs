@@ -3,7 +3,7 @@ use crate::base::{self, Failure, Res};
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
     time::Duration,
@@ -20,10 +20,15 @@ pub struct Finished {
     pub outside_scope: Vec<String>,
 }
 struct Claim {
+    // Units of different projects never block or excuse each other.
+    store: PathBuf,
     scope: Vec<String>,
     dirty: BTreeSet<String>,
 }
 static RUNNING: OnceLock<Mutex<HashMap<String, Claim>>> = OnceLock::new();
+fn key(store: &Path, unit: &str) -> String {
+    format!("{}|{unit}", store.display())
+}
 fn claims() -> &'static Mutex<HashMap<String, Claim>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -96,7 +101,11 @@ pub fn begin_unit(
     if !missing.is_empty() {
         return Err(Failure::new("not_ready", missing.join(", ")));
     }
-    if active.contains_key(unit) || active.values().any(|c| overlaps(&brief.scope, &c.scope)) {
+    if active.contains_key(&key(store, unit))
+        || active
+            .values()
+            .any(|c| c.store == store && overlaps(&brief.scope, &c.scope))
+    {
         return Err(Failure::new("busy", format!("scope busy: {unit}")));
     }
     if derive_state(&rows, needs_accept(store, unit)?) == "verified"
@@ -133,8 +142,9 @@ pub fn begin_unit(
         astra_gate(store)?;
     }
     active.insert(
-        unit.into(),
+        key(store, unit),
         Claim {
+            store: store.to_path_buf(),
             scope: brief.scope.clone(),
             dirty: dirty(repo)?,
         },
@@ -144,18 +154,18 @@ pub fn begin_unit(
         attempt: count as u32 + 1,
     })
 }
-pub fn abort_unit(unit: &str) {
+pub fn abort_unit(store: &Path, unit: &str) {
     claims()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(unit);
+        .remove(&key(store, unit));
 }
 pub fn running() -> Vec<String> {
     let mut v: Vec<_> = claims()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .keys()
-        .cloned()
+        .map(|k| k.rsplit('|').next().unwrap_or(k).to_owned())
         .collect();
     v.sort();
     v
@@ -163,7 +173,11 @@ pub fn running() -> Vec<String> {
 pub fn ready_units(store: &Path) -> Res<Vec<String>> {
     let active = claims().lock().unwrap_or_else(|e| e.into_inner());
     let units = read_units(store)?;
-    let mut selected: Vec<Vec<String>> = active.values().map(|c| c.scope.clone()).collect();
+    let mut selected: Vec<Vec<String>> = active
+        .values()
+        .filter(|c| c.store == store)
+        .map(|c| c.scope.clone())
+        .collect();
     let mut result = vec![];
     for u in &units {
         let rows = evidence(store, &u.id)?;
@@ -195,24 +209,24 @@ pub fn finish_unit(
     model: &str,
     report: &Value,
 ) -> Res<Finished> {
-    struct Release(String);
-    impl Drop for Release {
+    struct Release<'a>(&'a Path, &'a str);
+    impl Drop for Release<'_> {
         fn drop(&mut self) {
-            abort_unit(&self.0);
+            abort_unit(self.0, self.1);
         }
     }
-    let _release = Release(unit.into());
+    let _release = Release(store, unit);
     let brief = unit_brief(store, unit)?;
     let (before, others) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
-            .get(unit)
+            .get(&key(store, unit))
             .ok_or_else(|| Failure::new("not_found", "unit is not running"))?;
         (
             c.dirty.clone(),
             active
                 .iter()
-                .filter(|(id, _)| id.as_str() != unit)
+                .filter(|(id, c)| c.store == store && **id != key(store, unit))
                 .flat_map(|(_, c)| c.scope.clone())
                 .collect::<Vec<_>>(),
         )

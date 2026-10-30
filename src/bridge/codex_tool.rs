@@ -54,11 +54,11 @@ pub(super) fn destination(root: &Path, path: &str) -> Res<PathBuf> {
     }
     Ok(dest.to_path_buf())
 }
-struct UnitGuard(Option<String>);
+struct UnitGuard(Option<(PathBuf, String)>);
 impl Drop for UnitGuard {
     fn drop(&mut self) {
-        if let Some(u) = &self.0 {
-            orch::abort_unit(u);
+        if let Some((store, u)) = &self.0 {
+            orch::abort_unit(store, u);
         }
     }
 }
@@ -133,7 +133,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             } => {
                 brief = value.text;
                 attempt = n;
-                guard.0 = Some(u.to_owned());
+                guard.0 = Some((root.to_path_buf(), u.to_owned()));
             }
         }
     }

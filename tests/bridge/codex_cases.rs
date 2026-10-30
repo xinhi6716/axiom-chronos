@@ -407,7 +407,7 @@ fn sol_requires_failing_fulltest() {
         temp.path(),
         &[(
             "solunit",
-            "GOAL build\nSCOPE sol-only.txt\nVERIFY echo ok\n",
+            "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n",
         )],
     );
     let b = bridge(temp.path());
