@@ -1,9 +1,4 @@
-<p align="center"><picture>
-  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/readme-cover-dark-mobile.svg" />
-  <source media="(max-width: 600px)" srcset="assets/readme-cover-mobile.svg" />
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme-cover-dark.svg" />
-  <img src="assets/readme-cover.svg" width="1200" alt="Axiom Chronos — 程式碼願望流程測試版，以原創天體時間軸呈現" />
-</picture></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png" width="360" alt="Axiom Chronos — approved Flagship identity artwork"></p>
 
 <h1 align="center">Axiom Chronos</h1>
 
