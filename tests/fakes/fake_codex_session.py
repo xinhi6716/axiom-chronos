@@ -35,7 +35,14 @@ def call(tid,turn,tool,args):
         done=threading.Event()
         waiters[id]=(done,None)
     send({'id':id,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':str(id),'tool':tool,'arguments':args}})
-    assert done.wait(12), ('callback deadlock',tool)
+    # The host owns callback deadlines; a valid nested engineering operation can
+    # outlive the model turn's budget.  Wait for its reply or turn interruption,
+    # rather than silently killing this daemon thread after an arbitrary timeout.
+    while not done.wait(.05):
+        if (tid,turn) in cancelled:
+            with lock:
+                waiters.pop(id, None)
+            return {'success':False,'contentItems':[{'type':'inputText','text':'turn interrupted'}]}
     with lock:
         _,result=waiters.pop(id)
     return result
@@ -49,9 +56,64 @@ children=[]
 def run_turn(tid,turn,params):
     role=threads[tid].get('model','')
     core=not threads[tid].get('ephemeral',False) and 'You are Chronos core' in threads[tid].get('developerInstructions','')
+    if core and scenario.startswith('idle-state'):
+        n = turns[tid]
+        marker = Path(record + '.completed-' + str(n))
+        if n == 1:
+            assert tool(tid,turn,'goal',{'mode':'change'})['success']
+            # Tests control the turn/wait boundary without racing a timer.
+            if scenario in ('idle-state-boundary', 'idle-state-callback'):
+                Path(record + '.boundary').touch()
+                deadline = time.monotonic() + 10
+                while not Path(record + '.release').exists():
+                    if time.monotonic() > deadline: os._exit(4)
+                    time.sleep(.01)
+            if scenario == 'idle-state-callback':
+                result = call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'return durable notices'})
+                assert result['success'], result
+        else:
+            g = json.loads(Path(option('--home'), 'goals', tid + '.json').read_text(encoding='utf-8'))
+            if g.get('interjection'):
+                Path(record + '.interjection').write_text(json.dumps(g), encoding='utf-8')
+                assert tool(tid,turn,'goal',{'classify':'amend'})['success']
+                assert tool(tid,turn,'goal',{'status':'blocked','note':'test finished'})['success']
+        complete(tid,turn,'waiting for durable change')
+        marker.touch()
+        if n == 1:
+            # Bound failures in idle-loop tests even if the host misses a wake.
+            def watchdog():
+                time.sleep(15)
+                os._exit(5)
+            threading.Thread(target=watchdog,daemon=True).start()
+        return
+    if core and scenario=='idle-wake':
+        if turns[tid] == 1:
+            assert tool(tid,turn,'goal',{'mode':'change'})['success']
+            complete(tid,turn,'waiting')
+        else:
+            assert tool(tid,turn,'goal',{'classify':'amend'})['success']
+            tool(tid,turn,'goal',{'status':'blocked','note':'test finished'})
+            complete(tid,turn)
+        return
+    if not core and 'terra' in role and threads[tid].get('dynamicTools'):
+        if scenario in ('planner','planner-invalid','planner-limit'):
+            index=int(params['input'][0]['text'])
+            result=call(tid,turn,'Agent',{'subagent_type':'chronos:astra','prompt':'plan independently','project':'demo','cwd':option('--planner-cwd',option('--project')) if index else option('--project'),'schema_path':option('--schema'),'save_to':option('--output'),'web_search':bool(index)})
+            complete(tid,turn,json.dumps(result))
+            return
+        if scenario == 'agents':
+            call(tid,turn,'Agent',{'subagent_type':'chronos:reviewer','prompt':'review independently'})
+            call(tid,turn,'Agent',{'subagent_type':'chronos:memory-keeper','prompt':'remember'})
+            complete(tid,turn,'routed specialists')
+            return
+        if scenario == 'authority':
+            call(tid,turn,'Agent',{'subagent_type':'chronos:content','prompt':'write document','output_paths':[option('--output')]})
+            complete(tid,turn,'delegated content')
+            return
     if not core:
         if scenario=='fallback' and 'terra' in role:
             result=call(tid,turn,'Agent',{'subagent_type':'chronos:reviewer','prompt':'review Sol writer fallback','project':'demo'})
+            call(tid,turn,'Agent',{'subagent_type':'chronos:critic','prompt':'research critique'})
             complete(tid,turn,json.dumps(result))
             return
         if scenario in ('verify-stop','verify-interrupt') and 'terra' in role and threads[tid].get('dynamicTools'):
@@ -95,7 +157,7 @@ def run_turn(tid,turn,params):
     if scenario=='tool-loop':
         for _ in range(100):
             if (tid,turn) in cancelled: return
-            result=call(tid,turn,'Read',{'file_path':str(Path(option('--project')).joinpath('input.txt'))})
+            result=tool(tid,turn,'workflow',{'action':'status'})
             if not result['success']: return
         return
     if scenario=='native-loop':
@@ -125,7 +187,6 @@ def run_turn(tid,turn,params):
         return
     if scenario=='fallback':
         call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'dispatch reviewer'})
-        call(tid,turn,'Agent',{'subagent_type':'chronos:critic','prompt':'research critique'})
         tool(tid,turn,'goal',{'status':'blocked','note':'fallback probe complete'})
         complete(tid,turn)
         return
@@ -155,18 +216,26 @@ def run_turn(tid,turn,params):
     if scenario=='agents':
         # Direct dispatcher requires change mode.
         call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'dispatch directly'})
-        call(tid,turn,'Agent',{'subagent_type':'chronos:reviewer','prompt':'review independently'})
-        call(tid,turn,'Agent',{'subagent_type':'chronos:memory-keeper','prompt':'remember'})
     if scenario in ('planner','planner-invalid','planner-limit'):
-        for i in range(2):
-            call(tid,turn,'Agent',{'subagent_type':'chronos:astra','prompt':'plan independently','project':'demo','cwd':option('--planner-cwd',option('--project')) if i else option('--project'),'schema_path':option('--schema'),'save_to':option('--output'),'web_search':bool(i)})
+        state=tool(tid,turn,'workflow',{'action':'status'})
+        current=json.loads(state['contentItems'][0]['text'])['workflow']
+        if current['phase']=='intent_review':
+            tool(tid,turn,'workflow',{'action':'verdict','revision':current['revision'],'decision':'reject','reason':'resumed intent requires a revised proposal'})
+        for i in range(1 if scenario=='planner-limit' else 2):
+            result=call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':str(i),'project':'demo'})
+            state=tool(tid,turn,'workflow',{'action':'status'})
+            current=json.loads(state['contentItems'][0]['text'])['workflow']
+            if current['phase']=='intent_review' and scenario!='planner-limit':
+                decision={'action':'verdict','revision':current['revision'],'decision':'reject' if i==0 else 'pass'}
+                if i==0: decision['reason']='first proposal does not match requested scope'
+                tool(tid,turn,'workflow',decision)
     if scenario=='planner-limit':
         complete(tid,turn,status='failed',error={'message':'usage capacity limit'})
         return
     if scenario=='authority':
         call(tid,turn,'Write',{'file_path':option('--output')+'.core','content':'NO'})
         call(tid,turn,PREFIX+'codex_run',{'role':'terra','cwd':option('--project'),'brief':'NO'})
-        call(tid,turn,'Agent',{'subagent_type':'chronos:content','prompt':'write document','output_paths':[option('--output')]})
+        call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'write document','output_paths':[option('--output')]})
     if scenario=='delegated-authority':
         call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'organize documents','output_paths':[option('--output')]})
         tool(tid,turn,'goal',{'status':'blocked','note':'authority probe complete'})
@@ -196,6 +265,7 @@ for line in sys.stdin:
                 done.set()
             continue
     if method=='initialize': reply(msg,{'userAgent':'fake'})
+    elif method=='thread/unsubscribe': reply(msg,{'status':'unsubscribed'})
     elif method=='model/list': reply(msg,{'data':[{'id':'gpt-6-'+r} for r in ('astra','terra','sol','luna')]})
     elif method=='plugin/installed': reply(msg,{'marketplaces':[{'plugins':[{'id':'fixture@test','enabled':True}]}]})
     elif method=='config/read': reply(msg,{'config':{'mcp_servers':{'fixture':{'command':'never-start'}}}})

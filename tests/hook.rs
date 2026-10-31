@@ -179,7 +179,7 @@ fn mode_restrictions() {
             for agent in [false, true] {
                 let e = dispatch(name);
                 let e = if agent { sub(e) } else { e };
-                if mode == Some("change") && !agent {
+                if mode.is_some() && !agent {
                     assert!(call(h, &e).is_none());
                 } else {
                     denial(call(h, &e));

@@ -104,6 +104,60 @@ fn modes_status_and_project_gate() {
 }
 
 #[test]
+#[cfg(any(unix, windows))]
+fn missing_store_gate_does_not_bypass_live_store_lock_or_corrupt_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let store = home.join("orchestrate/project");
+    goal::open(home, "change", "wish", Some("project")).unwrap();
+    goal::set_mode(home, "change", "change").unwrap();
+    assert_eq!(
+        goal::set_status(home, "change", "done", None).unwrap_err().kind,
+        "not_done"
+    );
+    assert!(!store.exists());
+    goal::open(home, "legacy", "wish", Some("project")).unwrap();
+    assert_eq!(
+        goal::set_status(home, "legacy", "done", None).unwrap()["status"],
+        "completed"
+    );
+    assert!(!store.exists());
+
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("core-wait.json"), "invalid json").unwrap();
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    let lock = options.open(store.join(".orch.mutex")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+    goal::open(home, "locked", "wish", Some("project")).unwrap();
+    assert_eq!(
+        goal::set_status(home, "locked", "done", None).unwrap_err().kind,
+        "busy"
+    );
+    assert_eq!(
+        goal::load(home, "locked").unwrap().unwrap().status,
+        "active"
+    );
+    drop(lock);
+    assert_eq!(
+        goal::set_status(home, "locked", "done", None).unwrap_err().kind,
+        "invalid_argument"
+    );
+}
+
+#[test]
 fn done_requires_verified_units_and_current_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();

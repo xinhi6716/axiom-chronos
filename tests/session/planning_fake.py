@@ -2,6 +2,7 @@
 from pathlib import Path
 
 source = (Path(__file__).parents[1] / 'fakes' / 'fake_codex_session.py').read_text(encoding='utf-8')
+source = source.replace("    elif method in ('thread/start','thread/resume'):", "    elif method=='skills/list': reply(msg,{'data':[{'cwd':params['cwds'][0],'errors':[],'skills':[]}]})\n    elif method in ('thread/start','thread/resume'):")
 child_anchor = "    if not core:\n"
 child_probe = '''    if not core and scenario == 'planning-policy':
         home = Path(option('--home'))

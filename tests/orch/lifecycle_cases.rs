@@ -451,13 +451,11 @@ fn lifecycle_reuse_scope_and_limit() {
 #[test]
 fn sol_and_extra_commands() {
     let (store, repo) = setup();
-    assert_eq!(
-        begin_unit(&store, "a", "sol", &repo, false)
-            .err()
-            .unwrap()
-            .kind,
-        "sol_not_allowed"
-    );
+    assert!(matches!(
+        begin_unit(&store, "a", "sol", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    abort_unit(&store, "a");
     assert_eq!(
         begin_unit(&store, "a", "worker", &repo, true)
             .err()
@@ -559,6 +557,7 @@ fn concurrent_workers_and_overlapping_scopes() {
 #[test]
 fn dependencies_require_verified_unit() {
     let (store, repo) = setup();
+    fs::write(repo.join("b.txt"), "b").unwrap();
     add_unit(&store, "b", "n", "b.txt");
     fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS b.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
     let err = begin_unit(&store, "b", "worker", &repo, false)
@@ -586,7 +585,165 @@ fn dependencies_require_verified_unit() {
         begin_unit(&store, "b", "worker", &repo, false).unwrap(),
         Begin::Run { .. }
     ));
+    finish_unit(
+        &store,
+        "b",
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    record_accept(&store, "n", &repo).unwrap();
+    record_review(&store, &["b".into()], "claude-review", true, &repo).unwrap();
+    assert!(current_verified_unit(&store, "b", &repo).unwrap());
+    record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
+    assert!(current_verified_unit(&store, "b", &repo).unwrap());
+    assert!(evidence(&store, "b")
+        .unwrap()
+        .iter()
+        .filter(|r| r.kind == "contract")
+        .all(|r| r.command.len() == 71));
+    assert!(matches!(
+        begin_unit(&store, "b", "worker", &repo, false).unwrap(),
+        Begin::Reused
+    ));
+    // A later failed review invalidates consumers even if sources are unchanged.
+    record_review(&store, &["a".into()], "claude-review", false, &repo).unwrap();
+    assert!(!current_verified_unit(&store, "b", &repo).unwrap());
+    assert_eq!(
+        begin_unit(&store, "b", "worker", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "not_ready"
+    );
+    // A fresh successful independent review at the same identity restores reuse.
+    // Historical failures at that identity remain failures until a new verify.
+    begin_unit(&store, "a", "worker", &repo, false).unwrap();
+    finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
+    assert!(current_verified_unit(&store, "b", &repo).unwrap());
+    fs::write(repo.join("a.txt"), "changed dependency").unwrap();
+    assert!(!current_verified_unit(&store, "b", &repo).unwrap());
+    assert_eq!(
+        begin_unit(&store, "b", "worker", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "not_ready"
+    );
+    fs::write(repo.join("a.txt"), "a").unwrap();
+    assert!(current_verified_unit(&store, "b", &repo).unwrap());
+    let map = fs::read_to_string(store.join("modules.md")).unwrap();
+    fs::write(
+        store.join("modules.md"),
+        map.replacen("CONTRACT x", "CONTRACT changed", 1),
+    )
+    .unwrap();
+    assert!(!current_verified_unit(&store, "b", &repo).unwrap());
+    assert_eq!(
+        begin_unit(&store, "b", "worker", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "not_ready"
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+// Re-executed in a separate OS process, never a second in-process Bridge.
+#[test]
+fn exclusive_claim_child() {
+    let Some(store) = std::env::var_os("CHRONOS_TEST_CLAIM_STORE") else {
+        return;
+    };
+    let repo = std::env::var_os("CHRONOS_TEST_CLAIM_REPO").unwrap();
+    let store = Path::new(&store);
+    let repo = Path::new(&repo);
+    let unit = std::env::var("CHRONOS_TEST_CLAIM_UNIT").unwrap();
+    match std::env::var("CHRONOS_TEST_CLAIM_ACTION").unwrap().as_str() {
+        "busy" => {
+            assert_eq!(
+                begin_unit(store, &unit, "worker", repo, false)
+                    .err()
+                    .unwrap()
+                    .kind,
+                "busy"
+            );
+            assert_eq!(recover_quarantine(store).unwrap_err().kind, "busy");
+        }
+        "abort" => {
+            assert!(matches!(
+                begin_unit(store, &unit, "worker", repo, false).unwrap(),
+                Begin::Run { .. }
+            ));
+            abort_unit(store, &unit);
+            assert!(!store.join(".worker.claim").exists());
+        }
+        "crash" => {
+            assert!(matches!(
+                begin_unit(store, &unit, "worker", repo, false).unwrap(),
+                Begin::Run { .. }
+            ));
+            // Simulates abrupt owner death: no Rust destructors run.
+            std::process::exit(0);
+        }
+        _ => panic!("unknown child action"),
+    }
+}
+
+#[test]
+fn cross_process_claim_is_exclusive_until_release_or_explicit_crash_recovery() {
+    let (store, repo) = setup();
+    add_unit(&store, "b", "n", "b.txt");
+    let child = |unit: &str, action: &str| {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lifecycle_cases::exclusive_claim_child",
+                "--nocapture",
+            ])
+            .env("CHRONOS_TEST_CLAIM_STORE", &store)
+            .env("CHRONOS_TEST_CLAIM_REPO", &repo)
+            .env("CHRONOS_TEST_CLAIM_UNIT", unit)
+            .env("CHRONOS_TEST_CLAIM_ACTION", action)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    begin(&store, &repo);
+    child("a", "busy");
+    child("b", "busy"); // Conservative store ownership, including disjoint scopes.
+    begin_unit(&store, "b", "worker", &repo, false).unwrap();
+    abort_unit(&store, "a");
+    child("a", "busy"); // Last local peer still owns the lease.
     abort_unit(&store, "b");
+    child("a", "abort"); // Negative control: normal release permits another process.
+    child("a", "crash");
+    assert_eq!(
+        begin_unit(&store, "a", "worker", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "busy"
+    );
+    recover_quarantine(&store).unwrap(); // Child exit was independently observed above.
+    child("a", "abort");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -681,11 +838,18 @@ fn non_git_and_reported_paths() {
     let (store, repo) = setup();
     let plain = store.parent().unwrap().join("plain");
     fs::create_dir(&plain).unwrap();
-    assert!(matches!(begin(&store, &plain), Begin::Run { .. }));
+    assert_eq!(
+        begin_unit(&store, "a", "worker", &plain, false)
+            .err()
+            .unwrap()
+            .kind,
+        "process"
+    );
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
     let result = finish_unit(
         &store,
         "a",
-        &plain,
+        &repo,
         "worker",
         "gpt-worker",
         &json!({"status":"completed","file_changes":[{"path":"z.txt"},{"path":"b.txt"}]}),
@@ -697,7 +861,6 @@ fn non_git_and_reported_paths() {
         "b.txt z.txt"
     );
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
-    let _ = repo;
 }
 
 #[test]
@@ -788,7 +951,7 @@ fn verify_tail_keeps_last_2000_characters() {
 
 #[test]
 fn ready_lists_waiting_units_with_next_step() {
-    let (store, repo) = setup();
+    let (store, _repo) = setup();
     for (id, track) in [
         ("b", "m"),
         ("c", "m"),
@@ -851,5 +1014,67 @@ fn ready_lists_waiting_units_with_next_step() {
     let (store, _) = setup();
     assert_eq!(run(&store, &["ready".into()], false, false).stdout, "a\n");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
-    let _ = repo;
+}
+
+#[test]
+fn quarantine_survives_abort_until_explicit_recovery() {
+    let (store, repo) = setup();
+    begin(&store, &repo);
+    quarantine_unit(&store, "a").unwrap();
+    abort_unit(&store, "a");
+    assert!(running().contains(&"a".to_string()));
+    assert_eq!(
+        begin_unit(&store, "a", "sol", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "quarantined"
+    );
+    recover_quarantine(&store).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    abort_unit(&store, "a");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn quarantine_io_failure_does_not_release_active_claim() {
+    let (store, repo) = setup();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    // A regular file prevents create_dir_all from creating the quarantine
+    // directory; this exercises a real filesystem failure, not a stubbed error.
+    fs::write(store.join("quarantine"), b"obstruction").unwrap();
+    assert_eq!(quarantine_unit(&store, "a").unwrap_err().kind, "io");
+    abort_unit(&store, "a");
+    assert!(store.join(".worker.claim").is_file());
+    fs::remove_file(store.join("quarantine")).unwrap();
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "quarantined");
+    recover_quarantine(&store).unwrap();
+    assert!(!store.join(".worker.claim").exists());
+}
+#[test]
+fn git_status_failure_does_not_start_unit() {
+    let (store, repo) = setup();
+    fs::remove_dir_all(repo.join(".git")).unwrap();
+    assert_eq!(
+        begin_unit(&store, "a", "worker", &repo, false)
+            .err()
+            .unwrap()
+            .kind,
+        "process"
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn opted_in_store_refuses_unenrolled_units_without_changing_ordinary_workflows() {
+    let (store, repo) = setup();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    abort_unit(&store, "a");
+    let output = run(&store, &["wait".into(), "enroll".into()], true, false);
+    assert_eq!(output.exit_code, 0, "{}", output.stderr);
+    assert!(begin_unit(&store, "a", "terra", &repo, false).is_err());
+    assert!(commit_dispatch(&store, "a").is_err());
+    assert!(ready_units(&store).unwrap().is_empty());
+    assert!(release_gate(&store).is_err());
+    assert!(wait_state(&store).unwrap().events.is_empty());
 }

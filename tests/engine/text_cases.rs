@@ -5,22 +5,19 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 }
 
 #[test]
-fn creative_ruling_and_mode_precede_artifact_writes_and_architect() {
-    let text = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md"),
-    )
-    .unwrap();
-    let ruling = text.find("Rule on each finding yourself").unwrap();
-    let choice = text.find("choose exactly one smallest increment").unwrap();
-    let mode = text.find("declare the mode after the ruling").unwrap();
-    let review = text
-        .find("write the review to `<store>/astra/review.json`")
-        .unwrap();
-    let final_plan = text.find("`<store>/astra/plan-final.md`").unwrap();
-    let rulings = text.find("`<store>/astra/ruling.md`").unwrap();
-    let architect = text.find("3. In creative mode always").unwrap();
-    assert!(ruling < choice && choice < mode && mode < review);
-    assert!(mode < final_plan && mode < rulings && rulings < architect);
+fn core_routes_technical_context_without_ruling_or_report_ingestion() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("engine");
+    let wish = fs::read_to_string(root.join("skills/wish/SKILL.md")).unwrap();
+    let research = fs::read_to_string(root.join("skills/research/SKILL.md")).unwrap();
+    for text in [&wish, &research] {
+        assert!(!text.contains("Rule on each finding yourself"));
+        assert!(!text.contains("Read every file"));
+        assert!(text.contains("do not start another core model"));
+    }
+    assert!(wish.contains("Declare change mode after a qualifying ruling"));
+    assert!(wish.contains("no technical design, rulings, implementation, assembly"));
+    assert!(research.contains("core must not do it"));
+    assert!(wish.contains("Read-only is not an inability to dispatch"));
 }
 
 #[test]
@@ -30,15 +27,15 @@ fn required_phrases_are_present() {
         ("agents/dispatcher.md", "Never forward engineering Codex work through another agent"),
         ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),
         ("agents/dispatcher.md", "`cargo test --locked --offline`"),
-        ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
+        ("skills/wish/SKILL.md", "resume the same dispatcher ownership"),
         ("skills/wish/SKILL.md", "`[creative]`"),
-        ("skills/wish/SKILL.md", "run step 2, then step 2a, then step 3 always"),
+        ("skills/wish/SKILL.md", "engineering change mode is selected only after the independent ruling"),
         ("skills/wish/SKILL.md", "at most three candidates"),
         ("skills/wish/SKILL.md", "the existing capability, the missing link, the code location, the user-visible value, and a falsifiable acceptance check"),
         ("skills/wish/SKILL.md", "evidence strength, then direct user value, then reuse of what exists"),
         ("skills/wish/SKILL.md", "exactly one smallest increment"),
         ("skills/wish/SKILL.md", "In creative mode `[no-architect]` is ignored"),
-        ("skills/wish/SKILL.md", "declare the mode after the ruling"),
+        ("skills/wish/SKILL.md", "Declare change mode after a qualifying ruling"),
         ("skills/wish/SKILL.md", "no follow-up exploration"),
         ("skills/wish/SKILL.md", "`area: feature`"),
         ("agents/dispatcher.md", "including fix and sol units"),
@@ -57,11 +54,11 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "`## Coverage`"),
         ("skills/wish/SKILL.md", "`review-failed`, or `unreviewed`"),
         ("skills/research/SKILL.md", "output path `<store>/research/plan.json`"),
-        ("skills/research/SKILL.md", "`stage: \"second_review\"`"),
+        ("skills/research/SKILL.md", "second-review stage"),
         ("agents/astra.md", "do not call `codex_run`"),
         ("agents/content.md", "exact files authorized by `output_paths`"),
         ("agents/dispatcher.md", "<actual model returned by the agent>"),
-        ("skills/research/SKILL.md", "`schema_path`"),
+        ("skills/research/SKILL.md", "`schema_path:"),
         ("skills/wish/SKILL.md", "`subagent_type: \"chronos:astra\"`"),
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("engine");

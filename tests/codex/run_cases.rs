@@ -26,6 +26,71 @@ fn server() -> AppServer {
 }
 
 #[test]
+fn actual_effort_uses_server_settings_evidence() {
+    let dir = common::temp();
+    let server = server();
+    for (brief, expected) in [
+        ("EFFORT_NESTED", json!("high")),
+        ("EFFORT_MISSING", Value::Null),
+        ("EFFORT_NULL", Value::Null),
+        ("EFFORT_INVALID", Value::Null),
+        ("EFFORT_EMPTY", Value::Null),
+        ("EFFORT_LEGACY", json!("medium")),
+        ("EFFORT_ROUTING", Value::Null),
+    ] {
+        let report = server.run(&request(dir.path(), brief)).unwrap();
+        assert_eq!(report["status"], "completed", "{brief}");
+        assert_eq!(report["actual_effort"], expected, "{brief}");
+    }
+}
+
+#[test]
+fn stderr_is_not_exposed_in_initialization_or_crash_errors() {
+    const SECRET: &str = "synthetic-stderr-secret-83a4";
+    let dir = common::temp();
+    let script = dir.path().join("stderr_server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+mode, marker, secret = sys.argv[1:4]
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get('method')
+    if method == 'initialize' and mode == 'crash':
+        print(json.dumps({'id': msg['id'], 'result': {}}), flush=True)
+    elif method == ('initialize' if mode == 'init' else 'model/list'):
+        sys.stderr.buffer.write(b'\xff' + secret.encode() + b'x' * (256 * 1024))
+        sys.stderr.flush()
+        with open(marker, 'w') as f:
+            f.write('written')
+        sys.exit(7)
+"#,
+    )
+    .unwrap();
+    for mode in ["init", "crash"] {
+        let marker = dir.path().join(mode);
+        let server = AppServer::with_request_timeout(
+            vec![
+                common::python(),
+                script.to_string_lossy().into_owned(),
+                mode.into(),
+                marker.to_string_lossy().into_owned(),
+                SECRET.into(),
+            ],
+            Some(Duration::from_secs(5)),
+        );
+        let error = server.list_models().unwrap_err();
+        assert_eq!(error.kind, "codex_exited", "{mode}: {error}");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "written");
+        assert!(
+            !error.to_json().to_string().contains(SECRET),
+            "{mode}: {error}"
+        );
+    }
+}
+
+#[test]
 fn completed_and_lean_configuration() {
     let dir = common::temp();
     let server = server();
@@ -44,7 +109,7 @@ fn completed_and_lean_configuration() {
     );
     assert_eq!(
         r["disabled"],
-        json!({"sections":["apps","goals","skills_catalog","personality","web_search"],"plugins":["keepme@personal","panel@personal"],"mcp_servers":["node_repl"]})
+        json!({"sections":["apps","goals","skills_catalog","personality","web_search"],"plugins":["keepme@personal","panel@personal"],"mcp_servers":["node_repl"],"skills":["/skills/ordinary/SKILL.md","/skills/workflow/SKILL.md"]})
     );
     assert_eq!(r["usage"]["totalTokens"], 1240);
     assert_eq!(r["started_mcp_servers"], json!([]));
@@ -59,10 +124,19 @@ fn completed_and_lean_configuration() {
     assert_eq!(p["developerInstructions"], "instructions");
     assert_eq!(
         p["config"]["features"],
-        json!({"apps":false,"goals":false,"multi_agent":false,"multi_agent_v2":false,"view_image":true})
+        json!({"apps":false,"goals":false,"plugins":false,"remote_plugin":false,"multi_agent":false,"multi_agent_v2":false,"view_image":true})
     );
     assert_eq!(p["config"]["personality"], "none");
     assert_eq!(echo["config"]["skills"]["max_context_tokens"], 1);
+    assert_eq!(
+        echo["config"]["skills"]["config"].as_array().unwrap().len(),
+        2
+    );
+    assert!(p["baseInstructions"]
+        .as_str()
+        .unwrap()
+        .contains("project AGENTS"));
+    assert_eq!(r["model"], "gpt-6.1-terra");
     assert_eq!(echo["config"]["web_search"], "disabled");
     assert_eq!(echo["disabled_plugin_ids"], r["disabled"]["plugins"]);
     let mut req = request(dir.path(), "search");
@@ -76,10 +150,16 @@ fn completed_and_lean_configuration() {
         .contains(&json!("web_search")));
     let echo: Value = serde_json::from_str(kept["final_message"].as_str().unwrap()).unwrap();
     assert!(echo["config"].get("web_search").is_none());
+    assert!(echo["config"]["features"].get("plugins").is_none());
+    assert_eq!(
+        echo["config"]["skills"]["config"],
+        json!([{"path":"/skills/ordinary/SKILL.md","enabled":false}])
+    );
     req.lean = false;
     let inherited = server.run(&req).unwrap();
     assert!(inherited["disabled"].is_null());
     let echo: Value = serde_json::from_str(inherited["final_message"].as_str().unwrap()).unwrap();
+    assert!(echo["thread_params"].get("baseInstructions").is_none());
     assert_eq!(
         echo["thread_params"]["config"]["features"],
         json!({"multi_agent":false,"multi_agent_v2":false,"view_image":true})
@@ -89,6 +169,60 @@ fn completed_and_lean_configuration() {
         4
     );
     assert_ne!(r["thread_id"], inherited["thread_id"]);
+}
+
+#[test]
+fn official_integrations_are_opt_in_per_thread_not_removed_from_global_config() {
+    // Synthetic installed IDs exercise the same mechanism for each official service;
+    // this is not a live OAuth/provider check.
+    for service in [
+        "github",
+        "google-drive",
+        "gmail",
+        "google-calendar",
+        "documents",
+        "spreadsheets",
+        "browser",
+    ] {
+        let dir = common::temp();
+        let config = dir.path().join("config.toml");
+        let original = format!(
+            "# official integration sentinel\n[plugins.\"{service}@official\"]\nenabled = true\n"
+        );
+        std::fs::write(&config, &original).unwrap();
+        let fake = dir.path().join("official.py");
+        let id = format!("{service}@official");
+        std::fs::write(&fake, format!("from pathlib import Path\np={}\ns=Path(p).read_text(encoding='utf-8').replace('keepme@personal',{})\nexec(compile(s,p,'exec'))\n", serde_json::to_string(&common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy()).unwrap(), serde_json::to_string(&id).unwrap())).unwrap();
+        let server = AppServer::new(vec![
+            common::python(),
+            "-I".into(),
+            fake.to_string_lossy().into_owned(),
+        ]);
+        let mut req = request(dir.path(), "inspect official integration routing");
+        let lean = server.run(&req).unwrap();
+        assert_eq!(lean["started_mcp_servers"], json!([]));
+        req.keep_plugins = vec![id.clone()];
+        let kept = server.run(&req).unwrap();
+        assert_eq!(kept["started_mcp_servers"], json!(["keepme"]));
+        let echo: Value = serde_json::from_str(kept["final_message"].as_str().unwrap()).unwrap();
+        assert!(!kept["disabled"]["plugins"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(id)));
+        assert_eq!(echo["config"]["features"]["view_image"], true);
+        assert_eq!(
+            echo["config"]["skills"]["config"],
+            json!([{"path":"/skills/ordinary/SKILL.md","enabled":false}])
+        );
+        req.lean = false;
+        let inherited = server.run(&req).unwrap();
+        assert!(inherited["disabled"].is_null());
+        assert_eq!(
+            inherited["started_mcp_servers"].as_array().unwrap().len(),
+            4
+        );
+        assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    }
 }
 
 #[test]
@@ -147,7 +281,7 @@ fn timeout_crash_and_restart() {
     req.timeout_s = 10;
     let r = server.run(&req).unwrap();
     assert_eq!(r["status"], "bridge_error");
-    assert_eq!(r["error"]["kind"], "codex_exited");
+    assert_eq!(r["error"]["kind"], "turn_unconfirmed");
     req.brief = "after crash".into();
     assert_eq!(server.run(&req).unwrap()["status"], "completed");
 }
@@ -227,7 +361,7 @@ fn hanging_rpc_times_out() {
             .run(&request(dir.path(), "HANGREQ"))
             .unwrap_err()
             .kind,
-        "timeout"
+        "turn_unconfirmed"
     );
     assert!(start.elapsed() < Duration::from_secs(5));
 }
@@ -268,5 +402,106 @@ fn cancel_all_interrupts_single_and_concurrent_turns() {
                     && e["params"]["turnId"] == report["turn_id"]));
         }
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+}
+
+#[test]
+fn refused_interrupt_is_unconfirmed() {
+    let dir = common::temp();
+    let server = server();
+    let mut req = request(dir.path(), "HANG REFUSE_INTERRUPT");
+    req.timeout_s = 1;
+    let report = server.run(&req).unwrap();
+    assert_eq!(report["status"], "bridge_error");
+    assert_eq!(report["error"]["kind"], "turn_unconfirmed");
+}
+
+#[test]
+fn actual_model_and_unconfirmed_interrupt() {
+    let dir = common::temp();
+    let server = server();
+    let mut req = request(dir.path(), "normal");
+    req.model = "requested-model".into();
+    let result = server.run(&req).unwrap();
+    assert_eq!(result["model"], "actual-model");
+    assert_eq!(result["requested_model"], "requested-model");
+    req.brief = "NO_CONFIRM".into();
+    req.timeout_s = 1;
+    let start = Instant::now();
+    let result = server.run(&req).unwrap();
+    assert_eq!(result["error"]["kind"], "turn_unconfirmed");
+    assert!(start.elapsed() >= Duration::from_secs(2));
+    assert!(start.elapsed() < Duration::from_secs(6));
+    req.brief = "normal".into();
+    assert_eq!(server.run(&req).unwrap()["status"], "completed");
+}
+
+#[test]
+fn confirmed_late_completion_is_terminal_but_not_cancelled_or_timed_out_success() {
+    let dir = common::temp();
+    let server = server();
+    let mut req = request(dir.path(), "LATE_COMPLETE");
+    req.timeout_s = 1;
+    let result = server.run(&req).unwrap();
+    assert_eq!(result["terminal_status"], "completed");
+    assert_eq!(result["status"], "timeout");
+    assert_eq!(result["error"]["kind"], "timeout");
+    let (server, log) = logged_server(dir.path());
+    let cancellation = axiom::base::proc::Cancellation::default();
+    let worker_cancel = cancellation.clone();
+    req.timeout_s = 10;
+    let worker = std::thread::spawn(move || worker_cancel.scope(|| server.run(&req).unwrap()));
+    let until = Instant::now() + Duration::from_secs(5);
+    while !entries(&log).iter().any(|e| e["method"] == "turn/start") {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Unlike cancelling an unacknowledged start, target a registered running turn.
+    std::thread::sleep(Duration::from_millis(100));
+    cancellation.cancel();
+    let result = worker.join().unwrap();
+    assert_eq!(result["terminal_status"], "completed");
+    assert_eq!(result["status"], "interrupted");
+    assert_eq!(result["error"]["kind"], "interrupted");
+}
+
+#[test]
+fn cancellation_during_turn_start_reports_shared_close() {
+    let dir = common::temp();
+    let (server, log) = logged_server(dir.path());
+    let server = Arc::new(server);
+    let cancellation = axiom::base::proc::Cancellation::default();
+    let worker_cancel = cancellation.clone();
+    let worker_server = server.clone();
+    let req = request(dir.path(), "HANGREQ");
+    let worker = std::thread::spawn(move || worker_cancel.scope(|| worker_server.run(&req)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entries(&log).iter().any(|e| e["method"] == "turn/start") {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cancellation.cancel();
+    let error = worker.join().unwrap().unwrap_err();
+    assert_eq!(error.kind, "turn_unconfirmed");
+    assert!(error.message.contains("concurrent calls"));
+}
+
+#[test]
+fn rejects_unconfirmed_verifier_policy_before_turn() {
+    let dir = common::temp();
+    for mode in [
+        "FAKE_WRONG_MODEL",
+        "FAKE_WRONG_SANDBOX",
+        "FAKE_WRONG_APPROVAL",
+    ] {
+        let mut req = request(dir.path(), "must not execute");
+        req.model = "gpt-6-astra".into();
+        req.sandbox = "read-only".into();
+        req.developer_instructions = Some(mode.into());
+        assert_eq!(
+            server().run(&req).unwrap_err().kind,
+            "thread_policy",
+            "{mode}"
+        );
     }
 }

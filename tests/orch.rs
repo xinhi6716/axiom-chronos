@@ -6,3 +6,6 @@ mod lifecycle_cases;
 mod parse_cases;
 #[path = "orch/store_cases.rs"]
 mod store_cases;
+
+#[path = "orch/wait_cases.rs"]
+mod wait_cases;

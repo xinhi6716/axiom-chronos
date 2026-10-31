@@ -97,20 +97,23 @@ pub fn review(
     );
     let mut result =
         super::review_run::run(bridge, &prompt, None, model, Some(schema()), timeout_s)?;
+    let actual_model = result["model"].as_str().unwrap_or("").to_owned();
     if result["status"] != "completed" {
         if result["error"]["kind"] == "invalid_structured_output" {
             return Ok(
-                json!({"status":"failed", "verdict":null, "findings":[], "reviewer":model,
+                json!({"status":"failed", "verdict":null, "findings":[], "reviewer":actual_model,"requested_model":model,
                 "bytes_reviewed":total, "usage":result["usage"], "error":{"kind":"no_review_output",
                 "message":result["error"]["message"], "fallback":true}}),
             );
         }
         result["error"]["fallback"] = json!(true);
+        result["reviewer"] = result["model"].clone();
         return Ok(result);
     }
     let thread = result["thread_id"].clone();
     let turn = result["turn_id"].clone();
-    let mut report = derive(result, model, total);
+    let mut report = derive(result, &actual_model, total);
+    report["requested_model"] = json!(model);
     report["thread_id"] = thread;
     report["turn_id"] = turn;
     Ok(report)

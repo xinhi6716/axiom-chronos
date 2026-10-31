@@ -13,7 +13,7 @@
 
 用僅依賴 Codex 的 Rust 執行環境協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
 
-**公開測試版（beta）· 0.2.0-codex.1。** 每次 commit 前請檢查 diff。
+**公開測試版（beta）· 0.2.2-codex.dev.7。** 每次 commit 前請檢查 diff。
 
 | 01 · 準備 | 02 · 描述 | 03 · 檢查 |
 | --- | --- | --- |
@@ -89,14 +89,16 @@ axiom wish --project ../other 把 calc 全部改名成 compute_total
 | `--max-turns N` | — | 限制各 host thread 的模型／工具步數；達上限即停止並提供續接指令。 |
 | `--resume <session-id>` | — | 繼續先前的願望 session。 |
 | `--creative` | — | 探索並選擇有證據支持的小幅改進。 |
-| `--no-architect` | 關閉 | 非創意願望跳過架構代理。 |
+| `--no-architect` | 關閉 | 保留輸入旗標；不可略過必要的核准規劃。 |
 | `--astra` | 關閉 | 先執行獨立 Astra 規劃與裁定流程。 |
 
-- **Astra max 核心：**持續執行整個 session、委派工作並負責最終裁定；另一個獨立 Astra max 規劃 thread 起草研究與可選的願望計畫。
-- **Terra high 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
-- **Codex `terra` worker：**在用完即丟的 thread 工作。只有多個 unit 改檔且全專案測試失敗時，才派 `sol` 整合。
-- **Sol／Astra 工程審查：**以不同於撰寫者的角色審查；不同於原版跨模型家族審查，此版本均使用 OpenAI Codex。Sol 也審查計畫，Luna 改寫報告。
-- **Luna 記憶代理：**保存已驗證 unit 中可重用的工作；Luna 內容代理可處理授權的非工程文件、圖片與整理。
+- **目前的 Astra medium 核心：**溝通意圖、最簡通過／不通過複核、提交已驗證輪次；不另開核心。
+- **Terra high 調度者：**負責路由、持久化工作與一般修復。
+- **Astra MAX 研究者：**獨立思考與研究；核心通過後取消研究執行緒訂閱並釋放 Host 上下文索引，保留研究產物。
+- **Astra HIGH 規劃者：**依核准研究切分模塊、依賴與驗收。
+- **Terra 實作者與 Sol HIGH 組裝者：**完成模塊並組裝。
+- **獨立 Astra HIGH 驗證者：**核對來源綁定的測試與軟體包證據，只驗證，不改進。
+- **Terra medium 記憶模塊；Luna 內容模塊：**記憶由 Terra 維護；Luna 處理授權的非工程文件、圖片與整理。
 
 Rust host 載入嵌入指示、替換相容佔位符，並透過原有 hooks 與唯讀代理 sandbox 執行限制。Codex worker 預設使用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context。詳見 [bridge contracts](docs/bridge.md#contracts)。
 

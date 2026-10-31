@@ -260,11 +260,16 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
     let mut goal = required(home, session)?;
     if status == "done" && !matches!(goal.mode.as_deref(), Some("answer" | "review")) {
         if let Some(project) = &goal.project {
+            if home.join("authority").join(session).join("state.json").is_file()
+                && crate::session::authority::read(home,session)?.phase == crate::session::authority::Phase::Submitted {
+                crate::orch::round_evidence_gate(&crate::orch::store_for(home,project)?, Path::new(goal.cwd.as_deref().ok_or_else(|| Failure::new("invalid_argument","missing project directory"))?))?;
+            } else {
             crate::orch::done_gate_in_repo(
                 &crate::orch::store_for(home, project)?,
                 goal.mode.as_deref() == Some("change"),
                 goal.cwd.as_deref().map(Path::new),
             )?;
+            }
         }
     }
     goal.status = status.into();

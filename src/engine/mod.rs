@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub const FILES: &[(&str, &str)] = &[
+    ("agents/tester.md", include_str!("../../engine/agents/tester.md")),
     (
         ".claude-plugin/plugin.json",
         include_str!("../../engine/.claude-plugin/plugin.json"),

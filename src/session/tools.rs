@@ -1,11 +1,9 @@
 use crate::base::{self, Failure, Res};
 use serde_json::{json, Value};
 use std::{
-    io::Read,
     path::{Path, PathBuf},
-    process::Stdio,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    sync::atomic::AtomicBool,
+    time::Duration,
 };
 
 fn arg<'a>(a: &'a Value, k: &str) -> &'a str {
@@ -206,7 +204,7 @@ pub(super) fn dispatch(
         "Write" => write(home, cwd, a, outputs),
         "Glob" | "Grep" => {
             let mut command = std::process::Command::new("rg");
-            command.current_dir(cwd).stdin(Stdio::null());
+
             if name == "Glob" {
                 command.args(["--files", "--hidden", "-g", arg(a, "pattern")]);
             } else {
@@ -225,12 +223,12 @@ pub(super) fn dispatch(
             if let Some(p) = a["path"].as_str() {
                 command.arg(path(cwd, p));
             }
-            let result = command.output().map_err(error)?;
-            if !result.status.success() && result.status.code() != Some(1) {
-                return Err(error(String::from_utf8_lossy(&result.stderr)));
+            let result = base::proc::run_command(command, cwd, Duration::from_secs(30))?;
+            if result.exit_code != 0 && result.exit_code != 1 {
+                return Err(error(result.output));
             }
             Ok(
-                json!({"output":String::from_utf8_lossy(&result.stdout).chars().take(64000).collect::<String>()}),
+                json!({"exit_code":result.exit_code,"output":result.output,"timed_out":result.timed_out}),
             )
         }
         "Bash" => shell(cwd, a, cancelled),
@@ -238,7 +236,7 @@ pub(super) fn dispatch(
     }
 }
 
-fn shell(cwd: &Path, a: &Value, cancelled: &AtomicBool) -> Res<Value> {
+fn shell(cwd: &Path, a: &Value, _cancelled: &AtomicBool) -> Res<Value> {
     let text = arg(a, "command");
     if !crate::hook::read_only_bash(text) || text.chars().any(|c| "$`{}()<>".contains(c)) {
         return Err(Failure::new(
@@ -261,42 +259,10 @@ fn shell(cwd: &Path, a: &Value, cancelled: &AtomicBool) -> Res<Value> {
     };
     #[cfg(unix)]
     let argv = vec!["sh".into(), "-c".into(), text.into()];
-    let mut child = base::proc::command(&argv)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(error)?;
-    let reader = |mut pipe: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut data = Vec::new();
-            let _ = pipe.read_to_end(&mut data);
-            data
-        })
-    };
-    let stdout = reader(Box::new(child.stdout.take().unwrap()));
-    let stderr = reader(Box::new(child.stderr.take().unwrap()));
-    let deadline = Instant::now()
-        + Duration::from_millis(a["timeout"].as_u64().unwrap_or(120000).clamp(1, 120000));
-    let status = loop {
-        match child.try_wait().map_err(error)? {
-            Some(s) => break s.code().unwrap_or(-1),
-            None if Instant::now() < deadline
-                && !super::run::interrupted()
-                && !cancelled.load(Ordering::Acquire) =>
-            {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            None => {
-                base::proc::kill_tree(&mut child);
-                break -1;
-            }
-        }
-    };
-    let mut output = stdout.join().unwrap_or_default();
-    output.extend(stderr.join().unwrap_or_default());
-    Ok(
-        json!({"exit_code":status,"output":String::from_utf8_lossy(&output).chars().take(64000).collect::<String>()}),
-    )
+    let result = base::proc::run_command(
+        base::proc::command(&argv),
+        cwd,
+        Duration::from_millis(a["timeout"].as_u64().unwrap_or(120000).clamp(1, 120000)),
+    )?;
+    Ok(json!({"exit_code":result.exit_code,"output":result.output,"timed_out":result.timed_out}))
 }

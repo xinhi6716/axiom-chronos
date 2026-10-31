@@ -13,7 +13,7 @@
 
 Coordinate scoped code changes with the Codex-only Rust runtime. Keep verification records and reusable project context.
 
-**Public beta · 0.2.0-codex.1.** Review each diff before committing.
+**Public beta · 0.2.2-codex.dev.7.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |
@@ -86,14 +86,16 @@ axiom wish --project ../other rename calc to compute_total everywhere
 | `--max-turns N` | — | Bound model/tool steps per host thread; reaching the bound stops the session with resume instructions. |
 | `--resume <session-id>` | — | Resume a previous wish session. |
 | `--creative` | — | Explore and select a small evidence-backed increment. |
-| `--no-architect` | Off | Skip the architect for non-creative wishes. |
+| `--no-architect` | Off | Retained input flag; cannot bypass mandatory approved planning. |
 | `--astra` | Off | Run the independent Astra planning and ruling flow first. |
 
-- **Astra max core:** persists for the session, delegates work and owns the final ruling. A separate Astra max planner drafts research and optional wish plans.
-- **Terra high dispatcher:** scopes units, supplies relevant memory and verifies their command records.
-- **Codex `terra` workers:** work in ephemeral threads. A `sol` integration unit is used only when the full suite fails after more than one unit changed files.
-- **Sol/Astra engineering reviewer:** reviews with a distinct role from the writer; unlike the original different-family review, all models here are OpenAI Codex. Sol also reviews plans; Luna rewrites reports.
-- **Luna memory keeper:** saves reusable work from verified units. Luna content can handle authorized nonengineering documents, images and organization.
+- **Current Astra medium core:** communicates user intent, returns pass/reject for intent conflicts, and submits a tested round. No second core is launched.
+- **Terra high dispatcher:** owns routing, persisted work and ordinary repair.
+- **Astra MAX researcher:** develops the technical plan in an independent context, unsubscribed after core approval (Host context metadata is released).
+- **Astra HIGH planner:** splits approved work into modules, dependencies and acceptance checks.
+- **Terra workers and Sol HIGH assembler:** implement modules and assemble the changes.
+- **Separate Astra HIGH tester:** validates actual source-bound test/package evidence; it does not improve the product.
+- **Terra medium memory keeper; Luna content:** reusable verified memory belongs to Terra. Luna handles authorized nonengineering documents, images and organization.
 
 The Rust host loads embedded instructions, substitutes compatibility placeholders, and enforces the original hooks and read-only agent sandboxes. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. [Bridge contracts](docs/bridge.md#contracts).
 

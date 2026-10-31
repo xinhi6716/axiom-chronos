@@ -178,11 +178,6 @@ fn sol_and_astra_restrictions() {
         &[("gatedunit", "GOAL build\nSCOPE gated.txt\nVERIFY echo ok\n")],
     );
     let b = bridge(home);
-    let sol = invoke(
-        &b,
-        json!({"project":"demo","unit":"gatedunit","cwd":repo,"role":"sol","model":"gpt-6-sol"}),
-    );
-    assert_eq!(sol["error"]["kind"], "sol_not_allowed");
     let mut g = axiom::goal::open(
         home,
         "session",
@@ -495,17 +490,15 @@ fn astra_gate_requires_every_prerequisite() {
     }
 }
 #[test]
-fn sol_requires_failing_fulltest() {
+fn sol_can_assemble_without_failing_fulltest() {
     let temp = common::temp();
-    let (repo, store) = fixture(
+    let (repo, _store) = fixture(
         temp.path(),
         &[("solunit", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")],
     );
     let b = bridge(temp.path());
     let args =
         json!({"project":"demo","unit":"solunit","cwd":repo,"role":"sol","model":"gpt-6-sol"});
-    assert_eq!(invoke(&b, args.clone())["error"]["kind"], "sol_not_allowed");
-    orch::record_full(&store, &repo, Some("exit 1")).unwrap();
     let r = invoke(&b, args);
     assert_eq!(r["state"], "built", "{r}");
 }
@@ -820,4 +813,1283 @@ fn creative_goal_requires_architect() {
     }
     let result = invoke(&b, args);
     assert_eq!(result["state"], "built", "{result}");
+}
+
+#[test]
+fn uncertain_writer_is_quarantined_before_claim_release_across_bridges() {
+    for scenario in ["CRASH", "NO_TURN_ID", "REFUSE_INTERRUPT"] {
+        let temp = common::temp();
+        let (repo, store) = fixture(
+            temp.path(),
+            &[(
+                "uncertain-writer",
+                &format!("GOAL {scenario}\nSCOPE src/mod.py\nVERIFY echo ok\n"),
+            )],
+        );
+        let b = bridge(temp.path());
+        let args = json!({"project":"demo","unit":"uncertain-writer","role":"terra","cwd":repo,"timeout_s":1});
+        let result = invoke(&b, args.clone());
+        assert_eq!(result["error"]["kind"], "turn_unconfirmed", "{result}");
+        assert!(store.join("quarantine").is_dir());
+        assert!(orch::running().contains(&"uncertain-writer".into()));
+        assert!(!store.join("reports/uncertain-writer.evidence.tsv").exists());
+        let other = bridge(temp.path());
+        assert_eq!(invoke(&other, args)["error"]["kind"], "quarantined");
+        drop(b); // closes/reaps the test app-server before explicit recovery
+        orch::recover_quarantine(&store).unwrap();
+        let retry = orch::begin_unit(&store, "uncertain-writer", "terra", &repo, false).unwrap();
+        assert!(matches!(retry, orch::Begin::Run { .. }));
+        orch::abort_unit(&store, "uncertain-writer");
+    }
+}
+
+#[test]
+fn actual_worker_model_not_requested_model_controls_evidence() {
+    let temp = common::temp();
+    let (repo, store) = fixture(
+        temp.path(),
+        &[("mismatch", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")],
+    );
+    let wrapper = temp.path().join("mismatch.py");
+    fs::write(&wrapper, format!("from pathlib import Path\np={}\ns=Path(p).read_text(encoding='utf-8').replace(\"'actual-model' if params.get('model') == 'requested-model' else params.get('model')\",\"'gpt-6-luna'\")\nexec(compile(s,p,'exec'))\n", serde_json::to_string(&common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy()).unwrap())).unwrap();
+    let mut cfg = Config {
+        data_home: Some(temp.path().into()),
+        codex: Ok(common::fake("fake_codex")),
+        agy: Ok(common::fake("fake_agy")),
+        wsl: None,
+        on_windows: false,
+    };
+    cfg.codex = Ok(vec![
+        common::python(),
+        "-I".into(),
+        wrapper.to_string_lossy().into_owned(),
+    ]);
+    let b = Bridge::new(cfg);
+    let result = invoke(
+        &b,
+        json!({"project":"demo","unit":"mismatch","role":"sol","model":"gpt-6-sol","cwd":repo}),
+    );
+    assert_eq!(result["error"]["kind"], "thread_policy", "{result}");
+    assert!(orch::evidence(&store, "mismatch").unwrap().is_empty());
+    assert!(!store.join(".worker.claim").exists());
+    assert!(!orch::current_verified_unit(&store, "mismatch", &repo).unwrap());
+    assert!(!store.join("quarantine").exists());
+}
+
+#[test]
+fn missing_actual_model_never_starts_a_turn_or_credits_requested_model() {
+    let temp = common::temp();
+    let (repo, store) = fixture(
+        temp.path(),
+        &[(
+            "unknown-model",
+            "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n",
+        )],
+    );
+    let wrapper = temp.path().join("missing_model.py");
+    let log = temp.path().join("requests.jsonl");
+    fs::write(&wrapper, format!("from pathlib import Path\nimport os\nos.environ['FAKE_CODEX_LOG']={}\np={}\ns=Path(p).read_text(encoding='utf-8').replace(\"'actual-model' if params.get('model') == 'requested-model' else params.get('model')\",\"None\")\nassert s!=Path(p).read_text(encoding='utf-8')\nexec(compile(s,p,'exec'))\n", serde_json::to_string(&log.to_string_lossy()).unwrap(), serde_json::to_string(&common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy()).unwrap())).unwrap();
+    let b = Bridge::new(Config {
+        data_home: Some(temp.path().into()),
+        codex: Ok(vec![
+            common::python(),
+            "-I".into(),
+            wrapper.to_string_lossy().into_owned(),
+        ]),
+        agy: Ok(common::fake("fake_agy")),
+        wsl: None,
+        on_windows: false,
+    });
+    let result = invoke(
+        &b,
+        json!({"project":"demo","unit":"unknown-model","role":"terra","cwd":repo}),
+    );
+    assert_eq!(result["error"]["kind"], "thread_policy", "{result}");
+    assert!(result["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("turn not started"));
+    assert!(orch::evidence(&store, "unknown-model").unwrap().is_empty());
+    assert!(!store.join(".worker.claim").exists());
+    let events: Vec<Value> = fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(events.iter().any(|v| v["method"] == "thread/start"));
+    assert!(!events.iter().any(|v| v["method"] == "turn/start"));
+}
+
+#[test]
+fn astra_high_verifier_is_isolated_and_rejects_writing_or_effort_overrides() {
+    let temp = common::temp();
+    let (repo, _) = fixture(
+        temp.path(),
+        &[("u", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")],
+    );
+    let log = temp.path().join("verifier.log");
+    let b = logged_bridge(temp.path(), &log);
+    let base = json!({"cwd":repo,"role":"astra-verify","sandbox":"read-only","task_kind":"verification","brief":"verify tracked.txt"});
+    for kind in ["verification", "measurement"] {
+        let mut args = base.clone();
+        args["task_kind"] = json!(kind);
+        let r = invoke(&b, args);
+        assert_eq!(r["status"], "completed", "{r}");
+        assert_eq!(r["requested_model"], "gpt-6-astra");
+        assert_eq!(r["model"], "gpt-6-astra");
+        assert_eq!(r["requested_effort"], "high");
+        assert!(r["actual_effort"].is_null());
+    }
+    let events: Vec<Value> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for e in events.iter().filter(|e| e["method"] == "thread/start") {
+        assert_eq!(e["params"]["sandbox"], "read-only");
+        assert_eq!(e["params"]["approvalPolicy"], "never");
+        assert_eq!(e["params"]["config"]["features"]["multi_agent"], false);
+        assert_eq!(e["params"]["config"]["features"]["apps"], false);
+    }
+    assert!(events
+        .iter()
+        .filter(|e| e["method"] == "turn/start")
+        .all(|e| e["params"]["effort"] == "high"));
+    let count = events.len();
+    for (key, value) in [
+        ("sandbox", json!("workspace-write")),
+        ("unit", json!("u")),
+        ("effort", json!("max")),
+        ("task_kind", json!("improvement")),
+        ("model", json!("gpt-6-terra")),
+        ("lean", json!(false)),
+        ("keep_plugins", json!(["unsafe"])),
+        ("developer_instructions", json!("write product")),
+    ] {
+        let mut args = base.clone();
+        args[key] = value;
+        assert_eq!(
+            invoke(&b, args)["error"]["kind"],
+            "invalid_argument",
+            "{key}"
+        );
+    }
+    let astra =
+        json!({"cwd":repo,"role":"astra","sandbox":"read-only","brief":"research","effort":"high"});
+    assert_eq!(invoke(&b, astra)["error"]["kind"], "invalid_argument");
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), count);
+    assert_eq!(
+        fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+        "fixture"
+    );
+}
+
+fn pipeline_bridge(home: &Path, hold: u64, fault: &str) -> Bridge {
+    Bridge::new(Config {
+        data_home: Some(home.into()),
+        codex: Ok(vec![
+            common::python(),
+            "-I".into(),
+            common::repo_root()
+                .join("tests/bridge/fake_dispatcher.py")
+                .to_string_lossy()
+                .into_owned(),
+            "--scenario".into(),
+            (if fault.starts_with("host-callback") {
+                "pipeline-dispatcher"
+            } else {
+                "pipeline"
+            })
+            .into(),
+            "--hold-s".into(),
+            hold.to_string(),
+            "--fault".into(),
+            fault.into(),
+        ]),
+        agy: Err(axiom::base::Failure::new("disabled", "test")),
+        wsl: None,
+        on_windows: cfg!(windows),
+    })
+}
+fn pipeline_fixture(home: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (repo,store)=fixture(home,&[("checkpointed","GOAL Verify a Rust product\nSCOPE src/lib.rs src/mod.py\nVERIFY cargo test --locked --offline\nDELIVERY verification\nOUTPUTS src/lib.rs\n")]);
+    let product = home.join("demo");
+    fs::rename(&repo, &product).unwrap();
+    let repo = product;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname=\"host-fixture\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(repo.join(".gitignore"), "/target\n").unwrap();
+    assert!(Command::new("cargo")
+        .current_dir(&repo)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .unwrap()
+        .success());
+    (repo, store)
+}
+fn pipeline_checkpoint(store: &Path, repo: &Path, round: u32) {
+    pipeline_checkpoint_with_severity(store, repo, round, "normal");
+}
+fn pipeline_checkpoint_with_severity(store: &Path, repo: &Path, round: u32, severity: &str) {
+    orch::checkpoint(store,serde_json::from_value(json!({"task":"checkpointed","module":"m","round":round,"owner":"terra","dependencies":[],"outputs":["src/lib.rs"],"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":round,"contract":orch::contract_identity(store,"checkpointed").unwrap(),"repo":repo,"severity":severity,"findings":[]})).unwrap()).unwrap();
+}
+fn seed_execution(b: &Bridge) {
+    let (id,_)=axiom::goal::find_active(b.home().unwrap(),"demo").unwrap().unwrap();
+    let dir=b.home().unwrap().join("authority").join(id);fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("state.json"),json!({"phase":"execution","revision":1,"research":null,"reason":"trusted downstream fixture"}).to_string()).unwrap();
+}
+fn pipeline_core_status(b: &Bridge, repo: &Path) -> Value {
+    let begin = call(
+        b,
+        "session",
+        &json!({"action":"begin","project":repo,"text":"verify Rust product"}),
+    );
+    assert_eq!(begin["structuredContent"]["status"], "completed", "{begin}");
+    // Downstream pipeline fixture starts after the independently tested review/planning prefix.
+    let dir=b.home().unwrap().join("authority").join(begin["structuredContent"]["session"].as_str().unwrap());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("state.json"),json!({"phase":"execution","revision":1,"research":null,"reason":"trusted downstream fixture"}).to_string()).unwrap();
+
+    let mode = call(
+        b,
+        "session",
+        &json!({"action":"call","tool":"goal","arguments":{"mode":"change"}}),
+    );
+    assert_eq!(
+        mode["structuredContent"]["goal"]["mode"], "change",
+        "{mode}"
+    );
+    let dispatched = call(
+        b,
+        "session",
+        &json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:dispatcher","project":"demo","cwd":repo,"prompt":"Return bounded host evidence; do not dispatch another writer."}}),
+    );
+    assert_eq!(
+        dispatched["structuredContent"]["status"], "completed",
+        "{dispatched}"
+    );
+    call(b, "session", &json!({"action":"status"}))["structuredContent"].clone()
+}
+#[test]
+fn checkpointed_bridge_lifecycle_separates_unit_release_from_five_product_rounds() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, store) = pipeline_fixture(home);
+    let brief = store.join("second.brief");
+    fs::copy(store.join("checkpointed.brief"), &brief).unwrap();
+    let mut rows = fs::read_to_string(store.join("units.tsv")).unwrap();
+    rows.push_str(&format!("second\tm\tpending\t\t\t\t{}\n", brief.display()));
+    fs::write(store.join("units.tsv"), rows).unwrap();
+    let b = pipeline_bridge(home, 0, "");
+    let operator = pipeline_bridge(home, 0, "");
+    let product_command = |args: Value, _attached: bool| {
+        let arguments = json!({"project":"demo","args":args});
+        let response = call(&operator,"orch",&arguments);
+        response["structuredContent"].clone()
+    };
+    let transition = |round: u32, verification: &str, assessment: &str, action: &str| {
+        product_command(json!(["wait","product-transition","--run","product","--round",round.to_string(),"--verifications",verification,"--assessment",assessment,"--action",action]), true)
+    };
+    let finish_product = || {
+        // Historical product-controller acceptance uses the unattached operator;
+        // attached core additionally requires the new role workflow submit gate.
+        let session=call(&b,"session",&json!({"action":"status"}))["structuredContent"]["session"].clone();
+        call(&operator,"goal",&json!({"session":session,"status":"done"}))["structuredContent"].clone()
+    };
+    let checkpoint = |task: &str, round: u32| {
+        orch::checkpoint(&store, serde_json::from_value(json!({"task":task,"module":"m","round":round,"owner":"terra","dependencies":[],"outputs":["src/lib.rs"],"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":round,"contract":orch::contract_identity(&store,task).unwrap(),"repo":repo,"severity":"normal","findings":[]})).unwrap()).unwrap();
+    };
+    let mut previous_verification: Option<String> = None;
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    for round in 1..=5 {
+        let checkpoint_args = json!(["wait","product-checkpoint","--run","product"]);
+        let result = product_command(checkpoint_args.clone(), round > 1);
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_ne!(product_command(checkpoint_args, round > 1)["status"], "completed");
+        // The fixture reports unresolved issues on task attempt five. Use a
+        // second already-enrolled unit to prove product rounds are not attempts.
+        let task = if round < 5 { "checkpointed" } else { "second" };
+        let task_round = if round < 5 { round } else { round - 3 };
+        checkpoint(task, task_round);
+        let args = json!({"project":"demo","unit":task,"cwd":repo,"role":"terra"});
+        let built = invoke(&operator, args.clone());
+        assert_eq!(built["state"], "awaiting_core", "round {round}: {built}");
+        assert_eq!(invoke(&operator, args.clone())["operation_id"], built["operation_id"]);
+        let state = orch::wait_state(&store).unwrap();
+        let d = state
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "dispatch")
+            .unwrap();
+        let verification_id = state
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "verification")
+            .unwrap()
+            .id
+            .as_str();
+        let product_assessment = json!({"valid_issues":Vec::<&str>::new(),"severity":"normal","decision":"finish"}).to_string();
+        assert!(orch::product_transition(&store, "product", round, vec![verification_id.into()], &product_assessment, "continue").is_err());
+        let mut forged = state
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "build")
+            .unwrap()
+            .clone();
+        forged.id = "forged-host-report".into();
+        assert!(orch::wait_event(&store, forged).is_err());
+        let assessment=json!({"valid_issues":Vec::<&str>::new(),"severity":"normal"}).to_string();
+        // The replayable notification is now committed before codex_run returns.
+        // A stale identity still cannot acknowledge that outbox delivery.
+        assert!(state.events.iter().any(|e| e.kind == "notification" && e.dispatch_id == d.id));
+        assert!(
+            orch::core_verdict(&store, task, "not-the-verification", true, &assessment).is_err()
+        );
+        let status = if round == 1 {
+            pipeline_core_status(&b, &repo)
+        } else {
+            call(&b, "session", &json!({"action":"status"}))["structuredContent"].clone()
+        };
+        let notices = status["core_notices"].as_array().unwrap();
+        assert_eq!(notices.len(), 1, "{status}");
+        assert_eq!(notices[0]["dispatch_id"], d.id);
+        let replay = call(&b, "session", &json!({"action":"status"}));
+        assert_eq!(
+            replay["structuredContent"]["core_notices"],
+            status["core_notices"]
+        );
+        let original = fs::read(repo.join("src/lib.rs")).unwrap();
+        fs::write(repo.join("src/lib.rs"), "changed source").unwrap();
+        assert!(
+            orch::core_verdict(&store, task, verification_id, true, &assessment).is_err()
+        );
+        fs::write(repo.join("src/lib.rs"), original).unwrap();
+        let package = state
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "package")
+            .unwrap();
+        let report: Value =
+            serde_json::from_str(package.evidence.trim_start_matches("host:")).unwrap();
+        let path = Path::new(report["package_path"].as_str().unwrap());
+        let bytes = fs::read(path).unwrap();
+        fs::write(path, b"forged package").unwrap();
+        assert!(
+            orch::core_verdict(&store, task, verification_id, true, &assessment).is_err()
+        );
+        fs::write(path, bytes).unwrap();
+        let approved =
+            orch::core_verdict(&store, task, verification_id, true, &assessment).unwrap();
+        assert_eq!(
+            orch::core_verdict(&store, task, verification_id, true, &assessment)
+                .unwrap()
+                .events
+                .len(),
+            approved.events.len()
+        );
+        assert!(
+            orch::core_verdict(&store, task, verification_id, false, &assessment)
+                .is_err()
+        );
+        orch::complete_round(&store, task, verification_id).unwrap();
+        let count = orch::wait_state(&store).unwrap().events.len();
+        orch::complete_round(&store, task, verification_id).unwrap();
+        assert_eq!(orch::wait_state(&store).unwrap().events.len(), count);
+        assert!(orch::current_verified_unit(&store, task, &repo).unwrap());
+        if round == 1 {
+            checkpoint("second", 1);
+            let second = invoke(&operator, json!({"project":"demo","unit":"second","cwd":repo,"role":"terra"}));
+            assert_eq!(second["state"], "awaiting_core", "{second}");
+            let second_state = orch::wait_state(&store).unwrap();
+            let id = &second_state.events.iter().rev().find(|e| e.task == "second" && e.kind == "verification").unwrap().id;
+            call(&b, "session", &json!({"action":"status"}));
+            orch::core_verdict(&store, "second", id, true, &assessment).unwrap();
+            orch::complete_round(&store, "second", id).unwrap();
+            // Even a complete engineering handoff cannot turn unit releases
+            // into product rounds or bypass the product minimum.
+            orch::record_full(&store, &repo, Some("cargo test --locked --offline")).unwrap();
+            orch::record_stage(&store, "rewrite", "core", true).unwrap();
+            assert!(orch::current_verified_unit(&store, "second", &repo).unwrap());
+            let error = orch::done_gate_in_repo(&store, true, Some(&repo)).unwrap_err();
+            assert!(error.message.contains("product rounds"), "{error:?}");
+            let refused = finish_product();
+            assert_eq!(refused["error"]["kind"], "not_done", "{refused}");
+        }
+        // Check stale/forged evidence only after all engineering gates pass,
+        // so a missing unit release cannot mask the rejection being tested.
+        if let Some(old) = &previous_verification {
+            assert_ne!(transition(round, old, &product_assessment, "continue")["status"], "completed");
+        }
+        assert_ne!(transition(round, "forged-verification", &product_assessment, "continue")["status"], "completed");
+        assert_ne!(transition(round + 1, verification_id, &product_assessment, "finish")["status"], "completed");
+        if round < 5 {
+            assert_ne!(transition(round, verification_id, &product_assessment, "finish")["status"], "completed");
+            assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+            assert_eq!(finish_product()["error"]["kind"], "not_done");
+        }
+        let action = if round < 5 { "continue" } else { "finish" };
+        let original = fs::read(repo.join("src/lib.rs")).unwrap();
+        fs::write(repo.join("src/lib.rs"), "stale product source").unwrap();
+        assert_ne!(transition(round, verification_id, &product_assessment, action)["status"], "completed");
+        fs::write(repo.join("src/lib.rs"), original).unwrap();
+        let result = transition(round, verification_id, &product_assessment, action);
+        assert_eq!(result["status"], "completed", "{result}");
+        let replay = orch::wait_state(&store).unwrap();
+        assert_eq!(replay.product_runs[0].rounds.len(), round as usize);
+        assert_eq!(orch::product_policy_finished(&replay, "product"), round >= 5);
+        assert_eq!(orch::current_checkpoint(&replay, task).unwrap().round, task_round);
+        previous_verification = Some(verification_id.to_string());
+    }
+    // Reopening the persisted journal rejects both skipped rounds and forged
+    // transition evidence; do not rely only on in-memory command validation.
+    let journal = store.join("core-wait.json");
+    let original = fs::read(&journal).unwrap();
+    for forged_evidence in [false, true] {
+        let mut replay: orch::WaitState = serde_json::from_slice(&original).unwrap();
+        if forged_evidence {
+            replay.product_runs[0].rounds[4].transition.as_mut().unwrap().verification_ids = vec!["forged-verification".into()];
+        } else {
+            replay.product_runs[0].rounds[4].round = 6;
+        }
+        fs::write(&journal, serde_json::to_vec(&replay).unwrap()).unwrap();
+        assert!(orch::wait_state(&store).is_err());
+        assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+        fs::write(&journal, &original).unwrap();
+    }
+    assert!(orch::product_checkpoint(&store, "product").is_err());
+    assert_eq!(invoke(&operator, json!({"project":"demo","unit":"second","cwd":repo,"role":"terra"}))["reused"], true);
+    // Policy finish alone cannot bypass the existing product handoff.
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    assert_eq!(finish_product()["error"]["kind"], "not_done");
+    let full = product_command(json!(["fulltest","--repo",repo,"--command","cargo test --locked --offline"]), true);
+    assert_eq!(full["status"], "completed", "{full}");
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    assert_eq!(finish_product()["error"]["kind"], "not_done");
+    orch::record_stage(&store, "rewrite", "core", true).unwrap();
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    orch::record_stage(&store, "rewrite", "core", false).unwrap();
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    assert_eq!(finish_product()["error"]["kind"], "not_done");
+    orch::record_stage(&store, "rewrite", "core", true).unwrap();
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    let original_brief = fs::read(&brief).unwrap();
+    fs::write(&brief, [original_brief.as_slice(), b"changed contract\n"].concat()).unwrap();
+    assert!(!orch::current_verified_unit(&store, "second", &repo).unwrap());
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    fs::write(&brief, original_brief).unwrap();
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    let original_source = fs::read(repo.join("src/lib.rs")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "stale source").unwrap();
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    assert_eq!(finish_product()["error"]["kind"], "not_done");
+    fs::write(repo.join("src/lib.rs"), original_source).unwrap();
+    // Successful historical verification cannot authorize a handoff or reuse
+    // once the Host receipt is missing or tampered with.
+    let state = orch::wait_state(&store).unwrap();
+    let package = state.events.iter().rev().find(|e| e.task == "second" && e.kind == "package").unwrap();
+    let evidence: Value = serde_json::from_str(package.evidence.trim_start_matches("host:")).unwrap();
+    let receipt_path = Path::new(evidence["verification_receipt"]["path"].as_str().unwrap());
+    let original_receipt = fs::read(receipt_path).unwrap();
+    for missing in [true, false] {
+        if missing { fs::remove_file(receipt_path).unwrap(); }
+        else { fs::write(receipt_path, b"{}").unwrap(); }
+        assert!(!orch::current_verified_unit(&store, "second", &repo).unwrap());
+        assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+        assert_eq!(finish_product()["error"]["kind"], "not_done");
+        fs::write(receipt_path, &original_receipt).unwrap();
+        assert!(orch::current_verified_unit(&store, "second", &repo).unwrap());
+    }
+    let finished = finish_product();
+    assert_eq!(finished["status"], "completed", "{finished}");
+    assert_eq!(finished["goal"]["status"], "done", "{finished}");
+    checkpoint("second", 3);
+    let replay = orch::wait_state(&store).unwrap();
+    assert!(!orch::product_policy_finished(&replay, "product"));
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    let next = product_command(json!(["wait","product-checkpoint","--run","product"]), false);
+    assert_eq!(next["status"], "completed", "{next}");
+    assert_eq!(orch::wait_state(&store).unwrap().product_runs[0].rounds.len(), 6);
+}
+#[test]
+fn enrolled_host_missing_actual_effort_and_dead_worker_never_credit_or_redispatch() {
+    for fault in ["missing-effort", "crash-worker"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"});
+        assert_ne!(invoke(&b, args.clone())["status"], "completed");
+        assert_ne!(invoke(&b, args)["status"], "completed");
+        let state = orch::wait_state(&store).unwrap();
+        assert_eq!(
+            state.events.iter().filter(|e| e.kind == "dispatch").count(),
+            1
+        );
+        assert!(!state.events.iter().any(|e| e.kind == "build"));
+        if fault == "crash-worker" {
+            assert!(store.join("quarantine").exists());
+        }
+    }
+}
+#[test]
+#[ignore = "product host waits a real >=180 seconds; explicit acceptance command"]
+fn product_host_wait_180s() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store, &repo, 1);
+    let b = pipeline_bridge(temp.path(), 180, "");
+    let start = std::time::Instant::now();
+    let result = invoke(
+        &b,
+        json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":240}),
+    );
+    assert_eq!(result["state"], "awaiting_core", "{result}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(180));
+    let state = orch::wait_state(&store).unwrap();
+    let build = state.events.iter().find(|e| e.kind == "build").unwrap();
+    let report: Value = serde_json::from_str(build.evidence.trim_start_matches("host:")).unwrap();
+    assert!(report["elapsed_ms"].as_u64().unwrap() >= 180000);
+    println!(
+        "product-host evidence: {}",
+        serde_json::to_string(&state).unwrap()
+    );
+}
+
+#[test]
+fn enrolled_worker_interruption_and_explicit_recovery_preserve_attempt_identity() {
+    for fault in ["interrupt-worker", "crash-worker"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let result = invoke(
+            &b,
+            json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":1}),
+        );
+        assert_ne!(result["status"], "completed", "{result}");
+        let state = orch::wait_state(&store).unwrap();
+        assert!(state.events.iter().any(|e| e.kind == "suspended"));
+        if fault == "crash-worker" {
+            assert!(state.operations[0].executing, "{fault}: {result}");
+            assert!(store.join("quarantine").exists(), "{fault}");
+        } else {
+            assert!(!state.operations[0].executing, "{fault}: {result}");
+            assert!(!store.join(".worker.claim").exists(), "{fault}");
+        }
+        let replay = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+        assert_ne!(replay["status"], "completed", "{fault}: {replay}");
+        assert_eq!(orch::wait_state(&store).unwrap().events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+        let dispatch = state.events.iter().find(|e| e.kind == "dispatch").unwrap();
+        let mut recovery = dispatch.clone();
+        recovery.id = "confirmed-stopped".into();
+        recovery.kind = "recovery".into();
+        recovery.actor = "core".into();
+        recovery.evidence="Independent fixture controller observed terminal interrupt or fixture process exit; no remote service exists in this fixture".into();
+        assert!(orch::recover_dispatch(&store, recovery.clone(), "unknown").is_err());
+        orch::recover_dispatch(&store, recovery, "stopped").unwrap();
+        assert!(!store.join("quarantine").exists());
+        let before = orch::wait_state(&store).unwrap();
+        let deadline = before.operations[0].deadline_ms;
+        let retry = pipeline_bridge(temp.path(), 0, "typed-failed");
+        let result = invoke(
+            &retry,
+            json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":99999}),
+        );
+        assert_ne!(result["status"], "completed", "{result}");
+        let after = orch::wait_state(&store).unwrap();
+        assert_eq!(after.events.len(), before.events.len());
+        assert_eq!(after.operations.len(), 1);
+        assert_eq!(after.operations[0].deadline_ms, deadline);
+        assert!(!temp.path().join("terminal-launches.log").exists());
+        assert_eq!(
+            orch::wait_state(&store)
+                .unwrap()
+                .events
+                .iter()
+                .filter(|e| e.kind == "dispatch")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn host_testing_releases_unit_without_core_technical_authority() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    let prepared = orch::run(
+        &store,
+        &[
+            "wait".into(),
+            "prepare".into(),
+            "--task".into(),
+            "checkpointed".into(),
+            "--repo".into(),
+            repo.to_string_lossy().into_owned(),
+            "--issue".into(),
+            "issue".into(),
+            "--proposal".into(),
+            "proposal".into(),
+            "--severity".into(),
+            "normal".into(),
+            "--min-rounds".into(),
+            "3".into(),
+        ],
+        true,
+        false,
+    );
+    assert_eq!(prepared.exit_code, 0, "{}", prepared.stderr);
+    let b = pipeline_bridge(temp.path(), 0, "host-callback");
+    let status = pipeline_core_status(&b, &repo);
+    assert_eq!(
+        status["core_notices"].as_array().unwrap().len(),
+        0,
+        "{status}"
+    );
+    let state = orch::wait_state(&store).unwrap();
+    for kind in [
+        "dispatch",
+        "build",
+        "assembly",
+        "package",
+        "verification",
+        "notification",
+    ] {
+        assert_eq!(
+            state.events.iter().filter(|e| e.kind == kind).count(),
+            1,
+            "{kind}"
+        );
+    }
+    let verification = state
+        .events
+        .iter()
+        .find(|e| e.kind == "verification")
+        .unwrap();
+    let assessment = json!({"valid_issues":[],"severity":"normal"}).to_string();
+    let command = |verification_id: &str, assessment: &str| {
+        call(
+            &b,
+            "session",
+            &json!({"action":"call","tool":"orch","arguments":{"project":"demo","args":["wait","verdict","--task","checkpointed","--verification",verification_id,"--decision","approve","--assessment",assessment]}}),
+        )
+    };
+    assert_ne!(
+        command("stale-verification", &assessment)["structuredContent"]["status"],
+        "completed"
+    );
+    assert_ne!(
+        command(&verification.id, &assessment)["structuredContent"]["status"],
+        "completed"
+    );
+    assert!(!state.events.iter().any(|e| e.kind=="core_approve"));
+    for kind in ["test_approve","completion","release"] {
+        let event=state.events.iter().find(|e| e.kind==kind).unwrap();
+        assert_eq!(event.actor,"lifecycle");
+    }
+    assert!(call(&b,"orch",&json!({"project":"demo","args":["status"]}))["isError"] == true);
+    assert!(orch::may_finish(
+        &orch::wait_state(&store).unwrap(),
+        "checkpointed"
+    ));
+    assert!(orch::wait_state(&store).unwrap().product_runs.is_empty());
+    assert!(orch::done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    let prepare = vec!["wait".into(), "prepare".into(), "--task".into(), "checkpointed".into(), "--repo".into(), repo.to_string_lossy().into_owned(), "--issue".into(), "issue".into(), "--proposal".into(), "proposal".into()];
+    let mut changed = prepare.clone();
+    changed.extend(["--min-rounds".into(), "5".into()]);
+    assert_ne!(orch::run(&store, &changed, true, false).exit_code, 0);
+    assert_eq!(orch::run(&store, &prepare, true, false).exit_code, 0);
+    assert_eq!(orch::current_checkpoint(&orch::wait_state(&store).unwrap(), "checkpointed").unwrap().min_rounds, 3);
+    assert!(
+        call(&b, "session", &json!({"action":"status"}))["structuredContent"]["core_notices"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn host_verify_preflight_io_failure_does_not_invent_a_running_process() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    let marker = repo.join("verify-started");
+    let script = repo.join("verify_start_count.py");
+    fs::write(&script, "from pathlib import Path\nPath('verify-started').write_text('started')\n").unwrap();
+    let command = format!("\"{}\" verify_start_count.py", common::python());
+    fs::write(store.join("checkpointed.brief"), format!("GOAL Verify fixture\nSCOPE src/lib.rs src/mod.py\nVERIFY {command}\nDELIVERY verification\nOUTPUTS src/lib.rs\n")).unwrap();
+    pipeline_checkpoint(&store, &repo, 1);
+    fs::create_dir_all(store.join("reports/checkpointed.md")).unwrap();
+    let b = pipeline_bridge(temp.path(), 0, "");
+    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+    assert_eq!(result["outcome"], "failed", "{result}");
+    assert_eq!(result["error"]["kind"], "io", "{result}");
+    assert!(!marker.exists());
+    let state = orch::wait_state(&store).unwrap();
+    assert!(!state.operations[0].executing);
+    assert_eq!(state.operations[0].outcome, "failed");
+    assert!(!store.join(".worker.claim").exists());
+    assert!(!store.join("quarantine").exists());
+    assert!(!state.events.iter().any(|e| e.kind == "package"));
+}
+
+#[test]
+fn enrolled_host_verification_receipt_records_failures_and_source_changes() {
+    let mut targets = std::collections::HashSet::new();
+    for mode in ["success", "failure", "stale"] {
+        let temp = common::temp();
+        // Keep Host report names within Win32's limit; only Cargo's nested
+        // artifact paths are the regression under test.
+        let root = temp.path().join("long-project-store-".repeat(2));
+        let (repo, store) = pipeline_fixture(&root);
+        let script = repo.join("verify_fixture.py");
+        fs::write(&script, format!("import os, sys\nfrom pathlib import Path\nprint('receipt stdout')\nprint(os.environ['CARGO_TARGET_DIR'])\nprint('receipt stderr', file=sys.stderr)\n{}\nsys.exit({})\n", if mode == "stale" { "Path('src/lib.rs').write_text('changed')" } else { "pass" }, if mode == "failure" { 7 } else { 0 })).unwrap();
+        let command = format!("\"{}\" verify_fixture.py", common::python());
+        fs::write(store.join("checkpointed.brief"), format!("GOAL Verify fixture\nSCOPE src/lib.rs src/mod.py\nVERIFY {command}\nDELIVERY verification\nOUTPUTS src/lib.rs\n")).unwrap();
+        pipeline_checkpoint(&store, &repo, 1);
+        // A candidate unit run must not overwrite an earlier failed fulltest.
+        let failed_full = b"kind\tcommand\texit_code\tcommit\tts\nfull\tcargo test --locked --offline\t101\told-source\t2026-10-31T00:00:00Z\n";
+        fs::create_dir_all(store.join("reports")).unwrap();
+        fs::write(store.join("reports/_full.evidence.tsv"), failed_full).unwrap();
+        let b = pipeline_bridge(&root, 0, "");
+        let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+        if mode == "success" { assert_eq!(result["state"], "awaiting_core", "{result}"); }
+        else { assert_ne!(result["status"], "completed", "{result}"); }
+        let receipt_path = fs::read_dir(store.join("reports")).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("verify-checkpointed-") && p.extension().is_some_and(|e| e == "json")).unwrap();
+        let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["command"], command);
+        assert!(receipt["stdout"].as_str().unwrap().contains("receipt stdout"));
+        let target = receipt["target_dir"].as_str().unwrap();
+        assert!(targets.insert(target.to_owned()));
+        assert!(target.encode_utf16().count() <= 78);
+        assert!(!Path::new(target).starts_with(&store));
+        assert!(Path::new(target).join(".chronos-binding.json").is_file());
+        let binding: Value = serde_json::from_slice(&fs::read(Path::new(target).join(".chronos-binding.json")).unwrap()).unwrap();
+        assert_eq!(binding["source"], fs::canonicalize(&repo).unwrap().to_string_lossy().as_ref());
+        assert!(binding["execution"].as_str().unwrap().starts_with("verify:checkpointed:"));
+        assert_eq!(fs::read(receipt_path.with_extension("stdout")).unwrap(), receipt["stdout"].as_str().unwrap().as_bytes());
+        assert_eq!(fs::read(receipt_path.with_extension("stderr")).unwrap(), receipt["stderr"].as_str().unwrap().as_bytes());
+        assert!(receipt["stdout"].as_str().unwrap().contains(target));
+        assert!(receipt["stderr"].as_str().unwrap().contains("receipt stderr"));
+        assert_eq!(receipt["exit_code"], if mode == "failure" { 7 } else { 0 });
+        assert_eq!(receipt["source_before"] == receipt["source_after"], mode != "stale");
+        let state = orch::wait_state(&store).unwrap();
+        assert_eq!(state.events.iter().any(|e| e.kind == "verification"), mode == "success");
+        assert!(!state.operations[0].executing, "{mode}: {result}");
+        assert!(!store.join(".worker.claim").exists(), "{mode}");
+        assert_eq!(fs::read(store.join("reports/_full.evidence.tsv")).unwrap(), failed_full);
+        if mode == "success" {
+            let package = state.events.iter().find(|e| e.kind == "package").unwrap();
+            let evidence: Value = serde_json::from_str(package.evidence.trim_start_matches("host:")).unwrap();
+            assert_eq!(evidence["verification_receipt"]["receipt"], receipt);
+            assert_eq!(evidence["source_identity"], receipt["source_after"]);
+            let commands = evidence["commands"].as_array().unwrap();
+            let package_target = commands[0]["env"]["CARGO_TARGET_DIR"].as_str().unwrap();
+            assert!(targets.insert(package_target.to_owned()));
+            assert!(package_target.encode_utf16().count() <= 78);
+            assert_ne!(package_target, target);
+            assert_eq!(commands[1]["env"]["CARGO_TARGET_DIR"], package_target);
+            assert!(Path::new(evidence["cargo_package_path"].as_str().unwrap()).starts_with(package_target));
+        } else {
+            assert!(!state.events.iter().any(|e| e.kind == "package"));
+        }
+    }
+}
+
+#[test]
+fn enrolled_host_rejects_missing_or_tampered_receipt_and_stale_review_source() {
+    for fault in ["missing-receipt", "tampered-receipt", "stale-review-source"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+        assert_ne!(result["status"], "completed", "{fault}: {result}");
+        let state = orch::wait_state(&store).unwrap();
+        assert!(state.events.iter().any(|e| e.kind == "package"), "{fault}");
+        assert!(!state.events.iter().any(|e| e.kind == "verification"), "{fault}");
+        assert!(!orch::current_verified_unit(&store, "checkpointed", &repo).unwrap());
+    }
+}
+
+#[test]
+fn stage_restart_child() {
+    let Some(home) = std::env::var_os("AXIOM_R1_RESTART_HOME") else { return };
+    let home = Path::new(&home);
+    let b = pipeline_bridge(home, 0, "");
+    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":home.join("demo"),"role":"terra","stop_after":"build","timeout_s":300}));
+    assert_eq!(result["outcome"], "blocked", "{result}");
+    assert_eq!(result["stage"], "assembly");
+    // Reconstruct the exact crash window: terminal boundary is durable but
+    // the local process lease was not unlinked. The child then exits.
+    let store = home.join("orchestrate/demo");
+    let op = orch::wait_state(&store).unwrap().operations[0].clone();
+    fs::write(store.join(".worker.claim"), &op.worker_lease).unwrap();
+}
+
+#[test]
+fn durable_phase_boundaries_resume_after_process_restart_without_a_second_dispatch() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store, &repo, 1);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "codex_cases::stage_restart_child", "--nocapture"])
+        .env("AXIOM_R1_RESTART_HOME", temp.path()).output().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let initial = orch::wait_state(&store).unwrap().operations[0].clone();
+    let deadline = initial.deadline_ms;
+    for phase in ["assembly", "host_test", "package", "verification"] {
+        let b = pipeline_bridge(temp.path(), 0, "");
+        let response = call(&b, "codex_run", &json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":phase,"timeout_s":99999}));
+        let result = &response["structuredContent"];
+        assert_eq!(response["isError"], true, "{response}");
+        assert_eq!(result["outcome"], "blocked", "{phase}: {result}");
+        assert_eq!(result["operation_id"], initial.id);
+        assert_eq!(result["deadline_ms"], deadline);
+        assert!(!store.join(".worker.claim").exists());
+    }
+    let b = pipeline_bridge(temp.path(), 0, "");
+    let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"});
+    let result = invoke(&b, args.clone());
+    assert_eq!(result["outcome"], "awaiting_core", "{result}");
+    let replay = invoke(&b, args);
+    assert_eq!(replay["delivery_id"], result["delivery_id"]);
+    let state = orch::wait_state(&store).unwrap();
+    for kind in ["dispatch", "build", "assembly", "package", "verification", "notification"] {
+        assert_eq!(state.events.iter().filter(|e| e.kind == kind).count(), 1, "{kind}");
+    }
+    assert_eq!(state.operations.len(), 1);
+    assert_eq!(state.operations[0].owner_generation, 6);
+    assert_eq!(state.operations[0].deadline_ms, deadline);
+    assert!(!orch::may_finish(&state, "checkpointed"));
+}
+
+#[test]
+fn host_terminal_failure_is_not_an_unknown_writer_or_an_implicit_retry() {
+    for fault in ["typed-unconfirmed", "typed-failed", "native-failed"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":300});
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let result = invoke(&b, args.clone());
+        assert_eq!(result["outcome"], "failed", "{fault}: {result}");
+        assert_eq!(result["transport_status"], "completed");
+        let state = orch::wait_state(&store).unwrap();
+        let op = &state.operations[0];
+        assert!(!op.executing, "{fault}");
+        assert!(op.terminal_failure.is_some());
+        assert!(!store.join(".worker.claim").exists(), "{fault}");
+        assert!(!store.join("quarantine").exists());
+        let deadline = op.deadline_ms;
+        let journal = state.events.len();
+        let launches = fs::read_to_string(temp.path().join("terminal-launches.log")).unwrap();
+        assert_eq!(launches.lines().count(), 1);
+        drop(b);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let mut retry = args.clone();
+        retry["timeout_s"] = json!(99999);
+        retry["operation_id"] = result["operation_id"].clone();
+        let replay = invoke(&b, retry);
+        assert_eq!(replay["delivery_id"], result["delivery_id"], "{fault}: {replay}");
+        let state = orch::wait_state(&store).unwrap();
+        assert!(!state.operations[0].executing, "{fault}");
+        assert!(state.operations[0].terminal_failure.is_some(), "{fault}");
+        assert!(!store.join(".worker.claim").exists(), "{fault}");
+        assert_eq!(state.operations.len(), 1);
+        assert_eq!(state.operations[0].deadline_ms, deadline);
+        assert_eq!(state.events.len(), journal);
+        assert_eq!(state.events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+        assert_eq!(fs::read_to_string(temp.path().join("terminal-launches.log")).unwrap(), launches);
+    }
+}
+
+#[test]
+fn host_scope_rejection_and_confirmed_astra_failure_release_ownership() {
+    for fault in ["scope", "native-failed"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"});
+        let b = pipeline_bridge(temp.path(), 0, "");
+        if fault != "scope" {
+            let mut boundary = args.clone();
+            boundary["stop_after"] = json!("package");
+            assert_eq!(invoke(&b, boundary)["outcome"], "blocked");
+        }
+        drop(b);
+        let b = if fault == "scope" {
+            let wrapper = temp.path().join("scope_fixture.py");
+            let original = common::repo_root().join("tests/bridge/fake_dispatcher.py");
+            fs::write(&wrapper, "import sys\np=sys.argv.pop(1)\ns=open(p,encoding='utf8').read()\ns=s.replace(\"        complete(tid,turn,final,status='failed' if fault=='native-failed' else 'completed')\", \"        event('item/completed',tid,turnId=turn,item={'type':'fileChange','id':'scope','status':'completed','changes':[{'path':'outside.txt','kind':{'type':'update'}}]})\\n        complete(tid,turn,final,status='failed' if fault=='native-failed' else 'completed')\")\n__file__=p\nexec(compile(s,p,'exec'))\n").unwrap();
+            Bridge::new(Config { data_home: Some(temp.path().into()), codex: Ok(vec![common::python(), "-I".into(), wrapper.to_string_lossy().into_owned(), original.to_string_lossy().into_owned(), "--scenario".into(), "pipeline".into()]), agy: Err(axiom::base::Failure::new("disabled", "test")), wsl: None, on_windows: cfg!(windows) })
+        } else { pipeline_bridge(temp.path(), 0, fault) };
+        let result = invoke(&b, args.clone());
+        assert_eq!(result["outcome"], "failed", "{fault}: {result}");
+        let state = orch::wait_state(&store).unwrap();
+        assert!(!state.operations[0].executing, "{fault}");
+        assert!(!store.join(".worker.claim").exists(), "{fault}");
+        assert!(!store.join("quarantine").exists(), "{fault}");
+        assert_eq!(invoke(&b, args)["delivery_id"], result["delivery_id"]);
+        assert_eq!(orch::wait_state(&store).unwrap().events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+    }
+}
+
+#[test]
+fn typed_blocked_missing_truncated_and_foreign_results_never_advance_or_redispatch() {
+    for fault in ["blocked-worker", "missing-result", "truncated-result", "wrong-identity"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"});
+        let response = call(&b, "codex_run", &args);
+        let result = &response["structuredContent"];
+        assert_eq!(response["isError"], true, "{fault}: {response}");
+        assert_eq!(result["outcome"], if fault == "blocked-worker" { "blocked" } else { "protocol_incomplete" });
+        let replay = invoke(&b, args);
+        assert_eq!(replay["delivery_id"], result["delivery_id"], "{replay}");
+        let state = orch::wait_state(&store).unwrap();
+        assert!(!state.operations[0].executing, "{fault}");
+        assert!(state.operations[0].terminal_failure.is_some(), "{fault}");
+        assert!(!store.join(".worker.claim").exists(), "{fault}");
+        assert_eq!(state.events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+        assert!(!state.events.iter().any(|e| e.kind == "build" || e.kind == "assembly"));
+    }
+}
+
+#[test]
+fn sol_terminal_blocked_and_failed_release_writer_without_retry() {
+    for fault in ["blocked-worker", "native-failed"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"});
+        let b = pipeline_bridge(temp.path(), 0, "");
+        let mut boundary = args.clone();
+        boundary["stop_after"] = json!("build");
+        assert_eq!(invoke(&b, boundary)["stage"], "assembly");
+        drop(b);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let result = invoke(&b, args.clone());
+        assert_eq!(result["outcome"], if fault == "blocked-worker" { "blocked" } else { "failed" }, "{result}");
+        let state = orch::wait_state(&store).unwrap();
+        let op = &state.operations[0];
+        assert!(!op.executing, "{fault}");
+        assert_eq!(op.terminal_failure.as_ref().unwrap()["requested_role"], "sol");
+        assert!(!store.join(".worker.claim").exists());
+        assert_eq!(invoke(&b, args)["delivery_id"], result["delivery_id"]);
+        assert_eq!(orch::wait_state(&store).unwrap().events.iter().filter(|e| e.kind == "assembly_intent").count(), 1);
+    }
+}
+
+#[test]
+fn enrolled_unconfirmed_interrupt_keeps_writer_quarantined() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    fs::write(store.join("checkpointed.brief"), "GOAL NO_CONFIRM\nSCOPE src/lib.rs src/mod.py\nVERIFY cargo test --locked --offline\nDELIVERY verification\nOUTPUTS src/lib.rs\n").unwrap();
+    pipeline_checkpoint(&store, &repo, 1);
+    let b = bridge(temp.path());
+    let args = json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":1});
+    let result = invoke(&b, args.clone());
+    assert_eq!(result["outcome"], "unconfirmed", "{result}");
+    let state = orch::wait_state(&store).unwrap();
+    assert!(state.operations[0].executing);
+    assert!(store.join("quarantine").is_dir());
+    assert!(store.join(".worker.claim").exists());
+    let replay = invoke(&bridge(temp.path()), args);
+    assert_ne!(replay["status"], "completed", "{replay}");
+    assert_eq!(orch::wait_state(&store).unwrap().events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+    drop(b);
+    orch::recover_quarantine(&store).unwrap();
+}
+
+#[test]
+fn persisted_deadline_is_not_renewed_by_restart_or_larger_requested_timeout() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store, &repo, 1);
+    let b = pipeline_bridge(temp.path(), 0, "");
+    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build","timeout_s":3}));
+    assert_eq!(result["outcome"], "blocked", "{result}");
+    drop(b);
+    std::thread::sleep(std::time::Duration::from_millis(3100));
+    let b = pipeline_bridge(temp.path(), 0, "");
+    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":99999}));
+    assert_eq!(result["outcome"], "timeout", "{result}");
+    let state = orch::wait_state(&store).unwrap();
+    assert_eq!(state.events.iter().filter(|e| e.kind == "dispatch").count(), 1);
+    assert!(!state.events.iter().any(|e| e.kind == "assembly"));
+}
+
+#[test]
+fn actual_test_rejection_allows_dispatcher_repair_without_core_verdict() {
+    let temp=common::temp();
+    let (repo,store)=pipeline_fixture(temp.path());
+    assert_eq!(orch::run(&store,&["wait".into(),"enroll".into()],true,false).exit_code,0);
+    let prepared=orch::run(&store,&["wait".into(),"prepare".into(),"--task".into(),"checkpointed".into(),"--repo".into(),repo.to_string_lossy().into_owned(),"--issue".into(),"issue".into(),"--proposal".into(),"proposal".into(),"--min-rounds".into(),"5".into()],true,false);
+    assert_eq!(prepared.exit_code,0,"{}",prepared.stderr);
+    let b=pipeline_bridge(temp.path(),0,"host-callback-test-findings");
+    call(&b,"session",&json!({"action":"begin","project":repo,"text":"repair test finding"}));
+    seed_execution(&b);
+    call(&b,"session",&json!({"action":"call","tool":"goal","arguments":{"mode":"change"}}));
+    let result=call(&b,"session",&json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:dispatcher","project":"demo","cwd":repo,"prompt":"Run tests and prepare a repair if they fail"}}));
+    let state=orch::wait_state(&store).unwrap();
+    let report=fs::read_to_string(result["structuredContent"]["saved_to"].as_str().unwrap()).unwrap();
+    assert_eq!(state.checkpoints.last().unwrap().round,2,"{report}");
+    assert!(state.events.iter().any(|e|e.kind=="test_reject"&&e.actor=="lifecycle"));
+    assert!(!state.events.iter().any(|e|matches!(e.kind.as_str(),"core_approve"|"core_reject"|"release")));
+    assert!(call(&b,"session",&json!({"action":"status"}))["structuredContent"]["core_notices"].as_array().unwrap().is_empty());
+    assert!(!orch::may_finish(&state,"checkpointed"));
+}
+
+#[test]
+fn independent_final_tester_unlocks_only_core_submission() {
+    // Downstream fixture: the real prefix is covered by authority_cases.
+    // Models are deterministic; Rust executes actual build, package and full tests.
+    let temp=common::temp();
+    let (repo,store)=pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store,&repo,1);
+    let b=pipeline_bridge(temp.path(),0,"host-callback-final");
+    pipeline_core_status(&b,&repo);
+    let status=call(&b,"session",&json!({"action":"call","tool":"workflow","arguments":{"action":"status"}}));
+    assert_eq!(status["structuredContent"]["workflow"]["phase"],"ready_submit","{status}");
+    let submitted=call(&b,"session",&json!({"action":"call","tool":"workflow","arguments":{"action":"submit"}}));
+    assert_eq!(submitted["structuredContent"]["phase"],"submitted","{submitted}");
+    let done=call(&b,"session",&json!({"action":"call","tool":"goal","arguments":{"status":"done"}}));
+    assert_eq!(done["isError"],false,"{done}");
+    assert_eq!(done["structuredContent"]["goal"]["status"],"done","{done}");
+    assert!(!orch::wait_state(&store).unwrap().events.iter().any(|e|e.kind=="core_approve"));
+}
+
+#[test]
+fn rejected_final_tester_persists_findings_without_unlocking_core() {
+    let temp=common::temp();
+    let (repo,store)=pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store,&repo,1);
+    let b=pipeline_bridge(temp.path(),0,"host-callback-final-reject");
+    pipeline_core_status(&b,&repo);
+    let status=call(&b,"session",&json!({"action":"call","tool":"workflow","arguments":{"action":"status"}}));
+    assert_eq!(status["structuredContent"]["workflow"]["phase"],"execution","{status}");
+    let submitted=call(&b,"session",&json!({"action":"call","tool":"workflow","arguments":{"action":"submit"}}));
+    assert_eq!(submitted["isError"],true,"{submitted}");
+    let authority=b.home().unwrap().join("authority");
+    let artifacts:Vec<_>=fs::read_dir(authority).unwrap().flatten().flat_map(|d|
+        fs::read_dir(d.path()).unwrap().flatten().map(|f|f.path()).collect::<Vec<_>>()
+    ).filter(|p|p.file_name().unwrap().to_string_lossy().starts_with("tester-")).collect();
+    assert_eq!(artifacts.len(),1);
+    let saved:Value=serde_json::from_slice(&fs::read(&artifacts[0]).unwrap()).unwrap();
+    assert!(saved["final_message"].as_str().unwrap().contains("Final acceptance evidence missing"));
+}
+
+#[test]
+fn outer_dispatcher_budget_does_not_cut_a_long_owned_engineering_callback() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store, &repo, 1);
+    let b = pipeline_bridge(temp.path(), 13, "host-callback");
+    assert_eq!(call(&b,"session",&json!({"action":"begin","project":repo,"text":"deadline regression"}))["isError"], false);
+    seed_execution(&b);
+    assert_eq!(call(&b,"session",&json!({"action":"call","tool":"goal","arguments":{"mode":"change"}}))["isError"], false);
+    let result = call(&b,"session",&json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:dispatcher","project":"demo","cwd":repo,"prompt":"run one owned engineering operation","timeout_s":1}}));
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["structuredContent"]["outcome"], "verified", "{result}");
+    assert_eq!(orch::wait_state(&store).unwrap().operations.len(), 1);
+}
+
+#[test]
+fn outer_completed_transport_cannot_mask_blocked_or_incomplete_domain_result() {
+    for fault in ["host-callback-blocked-worker", "host-callback-missing-result"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        pipeline_checkpoint(&store, &repo, 1);
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        call(&b,"session",&json!({"action":"begin","project":repo,"text":"blocked domain regression"}));
+        seed_execution(&b);
+        call(&b,"session",&json!({"action":"call","tool":"goal","arguments":{"mode":"change"}}));
+        let response = call(&b,"session",&json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:dispatcher","project":"demo","cwd":repo,"prompt":"run one operation"}}));
+        let result = &response["structuredContent"];
+        assert_eq!(response["isError"], true, "{response}");
+        assert_eq!(result["transport_status"], "completed", "{result}");
+        assert_eq!(result["outcome"], if fault.ends_with("blocked-worker") { "blocked" } else { "protocol_incomplete" }, "{result}");
+        let saved: Value = serde_json::from_slice(&fs::read(result["saved_to"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(saved["domain_result"], result["result"]);
+        let op = &orch::wait_state(&store).unwrap().operations[0];
+        assert_eq!(result["result"]["operations"][0]["delivery_id"], op.reply()["delivery_id"]);
+        assert!(!op.receipts.contains_key("build"));
+    }
+}
+
+#[test]
+fn implementation_delivery_gate_uses_actual_tree_and_host_check_before_assembly() {
+    for fault in ["delivery-native", "delivery-zero", "delivery-outside", "delivery-unrelated", "delivery-missing-output", "delivery-verify-fail", "delivery-positive"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        let verify = if fault == "delivery-verify-fail" { "cargo test --locked --offline --definitely-invalid" } else { "cargo test --locked --offline" };
+        fs::write(store.join("checkpointed.brief"), format!("GOAL Implement required artifact\nSCOPE src/lib.rs src/deliverable.rs\nVERIFY {verify}\nDELIVERY implementation\nOUTPUTS {}\n", if fault == "delivery-missing-output" { "src/lib.rs src/deliverable.rs" } else { "src/deliverable.rs" })).unwrap();
+        let outputs = if fault == "delivery-missing-output" { vec!["src/lib.rs", "src/deliverable.rs"] } else { vec!["src/deliverable.rs"] };
+        orch::checkpoint(&store, serde_json::from_value(json!({"task":"checkpointed","module":"m","round":1,"owner":"terra","dependencies":[],"outputs":outputs,"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":1,"contract":orch::contract_identity(&store,"checkpointed").unwrap(),"repo":repo,"severity":"normal","findings":[]})).unwrap()).unwrap();
+        let b = pipeline_bridge(temp.path(), 0, fault);
+        let response = call(&b, "codex_run", &json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"assembly"}));
+        let state = orch::wait_state(&store).unwrap();
+        let positive = fault == "delivery-positive";
+        if !positive {
+            assert!(!state.operations[0].executing, "{fault}: {response}");
+            assert!(!store.join(".worker.claim").exists(), "{fault}");
+        }
+        assert_eq!(state.events.iter().filter(|e| e.kind == "build").count(), usize::from(positive), "{fault}: {response}");
+        assert_eq!(state.events.iter().filter(|e| e.kind == "assembly").count(), usize::from(positive), "{fault}: {response}");
+        let log = fs::read_to_string(temp.path().join("delivery-launches.log")).unwrap();
+        assert_eq!(log.lines().filter(|l| l.contains("terra")).count(), 1, "{fault}");
+        assert_eq!(log.lines().filter(|l| l.contains("sol")).count(), usize::from(positive), "{fault}");
+        assert_eq!(log.lines().filter(|l| l.contains("astra")).count(), 0, "{fault}");
+        if ["delivery-zero", "delivery-unrelated", "delivery-missing-output"].contains(&fault) {
+            assert_eq!(response["structuredContent"]["outcome"], "blocked", "{fault}: {response}");
+        }
+        if positive { assert!(repo.join("src/deliverable.rs").is_file()); }
+    }
+}
+
+#[test]
+fn implementation_saved_build_requires_intact_bound_receipt_before_assembly() {
+    for tamper in ["missing", "identity"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        fs::write(store.join("checkpointed.brief"), "GOAL Implement\nSCOPE src/lib.rs src/deliverable.rs\nVERIFY cargo test --locked --offline\nDELIVERY implementation\nOUTPUTS src/deliverable.rs\n").unwrap();
+        orch::checkpoint(&store, serde_json::from_value(json!({"task":"checkpointed","module":"m","round":1,"owner":"terra","dependencies":[],"outputs":["src/deliverable.rs"],"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":1,"contract":orch::contract_identity(&store,"checkpointed").unwrap(),"repo":repo,"severity":"normal","findings":[]})).unwrap()).unwrap();
+        let b = pipeline_bridge(temp.path(), 0, "delivery-positive");
+        invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build"}));
+        let state = orch::wait_state(&store).unwrap();
+        let receipt = &state.operations[0].receipts["build"]["delivery_receipt"];
+        let path = std::path::PathBuf::from(receipt["path"].as_str().unwrap());
+        if tamper == "missing" { fs::remove_file(path).unwrap(); } else {
+            let mut value = receipt["receipt"].clone(); value["binding"]["operation_id"] = json!("foreign");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+        assert_eq!(result["outcome"], "failed", "{tamper}: {result}");
+        let state = orch::wait_state(&store).unwrap();
+        assert_eq!(state.events.iter().filter(|e| e.kind == "assembly").count(), 0);
+        let log = fs::read_to_string(temp.path().join("delivery-launches.log")).unwrap();
+        assert_eq!(log.lines().count(), 1, "{tamper}");
+    }
+}
+
+#[test]
+fn missing_live_delivery_never_dispatches_but_historical_brief_remains_readable() {
+    let temp = common::temp();
+    let (repo, store) = pipeline_fixture(temp.path());
+    pipeline_checkpoint(&store, &repo, 1);
+    fs::write(store.join("checkpointed.brief"), "GOAL Historical\nSCOPE src/lib.rs\nVERIFY cargo test --locked --offline\n").unwrap();
+    assert!(orch::unit_brief(&store, "checkpointed").unwrap().delivery.is_none());
+    let b = pipeline_bridge(temp.path(), 0, "delivery-zero");
+    let response = call(&b, "codex_run", &json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra"}));
+    assert_eq!(response["isError"], true, "{response}");
+    assert_eq!(response["structuredContent"]["error"]["kind"], "invalid_argument", "{response}");
+    let state = orch::wait_state(&store).unwrap();
+    assert_eq!(state.events.iter().filter(|e| ["dispatch", "build", "assembly"].contains(&e.kind.as_str())).count(), 0);
+    assert!(!temp.path().join("delivery-launches.log").exists());
+}
+
+#[test]
+fn explicit_outputs_real_registration_prepare_and_build_boundary() {
+    for mode in ["delivery-positive", "delivery-existing", "delivery-dir", "delivery-dir-delete", "delivery-empty", "delivery-wrong", "delivery-file-is-dir", "delivery-file-delete", "delivery-ignored-dir", "delivery-other"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        fs::remove_file(store.join("units.tsv")).unwrap();
+        assert_eq!(orch::run(&store, &["init".into()], true, false).exit_code, 0);
+        fs::create_dir_all(repo.join("src/items")).unwrap();
+        if mode == "delivery-dir-delete" {
+            fs::write(repo.join("src/items/keep.rs"), "// keep\n").unwrap();
+            fs::write(repo.join("src/items/remove.rs"), "// remove\n").unwrap();
+        }
+        if mode == "delivery-wrong" { fs::write(repo.join("src/items" ).join("wrong.rs"), "// wrong type\n").unwrap(); }
+        if mode == "delivery-file-delete" { fs::write(repo.join("src/deliverable.rs"), "// required file\n").unwrap(); }
+        if mode == "delivery-ignored-dir" {
+            fs::write(repo.join(".gitignore"), "/target\n/src/items/\n").unwrap();
+            fs::write(repo.join("src/items/ignored.rs"), "// not monitored\n").unwrap();
+        }
+        let outputs = match mode {
+            "delivery-existing" => "src/lib.rs src/deliverable.rs",
+            "delivery-dir" | "delivery-dir-delete" | "delivery-empty" | "delivery-ignored-dir" => "src/items/",
+            "delivery-wrong" => "src/items/wrong.rs/",
+            "delivery-file-is-dir" => "src/items",
+            _ => "src/deliverable.rs",
+        };
+        let brief = store.join("checkpointed.brief");
+        fs::write(&brief, format!("GOAL Implement\nSCOPE src/\nVERIFY cargo test --locked --offline\nDELIVERY implementation\nOUTPUTS {outputs}\n")).unwrap();
+        let add = vec!["unit".into(), "add".into(), "checkpointed".into(), "--track".into(), "m".into(), "--brief".into(), brief.to_string_lossy().into_owned()];
+        let added = orch::run(&store, &add, true, false);
+        assert_eq!(added.exit_code, 0, "{}", added.stderr);
+        let prepare = vec!["wait".into(), "prepare".into(), "--task".into(), "checkpointed".into(), "--repo".into(), repo.to_string_lossy().into_owned(), "--issue".into(), "issue".into(), "--proposal".into(), "proposal".into()];
+        let prepared = orch::run(&store, &prepare, true, false);
+        assert_eq!(prepared.exit_code, 0, "{}", prepared.stderr);
+        let state = orch::wait_state(&store).unwrap();
+        let checkpoint = orch::current_checkpoint(&state, "checkpointed").unwrap();
+        assert_eq!(checkpoint.outputs, outputs.split_whitespace().collect::<Vec<_>>());
+        assert_ne!(checkpoint.outputs, vec!["src/"]);
+        let b = pipeline_bridge(temp.path(), 0, mode);
+        let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build"}));
+        let positive = ["delivery-positive", "delivery-existing", "delivery-dir", "delivery-dir-delete"].contains(&mode);
+        let state = orch::wait_state(&store).unwrap();
+        assert_eq!(state.events.iter().filter(|e| e.kind == "build").count(), usize::from(positive), "{mode}: {result}");
+        assert_eq!(state.events.iter().filter(|e| e.kind == "assembly").count(), 0, "{mode}: {result}");
+        let log = fs::read_to_string(temp.path().join("delivery-launches.log")).unwrap();
+        assert_eq!(log.lines().filter(|s| s.contains("terra")).count(), 1);
+        assert_eq!(log.lines().filter(|s| s.contains("sol") || s.contains("astra")).count(), 0);
+        if positive { assert_eq!(result["stage"], "assembly", "{mode}: {result}"); }
+        else {
+            assert_eq!(result["outcome"], "blocked", "{mode}: {result}");
+            let replay = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build"}));
+            assert_eq!(replay["delivery_id"], result["delivery_id"], "{mode}: {replay}");
+            assert_eq!(fs::read_to_string(temp.path().join("delivery-launches.log")).unwrap(), log);
+        }
+    }
+}
+
+#[test]
+fn live_missing_outputs_and_forged_checkpoint_reject_before_dispatch() {
+    for mode in ["missing-delivery", "missing", "invalid", "mismatch"] {
+        let temp = common::temp();
+        let (repo, store) = pipeline_fixture(temp.path());
+        if mode == "mismatch" {
+            pipeline_checkpoint(&store, &repo, 1);
+        } else {
+            let suffix = match mode {
+                "missing-delivery" => "OUTPUTS src/lib.rs\n",
+                "invalid" => "DELIVERY verification\nOUTPUTS ../outside\n",
+                _ => "DELIVERY verification\n",
+            };
+            fs::write(store.join("checkpointed.brief"), format!("GOAL Verify a Rust product\nSCOPE src/lib.rs src/mod.py\nVERIFY cargo test --locked --offline\n{suffix}")).unwrap();
+            let contract = if mode == "invalid" { "sha256:invalid".into() } else { orch::contract_identity(&store,"checkpointed").unwrap() };
+            let c = serde_json::from_value(json!({"task":"checkpointed","module":"m","round":1,"owner":"terra","dependencies":[],"outputs":["src/lib.rs"],"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":1,"contract":contract,"repo":repo,"severity":"normal","findings":[]})).unwrap();
+            let error = orch::checkpoint(&store, c).unwrap_err();
+            assert_eq!(error.kind, "invalid_argument", "{mode}: {error:?}");
+            assert!(error.message.contains("OUTPUTS"), "{mode}: {error:?}");
+            assert!(!store.join("core-wait.json").exists());
+            // Forge a historical checkpoint to exercise live validation too.
+            fs::write(store.join("checkpointed.brief"), "GOAL Verify a Rust product\nSCOPE src/lib.rs src/mod.py\nVERIFY cargo test --locked --offline\nDELIVERY verification\nOUTPUTS src/lib.rs\n").unwrap();
+            pipeline_checkpoint(&store, &repo, 1);
+            fs::write(store.join("checkpointed.brief"), format!("GOAL Verify a Rust product\nSCOPE src/lib.rs src/mod.py\nVERIFY cargo test --locked --offline\n{suffix}")).unwrap();
+        }
+        if mode == "mismatch" {
+            let path = store.join("core-wait.json");
+            let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            state["checkpoints"][0]["outputs"] = json!(["src/mod.py"]);
+            fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        let b = pipeline_bridge(temp.path(), 0, "delivery-zero");
+        let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build"}));
+        assert_eq!(result["error"]["kind"], "invalid_argument", "{mode}: {result}");
+        let state = orch::wait_state(&store).unwrap();
+        assert_eq!(state.events.iter().filter(|e| e.kind == "dispatch").count(), 0);
+        assert!(!temp.path().join("delivery-launches.log").exists());
+    }
 }

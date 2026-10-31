@@ -2,7 +2,7 @@ use crate::base::{proc, Failure, Res};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(crate) type ToolHandler = Arc<dyn Fn(&str, &Value) -> Value + Send + Sync>;
@@ -31,6 +31,7 @@ pub struct AppServer {
     ids: AtomicU64,
     turns: Mutex<HashSet<(String, String)>>,
     request_timeout: Option<Duration>,
+    unconfirmed: AtomicBool,
 }
 impl AppServer {
     pub fn new(command: Vec<String>) -> Self {
@@ -45,7 +46,14 @@ impl AppServer {
             ids: AtomicU64::new(1),
             turns: Mutex::new(HashSet::new()),
             request_timeout: timeout,
+            unconfirmed: AtomicBool::new(false),
         }
+    }
+    pub(crate) fn mark_unconfirmed(&self) {
+        self.unconfirmed.store(true, Ordering::Release);
+    }
+    pub(crate) fn has_unconfirmed(&self) -> bool {
+        self.unconfirmed.load(Ordering::Acquire)
     }
     pub fn alive(&self) -> bool {
         self.connection.lock().unwrap().as_ref().is_some_and(|c| {
@@ -84,12 +92,11 @@ impl AppServer {
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| Failure::new("codex_exited", e.to_string()))?;
         let input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
         let c = Arc::new(Connection {
             child: Mutex::new(child),
             input: Mutex::new(input),
@@ -105,7 +112,9 @@ impl AppServer {
             let mut line = Vec::new();
             loop {
                 line.clear();
-                if !matches!(output.read_until(b'\n', &mut line), Ok(n) if n > 0) {
+                // A malformed peer must not cause an unbounded line allocation.
+                if !matches!((&mut output).take(16 * 1024 * 1024 + 1).read_until(b'\n', &mut line), Ok(n) if n > 0 && n <= 16 * 1024 * 1024)
+                {
                     break;
                 }
                 let text = String::from_utf8_lossy(&line);
@@ -190,13 +199,6 @@ impl AppServer {
             let handlers = std::mem::take(&mut *reader.tools.lock().unwrap());
             drop(handlers);
         });
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                if line.is_err() {
-                    break;
-                }
-            }
-        });
         if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
         Ok(c)
     }
@@ -207,6 +209,19 @@ impl AppServer {
             .map_err(|e| Failure::new("codex_exited", e.to_string()))
     }
     fn request_on(&self, c: &Connection, method: &str, params: Value) -> Res<Value> {
+        if method != "turn/interrupt" && proc::remaining(Duration::from_secs(1)).is_zero() {
+            return Err(Failure::new("timeout", format!("{method}: operation deadline exhausted before send")));
+        }
+        if method != "turn/interrupt"
+            && proc::current_cancellation()
+                .as_ref()
+                .is_some_and(|c| c.cancelled())
+        {
+            return Err(Failure::new(
+                "interrupted",
+                format!("{method} cancelled before sending"),
+            ));
+        }
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         {
@@ -223,21 +238,44 @@ impl AppServer {
         let timeout = self.request_timeout.unwrap_or_else(|| {
             Duration::from_secs(match method {
                 "initialize" => 60,
-                "turn/interrupt" => 30,
+                "turn/interrupt" => 2,
                 _ => 120,
             })
         });
-        let msg = match rx.recv_timeout(timeout) {
-            Ok(msg) => msg,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        // Interrupt/reap has its own bounded cleanup budget, not renewed work.
+        let timeout = if method == "turn/interrupt" { timeout } else { proc::remaining(timeout) };
+        let deadline = Instant::now() + timeout;
+        let cancellation = if method == "turn/interrupt" {
+            None
+        } else {
+            proc::current_cancellation()
+        };
+        let msg = loop {
+            if cancellation.as_ref().is_some_and(|c| c.cancelled()) {
+                c.pending.lock().unwrap().remove(&id);
+                return Err(Failure::new(
+                    if method == "turn/start" {
+                        "turn_unconfirmed"
+                    } else {
+                        "interrupted"
+                    },
+                    format!("{method} cancelled while awaiting response"),
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 c.pending.lock().unwrap().remove(&id);
                 return Err(Failure::new("timeout", format!("{method} timed out")));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(Failure::new(
-                    "codex_exited",
-                    format!("codex app-server exited during {method}"),
-                ))
+            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(msg) => break msg,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Failure::new(
+                        "codex_exited",
+                        format!("codex app-server exited during {method}"),
+                    ))
+                }
             }
         };
         if let Some(error) = msg.get("error") {
@@ -312,14 +350,19 @@ impl AppServer {
             c.events.lock().unwrap().remove(thread_id);
         }
     }
-    pub(crate) fn interrupt(&self, thread_id: &str, turn_id: &str) {
-        if let Some(c) = self.connection.lock().unwrap().clone() {
-            let _ = self.request_on(
-                &c,
-                "turn/interrupt",
-                json!({"threadId":thread_id,"turnId":turn_id}),
-            );
-        }
+    pub(crate) fn interrupt(&self, thread_id: &str, turn_id: &str) -> Res<()> {
+        let c = self
+            .connection
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Failure::new("codex_exited", "app-server closed"))?;
+        self.request_on(
+            &c,
+            "turn/interrupt",
+            json!({"threadId":thread_id,"turnId":turn_id}),
+        )
+        .map(|_| ())
     }
     pub(crate) fn register_turn(&self, thread_id: &str, turn_id: &str) {
         self.turns
@@ -339,11 +382,15 @@ impl AppServer {
             return;
         };
         for (thread_id, turn_id) in turns {
-            let _ = self.request_on(
-                &c,
-                "turn/interrupt",
-                json!({"threadId":thread_id,"turnId":turn_id}),
-            );
+            let c = c.clone();
+            let id = self.ids.fetch_add(1, Ordering::Relaxed);
+            // Best-effort notifications are sent concurrently; turn owners verify terminal events.
+            thread::spawn(move || {
+                let _ = Self::send(
+                    &c,
+                    json!({"id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}}),
+                );
+            });
         }
     }
     pub fn list_models(&self) -> Res<Vec<String>> {

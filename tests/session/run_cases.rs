@@ -12,17 +12,43 @@ use std::{
 };
 
 struct Harness {
+    // run() serializes process-wide signal handling. Acquire the corresponding
+    // test lease before fixtures, watchdogs and asynchronous marker waits too;
+    // otherwise parallel tests time out while still queued outside run().
+    _session: std::sync::MutexGuard<'static, ()>,
     temp: tempfile::TempDir,
     config: Config,
     record: PathBuf,
 }
 impl Harness {
     fn new(scenario: &str) -> Self {
+        static SESSIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let session = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         let temp = common::temp();
         let home = temp.path().join("home");
         let record = temp.path().join("record.json");
+        if scenario=="checkpoint-authority" {
+            let store=axiom::orch::store_for(&home,"demo").unwrap();
+            assert_eq!(axiom::orch::run(&store,&["init".into()],true,false).exit_code,0);
+            assert_eq!(axiom::orch::run(&store,&["wait".into(),"enroll".into()],true,false).exit_code,0);
+        }
+
+        // These tests start at an already approved execution checkpoint and test
+        // downstream routing/cancellation only. authority_cases covers the real prefix.
+        if matches!(scenario,"agents" | "fallback" | "verify-stop" | "verify-interrupt" | "checkpoint-authority") {
+            let dir=home.join("authority/thread-1");std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("state.json"),json!({"phase":"execution","revision":1,"research":null,"reason":"trusted downstream test fixture"}).to_string()).unwrap();
+        }
+
         std::fs::write(temp.path().join("input.txt"), "readable source").unwrap();
-        let mut cmd = common::fake("fake_codex_session");
+        let mut cmd = vec![
+            common::python(),
+            "-I".into(),
+            common::repo_root()
+                .join("tests/session/fake_session.py")
+                .to_string_lossy()
+                .into_owned(),
+        ];
         for (k, v) in [
             ("--scenario", scenario.to_owned()),
             ("--record", record.to_string_lossy().into_owned()),
@@ -32,6 +58,7 @@ impl Harness {
             cmd.extend([k.into(), v]);
         }
         Self {
+            _session: session,
             config: Config {
                 codex: Ok(cmd),
                 home,
@@ -87,7 +114,447 @@ impl Harness {
 fn empty() -> Box<dyn BufRead + Send> {
     Box::new(Cursor::new(Vec::<u8>::new()))
 }
+#[test]
+fn enrolled_change_waits_without_model_polling_and_wakes_for_interjection() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    struct IdleInput { record: PathBuf, count: Arc<AtomicUsize>, sent: bool }
+    impl Read for IdleInput {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent { return Ok(0); }
+            std::thread::sleep(Duration::from_millis(800));
+            let record: Value = serde_json::from_slice(&std::fs::read(&self.record)?).unwrap();
+            self.count.store(record["requests"].as_array().unwrap().iter()
+                .filter(|r| r["method"] == "turn/start").count(), Ordering::SeqCst);
+            self.sent = true;
+            let line = b"new requirement\n";
+            buf[..line.len()].copy_from_slice(line);
+            Ok(line.len())
+        }
+    }
+    let h = Harness::new("idle-wake");
+    idle_store(&h);
+    let count = Arc::new(AtomicUsize::new(0));
+    let input = IdleInput { record: h.record.clone(), count: count.clone(), sent: false };
+    let (code, out) = h.execute(Box::new(BufReader::new(input)), None);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let turns = h.requests("turn/start");
+    assert_eq!(turns.len(), 2);
+    assert!(turns[1]["input"][0]["text"].as_str().unwrap().contains("new requirement"));
+    assert!(h.goal().interjection.is_none());
+}
+// Synthetic dispatch reports are fixtures, not evidence of live engineering.
+// They pass the real persisted journal replay and session RPC delivery paths.
+fn idle_store(h: &Harness) -> PathBuf {
+    let store = h.config.home.join("orchestrate").join(axiom::base::slug_for_dir(h.temp.path()));
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("units.tsv"), "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n").unwrap();
+    std::fs::write(store.join("wait-required"), "1\n").unwrap();
+    let state = axiom::orch::WaitState { engineering_enrolled: true, ..Default::default() };
+    axiom::base::atomic_write(&store.join("core-wait.json"), &serde_json::to_vec(&state).unwrap()).unwrap();
+    store
+}
+fn publish_idle_notice(store: &Path, task: &str) -> String {
+    let mut state = axiom::orch::wait_state(store).unwrap();
+    let c: axiom::orch::Checkpoint = serde_json::from_value(json!({
+        "task":task,"module":"m","round":1,"min_rounds":5,"owner":"dispatcher",
+        "dependencies":[],"outputs":["out"],"evidence":[],"next_action":"core verdict",
+        "issue":"i","proposal":"p","evidence_version":1,"contract":"fixture-contract",
+        "repo":"","severity":"normal","findings":[]
+    })).unwrap();
+    state.checkpoints.push(c);
+    let dispatch = format!("{task}-dispatch");
+    for (kind, actor, model) in [
+        ("dispatch", "lifecycle", ""), ("build", "worker", "gpt-6.1-terra"),
+        ("assembly_intent", "lifecycle", ""), ("assembly", "sol", "gpt-6.1-sol"),
+        ("package_intent", "lifecycle", ""), ("package", "lifecycle", ""),
+        ("verification_intent", "lifecycle", ""), ("verification", "astra-verify", "gpt-6-astra"),
+        ("notification", "lifecycle", ""),
+    ] {
+        let report = json!({"status":"completed","actual_effort":"high","model":model,
+            "actual_sandbox":if kind == "verification" {"readOnly"} else {"workspaceWrite"},
+            "thread_id":"fixture-thread","turn_id":kind,"source_identity":"fixture-source",
+            "binding":{"task":task,"round":1,"attempt":dispatch,"artifact":"fixture-artifact",
+                "issue":"i","evidence_version":1,"contract":"fixture-contract"},
+            "package_hash":"sha256:fixture","verification_event":format!("{task}-verification"),
+            "structured_output":{"issues":[],"severity":"normal"}});
+        state.events.push(axiom::orch::Event {
+            id:format!("{task}-{kind}"), task:task.into(), round:1, issue:"i".into(),
+            proposal:"p".into(), evidence_version:1, kind:kind.into(), evidence:format!("host:{report}"),
+            actor:actor.into(), dispatch_id:dispatch.clone(), contract:"fixture-contract".into(),
+            artifact:"fixture-artifact".into(),
+        });
+    }
+    axiom::base::atomic_write(&store.join("core-wait.json"), &serde_json::to_vec(&state).unwrap()).unwrap();
+    axiom::orch::wait_state(store).unwrap(); // Reject malformed fixtures before exercising the loop.
+    format!("{task}-notification")
+}
+fn wait_file(path: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    while !path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "timed out waiting for {}", path.display());
+}
+fn marker(h: &Harness, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}.{suffix}", h.record.display()))
+}
+fn start_idle(h: &Harness, input: Box<dyn BufRead + Send>) -> std::thread::JoinHandle<(i32, String)> {
+    let config = Config {
+        codex: Ok(h.config.codex.as_ref().unwrap().clone()),
+        home: h.config.home.clone(), bin: h.config.bin.clone(),
+    };
+    let project = h.temp.path().to_path_buf();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let code = run(&config, "wish", "durable idle test", &project, Some(20), input, &mut output).unwrap();
+        (code, String::from_utf8(output).unwrap())
+    })
+}
+fn assert_idle_turns(h: &Harness, count: usize) {
+    // Several 50ms polling periods must not schedule another model turn.
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(h.requests("turn/start").len(), count);
+}
+struct ChannelInput(std::sync::mpsc::Receiver<String>);
+impl Read for ChannelInput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Ok(line) = self.0.recv() else { return Ok(0) };
+        let bytes = line.as_bytes();
+        assert!(bytes.len() <= buf.len());
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Ok(bytes.len())
+    }
+}
+#[test]
+fn enrolled_idle_notice_wakes_once_and_replays_pending_notice_on_user_wake() {
+    let h = Harness::new("idle-state");
+    let store = idle_store(&h);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let running = start_idle(&h, Box::new(BufReader::new(ChannelInput(rx))));
+    wait_file(&marker(&h, "completed-1"));
+    assert_idle_turns(&h, 1);
+    let first = publish_idle_notice(&store, "first");
+    wait_file(&marker(&h, "completed-2"));
+    assert_idle_turns(&h, 2);
+    // A second distinct durable event wakes once even with the old notice pending.
+    let second = publish_idle_notice(&store, "second");
+    wait_file(&marker(&h, "completed-3"));
+    assert_idle_turns(&h, 3);
+    let before = std::fs::read(store.join("core-wait.json")).unwrap();
+    assert_eq!(h.goal().status, "active");
+    tx.send("new requirement while idle\n".into()).unwrap();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 1, "{out}");
+    let turns = h.requests("turn/start");
+    assert_eq!(turns.len(), 4);
+    assert!(turns[1]["input"].to_string().contains(&first));
+    for i in [2, 3] {
+        assert!(turns[i]["input"].to_string().contains(&first));
+        assert!(turns[i]["input"].to_string().contains(&second));
+        assert!(turns[i]["input"].to_string().contains("verification_event"));
+    }
+    let persisted: Value = serde_json::from_slice(&std::fs::read(marker(&h, "interjection")).unwrap()).unwrap();
+    assert_eq!(persisted["interjection"]["prompt"], "new requirement while idle");
+    assert!(h.goal().interjection.is_none());
+    assert!(h.goal().amendments.iter().any(|a| a == "new requirement while idle"));
+    // Delivery is not a verdict and must not rewrite or acknowledge the journal.
+    assert_eq!(std::fs::read(store.join("core-wait.json")).unwrap(), before);
+}
+#[test]
+fn enrolled_idle_cancellation_and_durable_stop_do_not_start_turns() {
+    for stop in [false, true] {
+        let h = Harness::new("idle-state");
+        idle_store(&h);
+        let running = start_idle(&h, empty());
+        wait_file(&marker(&h, "completed-1"));
+        assert_idle_turns(&h, 1);
+        if stop {
+            goal::interject(&h.config.home, "thread-1", "stop idle work").unwrap();
+            goal::classify(&h.config.home, "thread-1", "stop").unwrap();
+        } else {
+            axiom::session::trigger_interrupt();
+        }
+        let (code, out) = running.join().unwrap();
+        assert_eq!(code, if stop { 1 } else { 130 }, "{out}");
+        assert_eq!(h.requests("turn/start").len(), 1);
+        assert_eq!(h.goal().status, "blocked");
+        assert_eq!(h.goal().reason.as_deref(), Some(if stop { "user_stop" } else { "interrupted" }));
+    }
+}
+#[test]
+fn enrolled_idle_delivers_turn_boundary_notice_without_duplicate_wake() {
+    let h = Harness::new("idle-state-boundary");
+    let store = idle_store(&h);
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "boundary"));
+    let id = publish_idle_notice(&store, "boundary");
+    // The notice was absent when turn 1 was constructed, but durable before its completion.
+    std::fs::write(marker(&h, "release"), "go").unwrap();
+    wait_file(&marker(&h, "completed-2"));
+    assert_idle_turns(&h, 2);
+    axiom::session::trigger_interrupt();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 130, "{out}");
+    let turns = h.requests("turn/start");
+    assert_eq!(turns.len(), 2);
+    assert!(!turns[0]["input"].to_string().contains(&id));
+    assert!(turns[1]["input"].to_string().contains(&id));
+}
+#[test]
+fn enrolled_idle_dispatcher_reply_counts_as_notice_delivery_not_a_new_wake() {
+    let h = Harness::new("idle-state-callback");
+    let store = idle_store(&h);
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "boundary"));
+    let id = publish_idle_notice(&store, "callback");
+    std::fs::write(marker(&h, "release"), "go").unwrap();
+    wait_file(&marker(&h, "completed-1"));
+    // One core turn and the synchronous dispatcher turn; no follow-up core turn.
+    assert_idle_turns(&h, 2);
+    axiom::session::trigger_interrupt();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 130, "{out}");
+    assert_eq!(h.requests("turn/start").len(), 2);
+    assert!(h.records()["responses"].to_string().contains(&id));
+    assert!(axiom::orch::wait_state(&store).unwrap().events.iter().any(|e| e.id == id));
+}
+#[test]
+fn enrolled_idle_propagates_durable_state_errors_without_waking_model() {
+    let h = Harness::new("idle-state");
+    let store = idle_store(&h);
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "completed-1"));
+    assert_idle_turns(&h, 1);
+    std::fs::write(store.join("core-wait.json"), "{").unwrap();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("invalid core-wait state"), "{out}");
+    assert_eq!(h.requests("turn/start").len(), 1);
+}
 struct Delayed(bool);
+#[test]
+fn enrolled_steered_interjection_is_classified_after_unclassified_turn_completion() {
+    let h = Harness::new("idle-fix-steered");
+    idle_store(&h);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let running = start_idle(&h, Box::new(BufReader::new(ChannelInput(rx))));
+    wait_file(&marker(&h, "boundary"));
+    tx.send("successfully steered but not classified\n".into()).unwrap();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(h.requests("turn/steer").len(), 1);
+    assert_eq!(h.requests("turn/start").len(), 2);
+    assert!(h.requests("turn/start")[1]["input"].to_string().contains("successfully steered"));
+    assert!(h.goal().interjection.is_none());
+    assert!(h.goal().amendments.iter().any(|a| a == "successfully steered but not classified"));
+}
+
+fn actionable_store(h: &Harness) -> PathBuf {
+    let store = idle_store(h);
+    let call = |args: &[&str]| {
+        let out = axiom::orch::run(&store, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), true, false);
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    };
+    call(&["init"]);
+    std::fs::write(store.join("brief"), "GOAL progress\nSCOPE input.txt\nOUTPUTS input.txt\nDELIVERY implementation\nVERIFY echo ok\n").unwrap();
+    call(&["unit", "add", "u", "--track", "m", "--brief", store.join("brief").to_str().unwrap()]);
+    call(&["wait", "prepare", "--task", "u", "--repo", h.temp.path().to_str().unwrap(),
+        "--issue", "i", "--proposal", "p"]);
+    store
+}
+
+#[test]
+fn enrolled_producerless_todo_recovery_and_dispatcher_failure_deliver_stable_blocked_outcome() {
+    for scenario in ["idle-fix-todo", "idle-fix-recovered", "idle-fix-dispatcher-completed",
+        "idle-fix-dispatcher-failed", "idle-fix-ignored", "idle-fix-abandoned"] {
+        let h = Harness::new(scenario);
+        let store = if scenario == "idle-fix-dispatcher-failed" { idle_store(&h) } else { actionable_store(&h) };
+        if scenario == "idle-fix-recovered" {
+            axiom::orch::commit_dispatch(&store, "u").unwrap();
+            let state = axiom::orch::wait_state(&store).unwrap();
+            let mut recovery = state.events.last().unwrap().clone();
+            recovery.kind = "recovery".into();
+            recovery.id = "confirmed-recovery".into();
+            recovery.actor = "core".into();
+            recovery.evidence = "operator confirmed no previous writer launched".into();
+            axiom::orch::recover_dispatch(&store, recovery, "not_started").unwrap();
+        }
+        if scenario == "idle-fix-abandoned" {
+            axiom::orch::commit_dispatch(&store, "u").unwrap();
+            std::fs::write(store.join(".worker.claim"), "unconfirmed stale ownership").unwrap();
+        }
+        let (code, out) = h.execute(empty(), Some(20));
+        assert_eq!(code, 1, "{scenario}: {out}");
+        assert_eq!(h.goal().status, "blocked", "{scenario}");
+        let turns = h.requests("turn/start");
+        let core_turns: Vec<_> = turns.iter().filter(|t| t["threadId"] == "thread-1").collect();
+        assert_eq!(core_turns.len(), 2, "{scenario}");
+        assert!(core_turns[1]["input"].to_string().contains("Rust idle liveness failure"));
+        if scenario == "idle-fix-ignored" {
+            assert!(h.goal().note.unwrap().contains("idle_blocked"));
+        }
+        // A liveness failure is never forged into independent verification or acceptance.
+        let state = axiom::orch::wait_state(&store).unwrap();
+        assert!(!state.events.iter().any(|e| matches!(e.kind.as_str(), "verification" | "core_approve" | "release")));
+    }
+}
+
+// Hold the actual nonblocking OS store mutex, not synthetic error strings.
+fn hold_store_mutex(store: &Path) -> std::fs::File {
+    // The live idle poller can own the real lock at this boundary. Retry only
+    // contention; acquiring the fixture must not race an ordinary poll.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)] {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        match options.open(store.join(".orch.mutex")) {
+            Ok(file) => {
+                #[cfg(unix)] {
+                    use std::os::fd::AsRawFd;
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                        let e = std::io::Error::last_os_error();
+                        assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock, "{e}");
+                        assert!(std::time::Instant::now() < deadline, "store lock remained busy");
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                }
+                return file;
+            }
+            Err(e) => {
+                #[cfg(windows)]
+                let busy = e.raw_os_error() == Some(32);
+                #[cfg(not(windows))]
+                let busy = e.kind() == std::io::ErrorKind::WouldBlock;
+                assert!(busy, "{e}");
+                assert!(std::time::Instant::now() < deadline, "store lock remained busy: {e}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+#[test]
+fn enrolled_idle_retries_real_store_lock_without_model_wake_then_delivers_notice() {
+    let h = Harness::new("idle-state");
+    let store = idle_store(&h);
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "completed-1"));
+    assert_idle_turns(&h, 1);
+    let lock = hold_store_mutex(&store);
+    assert_eq!(axiom::orch::wait_state(&store).unwrap_err().kind, "busy");
+    assert_idle_turns(&h, 1);
+    assert!(!running.is_finished());
+    drop(lock);
+    let id = publish_idle_notice(&store, "after-lock");
+    wait_file(&marker(&h, "completed-2"));
+    assert_idle_turns(&h, 2);
+    axiom::session::trigger_interrupt();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 130, "{out}");
+    assert!(h.requests("turn/start")[1]["input"].to_string().contains(&id));
+}
+
+#[test]
+fn dispatcher_completion_retries_actual_store_lock_without_false_failure_or_core_wake() {
+    let h = Harness::new("dispatcher-boundary");
+    let store = idle_store(&h);
+    let id = publish_idle_notice(&store, "dispatcher-boundary");
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "dispatcher-ready"));
+    let lock = hold_store_mutex(&store);
+    assert_eq!(axiom::orch::wait_state(&store).unwrap_err().kind, "busy");
+    std::fs::write(marker(&h, "release"), "").unwrap();
+    wait_file(&marker(&h, "dispatcher-completed"));
+    assert_idle_turns(&h, 2); // One core turn and one dispatcher turn.
+    assert!(!marker(&h, "callback").exists());
+    drop(lock);
+    wait_file(&marker(&h, "completed-1"));
+    let response = std::fs::read_to_string(marker(&h, "callback")).unwrap();
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["success"], true, "{response}");
+    assert!(response.to_string().contains(&id), "{response}");
+    assert_idle_turns(&h, 2);
+    assert!(!running.is_finished());
+    axiom::session::trigger_interrupt();
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 130, "{out}");
+    assert_eq!(h.requests("turn/start").len(), 2);
+}
+
+#[test]
+fn dispatcher_completion_propagates_corruption_after_real_lock_releases() {
+    let h = Harness::new("dispatcher-boundary-corrupt");
+    let store = idle_store(&h);
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "dispatcher-ready"));
+    let lock = hold_store_mutex(&store);
+    std::fs::write(store.join("core-wait.json"), "{").unwrap();
+    std::fs::write(marker(&h, "release"), "").unwrap();
+    wait_file(&marker(&h, "dispatcher-completed"));
+    assert_idle_turns(&h, 2);
+    assert!(!marker(&h, "callback").exists());
+    drop(lock);
+    wait_file(&marker(&h, "callback"));
+    let response = std::fs::read_to_string(marker(&h, "callback")).unwrap();
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["success"], false, "{response}");
+    assert!(response.to_string().contains("invalid core-wait state"), "{response}");
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("invalid core-wait state"), "{out}");
+    assert_eq!(h.requests("turn/start").len(), 2);
+}
+
+#[test]
+fn enrolled_idle_waits_for_actual_worker_ownership_not_just_durable_claim() {
+    let h = Harness::new("idle-fix-owned");
+    let store = actionable_store(&h);
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .current_dir(h.temp.path()).status().unwrap().success());
+    assert!(matches!(axiom::orch::begin_unit(&store, "u", "worker", h.temp.path(), false).unwrap(),
+        axiom::orch::Begin::Run { .. }));
+    let running = start_idle(&h, empty());
+    wait_file(&marker(&h, "boundary"));
+    assert_idle_turns(&h, 1);
+    assert!(!running.is_finished());
+    axiom::orch::abort_unit(&store, "u");
+    let (code, out) = running.join().unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(h.goal().status, "blocked");
+    assert_eq!(h.requests("turn/start").len(), 2);
+}
+
+#[test]
+fn enrolled_idle_missing_unreadable_and_corrupt_files_fail_without_model_wake() {
+    for (file, damage) in [("core-wait.json", "missing"), ("core-wait.json", "directory"),
+        ("units.tsv", "missing"), ("units.tsv", "directory"), ("units.tsv", "invalid-utf8"),
+        ("core-wait.json", "corrupt-after-lock")] {
+        let h = Harness::new("idle-state");
+        let store = idle_store(&h);
+        let running = start_idle(&h, empty());
+        wait_file(&marker(&h, "completed-1"));
+        assert_idle_turns(&h, 1);
+        let lock = hold_store_mutex(&store);
+        std::fs::remove_file(store.join(file)).unwrap();
+        match damage {
+            "directory" => std::fs::create_dir(store.join(file)).unwrap(),
+            "invalid-utf8" => std::fs::write(store.join(file), [0xff]).unwrap(),
+            "corrupt-after-lock" => std::fs::write(store.join(file), "{").unwrap(),
+            _ => (),
+        }
+        drop(lock);
+        let (code, out) = running.join().unwrap();
+        assert_eq!(code, 1, "{file}/{damage}: {out}");
+        assert!(out.contains("session error"), "{file}/{damage}: {out}");
+        assert_eq!(h.requests("turn/start").len(), 1);
+    }
+}
 impl Read for Delayed {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.0 {
@@ -131,7 +598,7 @@ fn launch_progress_log_eof_and_readonly_authority() {
     assert!(!start["config"].get("tools").is_some()); // No invented native-tool removal keys.
     let turn = &h.requests("turn/start")[0];
     assert_eq!(turn["threadId"], "thread-1");
-    assert_eq!(turn["effort"], "max");
+    assert_eq!(turn["effort"], "medium");
     assert_eq!(turn["disabledPluginIds"], json!(["fixture@test"]));
     assert_eq!(turn["input"][0]["text"], "/chronos:wish 幫 todo 加統計功能");
     let logs = h.logs();
@@ -426,7 +893,20 @@ fn core_dispatcher_and_actual_reviewer_models_have_distinct_threads() {
             .iter()
             .map(|p| p["model"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["gpt-6-astra", "gpt-6-terra", "gpt-6-sol", "gpt-6-luna"]
+        ["gpt-6-astra", "gpt-6-terra", "gpt-6-sol", "gpt-6-terra"]
+    );
+    let dispatcher_tools = threads[1]["dynamicTools"].as_array().unwrap();
+    let codex = dispatcher_tools
+        .iter()
+        .find(|t| t["name"] == "chronos_codex_run")
+        .unwrap();
+    assert!(codex["inputSchema"]["properties"]["role"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("astra-verify")));
+    assert_eq!(
+        codex["inputSchema"]["properties"]["task_kind"]["enum"],
+        json!(["verification", "measurement"])
     );
     for child in &threads[1..] {
         assert_eq!(child["ephemeral"], true);
@@ -449,7 +929,7 @@ fn core_dispatcher_and_actual_reviewer_models_have_distinct_threads() {
         .all(|t| t["disabledPluginIds"] == json!(["fixture@test"])));
     assert_eq!(turns[1]["effort"], "high");
     assert_eq!(turns[2]["effort"], "high");
-    assert_eq!(turns[3]["effort"], "low");
+    assert_eq!(turns[3]["effort"], "medium");
     assert_eq!(turns[1]["input"][0]["text"], "dispatch directly");
     assert_ne!(turns[0]["threadId"], turns[1]["threadId"]);
 }
@@ -560,7 +1040,7 @@ fn independent_planner_thread_output_schema_saved_and_compressed() {
     h.arg("--output", &output);
     let (code, out) = h.execute(empty(), None);
     assert_eq!(code, 0, "{out}");
-    let threads = h.requests("thread/start");
+    let threads:Vec<_> = h.requests("thread/start").into_iter().filter(|p| p["model"] != "gpt-6-terra").collect();
     assert_eq!(threads.len(), 3);
     assert_eq!(Path::new(threads[2]["cwd"].as_str().unwrap()), second_cwd);
     assert!(!h.config.home.join("sessions/thread-1.planner").exists());
@@ -575,7 +1055,7 @@ fn independent_planner_thread_output_schema_saved_and_compressed() {
         .unwrap()
         .iter()
         .any(|t| t["name"] == "Agent" || t["name"].as_str().unwrap().ends_with("codex_run")));
-    let turns = h.requests("turn/start");
+    let turns:Vec<_> = h.requests("turn/start").into_iter().filter(|p| p["effort"] != "high").collect();
     assert_ne!(turns[0]["threadId"], turns[1]["threadId"]);
     assert_ne!(turns[1]["threadId"], turns[2]["threadId"]);
     assert!(turns
@@ -590,7 +1070,7 @@ fn independent_planner_thread_output_schema_saved_and_compressed() {
         .iter()
         .filter_map(|r| r["result"]["contentItems"][0]["text"].as_str())
         .filter_map(|s| serde_json::from_str::<Value>(s).ok())
-        .filter(|r| r.get("saved_to").is_some())
+        .filter(|r| r.get("saved_to").is_some() && r["model"] == "gpt-6-astra")
         .collect();
     assert_eq!(reports.len(), 2);
     for r in reports {
@@ -667,7 +1147,13 @@ fn resume_keeps_research_bound_with_fresh_independent_planners() {
         resume(&h.config, "thread-1", None, empty(), &mut Vec::new()).unwrap(),
         0
     );
-    assert_eq!(h.requests("thread/start").len(), 2);
+    assert_eq!(
+        h.requests("thread/start").iter().filter(|p| p["model"] != "gpt-6-terra").count(),
+        2,
+        "requests: {} goal: {:?}",
+        h.records(),
+        h.goal()
+    );
     let resumed = h.requests("thread/resume");
     assert_eq!(
         resumed
@@ -683,7 +1169,7 @@ fn resume_keeps_research_bound_with_fresh_independent_planners() {
     assert_eq!(metadata["skill"], "research");
     assert_eq!(metadata["max_turns"], 16);
     assert_eq!(h.goal().wish, "research question");
-    let turns = h.requests("turn/start");
+    let turns:Vec<_> = h.requests("turn/start").into_iter().filter(|p| p["effort"] != "high").collect();
     assert!(turns[0]["input"][1]["text"]
         .as_str()
         .unwrap()
@@ -704,9 +1190,9 @@ fn luna_content_has_reads_exact_outputs_and_no_arbitrary_nesting() {
     assert!(!PathBuf::from(format!("{}.other", output.display())).exists());
     assert!(!PathBuf::from(format!("{}.core", output.display())).exists());
     let threads = h.requests("thread/start");
-    assert_eq!(threads[1]["model"], "gpt-6-luna");
-    assert_eq!(threads[1]["sandbox"], "read-only");
-    let tools = threads[1]["dynamicTools"].as_array().unwrap();
+    assert_eq!(threads[2]["model"], "gpt-6-luna");
+    assert_eq!(threads[2]["sandbox"], "read-only");
+    let tools = threads[2]["dynamicTools"].as_array().unwrap();
     for name in ["Read", "Glob", "Grep", "Write"] {
         assert!(tools.iter().any(|t| t["name"] == name));
     }
@@ -773,7 +1259,27 @@ fn wait_for_verifier(path: &Path) -> Vec<u32> {
 #[test]
 fn stop_and_ctrl_c_kill_verifier_tree_after_worker_model_completes() {
     for scenario in ["verify-stop", "verify-interrupt"] {
-        let h = Harness::new(scenario);
+        let mut h = Harness::new(scenario);
+        let wrapper = h.temp.path().join("verifier_fake.py");
+        let source = serde_json::to_string(
+            &common::repo_root()
+                .join("tests/fakes/fake_codex_session.py")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        std::fs::write(&wrapper, format!("from pathlib import Path\np={source}\ns=Path(p).read_text(encoding='utf-8').replace(\"'workspaceWrite' if scenario=='unsafe-sandbox' else 'readOnly'\",\"'workspaceWrite' if scenario=='unsafe-sandbox' or params.get('sandbox')=='workspace-write' else 'readOnly'\")\ns=s.replace(\"    elif method in ('thread/start','thread/resume'):\",\"    elif method=='skills/list': reply(msg,{{'data':[{{'cwd':params['cwds'][0],'errors':[],'skills':[]}}]}})\\n    elif method in ('thread/start','thread/resume'):\")\nexec(compile(s,p,'exec'))\n")).unwrap();
+        h.config.codex.as_mut().unwrap()[2] = wrapper.to_string_lossy().into_owned();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(h.temp.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            h.temp.path().join(".git/info/exclude"),
+            "home/\nrecord.json\nverifier-pids\nverifier.py\n",
+        )
+        .unwrap();
         let store = axiom::orch::store_for(&h.config.home, "demo").unwrap();
         std::fs::create_dir_all(&store).unwrap();
         std::fs::create_dir(store.join("inbox")).unwrap();
@@ -946,57 +1452,20 @@ fn dispatcher_can_delegate_only_root_authorized_content_outputs() {
 }
 
 #[test]
-fn host_allows_planning_before_mode_but_not_project_writes_or_dispatch() {
-    let mut h = Harness::new("planning-policy");
-    h.config.codex.as_mut().unwrap()[2] = common::repo_root()
-        .join("tests/session/planning_fake.py")
-        .to_string_lossy()
-        .into_owned();
-    let output = h.temp.path().join("artifact.md");
-    h.arg("--output", &output);
-    let (code, out) = h.execute(empty(), None);
-    assert_eq!(code, 0, "{out}");
-    let read_results = |suffix: &str| -> Value {
-        serde_json::from_slice(
-            &std::fs::read(format!("{}.{}", h.record.display(), suffix)).unwrap(),
-        )
-        .unwrap()
-    };
-    let core = read_results("core");
-    for key in [
-        "inside",
-        "architect",
-        "content_before",
-        "mode",
-        "content_after",
-    ] {
-        assert_eq!(core[key]["success"], true, "{key}: {core}");
+fn core_cannot_write_plans_or_directly_call_specialists() {
+    let mut h=Harness::new("planning-policy");
+    h.config.codex.as_mut().unwrap()[2]=common::repo_root().join("tests/session/planning_fake.py").to_string_lossy().into_owned();
+    let output=h.temp.path().join("artifact.md");h.arg("--output",&output);
+    let (code,out)=h.execute(empty(),None);assert_eq!(code,0,"{out}");
+    let core:Value=serde_json::from_slice(&std::fs::read(format!("{}.core",h.record.display())).unwrap()).unwrap();
+    assert_eq!(core["mode"]["success"],true);
+    for key in ["inside","outside","architect","content_before","content_after","dispatch"] {
+        assert_eq!(core[key]["success"],false,"{key}: {core}");
     }
-    for key in ["outside", "dispatch"] {
-        assert_eq!(core[key]["success"], false, "{key}: {core}");
-    }
-    let architect = read_results("thread-2");
-    assert_eq!(architect["inside"]["success"], true);
-    assert_eq!(architect["outside"]["success"], false);
-    let before = read_results("thread-3");
-    assert_eq!(before["output"]["success"], false);
-    assert_eq!(before["other"]["success"], false);
-    let after = read_results("thread-4");
-    assert_eq!(after["output"]["success"], true);
-    assert_eq!(after["other"]["success"], false);
-    assert_eq!(
-        std::fs::read_to_string(h.config.home.join("core-plan.md")).unwrap(),
-        "core plan"
-    );
-    assert_eq!(
-        std::fs::read_to_string(h.config.home.join("architect-plan.md")).unwrap(),
-        "architect plan"
-    );
-    assert_eq!(std::fs::read_to_string(output).unwrap(), "content artifact");
-    assert!(!h.temp.path().join("artifact.md.core").exists());
-    assert!(!h.temp.path().join("artifact.md.architect").exists());
-    assert!(!h.temp.path().join("artifact.md.other").exists());
-    assert_eq!(h.goal().mode.as_deref(), Some("answer"));
+    assert!(!h.config.home.join("core-plan.md").exists());
+    assert!(!h.config.home.join("architect-plan.md").exists());
+    assert!(!output.exists());
+    assert_eq!(h.requests("thread/start").len(),1);
 }
 
 #[test]
@@ -1066,4 +1535,77 @@ fn readonly_workflows_ignore_old_units_without_weakening_change_gates() {
             "not_done"
         );
     }
+}
+
+#[test]
+fn host_binds_checkpoint_authority_to_caller_and_blocks_direct_state_writes() {
+    let mut h = Harness::new("checkpoint-authority");
+    let wrapper = h.temp.path().join("authority.py");
+    let source_path = serde_json::to_string(
+        &common::repo_root()
+            .join("tests/fakes/fake_codex_session.py")
+            .to_string_lossy(),
+    )
+    .unwrap();
+    let probe = r#"    if scenario == 'checkpoint-authority':
+        core = 'You are Chronos core' in threads[tid].get('developerInstructions','')
+        home = Path(option('--home'))
+        results = {}
+        if core:
+            results['mode'] = tool(tid,turn,'goal',{'mode':'change'})
+            results['plan'] = call(tid,turn,'Write',{'file_path':str(home/'orchestrate'/'demo'/'planning.md'),'content':'plan'})
+            results['init'] = tool(tid,turn,'orch',{'project':'demo','args':['init']})
+            results['enroll'] = tool(tid,turn,'orch',{'project':'demo','args':['wait','enroll']})
+            results['child'] = call(tid,turn,'Agent',{'subagent_type':'chronos:dispatcher','prompt':'probe checkpoint authority','project':'demo','cwd':option('--project')})
+            results['blocked'] = tool(tid,turn,'goal',{'status':'blocked','note':'authority probe complete'})
+        else:
+            repo = option('--project')
+            brief = str(home/'orchestrate'/'demo'/'brief.md')
+            results['brief'] = call(tid,turn,'Write',{'file_path':brief,'content':'GOAL test\nSCOPE a.txt\nOUTPUTS a.txt\nDELIVERY implementation\nVERIFY echo ok\n'})
+            results['unit'] = tool(tid,turn,'orch',{'project':'demo','args':['unit','add','t','--track','build','--brief',brief]})
+            prepare = ['wait','prepare','--task','t','--repo',repo,'--issue','issue','--proposal','proposal','--min-rounds','3']
+            results['unenrolled'] = tool(tid,turn,'orch',{'project':'other','args':prepare})
+            results['prepare'] = tool(tid,turn,'orch',{'project':'demo','args':prepare})
+            results['unit_default'] = tool(tid,turn,'orch',{'project':'demo','args':['unit','add','default','--track','build','--brief',brief]})
+            results['prepare_default'] = tool(tid,turn,'orch',{'project':'demo','args':['--json','wait','prepare','--task','default','--repo',repo,'--issue','issue','--proposal','proposal']})
+            results['policy_change'] = tool(tid,turn,'orch',{'project':'demo','args':prepare[:-1]+['2']})
+            results['bad_option'] = tool(tid,turn,'orch',{'project':'demo','args':prepare+['--min-rounds','0']})
+            for action in ('verdict','complete','recover','checkpoint','enroll'):
+                results[action] = tool(tid,turn,'orch',{'project':'demo','args':['wait',action,'--task','t']})
+            results['malformed'] = tool(tid,turn,'orch',{'project':'demo','args':['wait',None,'event','--file','x']})
+            for flags in ([], ['--json'], ['--force','--json']):
+                results[str(flags)] = tool(tid,turn,'orch',{'project':'demo','args':flags+['wait','event','--file','does-not-exist']})
+            results['write'] = call(tid,turn,'Write',{'file_path':str(home/'orchestrate'/'demo'/'core-wait.json'),'content':'{"forged":true}'})
+            results['relative'] = call(tid,turn,'Write',{'file_path':'core-wait.json','content':'{"forged":true}'})
+        Path(option('--record')+'.authority-'+('core' if core else 'child')).write_text(json.dumps(results),encoding='utf-8')
+        complete(tid,turn,'authority probe')
+        return
+"#;
+    std::fs::write(&wrapper, format!("from pathlib import Path\np={source_path}\ns=Path(p).read_text(encoding='utf-8')\ns=s.replace(\"    elif method in ('thread/start','thread/resume'):\",\"    elif method=='skills/list': reply(msg,{{'data':[{{'cwd':params['cwds'][0],'errors':[],'skills':[]}}]}})\\n    elif method in ('thread/start','thread/resume'):\")\ns=s.replace(\"    role=threads[tid].get('model','')\",{}+\"    role=threads[tid].get('model','')\")\nexec(compile(s,p,'exec'))\n",serde_json::to_string(probe).unwrap())).unwrap();
+    h.config.codex.as_mut().unwrap()[2] = wrapper.to_string_lossy().into_owned();
+    let (code, out) = h.execute(empty(), None);
+    assert_eq!(code, 1, "{out}");
+    let child: Value = serde_json::from_slice(
+        &std::fs::read(format!("{}.authority-child", h.record.display())).unwrap(),
+    )
+    .unwrap();
+    for name in ["brief", "unit", "prepare", "unit_default", "prepare_default"] {
+        assert_eq!(child[name]["success"], true, "{name}: {}", child[name]);
+    }
+    for name in ["policy_change", "bad_option"] {
+        assert_eq!(child[name]["success"], false, "{name}: {}", child[name]);
+        assert!(child[name].to_string().contains("orch_failed"), "{}", child[name]);
+    }
+    for (name, value) in child.as_object().unwrap().iter().filter(|(name, _)| !["brief", "unit", "prepare", "unit_default", "prepare_default", "policy_change", "bad_option"].contains(&name.as_str())) {
+        assert_eq!(value["success"], false, "{name}: {value}");
+        assert!(
+            value.to_string().contains("permission_denied"),
+            "{name}: {value}"
+        );
+    }
+    let state = axiom::orch::wait_state(&h.config.home.join("orchestrate/demo")).unwrap();
+    assert_eq!(state.checkpoints.len(), 2);
+    assert_eq!(axiom::orch::current_checkpoint(&state, "t").unwrap().min_rounds, 3);
+    assert_eq!(axiom::orch::current_checkpoint(&state, "default").unwrap().min_rounds, 5);
+    assert!(state.events.is_empty());
 }

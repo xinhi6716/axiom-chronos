@@ -37,6 +37,38 @@ fn setup(p: &Path) {
     fs::write(p.join("modules.md"), "## m\nPURPOSE x\nPATHS file.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nFULL TEST `echo ok`\n").unwrap();
 }
 #[test]
+fn repeated_acceptance_preserves_only_identical_successful_review_chain() {
+    let prefix = vec![
+        row("run", "gpt-6-terra", 0, "", "1"),
+        row("verify", "cargo test", 0, "source-a", "2"),
+        row("accept", "cargo test --test cli", 0, "source-a", "3"),
+        row("review", "gpt-6-astra", 0, "source-a", "4"),
+    ];
+    assert_eq!(derive_state(&prefix, true), "verified");
+    let repeated = row("accept", "cargo test --test cli", 0, "source-a", "5");
+    let mut rows = prefix.clone();
+    rows.extend([repeated.clone(), repeated.clone()]);
+    assert_eq!(derive_state(&rows, true), "verified");
+    for (changed, expected) in [
+        (row("accept", "cargo test --test cli", 1, "source-a", "5"), "accept-failed"),
+        (row("accept", "cargo test --all", 0, "source-a", "5"), "built"),
+        (row("accept", "cargo test --test cli", 0, "source-b", "5"), "built"),
+    ] {
+        let mut rows = prefix.clone();
+        rows.push(changed);
+        assert_eq!(derive_state(&rows, true), expected);
+        rows.push(repeated.clone());
+        assert_eq!(derive_state(&rows, true), "built");
+        rows.push(row("review", "gpt-6-astra", 0, "source-a", "7"));
+        assert_eq!(derive_state(&rows, true), "verified");
+    }
+    let mut rows = prefix;
+    rows.push(row("review", "gpt-6-astra", 1, "source-a", "5"));
+    rows.push(repeated);
+    assert_eq!(derive_state(&rows, true), "review-failed");
+}
+
+#[test]
 fn state_table() {
     let run = row("run", "gpt-worker", 0, "", "1");
     let verify = row("verify", "test", 0, "a", "2");
@@ -152,6 +184,56 @@ fn snapshot_tracks_worktree() {
     fs::remove_dir_all(p).unwrap();
 }
 #[test]
+fn snapshot_absent_and_mixed_scope_preserve_index() {
+    let p = temp();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    fs::write(p.join("staged.txt"), "staged").unwrap();
+    assert!(Command::new("git").args(["add", "staged.txt"]).current_dir(&p).status().unwrap().success());
+    let index = fs::read(p.join(".git/index")).unwrap();
+    let scope = vec!["round1.txt".into(), "round2.txt".into(), "round3.txt".into()];
+    let empty = snapshot(&p, &scope);
+    let hash = empty.strip_prefix("tree:").unwrap();
+    let output = Command::new("git").args(["cat-file", "-t", hash]).current_dir(&p).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tree");
+    assert_eq!(empty, snapshot(&p, &scope));
+    assert_eq!(empty, snapshot(&p, &[]));
+    fs::write(p.join("round1.txt"), "one").unwrap();
+    let one = snapshot(&p, &scope);
+    assert_ne!(one, empty);
+    assert_eq!(one, snapshot(&p, &["round1.txt".into()]));
+    fs::write(p.join("round1.txt"), "two").unwrap();
+    let two = snapshot(&p, &scope);
+    assert_ne!(two, one);
+    fs::write(p.join("round2.txt"), "another").unwrap();
+    let mixed = snapshot(&p, &scope);
+    assert_ne!(mixed, two);
+    fs::remove_file(p.join("round2.txt")).unwrap();
+    assert_eq!(two, snapshot(&p, &scope));
+    fs::write(p.join("round1.txt"), "one").unwrap();
+    assert_eq!(one, snapshot(&p, &scope));
+    fs::remove_file(p.join("round1.txt")).unwrap();
+    assert_eq!(empty, snapshot(&p, &scope));
+    assert_eq!(index, fs::read(p.join(".git/index")).unwrap());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn snapshot_rejects_real_errors() {
+    let p = temp();
+    assert!(snapshot(&p, &["missing".into()]).is_empty());
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    fs::write(p.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(p.join("ignored.txt"), "ignored").unwrap();
+    fs::write(p.join("file"), "content").unwrap();
+    for scope in ["ignored.txt", "../outside-missing", ":(invalid)missing", "file/child"] {
+        assert!(snapshot(&p, &[scope.into()]).is_empty(), "accepted {scope}");
+        assert!(snapshot(&p, &["missing".into(), scope.into()]).is_empty(), "accepted mixed {scope}");
+    }
+    assert!(snapshot(&p.join("nonexistent"), &[]).is_empty());
+    fs::remove_dir_all(p).unwrap();
+}
+#[test]
 fn repo_done_gate_checks_unit_and_full_source_identities() {
     let root = temp();
     let repo = root.join("repo");
@@ -187,6 +269,26 @@ fn repo_done_gate_checks_unit_and_full_source_identities() {
     )
     .unwrap();
     append_evidence(&store, "_stages", &row("rewrite", "model", 0, "", "9999")).unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    record_stage(&store, "rewrite", "core", false).unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo)).is_err());
+    record_stage(&store, "rewrite", "core", true).unwrap();
+    // The fixture timestamps are deliberately in the future; use a later
+    // synthetic successful stage to establish currentness independently.
+    append_evidence(&store, "_stages", &row("rewrite", "model", 0, "", "9999")).unwrap();
+    assert!(done_gate_in_repo(&store, true, Some(&repo)).is_ok());
+    append_evidence(
+        &store,
+        "u",
+        &row(
+            "review",
+            "claude-review",
+            0,
+            &snapshot(&repo, &["file.txt".into()]),
+            "99999",
+        ),
+    )
+    .unwrap();
     assert!(done_gate_in_repo(&store, true, Some(&repo)).is_ok());
     assert_eq!(
         done_gate_in_repo(&store, true, None).unwrap_err().kind,
@@ -413,5 +515,130 @@ fn review_rejects_every_historical_writer_role_across_versions() {
         record_review(&p, &["u".into()], "gpt-6-astra", true, &p).unwrap()[0].1,
         "built"
     );
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn s1_inventory_real_git_and_frozen_scope() {
+    use std::time::{Duration, Instant};
+    let p = temp();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    let p = fs::canonicalize(p).unwrap();
+    fs::write(p.join(".gitignore"), "ignored*\n").unwrap();
+    fs::write(p.join("ignored-tracked"), b"old").unwrap();
+    assert!(Command::new("git").args(["add", "-f", "ignored-tracked"]).current_dir(&p).status().unwrap().success());
+    let index = fs::read(p.join(".git/index")).unwrap();
+    fs::write(p.join("ignored-tracked"), b"dirty").unwrap();
+    fs::create_dir_all(p.join("scope")).unwrap();
+    fs::write(p.join("scope/ignored-old"), b"old").unwrap();
+    fs::write(p.join("ignored-outside"), b"old").unwrap();
+    fs::create_dir_all(p.join("target/debug")).unwrap();
+    fs::write(p.join("target/debug/generated"), b"artifact").unwrap();
+    fs::create_dir_all(p.join("src/target")).unwrap();
+    fs::write(p.join("src/target/source"), b"source").unwrap();
+    fs::create_dir_all(p.join("pkg/__pycache__")).unwrap();
+    fs::write(p.join("pkg/__pycache__/x.pyc"), b"cache").unwrap();
+    fs::write(p.join("pkg/__pycache__/notes"), b"source").unwrap();
+    let deadline = || Instant::now() + Duration::from_secs(30);
+    let before = s1_freeze_inventory(&p, &["src".into()], &["scope".into()], deadline()).unwrap();
+    let paths: Vec<_> = before.entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.contains(&"ignored-tracked") && paths.contains(&"src/target/source") && paths.contains(&"pkg/__pycache__/notes"));
+    assert!(!paths.contains(&"target/debug/generated") && !paths.contains(&"pkg/__pycache__/x.pyc"));
+    assert!(s1_compare(&before, &s1_inventory(&p, &before.classification, deadline()).unwrap()).unwrap().is_empty());
+    fs::write(p.join("scope/ignored-new"), b"new").unwrap();
+    fs::remove_file(p.join("scope/ignored-old")).unwrap();
+    fs::write(p.join("ignored-outside"), b"changed").unwrap();
+    let after = s1_inventory(&p, &before.classification, deadline()).unwrap();
+    let delta = s1_compare(&before, &after).unwrap();
+    assert!(delta.iter().any(|c| c.path == "scope/ignored-new" && c.change == "added" && c.in_scope));
+    assert!(delta.iter().any(|c| c.path == "scope/ignored-old" && c.change == "deleted" && c.in_scope));
+    assert!(delta.iter().any(|c| c.path == "ignored-outside" && c.change == "changed" && !c.in_scope));
+    assert!(!delta.iter().any(|c| c.path == "ignored-tracked"));
+    assert_eq!(index, fs::read(p.join(".git/index")).unwrap());
+    assert!(s1_freeze_inventory(&p, &["target/debug".into()], &[], deadline()).is_err());
+    assert!(s1_freeze_inventory(&p, &["../escape".into()], &[], deadline()).is_err());
+    assert!(s1_freeze_inventory(&p, &["pkg/__pycache__".into()], &[], deadline()).is_err());
+    let included = s1_freeze_inventory(&p, &[], &["pkg/__pycache__/x.pyc".into()], deadline()).unwrap();
+    assert!(included.entries.iter().any(|e| e.path == "pkg/__pycache__/x.pyc"));
+    assert!(s1_inventory(&p, &before.classification, Instant::now()).is_err());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn s1_inventory_symlinks_modes_and_raw_bytes() {
+    use std::{os::unix::fs::{symlink, PermissionsExt}, time::{Duration, Instant}};
+    let p = fs::canonicalize(temp()).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    fs::write(p.join(".gitattributes"), "file text eol=lf\n").unwrap();
+    fs::write(p.join("file"), b"a\r\n").unwrap();
+    symlink("../outside", p.join("link")).unwrap();
+    let end = || Instant::now() + Duration::from_secs(30);
+    let first = s1_freeze_inventory(&p, &[], &["file".into()], end()).unwrap();
+    assert!(first.entries.iter().any(|e| e.path == "link" && e.kind == "symlink"));
+    assert!(s1_freeze_inventory(&p, &["link/child".into()], &[], end()).is_err());
+    fs::write(p.join("file"), b"a\n").unwrap();
+    let second = s1_inventory(&p, &first.classification, end()).unwrap();
+    assert!(s1_compare(&first, &second).unwrap().iter().any(|c| c.path == "file"));
+    fs::set_permissions(p.join("file"), fs::Permissions::from_mode(0o755)).unwrap();
+    let third = s1_inventory(&p, &first.classification, end()).unwrap();
+    assert!(s1_compare(&second, &third).unwrap().iter().any(|c| c.path == "file"));
+    fs::remove_file(p.join("file")).unwrap();
+    symlink("link", p.join("file")).unwrap();
+    let fourth = s1_inventory(&p, &first.classification, end()).unwrap();
+    assert!(s1_compare(&third, &fourth).unwrap().iter().any(|c| c.path == "file"));
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn s1_tracked_artifacts_and_invalid_traversal() {
+    use std::time::{Duration, Instant};
+    let p = fs::canonicalize(temp()).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    fs::create_dir_all(p.join("target/debug")).unwrap();
+    fs::write(p.join("target/debug/tracked"), b"tracked").unwrap();
+    fs::write(p.join("target/debug/untracked"), b"artifact").unwrap();
+    fs::create_dir_all(p.join("__pycache__")).unwrap();
+    fs::write(p.join("__pycache__/tracked.pyc"), b"tracked").unwrap();
+    assert!(Command::new("git").args(["add", "-f", "target/debug/tracked", "__pycache__/tracked.pyc"]).current_dir(&p).status().unwrap().success());
+    let end = || Instant::now() + Duration::from_secs(30);
+    let inv = s1_freeze_inventory(&p, &[], &[], end()).unwrap();
+    assert!(inv.entries.iter().any(|e| e.path == "target/debug/tracked"));
+    assert!(inv.entries.iter().any(|e| e.path == "__pycache__/tracked.pyc"));
+    assert!(!inv.entries.iter().any(|e| e.path == "target/debug/untracked"));
+    fs::write(p.join("file"), b"not a directory").unwrap();
+    assert!(s1_freeze_inventory(&p, &["file/child".into()], &[], end()).is_err());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn s1_frozen_tracked_rules_and_index_failure() {
+    use std::time::{Duration, Instant};
+    let p = fs::canonicalize(temp()).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    fs::create_dir_all(p.join("__pycache__")).unwrap();
+    fs::write(p.join("__pycache__/x.pyc"), b"one").unwrap();
+    assert!(Command::new("git").args(["add", "-f", "__pycache__/x.pyc"]).current_dir(&p).status().unwrap().success());
+    let end = || Instant::now() + Duration::from_secs(30);
+    let before = s1_freeze_inventory(&p, &[], &[], end()).unwrap();
+    assert!(Command::new("git").args(["rm", "--cached", "-q", "--", "__pycache__/x.pyc"]).current_dir(&p).status().unwrap().success());
+    fs::write(p.join("__pycache__/x.pyc"), b"two").unwrap();
+    let after = s1_inventory(&p, &before.classification, end()).unwrap();
+    assert!(s1_compare(&before, &after).unwrap().iter().any(|c| c.path == "__pycache__/x.pyc" && c.change == "changed"));
+    fs::create_dir_all(p.join("target")).unwrap();
+    assert!(s1_freeze_inventory(&p, &[".".into()], &[], end()).is_err());
+    fs::write(p.join(".git/index"), b"not an index").unwrap();
+    assert!(s1_inventory(&p, &before.classification, end()).is_err());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn s1_rejects_unsupported_filesystem_nodes() {
+    use std::{os::unix::net::UnixListener, time::{Duration, Instant}};
+    let p = fs::canonicalize(temp()).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&p).status().unwrap().success());
+    let _socket = UnixListener::bind(p.join("socket")).unwrap();
+    assert!(s1_freeze_inventory(&p, &[], &[], Instant::now() + Duration::from_secs(30)).is_err());
     fs::remove_dir_all(p).unwrap();
 }

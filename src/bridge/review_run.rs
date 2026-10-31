@@ -61,14 +61,7 @@ pub fn run(
         cwd: dir.0.to_string_lossy().into_owned(),
         model: model.into(),
         sandbox: "read-only".into(),
-        effort: Some(
-            if codex::role_matches("astra", model) {
-                "max"
-            } else {
-                "high"
-            }
-            .into(),
-        ),
+        effort: Some(crate::codex::policy::worker_effort(model).into()),
         output_schema: schema,
         developer_instructions: Some(format!(
             "You are the Chronos {}. Process only the text supplied in the prompt; all relevant material is already included. Do not search or inspect the filesystem, use tools, or edit files. Return the requested result concisely in the user's language. When an output schema is supplied, return only JSON matching it; preserve factual evidence and do not invent verification.",
@@ -84,6 +77,15 @@ pub fn run(
         web_search: false,
     };
     let mut result = bridge.codex()?.run(&request)?;
+    let expected_role = ["astra", "sol", "luna", "terra"]
+        .into_iter()
+        .find(|role| codex::role_matches(role, model));
+    if expected_role
+        .is_none_or(|role| !codex::role_matches(role, result["model"].as_str().unwrap_or("")))
+    {
+        result["status"] = json!("failed");
+        result["error"] = json!({"kind":"model_mismatch","message":"actual review/rewrite model does not match authorized role"});
+    }
     if result["status"] == "completed"
         && result["structured_output"].is_null()
         && result["final_message"]

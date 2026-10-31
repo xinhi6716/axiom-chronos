@@ -16,6 +16,14 @@ extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> HANDLE;
     fn AssignProcessToJobObject(job: HANDLE, process: HANDLE) -> i32;
     fn TerminateJobObject(job: HANDLE, exit_code: u32) -> i32;
+    fn QueryInformationJobObject(job: HANDLE, class: i32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct Accounting {
+    total_user: i64, total_kernel: i64, period_user: i64, period_kernel: i64,
+    page_faults: u32, total_processes: u32, active_processes: u32, terminated_processes: u32,
 }
 
 pub(super) struct Job(HANDLE);
@@ -35,9 +43,16 @@ impl Job {
             Ok(job)
         }
     }
-    pub fn terminate(&self) {
+    pub fn terminate(&self) -> bool {
+        unsafe { TerminateJobObject(self.0, 1) != 0 }
+    }
+    /// A successful termination request alone does not prove the job is empty.
+    pub fn empty(&self) -> bool {
+        let mut info = Accounting::default();
         unsafe {
-            TerminateJobObject(self.0, 1);
+            QueryInformationJobObject(self.0, 1, &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<Accounting>() as u32, std::ptr::null_mut()) != 0
+                && info.active_processes == 0
         }
     }
 }

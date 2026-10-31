@@ -30,6 +30,53 @@ fn arr(a: &Value, k: &str) -> Res<Vec<String>> {
         )),
     }
 }
+fn require_reviewed_scope(
+    repo: &Path,
+    scope: &str,
+    reviewed: &std::collections::HashSet<std::path::PathBuf>,
+) -> Res<()> {
+    let target = std::fs::canonicalize(repo.join(scope))
+        .map_err(|e| Failure::new("review_scope", e.to_string()))?;
+    if !target.starts_with(repo) {
+        return Err(Failure::new("review_scope", "scope escapes project"));
+    }
+    let mut pending = vec![target];
+    let mut count = 0usize;
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in
+                std::fs::read_dir(&path).map_err(|e| Failure::new("review_scope", e.to_string()))?
+            {
+                let entry = entry.map_err(|e| Failure::new("review_scope", e.to_string()))?;
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                if entry
+                    .file_type()
+                    .map_err(|e| Failure::new("review_scope", e.to_string()))?
+                    .is_symlink()
+                {
+                    return Err(Failure::new("review_scope", "symlink in review scope"));
+                }
+                pending.push(entry.path());
+            }
+        } else if path.is_file() {
+            count += 1;
+            if !reviewed.contains(&path) {
+                return Err(Failure::new(
+                    "review_scope",
+                    format!("unreviewed scope file: {}", path.display()),
+                ));
+            }
+        } else {
+            return Err(Failure::new("review_scope", "unsupported scope entry"));
+        }
+    }
+    if count == 0 {
+        return Err(Failure::new("review_scope", "scope contains no files"));
+    }
+    Ok(())
+}
 fn timeout(a: &Value, d: u64) -> u64 {
     a.get("timeout_s")
         .and_then(Value::as_u64)
@@ -40,11 +87,107 @@ fn store(b: &Bridge, project: &str) -> Res<std::path::PathBuf> {
     orch::store_for(b.home()?, project)
 }
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
-    b.verification.scope(|| dispatch_inner(b, n, a))
+    if crate::base::proc::current_cancellation().is_some_and(|c| c.cancelled()) {
+        return Err(Failure::new("interrupted", "request cancelled"));
+    }
+    if crate::base::proc::current_cancellation().is_some() {
+        dispatch_inner(b, n, a)
+    } else {
+        b.verification.scope(|| dispatch_inner(b, n, a))
+    }
 }
 fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
+    let verification = n == "run_on_linux"
+        || (n == "orch"
+            && a["args"].as_array().is_some_and(|args| {
+                args.iter()
+                    .any(|v| matches!(v.as_str(), Some("accept" | "fulltest")))
+                    || orch::wait_mutation(
+                        &args
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
+                    )
+            }));
+    if verification {
+        let project = if n == "orch" {
+            opt(a, "project").map(str::to_owned)
+        } else {
+            opt(a, "project_dir").map(|p| crate::base::slug_for_dir(Path::new(p)))
+        };
+        if let Some(project) = project {
+            if let Some((_, goal)) = goal::find_active(b.home()?, &project)? {
+                if goal.interjection.is_some() {
+                    return Err(Failure::new(
+                        "pending_interjection",
+                        "classify the pending interjection before verification",
+                    ));
+                }
+                if goal.mode.as_deref() != Some("change") {
+                    return Err(Failure::new(
+                        "goal_mode",
+                        "verification commands require change mode",
+                    ));
+                }
+            }
+        }
+    }
     match n {
-        "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
+        "session" => match s(a, "action") {
+            "begin" | "resume" => {
+                let mut slot = b.attachment.lock().unwrap();
+                if slot.is_some() {
+                    return Err(Failure::new("busy", "caller already attached"));
+                }
+                if s(a, "action") == "resume" && opt(a, "session").is_none() {
+                    return Err(Failure::new("invalid_argument", "session is required"));
+                }
+                if s(a, "action") == "begin" && opt(a, "session").is_some() {
+                    return Err(Failure::new(
+                        "invalid_argument",
+                        "begin cannot select a session",
+                    ));
+                }
+                let config = crate::session::Config {
+                    home: b.home()?.to_path_buf(),
+                    codex: b.config.codex.clone(),
+                    bin: std::env::current_exe().unwrap_or_default(),
+                };
+                let (host, result) = crate::session::Attachment::open(&config, a)?;
+                *slot = Some(std::sync::Arc::new(host));
+                Ok(result)
+            }
+            "call" | "status" | "stop" | "interject" => {
+                let host = b
+                    .attachment
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| Failure::new("not_found", "no caller attached"))?;
+                match s(a, "action") {
+                    "call" => host.call(s(a, "tool"), a.get("arguments").unwrap_or(&Value::Null)),
+                    "status" => host.status(),
+                    "interject" => host.interject(s(a, "text")),
+                    _ => {
+                        host.stop();
+                        b.attachment.lock().unwrap().take();
+                        Ok(json!({"status":"completed"}))
+                    }
+                }
+            }
+            _ => Err(Failure::new("invalid_argument", "invalid session action")),
+        },
+        "codex_run" => {
+            if a.get("unit").and_then(Value::as_str).is_some() && b.codex()?.has_unconfirmed() {
+                return Err(Failure::new(
+                    "turn_unconfirmed",
+                    "a prior turn has unconfirmed termination; unit retry is blocked",
+                ));
+            }
+            Ok(super::codex_tool::codex_run(b, a))
+        }
         "gemini_preview" => {
             let project = opt(a, "project");
             let stage = opt(a, "stage");
@@ -116,7 +259,7 @@ fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 }
             }
             if let (Some(root), Some(t)) = (&root, stage) {
-                orch::record_stage(root, t, &model, completed)?;
+                orch::record_stage(root, t, result["model"].as_str().unwrap_or(""), completed)?;
             }
             Ok(result)
         }
@@ -143,6 +286,40 @@ fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
         }
         "review_code" => {
             let units = arr(a, "units")?;
+            let mut identities = Vec::new();
+            if let Some(project) = opt(a, "project") {
+                let root = store(b, project)?;
+                let repo = std::fs::canonicalize(s(a, "project_dir"))
+                    .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+                let reviewed = arr(a, "paths")?
+                    .iter()
+                    .map(|p| {
+                        std::fs::canonicalize(repo.join(p))
+                            .map_err(|e| Failure::new("review_scope", e.to_string()))
+                    })
+                    .collect::<Res<std::collections::HashSet<_>>>()?;
+                for unit in &units {
+                    let brief = orch::unit_brief(&root, unit)?;
+                    for scope in &brief.scope {
+                        require_reviewed_scope(&repo, scope, &reviewed)?;
+                    }
+                    if !s(a, "contract").contains(&brief.text) {
+                        return Err(Failure::new(
+                            "review_contract",
+                            "review contract must include the complete unit brief",
+                        ));
+                    }
+                    let snapshot = orch::snapshot(&repo, &brief.scope);
+                    if snapshot.is_empty() {
+                        return Err(Failure::new("review_scope", "cannot snapshot review scope"));
+                    }
+                    identities.push((
+                        unit.clone(),
+                        snapshot,
+                        orch::contract_identity(&root, unit)?,
+                    ));
+                }
+            }
             let role = super::review_run::role(b, opt(a, "project"), &units)?;
             let model = super::review_run::model(b, opt(a, "model"), role)?;
             let mut r = super::review::review(
@@ -155,10 +332,22 @@ fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             )?;
             if r["status"] == "completed" && a.get("units").is_some() && opt(a, "project").is_some()
             {
+                let root = store(b, s(a, "project"))?;
+                let repo = std::path::Path::new(s(a, "project_dir"));
+                for (unit, snapshot, contract) in &identities {
+                    let brief = orch::unit_brief(&root, unit)?;
+                    if orch::snapshot(repo, &brief.scope) != *snapshot
+                        || orch::contract_identity(&root, unit)? != *contract
+                    {
+                        r["status"] = json!("failed");
+                        r["error"] = json!({"kind":"review_identity_changed", "message":"artifact or contract changed during review"});
+                        return Ok(r);
+                    }
+                }
                 let states = match orch::record_review(
                     &store(b, s(a, "project"))?,
                     &units,
-                    &model,
+                    r["reviewer"].as_str().unwrap_or(""),
                     r["verdict"] == "pass",
                     std::path::Path::new(s(a, "project_dir")),
                 ) {
@@ -193,7 +382,7 @@ fn dispatch_inner(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             files: arr(a, "files")?,
             wish: s(a, "wish").into(),
         }),
-        "memory_search" => Memory::open(b.home()?)?.search(
+        "memory_search" => Memory::open(b.home()?)?.search_fresh(
             s(a, "query"),
             opt(a, "project"),
             a["limit"].as_i64().unwrap_or(5),

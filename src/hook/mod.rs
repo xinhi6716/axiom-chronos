@@ -277,7 +277,18 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             if agent
                 && matches!(tool, "Agent" | "Task")
                 && !(input.get("subagent_type").and_then(Value::as_str) == Some("chronos:reviewer")
-                    || (role == Some("dispatcher") && input["subagent_type"] == "chronos:content"))
+                    || (role == Some("dispatcher")
+                        && matches!(
+                            input["subagent_type"].as_str(),
+                            Some(
+                                "chronos:content"
+                                    | "chronos:memory-keeper"
+                                    | "chronos:astra"
+                                    | "chronos:architect"
+                                    | "chronos:critic"
+                                    | "chronos:tester"
+                            )
+                        )))
             {
                 return deny("Only designated reviewer/content children may be started; never forward engineering through another agent.");
             }
@@ -289,10 +300,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let mode = g.mode.as_deref();
             let dispatcher = (tool == "Agent" || tool == "Task")
                 && input.get("subagent_type").and_then(Value::as_str) == Some("chronos:dispatcher");
-            if mode != Some("change")
-                && (dispatcher
-                    || (tool == CODEX
-                        && input.get("sandbox").and_then(Value::as_str) != Some("read-only")))
+            if (dispatcher && mode.is_none())
+                || (mode != Some("change") && tool == CODEX
+                        && input.get("sandbox").and_then(Value::as_str) != Some("read-only"))
             {
                 return deny(if mode.is_none() {
                     "Declare the mode with the goal tool before dispatching or using a writable sandbox."

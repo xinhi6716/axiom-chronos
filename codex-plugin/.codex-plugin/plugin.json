@@ -1,8 +1,18 @@
 {
   "name": "chronos",
-  "version": "0.2.0-codex.1",
+  "version": "0.2.2-codex.dev.7",
   "description": "Codex entry skills for the Axiom Chronos CLI.",
-  "author": { "name": "xinhi6716" },
+  "author": {
+    "name": "xinhi6716"
+  },
   "skills": "./skills/",
-  "requires_local_executor": true
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Axiom Chronos",
+    "shortDescription": "Codex orchestration with verified work and compact memory",
+    "developerName": "xinhi6716",
+    "logo": "./assets/chronos.svg",
+    "logoDark": "./assets/chronos-dark.svg",
+    "composerIcon": "./assets/chronos.svg"
+  }
 }

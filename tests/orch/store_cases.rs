@@ -215,6 +215,14 @@ fn errors_and_locks() {
         .stderr
         .contains("replacing stale store lock"));
 }
+
+#[test]
+fn unusable_os_mutex_is_io_not_transient_busy() {
+    let t = Temp::new();
+    std::fs::create_dir(t.0.join(".orch.mutex")).unwrap();
+    let error = axiom::orch::with_lock(&t.0, false, || Ok(())).unwrap_err();
+    assert_eq!(error.kind, "io");
+}
 #[test]
 fn old_stores_read() {
     for fixture in ["old", "old-crlf"] {

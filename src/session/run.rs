@@ -363,6 +363,7 @@ fn run_inner(
     let mut notice = Some(format!("Root session: {session}. Project: {}. Goal is already open. Follow this workflow:\n{skill_contract}",base::slug_for_dir(project)));
     let mut cause = None;
     let mut deferred = Vec::<String>::new();
+    let mut delivered_blockers = Vec::<String>::new();
     let result: Res<i32> = (|| loop {
         if interrupted() {
             cause = Some("interrupted by the user".to_owned());
@@ -373,12 +374,29 @@ fn run_inner(
             return Ok(1);
         }
         let mut turn_input = vec![serde_json::json!({"type":"text","text":prompt})];
+        let pending = loop {
+            if interrupted() {
+                cause = Some("interrupted by the user".to_owned());
+                return Ok(130);
+            }
+            match host.pending_core_notices() {
+                Err(e) if e.kind == "busy" => std::thread::sleep(Duration::from_millis(50)),
+                result => break result?,
+            }
+        };
+        for event in pending {
+            host.core_notice_delivered(&event);
+            host.log(
+                &serde_json::json!({"hostEvent":"coreNotice","recipient":"core","event":event}),
+            )?;
+            turn_input.push(serde_json::json!({"type":"text","text":format!("Durable core notice (deduplicate by event id; submit a verdict bound to its verification_event): {}",serde_json::to_string(&event).map_err(failure)?)}));
+        }
         if let Some(notice) = notice.take() {
             turn_input.push(serde_json::json!({"type":"text","text":notice}));
         }
         let started = host.server.request(
             "turn/start",
-            host.turn_params(&session, serde_json::json!(turn_input), "max"),
+            host.turn_params(&session, serde_json::json!(turn_input), "medium"),
         )?;
         let turn = started["turn"]["id"]
             .as_str()
@@ -461,6 +479,100 @@ fn run_inner(
         match g.status.as_str() {
             "active" => {
                 prompt = format!("{CONTINUE_TAG} {}", hook::stop_reason(&session, &g));
+                if let Some(interjection) = &g.interjection {
+                    if !deferred.contains(&interjection.prompt) {
+                        deferred.push(interjection.prompt.clone());
+                    }
+                }
+                let enrolled = if deferred.is_empty() {
+                    loop {
+                        if interrupted() {
+                            cause = Some("interrupted by the user".to_owned());
+                            return Ok(130);
+                        }
+                        match host.enrolled_change_session() {
+                            Err(e) if e.kind == "busy" => std::thread::sleep(Duration::from_millis(50)),
+                            result => break result?,
+                        }
+                    }
+                } else { false };
+                if deferred.is_empty() && enrolled {
+                    loop {
+                        if interrupted() {
+                            cause = Some("interrupted by the user".to_owned());
+                            return Ok(130);
+                        }
+                        let current = goal::load(&config.home, &session)?
+                            .ok_or_else(|| Failure::new("not_found", "root goal disappeared"))?;
+                        if host.cancelled.load(Ordering::Acquire)
+                            && current.reason.as_deref() != Some("user_stop")
+                        {
+                            return Err(Failure::new(
+                                "interrupted", "session callback failed or was cancelled",
+                            ));
+                        }
+                        if host.budget_exhausted.load(Ordering::Acquire) {
+                            cause = Some("maximum turns reached (model/tool step budget)".to_owned());
+                            return Ok(1);
+                        }
+                        if current.status == "done" { return Ok(0); }
+                        if current.status == "blocked" {
+                            if current.reason.as_deref() == Some("user_stop") { host.bridge.cancel(); }
+                            let _ = writeln!(out, "goal blocked: {}", current.note.unwrap_or_default());
+                            return Ok(1);
+                        }
+                        for notice in host.drain_notices() { renderer.event(&notice, out); }
+                        // Check the durable outbox after the completed turn, not just before it.
+                        // Only delivery marks an ID seen, so a boundary arrival cannot be lost.
+                        match host.has_new_core_notice() {
+                            Ok(true) => break,
+                            Ok(false) => (),
+                            Err(e) if e.kind == "busy" => (),
+                            Err(e) => return Err(e),
+                        }
+                        match rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok(line) => {
+                                let _goal = host.goal_lock.lock().unwrap();
+                                goal::interject(&config.home, &session, &line)?;
+                                deferred.push(line);
+                                break;
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => (),
+                            // Input EOF is not a stop request. Avoid a disconnected-channel spin.
+                            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(Duration::from_millis(50)),
+                        }
+                        match events.try_recv() {
+                            Ok(event) => {
+                                host.log(&event)?;
+                                renderer.event(&event, out);
+                                host.observe(&event)?;
+                                if event["method"] == "error" && event["params"]["willRetry"] != true {
+                                    return Err(Failure::new("codex_rpc", event["params"]["error"].to_string()));
+                                }
+                            }
+                            Err(mpsc::TryRecvError::Empty) => (),
+                            Err(mpsc::TryRecvError::Disconnected) => return Err(Failure::new("codex_exited", "Codex app-server exited while idle")),
+                        }
+                        match host.idle_blockers() {
+                            Ok(blockers) if !blockers.is_empty() => {
+                                if blockers == delivered_blockers {
+                                    // Core already received this stable failure and did not
+                                    // repair it. Do not leave a producerless goal waiting,
+                                    // nor poll the model again for unchanged work.
+                                    cause = Some(format!("idle_blocked: {}", blockers.join("; ")));
+                                    return Ok(1);
+                                }
+                                host.log(&serde_json::json!({"hostEvent":"idleBlocked","recipient":"core","blockers":blockers}))?;
+                                notice = Some(format!("Rust idle liveness failure (not verification or release authority): {}. No confirmed producer can advance this work. Repair through dispatcher or explicitly block the goal; unchanged failure will stop blocked, not poll the model.", blockers.join("; ")));
+                                delivered_blockers = blockers;
+                                break;
+                            }
+                            Ok(_) => (),
+                            Err(e) if e.kind == "busy" => (),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
                 if !deferred.is_empty() {
                     prompt.push_str("\nUser interjections received as the prior turn ended:\n");
                     prompt.push_str(&std::mem::take(&mut deferred).join("\n"));

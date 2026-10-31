@@ -76,14 +76,15 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         if i != args.len() || project_set || no_architect || astra || creative {
             return usage("--resume takes only a session id");
         }
-        return match session::resume(
-            &session::Config::from_env(),
-            &id,
-            turns,
-            Box::new(io::BufReader::new(io::stdin())),
-            &mut io::stdout(),
+        let config = session::Config::from_env();
+        return match session::Attachment::open(
+            &config,
+            &serde_json::json!({"session":id,"max_turns":turns}),
         ) {
-            Ok(code) => code,
+            Ok((_host, value)) => {
+                println!("{}", value);
+                0
+            }
             Err(e) => usage(e.message),
         };
     }
@@ -126,16 +127,15 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             args[i..].join(" ")
         )
     };
-    match session::run(
-        &session::Config::from_env(),
-        skill,
-        &text,
-        &project,
-        turns,
-        Box::new(io::BufReader::new(io::stdin())),
-        &mut io::stdout(),
+    let config = session::Config::from_env();
+    match session::Attachment::open(
+        &config,
+        &serde_json::json!({"skill":skill,"text":text,"project":project,"max_turns":turns}),
     ) {
-        Ok(code) => code,
+        Ok((_host, value)) => {
+            println!("{}", value);
+            0
+        }
         Err(e) => usage(e.message),
     }
 }
@@ -260,6 +260,37 @@ pub fn main(args: Vec<OsString>) -> i32 {
             io::BufReader::new(io::stdin()),
             io::stdout(),
         ),
+        "bridge" if rest.len() == 2 && rest[0] == "call" => {
+            use std::io::Read;
+            let mut data = String::new();
+            let read = if rest[1] == "-" {
+                io::stdin().read_to_string(&mut data)
+            } else {
+                std::fs::read_to_string(&rest[1]).map(|s| {
+                    data = s;
+                    data.len()
+                })
+            };
+            if let Err(e) = read {
+                return usage(e);
+            }
+            let input: serde_json::Value = match serde_json::from_str(&data) {
+                Ok(v) => v,
+                Err(e) => return usage(e),
+            };
+            let bridge = bridge::Bridge::new(bridge::Config::from_env());
+            let result = bridge::call(
+                &bridge,
+                input["name"].as_str().unwrap_or(""),
+                input.get("arguments").unwrap_or(&serde_json::Value::Null),
+            );
+            println!("{}", result);
+            if result["isError"] == true {
+                1
+            } else {
+                0
+            }
+        }
         "hook" if rest.is_empty() => hook::main_stdin(),
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),

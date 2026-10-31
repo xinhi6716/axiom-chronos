@@ -1,5 +1,6 @@
 use crate::base;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
@@ -60,13 +61,31 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
         match rest[start..].iter().rposition(|r| r.kind == "accept") {
             None => return "built".into(),
             Some(a) => {
-                start += a + 1;
-                if rest[start - 1].exit_code != 0 {
+                let latest = start + a;
+                let accept = &rest[latest];
+                if accept.exit_code != 0 {
                     return "accept-failed".into();
                 }
-                if rest[start - 1].commit != *identity {
+                if accept.commit != *identity {
                     return "built".into();
                 }
+                // Repeating the same successful acceptance on unchanged source
+                // does not invalidate an independent review. A failed acceptance,
+                // changed command or changed source still starts a new chain.
+                let mut first = latest;
+                for (index, prior) in rest[start..latest].iter().enumerate().rev() {
+                    if prior.kind != "accept" {
+                        continue;
+                    }
+                    if prior.exit_code != 0
+                        || prior.commit != accept.commit
+                        || prior.command != accept.command
+                    {
+                        break;
+                    }
+                    first = start + index;
+                }
+                start = first + 1;
             }
         }
     }
@@ -195,10 +214,45 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         if !run(&["read-tree", "--empty"]).ok()?.status.success() {
             return None;
         }
-        if !scope.is_empty() {
-            let mut args = vec!["add", "-A", "--"];
-            args.extend(scope.iter().map(String::as_str));
-            if !run(&args).ok()?.status.success() {
+        for path in scope {
+            // Only skip a missing literal path. Let Git interpret pathspecs and
+            // reject invalid, ignored, inaccessible, or out-of-repository paths.
+            let literal = !path.starts_with(':') && !path.contains(['*', '?', '[']);
+            if literal {
+                match std::fs::symlink_metadata(repo.join(path)) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Windows can report NotFound even when an ancestor is a
+                        // file. A dangling symlink ancestor is not an absent directory either.
+                        let full = repo.join(path);
+                        let mut parent = full.parent();
+                        while let Some(dir) = parent {
+                            match std::fs::metadata(dir) {
+                                Ok(m) if m.is_dir() => break,
+                                Ok(_) => return None,
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    match std::fs::symlink_metadata(dir) {
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                        _ => return None,
+                                    }
+                                }
+                                Err(_) => return None,
+                            }
+                            parent = dir.parent();
+                        }
+                        // Git still validates the pathspec (e.g. it must be inside
+                        // the worktree); --ignore-missing is only valid in dry-run.
+                        if !run(&["add", "--dry-run", "--ignore-missing", "--", path])
+                            .ok()?.status.success()
+                        {
+                            return None;
+                        }
+                        continue;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            if !run(&["add", "-A", "--", path]).ok()?.status.success() {
                 return None;
             }
         }
@@ -220,22 +274,51 @@ fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
     parse_map(&text).map_err(invalid)
 }
-pub(crate) fn contract_identity(store: &Path, unit: &str) -> Res<String> {
+pub fn contract_identity(store: &Path, unit: &str) -> Res<String> {
     let brief = unit_brief(store, unit)?;
     let u = read_units(store)?
         .into_iter()
         .find(|u| u.id == unit)
         .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-    let module = if store.join("modules.md").exists() {
-        map(store)?
-            .modules
-            .into_iter()
-            .find(|m| m.id == u.track)
-            .map(|m| (m.contract, m.accept_command))
-    } else {
-        None
-    };
-    Ok(serde_json::to_string(&(brief.text, module)).unwrap())
+    let mut modules = Vec::new();
+    let mut dep_evidence = Vec::new();
+    if store.join("modules.md").exists() {
+        let map = map(store)?;
+        let mut wanted = vec![u.track.clone()];
+        while let Some(id) = wanted.pop() {
+            if modules.iter().any(|m: &super::Module| m.id == id) {
+                continue;
+            }
+            if let Some(m) = map.modules.iter().find(|m| m.id == id) {
+                wanted.extend(m.depends.iter().cloned());
+                modules.push(m.clone());
+            }
+        }
+        modules.sort_by(|a, b| a.id.cmp(&b.id));
+        let units = read_units(store)?;
+        for dep in units
+            .iter()
+            .filter(|d| d.track != u.track && modules.iter().any(|m| m.id == d.track))
+        {
+            let rows = evidence(store, &dep.id)?;
+            let verified = rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .map(|r| r.commit.clone());
+            let contract = rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "contract")
+                .map(|r| r.command.clone());
+            // Review timestamps/history do not change the dependency's content.
+            // Current validity is checked separately by current_verified_unit.
+            dep_evidence.push((dep.id.clone(), verified, contract));
+        }
+        dep_evidence.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    let bytes = serde_json::to_vec(&(brief.text, modules, dep_evidence)).unwrap();
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 pub(crate) fn current_contract(store: &Path, unit: &str, rows: &[Evidence]) -> Res<bool> {
     let Some(run) = rows.iter().rposition(|r| r.kind == "run") else {
@@ -246,6 +329,94 @@ pub(crate) fn current_contract(store: &Path, unit: &str, rows: &[Evidence]) -> R
         .iter()
         .find(|r| r.kind == "contract")
         .is_some_and(|r| r.command == expected))
+}
+/// Check both the saved Host receipt and its binding to the contract's command/source.
+pub(crate) fn verification_receipt_current(
+    envelope: &serde_json::Value,
+    command: &str,
+    source: &str,
+) -> bool {
+    let receipt = &envelope["receipt"];
+    !source.is_empty()
+        && receipt["command"] == command
+        && receipt["source_before"] == source
+        && receipt["source_after"] == source
+        && receipt["exit_code"] == 0
+        && receipt["timed_out"] == false
+        && receipt["error"].is_null()
+        && receipt["stdout"].is_string()
+        && receipt["stderr"].is_string()
+        && envelope["path"]
+            .as_str()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|saved| saved == *receipt)
+}
+
+/// Whether the unit and all its dependencies have current independent verification,
+/// matching contracts, and worktree snapshots. Does not mutate stored evidence.
+pub fn current_verified_unit(store: &Path, unit: &str, repo: &Path) -> Res<bool> {
+    let units = read_units(store)?;
+    let u = units
+        .iter()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    let rows = evidence(store, unit)?;
+    if derive_state(&rows, needs_accept(store, unit)?) != "verified"
+        || !current_contract(store, unit, &rows)?
+    {
+        return Ok(false);
+    }
+    // Enrolled units must retain the Host's receipt, not just a successful TSV
+    // row. Reuse and final handoff reject removed, changed or stale receipts.
+    let run = rows.iter().rposition(|row| row.kind == "run").unwrap();
+    if rows[run + 1..].iter().any(|row| row.kind == "dispatch") {
+        let command = unit_brief(store, unit)?.verify;
+        let source = snapshot(repo, &[".".into()]);
+        let current = rows[run + 1..].iter().rev()
+            .find(|row| row.kind == "verification_receipt")
+            .is_some_and(|row| {
+                let Ok(bytes) = std::fs::read(&row.command) else { return false; };
+                let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+                row.exit_code == 0
+                    && row.commit == format!("sha256:{:x}", Sha256::digest(&bytes))
+                    && verification_receipt_current(
+                        &serde_json::json!({"path":row.command,"receipt":receipt}),
+                        &command,
+                        &source,
+                    )
+            });
+        if !current {
+            return Ok(false);
+        }
+    }
+    let identity = snapshot(repo, &unit_brief(store, unit)?.scope);
+    if identity.is_empty()
+        || !rows
+            .iter()
+            .rev()
+            .find(|r| r.kind == "verify")
+            .is_some_and(|r| r.commit == identity)
+    {
+        return Ok(false);
+    }
+    if store.join("modules.md").exists() {
+        let map = map(store)?;
+        if let Some(module) = map.modules.iter().find(|m| m.id == u.track) {
+            for dep in &module.depends {
+                let dependent: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
+                if dependent.is_empty() {
+                    return Ok(false);
+                }
+                for d in dependent {
+                    if !current_verified_unit(store, &d.id, repo)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 pub fn needs_accept(store: &Path, unit: &str) -> Res<bool> {
     let u = read_units(store)?
@@ -414,6 +585,9 @@ pub fn astra_gate(store: &Path) -> Res<()> {
     Ok(())
 }
 pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
+    done_gate_inner(store, change_mode, false, true)
+}
+fn done_gate_inner(store: &Path, change_mode: bool, repo_check: bool, require_rewrite: bool) -> Res<()> {
     let units = if !store.join("units.tsv").exists() {
         vec![]
     } else {
@@ -442,7 +616,7 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
     let mut latest = String::new();
     for u in units {
         for r in evidence(store, &u.id)? {
-            if r.ts > latest {
+            if r.kind != "review" && r.ts > latest {
                 latest = r.ts;
             }
         }
@@ -451,15 +625,17 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
         .into_iter()
         .filter(|r| r.kind == "full")
         .last();
-    if !full.is_some_and(|r| r.exit_code == 0 && r.ts > latest) {
+    if !full.is_some_and(|r| r.exit_code == 0 && (repo_check || r.ts > latest)) {
         return Err(Failure::new(
             "not_done",
             "missing successful, current full test",
         ));
     }
-    if !rows(store, "_stages")?
+    if require_rewrite && !rows(store, "_stages")?
         .iter()
-        .any(|r| r.kind == "rewrite" && r.ts > latest)
+        .rev()
+        .find(|r| r.kind == "rewrite")
+        .is_some_and(|r| r.exit_code == 0 && r.ts > latest)
     {
         return Err(Failure::new("not_done", "missing current rewrite stage"));
     }
@@ -468,7 +644,10 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
 
 /// Additionally require unit verification and the full test to cover current sources.
 pub fn done_gate_in_repo(store: &Path, change_mode: bool, repo: Option<&Path>) -> Res<()> {
-    done_gate(store, change_mode)?;
+    tested_gate_in_repo(store, change_mode, repo, true)
+}
+pub(crate) fn tested_gate_in_repo(store: &Path, change_mode: bool, repo: Option<&Path>, require_rewrite: bool) -> Res<()> {
+    done_gate_inner(store, change_mode, true, require_rewrite)?;
     if !store.join("units.tsv").exists() {
         return Ok(());
     }
@@ -478,14 +657,7 @@ pub fn done_gate_in_repo(store: &Path, change_mode: bool, repo: Option<&Path>) -
     }
     let repo = repo.ok_or_else(|| Failure::new("not_done", "missing goal cwd"))?;
     for unit in units {
-        let identity = snapshot(repo, &unit_brief(store, &unit.id)?.scope);
-        if identity.is_empty()
-            || !evidence(store, &unit.id)?
-                .iter()
-                .rev()
-                .find(|r| r.kind == "verify")
-                .is_some_and(|r| r.commit == identity)
-        {
+        if !current_verified_unit(store, &unit.id, repo)? {
             return Err(Failure::new(
                 "not_done",
                 format!("stale verification: {}", unit.id),
@@ -503,4 +675,225 @@ pub fn done_gate_in_repo(store: &Path, change_mode: bool, repo: Option<&Path>) -
         return Err(Failure::new("not_done", "stale full test"));
     }
     Ok(())
+}
+
+// S1 inventories deliberately do not use `snapshot`: Git filters and its temporary
+// index would hide ignored or byte-level changes from the operation boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S1Classification {
+    pub version: u32,
+    pub source_inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    /// Paths tracked when the classification was frozen remain protected even if
+    /// the index is subsequently changed.
+    pub tracked_at_freeze: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S1Entry {
+    pub path: String,
+    pub kind: String,
+    pub mode: u32,
+    pub sha256: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S1Inventory {
+    pub version: u32,
+    pub classification: S1Classification,
+    pub entries: Vec<S1Entry>,
+    pub digest: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S1Change {
+    pub path: String,
+    pub change: String,
+    pub in_scope: bool,
+}
+
+fn s1_error(message: impl Into<String>) -> Failure { Failure::new("inventory", message) }
+fn s1_time(deadline: std::time::Instant) -> Res<()> {
+    if std::time::Instant::now() >= deadline { Err(s1_error("inventory deadline exceeded")) } else { Ok(()) }
+}
+fn s1_path(path: &str) -> Res<String> {
+    use std::path::Component;
+    if path.is_empty() || path.contains('\\') || path.contains('\0') { return Err(s1_error("invalid inventory path")); }
+    let p = Path::new(path);
+    let mut parts = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {},
+            Component::Normal(s) => parts.push(s.to_str().ok_or_else(|| s1_error("unsupported path"))?),
+            _ => return Err(s1_error("inventory path escapes repository")),
+        }
+    }
+    let result = if parts.is_empty() { ".".to_string() } else { parts.join("/") };
+    if result == ".git" || result.starts_with(".git/") { return Err(s1_error("Git control path")); }
+    Ok(result)
+}
+fn s1_under(path: &str, base: &str) -> bool {
+    base == "." || path == base || path.strip_prefix(base).is_some_and(|x| x.starts_with('/'))
+}
+fn s1_artifact(path: &str) -> bool {
+    path == "target" || path.starts_with("target/") ||
+        ((path.ends_with(".pyc") || path.ends_with(".pyo")) && path.split('/').any(|p| p == "__pycache__"))
+}
+fn s1_reparse(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)] { use std::os::windows::fs::MetadataExt; m.file_attributes() & 0x400 != 0 }
+    #[cfg(not(windows))] { m.file_type().is_symlink() }
+}
+fn s1_mode(m: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; m.permissions().mode() & 0o7777 }
+    #[cfg(not(unix))] { if m.permissions().readonly() { 0o444 } else { 0o666 } }
+}
+fn s1_git(repo: &Path, args: &[&str], deadline: std::time::Instant) -> Res<Vec<u8>> {
+    use std::{fs::OpenOptions, process::Stdio};
+    s1_time(deadline)?;
+    let p = std::env::temp_dir().join(format!("s1-git-{}-{}", std::process::id(), base::unique()));
+    let f = OpenOptions::new().write(true).create_new(true).open(&p).map_err(io)?;
+    let result = (|| {
+        let mut child = Command::new("git").current_dir(repo).args(args)
+            .env_remove("GIT_INDEX_FILE").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
+            .env("GIT_OPTIONAL_LOCKS", "0").stdin(Stdio::null()).stdout(Stdio::from(f)).stderr(Stdio::null())
+            .spawn().map_err(io)?;
+        loop {
+            if let Some(status) = child.try_wait().map_err(io)? {
+                if !status.success() { return Err(s1_error("Git index listing failed")); }
+                s1_time(deadline)?;
+                return std::fs::read(&p).map_err(io);
+            }
+            if s1_time(deadline).is_err() { let _ = child.kill(); let _ = child.wait(); return Err(s1_error("Git deadline exceeded")); }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    })();
+    let _ = std::fs::remove_file(p);
+    result
+}
+fn s1_check_repo(repo: &Path) -> Res<()> {
+    if !repo.is_absolute() || std::fs::canonicalize(repo).map_err(io)? != repo { return Err(s1_error("repository must be canonical")); }
+    Ok(())
+}
+fn s1_validate_declared(repo: &Path, path: &str) -> Res<()> {
+    let mut current = repo.to_path_buf();
+    let components: Vec<_> = path.split('/').filter(|x| *x != ".").collect();
+    for (i, part) in components.iter().enumerate() {
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(m) if i + 1 < components.len() && (s1_reparse(&m) || !m.is_dir()) => return Err(s1_error("declared path traverses non-directory or reparse point")),
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Ok(())
+}
+/// Freeze source and output rules before the writer runs. Paths are repository-relative literals.
+pub fn s1_freeze_inventory(repo: &Path, source_inputs: &[String], outputs: &[String], deadline: std::time::Instant) -> Res<S1Inventory> {
+    s1_time(deadline)?; s1_check_repo(repo)?;
+    let normalize = |paths: &[String]| -> Res<Vec<String>> {
+        let mut result = Vec::new();
+        for path in paths {
+            let path = s1_path(path)?;
+            if path == "target" || path.starts_with("target/") { return Err(s1_error("declared source or output is in root target")); }
+            s1_validate_declared(repo, &path)?;
+            result.push(path);
+        }
+        result.sort(); result.dedup(); Ok(result)
+    };
+    let rules = S1Classification { version: 1, source_inputs: normalize(source_inputs)?, outputs: normalize(outputs)?, tracked_at_freeze: s1_tracked(repo, deadline)?.into_iter().collect() };
+    s1_inventory(repo, &rules, deadline)
+}
+/// Repeat a scan with exactly the frozen rules, never new worker exclusions.
+fn s1_tracked(repo: &Path, deadline: std::time::Instant) -> Res<std::collections::BTreeSet<String>> {
+    use std::collections::BTreeSet;
+    let list = s1_git(repo, &["ls-files", "--cached", "-z", "--full-name"], deadline)?;
+    if !list.is_empty() && list.last() != Some(&0) { return Err(s1_error("incomplete Git index listing")); }
+    let mut tracked = BTreeSet::new();
+    for raw in list.split(|b| *b == 0).filter(|x| !x.is_empty()) {
+        let path = std::str::from_utf8(raw).map_err(|_| s1_error("unsupported index path"))?;
+        let normalized = s1_path(path)?;
+        if normalized != path { return Err(s1_error("noncanonical index path")); }
+        tracked.insert(normalized);
+    }
+    Ok(tracked)
+}
+pub fn s1_inventory(repo: &Path, rules: &S1Classification, deadline: std::time::Instant) -> Res<S1Inventory> {
+    use std::collections::BTreeSet;
+    s1_time(deadline)?; s1_check_repo(repo)?;
+    if rules.version != 1 { return Err(s1_error("unsupported classification version")); }
+    for p in rules.source_inputs.iter().chain(&rules.outputs) {
+        if s1_path(p)? != *p || p == "target" || p.starts_with("target/") { return Err(s1_error("invalid frozen classification")); }
+        s1_validate_declared(repo, p)?;
+    }
+    let top = s1_git(repo, &["rev-parse", "--show-toplevel"], deadline)?;
+    let top = std::str::from_utf8(&top).map_err(|_| s1_error("unsupported repository path"))?.trim_end_matches(['\r','\n']);
+    if std::fs::canonicalize(top).map_err(io)? != repo { return Err(s1_error("not repository root")); }
+    let mut tracked = s1_tracked(repo, deadline)?;
+    for path in &rules.tracked_at_freeze {
+        if s1_path(path)? != *path { return Err(s1_error("invalid frozen tracked path")); }
+        tracked.insert(path.clone());
+    }
+    let mut entries = Vec::new();
+    fn walk(repo: &Path, rel: &str, rules: &S1Classification, tracked: &BTreeSet<String>, out: &mut Vec<S1Entry>, deadline: std::time::Instant) -> Res<()> {
+        s1_time(deadline)?;
+        let dir = if rel.is_empty() { repo.to_path_buf() } else { repo.join(rel) };
+        for item in std::fs::read_dir(dir).map_err(io)? {
+            s1_time(deadline)?;
+            let item = item.map_err(io)?;
+            let name = item.file_name().into_string().map_err(|_| s1_error("unsupported filesystem path"))?;
+            let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+            if path == ".git" { continue; }
+            if s1_path(&path)? != path { return Err(s1_error("unsupported filesystem path")); }
+            let m = std::fs::symlink_metadata(item.path()).map_err(io)?;
+            let protected = tracked.contains(&path) || rules.source_inputs.iter().chain(&rules.outputs).any(|p| s1_under(&path, p));
+            let has_tracked_children = tracked.iter().any(|p| s1_under(p, &path));
+            if path == "target" && !has_tracked_children {
+                if protected { return Err(s1_error("source/artifact mixing")); }
+                if !m.is_dir() || s1_reparse(&m) { return Err(s1_error("root target is not an artifact directory")); }
+                continue;
+            }
+            if s1_artifact(&path) && !protected && !has_tracked_children { continue; }
+            if s1_artifact(&path) && !tracked.contains(&path) && protected && !rules.source_inputs.iter().chain(&rules.outputs).any(|p| p == &path) { return Err(s1_error("source/artifact mixing")); }
+            if has_tracked_children && !m.is_dir() && !tracked.contains(&path) { return Err(s1_error("tracked path traverses non-directory or reparse point")); }
+            if s1_reparse(&m) {
+                if !m.file_type().is_symlink() { return Err(s1_error("unsupported reparse point")); }
+                let target = std::fs::read_link(item.path()).map_err(io)?;
+                #[cfg(unix)] let bytes = { use std::os::unix::ffi::OsStrExt; target.as_os_str().as_bytes().to_vec() };
+                #[cfg(not(unix))] let bytes = target.to_str().ok_or_else(|| s1_error("unsupported symlink target"))?.as_bytes().to_vec();
+                out.push(S1Entry { path, kind: "symlink".into(), mode: s1_mode(&m), sha256: format!("{:x}", Sha256::digest(bytes)) });
+            } else if m.is_dir() {
+                if tracked.contains(&path) { return Err(s1_error("tracked path is a directory")); }
+                walk(repo, &path, rules, tracked, out, deadline)?;
+            } else if m.is_file() {
+                use std::io::Read;
+                let mut file = std::fs::File::open(item.path()).map_err(io)?;
+                let mut hash = Sha256::new();
+                let mut buf = [0u8; 65536];
+                loop {
+                    s1_time(deadline)?;
+                    let n = file.read(&mut buf).map_err(io)?;
+                    if n == 0 { break; }
+                    hash.update(&buf[..n]);
+                }
+                s1_time(deadline)?;
+                out.push(S1Entry { path, kind: "file".into(), mode: s1_mode(&m), sha256: format!("{:x}", hash.finalize()) });
+            } else { return Err(s1_error("unsupported source type")); }
+        }
+        Ok(())
+    }
+    walk(repo, "", rules, &tracked, &mut entries, deadline)?;
+    entries.sort_by(|a,b| a.path.cmp(&b.path));
+    let digest = format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&(1u32, rules, &entries)).map_err(|e| s1_error(e.to_string()))?));
+    s1_time(deadline)?;
+    Ok(S1Inventory { version: 1, classification: rules.clone(), entries, digest })
+}
+/// Compare inventories only when they use identical frozen rules.
+pub fn s1_compare(before: &S1Inventory, after: &S1Inventory) -> Res<Vec<S1Change>> {
+    use std::collections::BTreeMap;
+    if before.version != 1 || after.version != 1 || before.classification != after.classification { return Err(s1_error("inventory classifications differ")); }
+    let a: BTreeMap<_,_> = before.entries.iter().map(|e| (&e.path, e)).collect();
+    let b: BTreeMap<_,_> = after.entries.iter().map(|e| (&e.path, e)).collect();
+    let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
+    Ok(keys.into_iter().filter_map(|path| {
+        let change = match (a.get(path), b.get(path)) { (None, Some(_)) => "added", (Some(_), None) => "deleted", (Some(x), Some(y)) if x != y => "changed", _ => return None };
+        Some(S1Change { path: path.clone(), change: change.into(), in_scope: before.classification.outputs.iter().any(|p| s1_under(path, p)) })
+    }).collect())
 }

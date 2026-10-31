@@ -57,6 +57,42 @@ fn embedded_files_match_disk_and_install_idempotently() {
 }
 
 #[test]
+fn codex_manifest_preserves_authorized_light_and_dark_artwork() {
+    use sha2::{Digest, Sha256};
+    let root = root().parent().unwrap().join("codex-plugin");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root.join(".codex-plugin/plugin.json")).unwrap()).unwrap();
+    for (field, path, expected) in [
+        (
+            "logo",
+            "./assets/chronos.svg",
+            "87e269750c24d6a095d2e8706c00cb17f498e57cf711eaeaff86c8351aa2e477",
+        ),
+        (
+            "logoDark",
+            "./assets/chronos-dark.svg",
+            "4c2275607151611489b4f2a32a66d64ba2110f9dce01f9a20806f29c5a6f6938",
+        ),
+        (
+            "composerIcon",
+            "./assets/chronos.svg",
+            "87e269750c24d6a095d2e8706c00cb17f498e57cf711eaeaff86c8351aa2e477",
+        ),
+    ] {
+        assert_eq!(manifest["interface"][field], path);
+        let mut bytes = fs::read(root.join(path)).unwrap();
+        let digest = |b: &[u8]| format!("{:x}", Sha256::digest(b));
+        assert_eq!(
+            digest(&bytes),
+            expected,
+            "authorized artwork changed: {path}"
+        );
+        bytes[0] ^= 1;
+        assert_ne!(digest(&bytes), expected); // Detect content changes, not just file presence.
+    }
+}
+
+#[test]
 fn references_tools_and_agents_exist() {
     let references = Regex::new(r#"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`"'\\)]+)"#).unwrap();
     let tools = Regex::new(r"mcp__plugin_([a-z0-9-]+)_([a-z0-9-]+)__([a-z_]+)").unwrap();
@@ -153,12 +189,13 @@ fn schemas_are_strict_and_coverage_has_negative_control() {
 #[test]
 fn models_and_binary_configuration() {
     for (agent, model, effort) in [
-        ("architect", "astra", "max"),
+        ("architect", "astra", "high"),
+        ("tester", "astra", "high"),
         ("dispatcher", "terra", "high"),
         ("astra", "astra", "max"),
         ("critic", "sol", "high"),
         ("reviewer", "sol", "high"),
-        ("memory-keeper", "luna", "low"),
+        ("memory-keeper", "terra", "medium"),
         ("content", "luna", "low"),
     ] {
         let text = asset(&format!("agents/{agent}.md"));
@@ -177,7 +214,7 @@ fn models_and_binary_configuration() {
         );
     }
     let plugin = json_asset(".claude-plugin/plugin.json");
-    assert_eq!(plugin["version"], "0.2.0-codex.1");
+    assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         plugin["mcpServers"]["bridge"],
         json!({"command":"${AXIOM_BIN:-axiom}","args":["bridge"]})
@@ -198,7 +235,7 @@ fn models_and_binary_configuration() {
     )
     .unwrap();
     assert_eq!(marketplace["plugins"][0]["source"], "./engine");
-    assert_eq!(marketplace["plugins"][0]["version"], "0.2.0-codex.1");
+    assert_eq!(marketplace["plugins"][0]["version"], env!("CARGO_PKG_VERSION"));
     for (path, text) in engine::FILES {
         for forbidden in ["AXIOM_PYTHON", "bun", "vendor", "orch.ts"] {
             assert!(!text.contains(forbidden), "{path}: {forbidden}");

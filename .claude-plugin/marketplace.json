@@ -11,7 +11,7 @@
       "name": "chronos",
       "source": "./engine",
       "description": "Wish and research workflows: Astra maps modules, Terra dispatches Codex workers, and verification is recorded.",
-      "version": "0.2.0-codex.1"
+      "version": "0.2.2-codex.dev.7"
     }
   ]
 }

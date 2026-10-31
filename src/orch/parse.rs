@@ -6,6 +6,11 @@ pub struct Brief {
     pub goal: String,
     pub scope: Vec<String>,
     pub verify: String,
+    /// Absent for historical briefs written before delivery kinds existed.
+    #[serde(default)]
+    pub delivery: Option<String>,
+    #[serde(default)]
+    pub outputs: Option<Vec<String>>,
     pub context: Option<String>,
     pub text: String,
 }
@@ -67,32 +72,108 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
     let body = start
         .map(|n| text.lines().skip(n).collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
-    let f = fields(&body, &["GOAL", "SCOPE", "VERIFY", "CONTEXT"]);
+    // Delivery declarations are authority, not decorative preamble. Never
+    // silently downgrade a malformed modern brief into a legacy brief.
+    if let Some(n)=start {
+        for line in text.lines().take(n) {
+            for key in ["DELIVERY","OUTPUTS"] {
+                if line.strip_prefix(key).is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace)) {
+                    return Err(key.into());
+                }
+            }
+        }
+    }
+    let f = fields(&body, &["GOAL", "SCOPE", "VERIFY", "DELIVERY", "OUTPUTS", "CONTEXT"]);
     for n in ["GOAL", "SCOPE", "VERIFY"] {
         if f.get(n).is_none_or(|s| s.trim().is_empty()) {
             return Err(n.into());
         }
     }
-    if words(&f["SCOPE"]).is_empty() {
+    if words(&f["SCOPE"]).is_empty() || words(&f["SCOPE"]).iter().any(|p| !valid_scope(p)) {
         return Err("SCOPE".into());
     }
+    let declarations = body.lines().filter(|line| {
+        line.strip_prefix("DELIVERY")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    }).count();
+    let delivery = f.get("DELIVERY").cloned();
+    if declarations > 1 || delivery.as_deref().is_some_and(|v| !matches!(v, "implementation" | "verification" | "measurement")) {
+        return Err("DELIVERY".into());
+    }
+    let output_declarations = body.lines().filter(|line| {
+        line.strip_prefix("OUTPUTS")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    }).count();
+    if output_declarations > 1 { return Err("OUTPUTS".into()); }
+    let outputs = if let Some(value) = f.get("OUTPUTS") {
+        let paths = words(value);
+        if paths == ["none"] {
+            if !matches!(delivery.as_deref(), Some("verification" | "measurement")) {
+                return Err("OUTPUTS".into());
+            }
+            Some(vec![])
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            let mut result = Vec::new();
+            for path in paths {
+                if path == "none" || path == "." || !valid_scope(&path) || path.contains(['*', '?', '[', ']']) {
+                    return Err("OUTPUTS".into());
+                }
+                let path = normalized(&path);
+                let key = path.trim_end_matches('/').to_string();
+                #[cfg(windows)]
+                let key = key.to_ascii_lowercase();
+                if !seen.insert(key) || !covers(&words(&f["SCOPE"]), &path) {
+                    return Err("OUTPUTS".into());
+                }
+                result.push(path);
+            }
+            if result.is_empty() { return Err("OUTPUTS".into()); }
+            Some(result)
+        }
+    } else { None };
     Ok(Brief {
         goal: f["GOAL"].clone(),
         scope: words(&f["SCOPE"]),
         verify: f["VERIFY"].clone(),
+        delivery,
+        outputs,
         context: f.get("CONTEXT").cloned(),
         text: text.into(),
     })
+}
+fn valid_scope(path: &str) -> bool {
+    if path == "." {
+        return true;
+    }
+    let p = path.replace('\\', "/");
+    let p = p.strip_prefix("./").unwrap_or(&p);
+    !p.starts_with('/')
+        && !p.contains(':')
+        && !p.contains('\0')
+        && p.trim_end_matches('/')
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 fn normalized(s: &str) -> String {
     let s = s.replace('\\', "/");
     s.trim_start_matches("./").to_string()
 }
 pub fn covers(patterns: &[String], path: &str) -> bool {
+    if !valid_scope(path) {
+        return false;
+    }
     let p = normalized(path);
+    #[cfg(windows)]
+    let p = p.to_ascii_lowercase();
     patterns.iter().any(|x| {
+        if !valid_scope(x) {
+            return false;
+        }
         let x = normalized(x);
-        x == p || (x.ends_with('/') && p.starts_with(&x))
+        #[cfg(windows)]
+        let x = x.to_ascii_lowercase();
+        x == "." || x == p || (x.ends_with('/') && p.starts_with(&x))
     })
 }
 pub fn overlaps(a: &[String], b: &[String]) -> bool {
@@ -152,7 +233,7 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
             }
         }
         let paths = words(&f["PATHS"]);
-        if paths.is_empty() {
+        if paths.is_empty() || paths.iter().any(|p| !valid_scope(p)) {
             return Err(format!("module {id}: missing PATHS"));
         }
         for m in &modules {

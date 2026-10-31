@@ -95,14 +95,22 @@ for line in sys.stdin:
             {'id': 'panel@personal', 'enabled': True}, {'id': 'keepme@personal', 'enabled': True}, {'id': 'off@personal', 'enabled': False}]}]}})
     elif method == 'config/read':
         send({'id': message['id'], 'result': {'config': {'mcp_servers': {'node_repl': {'command': 'x'}}}, 'origins': {}}})
+    elif method == 'skills/list':
+        send({'id': message['id'], 'result': {'data': [{'cwd': params['cwds'][0], 'errors': [], 'skills': [
+            {'name': 'ordinary', 'path': '/skills/ordinary/SKILL.md', 'enabled': True, 'scope': 'user', 'description': ''},
+            {'name': 'workflow', 'path': '/skills/workflow/SKILL.md', 'pluginId': 'keepme@personal', 'enabled': True, 'scope': 'user', 'description': ''}]}]}})
     elif method == 'thread/start':
         threads += 1
         thread_id = f'thread-{threads}'
-        models[thread_id] = params.get('model')
+        models[thread_id] = 'actual-model' if params.get('model') == 'requested-model' else params.get('model')
         config = params.get('config') or {}
         configs[thread_id] = config
         thread_params[thread_id] = params
-        send({'id': message['id'], 'result': {'thread': {'id': thread_id}}})
+        mode = params.get('developerInstructions', '')
+        actual = 'gpt-6-sol' if mode == 'FAKE_WRONG_MODEL' else models[thread_id]
+        sandbox = 'workspaceWrite' if mode == 'FAKE_WRONG_SANDBOX' else ('readOnly' if params.get('sandbox') == 'read-only' else 'workspaceWrite')
+        approval = 'on-request' if mode == 'FAKE_WRONG_APPROVAL' else 'never'
+        send({'id': message['id'], 'result': {'thread': {'id': thread_id}, 'model': actual, 'sandbox': {'type': sandbox}, 'approvalPolicy': approval}})
         send({'method': 'thread/started', 'params': {'thread': {'id': thread_id}}})
         servers = {'node_repl': ('mcp_servers', 'node_repl'), 'panel': ('plugins', 'panel@personal'), 'keepme': ('plugins', 'keepme@personal')}
         for server, (section, key) in servers.items():
@@ -115,9 +123,21 @@ for line in sys.stdin:
         turn_id = thread_id + '-turn'
         if 'HANGREQ' in text:
             continue
+        if 'NO_TURN_ID' in text:
+            send({'id':message['id'],'result':{'turn':{}}})
+            continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
         if 'CRASH' in text:
             sys.exit(7)
+        if 'REFUSE_INTERRUPT' in text:
+            pending_turns[turn_id] = (thread_id, turn_id, 'refuse')
+            continue
+        if 'NO_CONFIRM' in text:
+            pending_turns[turn_id] = (thread_id, turn_id, 'no_confirm')
+            continue
+        if 'LATE_COMPLETE' in text:
+            pending_turns[turn_id] = (thread_id, turn_id, 'late_complete')
+            continue
         if 'HANG' in text:
             pending_turns[turn_id] = (thread_id, turn_id)
             continue
@@ -166,6 +186,20 @@ for line in sys.stdin:
             send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
             complete(thread_id, turn_id, 'failed', error)
             continue
+        if text.startswith('EFFORT_'):
+            scenarios = {
+                'EFFORT_NESTED': {'threadSettings': {'effort': 'high'}, 'effort': 'legacy'},
+                'EFFORT_MISSING': {'threadSettings': {}},
+                'EFFORT_NULL': {'threadSettings': {'effort': None}, 'effort': 'legacy'},
+                'EFFORT_INVALID': {'threadSettings': {'effort': 42}, 'effort': 'legacy'},
+                'EFFORT_EMPTY': {'threadSettings': {'effort': ''}, 'effort': 'legacy'},
+                'EFFORT_LEGACY': {'threadSettings': {}, 'effort': 'medium'},
+                'EFFORT_ROUTING': {'threadSettings': {}},
+            }
+            if text == 'EFFORT_ROUTING':
+                send({'method': 'thread/settings/updated', 'params': {'threadId': 'other-thread', 'threadSettings': {'effort': 'wrong-thread'}}})
+                send({'method': 'thread/settings/updated', 'params': {'threadId': thread_id, 'turnId': 'other-turn', 'threadSettings': {'effort': 'wrong-turn'}}})
+            send({'method': 'thread/settings/updated', 'params': {'threadId': thread_id, **scenarios[text]}})
         item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
         item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
                                   'changes': [{'path': 'src/mod.py', 'kind': {'type': 'add'}, 'diff': ''}]})
@@ -181,8 +215,14 @@ for line in sys.stdin:
         item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
         complete(thread_id, turn_id)
     elif method == 'turn/interrupt':
+        turn = pending_turns.get(params['turnId'])
+        if turn and len(turn) == 3 and turn[2] == 'refuse':
+            send({'id': message['id'], 'error': {'code': -32000, 'message': 'refused'}})
+            continue
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)
-        if turn:
+        if turn and len(turn) == 2:
             complete(*turn, 'interrupted')
+        elif turn and turn[2] == 'late_complete':
+            complete(*turn[:2], 'completed')
     time.sleep(0)

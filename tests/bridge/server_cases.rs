@@ -11,7 +11,14 @@ use std::{
 fn config(home: &std::path::Path) -> Config {
     Config {
         data_home: Some(home.into()),
-        codex: Ok(common::fake("fake_codex_review")),
+        codex: Ok(vec![
+            common::python(),
+            "-I".into(),
+            common::repo_root()
+                .join("tests/bridge/fake_review.py")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
         agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
@@ -99,7 +106,8 @@ fn full_protocol_session() {
             "memory_get",
             "memory_digest",
             "goal",
-            "bridge_status"
+            "bridge_status",
+            "session"
         ]
     );
     assert_eq!(lines[3]["result"], json!({}));
@@ -122,6 +130,31 @@ fn descriptor_names_policy() {
 fn memory_verified_round_trip_and_refusal() {
     let temp = common::temp();
     fixture(temp.path());
+    fs::write(temp.path().join(".git/info/exclude"), "orchestrate/\n").unwrap();
+    let store = temp.path().join("orchestrate/demo");
+    fs::write(
+        store.join("brief.md"),
+        "GOAL test\nSCOPE file.txt\nVERIFY echo ok\n",
+    )
+    .unwrap();
+    fs::create_dir_all(store.join("inbox")).unwrap();
+    axiom::orch::begin_unit(&store, "u1", "terra", temp.path(), false).unwrap();
+    let finish = axiom::orch::finish_unit(
+        &store,
+        "u1",
+        temp.path(),
+        "terra",
+        "gpt-6-terra",
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    axiom::orch::record_review(&store, &["u1".into()], "gpt-6-sol", true, temp.path()).unwrap();
+    assert!(
+        axiom::orch::current_verified_unit(&store, "u1", temp.path()).unwrap(),
+        "finish={}, evidence={:?}",
+        finish.state,
+        axiom::orch::evidence(&store, "u1")
+    );
     let b = Bridge::new(config(temp.path()));
     let mut args = json!({"project":"demo","project_dir":temp.path(),"unit":"u1","title":"slugify","summary":"把標題轉成網址代稱","body":"slugify(text)","wish":"add slugify","files":["file.txt"]});
     let recorded = invoke(&b, "memory_record", args.clone());
@@ -132,6 +165,14 @@ fn memory_verified_round_trip_and_refusal() {
         found["structuredContent"]["entries"][0]["id"],
         recorded["structuredContent"]["id"]
     );
+    fs::write(temp.path().join("file.txt"), "changed after recording").unwrap();
+    let stale = invoke(&b, "memory_search", json!({"query":"網址代稱"}));
+    assert_eq!(stale["structuredContent"]["entries"], json!([]));
+    let historical = axiom::memory::Memory::open(temp.path())
+        .unwrap()
+        .search("網址代稱", None, 5)
+        .unwrap();
+    assert_eq!(historical["entries"][0]["stale"], true);
     args["unit"] = json!("u2");
     let refused = invoke(&b, "memory_record", args);
     check(&refused, "bridge_error");
@@ -187,7 +228,7 @@ fn review_records_state() {
     let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
     assert!(!identity.is_empty());
     fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n")).unwrap();
-    let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract"});
+    let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract\nGOAL test\nSCOPE file.txt\nVERIFY test\n"});
     let ok = invoke(&b, "review_code", args.clone());
     check(&ok, "completed");
     assert_eq!(ok["structuredContent"]["verdict"], "pass");
@@ -326,17 +367,18 @@ fn serve_dispatches_tool_calls() {
         .collect();
     assert_eq!(lines.len(), 2);
     let success = lines.iter().find(|v| v["id"] == 1).unwrap();
-    check(&success["result"], "completed");
-    assert_eq!(
-        success["result"]["structuredContent"]["response"],
-        "echo: hi"
-    );
+    // EOF cancels outstanding work, so completion depends on scheduling.
+    let status = success["result"]["structuredContent"]["status"]
+        .as_str()
+        .unwrap();
+    assert!(status == "completed" || status == "bridge_error");
+    check(&success["result"], status);
     let failure = lines.iter().find(|v| v["id"] == 2).unwrap();
     check(&failure["result"], "bridge_error");
-    assert_eq!(
-        failure["result"]["structuredContent"]["error"]["kind"],
-        "unknown_tool"
-    );
+    assert!(matches!(
+        failure["result"]["structuredContent"]["error"]["kind"].as_str(),
+        Some("unknown_tool" | "interrupted")
+    ));
 }
 #[test]
 fn descriptors_expose_codex_unit_inputs() {
@@ -491,7 +533,14 @@ fn serve_stops_codex_process() {
         json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}})
     );
     assert_eq!(
-        serve(c, Cursor::new(request), Sink(Arc::new(Mutex::new(vec![])))),
+        serve(
+            c,
+            MarkerEof {
+                request: Some(request),
+                marker: pid.clone()
+            },
+            Sink(Arc::new(Mutex::new(vec![])))
+        ),
         0
     );
     let id = fs::read_to_string(pid).unwrap();
@@ -542,7 +591,7 @@ fn review_blocker_and_units_without_project() {
     let no_project = invoke(
         &b,
         "review_code",
-        json!({"units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
+        json!({"units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
     );
     check(&no_project, "completed");
     assert_eq!(no_project["structuredContent"]["verdict"], "fail");
@@ -556,7 +605,7 @@ fn review_blocker_and_units_without_project() {
     let failed = invoke(
         &b,
         "review_code",
-        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
+        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
     );
     check(&failed, "completed");
     assert_eq!(failed["structuredContent"]["verdict"], "fail");
@@ -604,7 +653,7 @@ fn codex_review_models_and_schema() {
         invoke(
             &b,
             "review_code",
-            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":contract,"model":"gemini-old"}),
+            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":format!("{contract}\nGOAL test\nSCOPE file.txt\nVERIFY test\n"),"model":"gemini-old"}),
         )
     };
     let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
@@ -652,12 +701,104 @@ fn codex_review_models_and_schema() {
     let rejected = invoke(
         &b,
         "review_code",
-        json!({"project_dir":temp.path(),"paths":["file.txt"],"contract":"x","model":"gpt-6-luna"}),
+        json!({"project_dir":temp.path(),"paths":["file.txt"],"contract":"x\nGOAL test\nSCOPE file.txt\nVERIFY test\n","model":"gpt-6-luna"}),
     );
     assert_eq!(
         rejected["structuredContent"]["error"]["kind"],
         "invalid_argument"
     );
+}
+
+#[test]
+fn actual_reviewer_and_stage_models_control_reports_and_evidence() {
+    for (actual, accepted) in [("gpt-7-sol", true), ("gpt-6-terra", false)] {
+        let temp = common::temp();
+        fixture(temp.path());
+        let repo = common::temp();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("file.txt"), "content").unwrap();
+        let store = temp.path().join("orchestrate/demo");
+        fs::create_dir_all(store.join("inbox")).unwrap();
+        fs::write(
+            store.join("brief.md"),
+            "GOAL test\nSCOPE file.txt\nVERIFY echo ok\n",
+        )
+        .unwrap();
+        axiom::orch::begin_unit(&store, "u3", "terra", repo.path(), false).unwrap();
+        let built = axiom::orch::finish_unit(
+            &store,
+            "u3",
+            repo.path(),
+            "terra",
+            "gpt-6-terra",
+            &json!({"status":"completed"}),
+        )
+        .unwrap();
+        assert_eq!(built.state, "built");
+        let mut cfg = config(temp.path());
+        cfg.codex
+            .as_mut()
+            .unwrap()
+            .extend(["--actual-model".into(), actual.into()]);
+        let b = Bridge::new(cfg);
+        let r = invoke(
+            &b,
+            "review_code",
+            json!({"project":"demo","units":["u3"],"project_dir":repo.path(),"paths":["file.txt"],"contract":"review actual model\nGOAL test\nSCOPE file.txt\nVERIFY echo ok\n"}),
+        );
+        check(
+            &r,
+            if accepted {
+                "completed"
+            } else {
+                "bridge_error"
+            },
+        );
+        if accepted {
+            assert_eq!(r["structuredContent"]["reviewer"], actual);
+            assert_eq!(r["structuredContent"]["requested_model"], "gpt-6-sol");
+        }
+        let reviews: Vec<_> = axiom::orch::evidence(&store, "u3")
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "review")
+            .collect();
+        if accepted {
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(reviews[0].command, actual);
+            assert_eq!(r["structuredContent"]["states"]["u3"], "verified");
+        } else {
+            assert_eq!(r["structuredContent"]["error"]["kind"], "thread_policy");
+            assert!(reviews.is_empty()); // Never credit a writer as its own reviewer.
+        }
+        let stage = invoke(
+            &b,
+            "gemini_preview",
+            json!({"project":"demo","stage":"second_review","prompt":"stage actual model"}),
+        );
+        check(
+            &stage,
+            if accepted {
+                "completed"
+            } else {
+                "bridge_error"
+            },
+        );
+        if accepted {
+            assert_eq!(stage["structuredContent"]["model"], actual);
+        }
+        let evidence = fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap();
+        assert!(evidence.contains(&format!(
+            "second_review\t{}\t{}\t",
+            if accepted { actual } else { "gpt-6-sol" },
+            if accepted { 0 } else { 1 }
+        )));
+    }
 }
 
 #[test]
@@ -708,7 +849,7 @@ fn review_effort_and_forbidden_processes() {
         wrapper.to_string_lossy().into_owned(),
         log.to_string_lossy().into_owned(),
         common::repo_root()
-            .join("tests/fakes/fake_codex_review.py")
+            .join("tests/bridge/fake_review.py")
             .to_string_lossy()
             .into_owned(),
     ]);
@@ -738,7 +879,7 @@ fn review_effort_and_forbidden_processes() {
         &invoke(
             &b,
             "review_code",
-            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"x"}),
+            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"x\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
         ),
         "completed",
     );
@@ -766,7 +907,7 @@ fn review_effort_and_forbidden_processes() {
         .map(|e| e["params"]["effort"].as_str().unwrap())
         .collect();
     assert_eq!(models, ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]);
-    assert_eq!(efforts, ["high", "max", "high"]);
+    assert_eq!(efforts, ["high", "max", "low"]);
     let starts: Vec<_> = events
         .iter()
         .filter(|e| e["method"] == "thread/start")
@@ -784,4 +925,251 @@ fn review_effort_and_forbidden_processes() {
         .as_str()
         .unwrap()
         .contains("report rewriter"));
+}
+
+struct SynchronizedLines {
+    lines: std::collections::VecDeque<String>,
+    log: std::path::PathBuf,
+    capture: Arc<Mutex<Vec<u8>>>,
+    cancel_at: Arc<Mutex<Option<std::time::Instant>>>,
+}
+impl io::Read for SynchronizedLines {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        unreachable!()
+    }
+}
+impl io::BufRead for SynchronizedLines {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        unreachable!()
+    }
+    fn consume(&mut self, _: usize) {
+        unreachable!()
+    }
+    fn read_line(&mut self, line: &mut String) -> io::Result<usize> {
+        if self.lines.len() == 1 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !(fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .contains("turn/start")
+                && String::from_utf8_lossy(&self.capture.lock().unwrap()).contains("\"id\":2"))
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "requests did not start: log={:?}, output={:?}",
+                    fs::read_to_string(&self.log),
+                    String::from_utf8_lossy(&self.capture.lock().unwrap())
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            *self.cancel_at.lock().unwrap() = Some(std::time::Instant::now());
+        }
+        if let Some(text) = self.lines.pop_front() {
+            line.push_str(&text);
+            Ok(text.len())
+        } else {
+            Ok(0)
+        }
+    }
+}
+#[test]
+fn notification_cancels_only_target_and_eof_cancels_remaining() {
+    for notify in [true, false] {
+        let temp = common::temp();
+        let out = Sink(Arc::new(Mutex::new(vec![])));
+        let capture = out.0.clone();
+        let slow = json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"SLOW"}}});
+        let fast = json!({"id":2,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"nothing"}}});
+        let log = temp.path().join("codex-events.jsonl");
+        let wrapper = temp.path().join("fake.py");
+        fs::write(&wrapper, format!("import os,runpy\nos.environ['FAKE_CODEX_LOG'] = {}\nrunpy.run_path({}, run_name='__main__')\n", serde_json::to_string(&log.to_string_lossy()).unwrap(), serde_json::to_string(&common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy()).unwrap())).unwrap();
+        let mut cfg = config(temp.path());
+        cfg.codex = Ok(vec![
+            common::python(),
+            "-I".into(),
+            wrapper.to_string_lossy().into_owned(),
+        ]);
+        let signal = if notify {
+            format!(
+                "{}\n",
+                json!({"method":"notifications/cancelled","params":{"requestId":1}})
+            )
+        } else {
+            "\n".into()
+        };
+        let cancel_at = Arc::new(Mutex::new(None));
+        let input = SynchronizedLines {
+            lines: std::collections::VecDeque::from([
+                format!("{slow}\n"),
+                format!("{fast}\n"),
+                signal,
+            ]),
+            log,
+            capture: capture.clone(),
+            cancel_at: cancel_at.clone(),
+        };
+        serve(cfg, input, out);
+        assert!(
+            cancel_at.lock().unwrap().unwrap().elapsed() < std::time::Duration::from_secs(2),
+            "cancellation phase exceeded two seconds"
+        );
+        let bytes = capture.lock().unwrap();
+        let responses: Vec<Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(
+            responses.iter().find(|v| v["id"] == 2).unwrap()["result"]["structuredContent"]
+                ["status"],
+            "completed"
+        );
+        assert_ne!(
+            responses.iter().find(|v| v["id"] == 1).unwrap()["result"]["structuredContent"]
+                ["status"],
+            "completed"
+        );
+    }
+}
+
+#[test]
+fn caller_attachment_bootstrap_resume_and_authority_without_core_thread() {
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    let begin = invoke(
+        &b,
+        "session",
+        json!({"action":"begin","skill":"wish","project":temp.path(),"text":"inspect"}),
+    );
+    check(&begin, "completed");
+    let id = begin["structuredContent"]["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!b.running());
+    let denied = invoke(
+        &b,
+        "session",
+        json!({"action":"call","tool":"codex_run","arguments":{"role":"terra"}}),
+    );
+    assert!(denied["isError"].as_bool().unwrap());
+    let mode = invoke(
+        &b,
+        "session",
+        json!({"action":"call","tool":"goal","arguments":{"mode":"review"}}),
+    );
+    check(&mode, "completed");
+    let linux = invoke(
+        &b,
+        "session",
+        json!({"action":"call","tool":"run_on_linux","arguments":{"project_dir":temp.path(),"args":["-c","open('marker','w')"]}}),
+    );
+    assert!(linux["isError"].as_bool().unwrap());
+    assert!(!temp.path().join("marker").exists());
+    check(
+        &invoke(
+            &b,
+            "session",
+            json!({"action":"interject","text":"clarify"}),
+        ),
+        "completed",
+    );
+    let blocked = invoke(
+        &b,
+        "session",
+        json!({"action":"call","tool":"orch","arguments":{"project":"demo","args":["fulltest"]}}),
+    );
+    assert_eq!(
+        blocked["structuredContent"]["error"]["kind"],
+        "permission_denied"
+    );
+    check(
+        &invoke(&b, "session", json!({"action":"stop"})),
+        "completed",
+    );
+    let resumed = invoke(&b, "session", json!({"action":"resume","session":id}));
+    check(&resumed, "completed");
+    assert_eq!(resumed["structuredContent"]["session"], id);
+    assert!(resumed["structuredContent"]["goal"]["interjection"].is_object());
+    assert!(!b.running());
+}
+
+#[test]
+fn caller_cannot_bypass_dispatcher_to_content() {
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    check(
+        &invoke(
+            &b,
+            "session",
+            json!({"action":"begin","project":temp.path(),"text":"summarize"}),
+        ),
+        "completed",
+    );
+    check(
+        &invoke(
+            &b,
+            "session",
+            json!({"action":"call","tool":"goal","arguments":{"mode":"answer"}}),
+        ),
+        "completed",
+    );
+    let child = invoke(
+        &b,
+        "session",
+        json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:content","prompt":"Summarize this text: hello","cwd":temp.path()}}),
+    );
+    assert_eq!(child["structuredContent"]["error"]["kind"],"permission_denied");
+    assert!(!b.running());
+}
+
+#[test]
+fn unrelated_review_paths_never_credit_unit() {
+    let temp = common::temp();
+    fixture(temp.path());
+    fs::write(temp.path().join("unrelated.txt"), "other").unwrap();
+    let b = Bridge::new(config(temp.path()));
+    let result = invoke(
+        &b,
+        "review_code",
+        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["unrelated.txt"],"contract":"x"}),
+    );
+    assert_eq!(result["structuredContent"]["error"]["kind"], "review_scope");
+    assert!(!temp
+        .path()
+        .join("orchestrate/demo/reports/u3.evidence.tsv")
+        .exists());
+}
+
+// Make EOF occur after observable process start, not after an arbitrary sleep.
+struct MarkerEof {
+    request: Option<String>,
+    marker: std::path::PathBuf,
+}
+impl io::Read for MarkerEof {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        unreachable!()
+    }
+}
+impl io::BufRead for MarkerEof {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        unreachable!()
+    }
+    fn consume(&mut self, _: usize) {
+        unreachable!()
+    }
+    fn read_line(&mut self, line: &mut String) -> io::Result<usize> {
+        if let Some(request) = self.request.take() {
+            line.push_str(&request);
+            return Ok(request.len());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !self.marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(0)
+    }
 }
