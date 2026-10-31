@@ -74,3 +74,11 @@ Ubuntu 22.04 / Rust 1.99.1: `cargo test --locked` passes all 366 tests,
 with 3 existing ignored tests. Includes the actual role authority sequence,
 parallel bridge tests, interruption, recovery and the new fork regression.
 GitHub's Ubuntu/Windows matrix must also pass before this release is installed.
+
+The final Windows run exposed a fixed-delay cancellation fixture: its 350 ms
+interjection could precede child startup on a slow runner, while the assertion
+required an outstanding child to receive an interrupt. The fixture now waits
+for the actual child's ready marker before sending stop, and still requires
+both root and child interrupts. The earlier widespread Windows Git launch
+failure did not recur on the fresh runner; logs are retained without assigning
+an unsupported deterministic cause.

@@ -120,6 +120,7 @@ def run_turn(tid,turn,params):
             tool(tid,turn,'codex_run',{'project':'demo','unit':'u','cwd':option('--project'),'role':'terra'})
             return
         if scenario=='cancel' and 'terra' in role:
+            Path(record + '.cancel-child-ready').touch()
             while (tid,turn) not in cancelled: time.sleep(.01)
             return
         if scenario=='delegated-authority' and 'terra' in role:

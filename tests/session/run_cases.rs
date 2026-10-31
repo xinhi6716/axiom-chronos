@@ -1213,7 +1213,15 @@ fn luna_content_has_reads_exact_outputs_and_no_arbitrary_nesting() {
 #[test]
 fn classified_stop_cancels_root_and_outstanding_child_calls() {
     let h = Harness::new("cancel");
-    let (code, out) = h.execute(Box::new(BufReader::new(Delayed(false))), None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let running = start_idle(&h, Box::new(BufReader::new(ChannelInput(rx))));
+    // An outstanding child is the precondition, not an elapsed 350 ms. A slow
+    // runner may otherwise receive the interjection before child dispatch,
+    // correctly refuse to launch it, and have nothing to interrupt.
+    wait_file(&marker(&h, "cancel-child-ready"));
+    tx.send("stop\n".into()).unwrap();
+    drop(tx);
+    let (code, out) = running.join().unwrap();
     assert_eq!(code, 1, "{out}");
     assert_eq!(h.goal().reason.as_deref(), Some("user_stop"));
     let interrupts = h.requests("turn/interrupt");
