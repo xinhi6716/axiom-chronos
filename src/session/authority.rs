@@ -86,7 +86,8 @@ pub fn guard(state: &State, caller: &str, tool: &str, args: &Value) -> Res<()> {
         };
         if !allowed { return Err(denied("specialist is forbidden in the current workflow phase")); }
     }
-    if tool == "codex_run" && (caller != "dispatcher" || state.phase != Phase::Execution) {
+    let measurement = args["role"] == "astra-verify" && args["task_kind"] == "measurement" && args["sandbox"] == "read-only";
+    if tool == "codex_run" && (caller != "dispatcher" || !(state.phase == Phase::Execution || (measurement && state.phase == Phase::Planning))) {
         return Err(denied("engineering requires approved research and completed Astra HIGH planning"));
     }
     if caller == "dispatcher" && matches!(tool, "orch" | "run_on_linux" | "review_code")
@@ -177,5 +178,18 @@ mod tests {
         assert_eq!(read(temp.path(),"session").unwrap().phase,Phase::IntentReview);
         std::fs::write(temp.path().join("authority/session/state.json"),b"broken").unwrap();
         assert!(read(temp.path(),"session").is_err());
+    }
+    #[test]
+    fn baseline_measurement_does_not_need_engineering_release_or_allow_core_work() {
+        let request=json!({"role":"astra-verify","task_kind":"measurement","sandbox":"read-only"});
+        for phase in [Phase::Planning, Phase::Execution] {
+            let state=State { phase, ..State::default() };
+            assert!(guard(&state,"dispatcher","codex_run",&request).is_ok());
+            assert!(guard(&state,"core","codex_run",&request).is_err());
+        }
+        for phase in [Phase::Research,Phase::IntentReview,Phase::ReadySubmit,Phase::Submitted] {
+            assert!(guard(&State { phase, ..State::default() },"dispatcher","codex_run",&request).is_err());
+        }
+        assert!(guard(&State {phase:Phase::Planning,..State::default()},"dispatcher","codex_run",&json!({"role":"terra"})).is_err());
     }
 }

@@ -127,6 +127,17 @@ for line in sys.stdin:
             send({'id':message['id'],'result':{'turn':{}}})
             continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
+        if text == 'MEASURE_MUTATE_COPY':
+            from pathlib import Path
+            Path(thread_params[thread_id]['cwd'], 'tracked.txt').write_text('unauthorized edit')
+        if text == 'MEASURE_RUN':
+            import subprocess
+            from pathlib import Path
+            measured = subprocess.run([sys.executable, '-c', "from pathlib import Path; assert Path('tracked.txt').read_text() == 'fixture'; assert Path('dirty.txt').read_text() == 'uncommitted'; print('2 cases passed')"], cwd=thread_params[thread_id]['cwd'], capture_output=True, text=True)
+            Path(thread_params[thread_id]['cwd'], 'measurement-output.txt').write_text(measured.stdout + measured.stderr)
+            if measured.returncode:
+                complete(thread_id, turn_id, 'failed', {'message': measured.stderr})
+                continue
         if 'CRASH' in text:
             sys.exit(7)
         if 'REFUSE_INTERRUPT' in text:

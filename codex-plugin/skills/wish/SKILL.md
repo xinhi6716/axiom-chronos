@@ -5,6 +5,12 @@ description: Run an Axiom Chronos wish or resume a wish session in the user's pr
 
 # Wish
 
+## Workspace hygiene (also applies to research)
+
+Reuse the configured AXIOM_HOME, AXIOM_DATA_HOME and existing session on resume; do not create a new home or sibling workspace for a retry. Pstack/Chronos owns TODO, checkpoints, logs and evidence: use its returned store/artifact paths instead of maintaining parallel state files. If an external request file, test sandbox, log or backup is necessary, keep it under `<AXIOM_HOME>/artifacts/<session-id>/` (or the user's explicitly designated artifact directory), with retries beneath that directory. Include this location in delegated briefs that need auxiliary files. Do not scatter outputs in the project or its parent, move live stores, or delete existing user files. Keep deliverables in their requested project paths; preserve evidence and report its location when finished. These instructions govern auxiliary files, not a new state machine or an automatic cleanup job.
+
+## Invocation
+
 Prefer the configured native MCP `session` tool. For a new wish call it with `action: "begin"`, `project` as the absolute project directory, `skill: "wish"`, and `text` containing the user's wish and applicable `[creative]`, `[no-architect]` and `[astra]` intent. For an existing session use `action: "resume"` and `session` with its id. Preserve the user's project, flags, text and intent; do not silently discard an option the native schema cannot represent (such as `--max-turns`). Report the limitation or use a compatible CLI path when available.
 
 Keep the same MCP connection open. The response supplies `workflow` and Host `tools`; the current caller is the sole core. Follow that workflow and invoke its returned tools through `session` with `action: "call"`, `tool` and `arguments` on that connection. Let the engine workflow own role dispatch; do not start another core or native collaboration subagents. Calls are synchronous: await the dispatcher response and its bound notices rather than polling status.

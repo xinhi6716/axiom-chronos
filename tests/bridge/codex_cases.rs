@@ -958,7 +958,12 @@ fn astra_high_verifier_is_isolated_and_rejects_writing_or_effort_overrides() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     for e in events.iter().filter(|e| e["method"] == "thread/start") {
-        assert_eq!(e["params"]["sandbox"], "read-only");
+        let sandbox = e["params"]["sandbox"].as_str().unwrap();
+        assert!(matches!(sandbox, "read-only" | "workspace-write"));
+        if sandbox == "workspace-write" {
+            assert_ne!(e["params"]["cwd"], json!(repo));
+            assert!(e["params"]["developerInstructions"].as_str().unwrap().contains("measurement operator"));
+        }
         assert_eq!(e["params"]["approvalPolicy"], "never");
         assert_eq!(e["params"]["config"]["features"]["multi_agent"], false);
         assert_eq!(e["params"]["config"]["features"]["apps"], false);
@@ -994,6 +999,32 @@ fn astra_high_verifier_is_isolated_and_rejects_writing_or_effort_overrides() {
         fs::read_to_string(repo.join("tracked.txt")).unwrap(),
         "fixture"
     );
+}
+
+#[test]
+fn preengineering_measurement_runs_without_releasing_units_and_seals_dirty_source() {
+    let temp = common::temp();
+    let (repo, store) = fixture(temp.path(), &[("u", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")]);
+    fs::write(repo.join("dirty.txt"), "uncommitted").unwrap();
+    let identity = orch::snapshot(&repo, &[".".into()]);
+    let b = bridge(temp.path());
+    assert!(!orch::current_verified_unit(&store, "u", &repo).unwrap());
+    let r = invoke(&b, json!({"cwd":repo,"role":"astra-verify","sandbox":"read-only","task_kind":"measurement","session":"baseline-test","brief":"MEASURE_RUN"}));
+    assert_eq!(r["status"], "completed", "{r}");
+    assert_eq!(r["measurement"]["source_identity"], identity);
+    assert_eq!(r["measurement"]["source_unchanged"], true);
+    let workspace = Path::new(r["measurement"]["workspace"].as_str().unwrap());
+    assert!(fs::read_to_string(workspace.join("measurement-output.txt")).unwrap().contains("2 cases passed"));
+    assert!(!repo.join("measurement-output.txt").exists());
+    let receipt: Value = serde_json::from_slice(&fs::read(r["measurement"]["receipt"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(receipt["snapshot_inputs_unchanged"], true);
+    assert!(receipt["git_state"]["untracked"].as_str().unwrap().contains("dirty.txt"));
+    assert!(workspace.starts_with(temp.path().join("artifacts/baseline-test/measurements")));
+    assert_eq!(identity, orch::snapshot(&repo, &[".".into()]));
+    assert!(!orch::current_verified_unit(&store, "u", &repo).unwrap(), "baseline must not release engineering");
+    let rejected = invoke(&b, json!({"cwd":repo,"role":"astra-verify","sandbox":"read-only","task_kind":"measurement","brief":"MEASURE_MUTATE_COPY"}));
+    assert_eq!(rejected["error"]["kind"], "measurement_source_changed", "{rejected}");
+    assert_eq!(fs::read_to_string(repo.join("tracked.txt")).unwrap(), "fixture");
 }
 
 fn pipeline_bridge(home: &Path, hold: u64, fault: &str) -> Bridge {

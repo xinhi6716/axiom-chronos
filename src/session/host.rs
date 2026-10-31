@@ -167,7 +167,7 @@ pub(super) fn specs(role: &str) -> Value {
             }
         };
         if name == "codex_run" {
-            description.push_str(" Astra HIGH independent read-only verification or assigned measurement: role astra-verify, sandbox read-only, task_kind verification or measurement. No product edits.");
+            description.push_str(" Astra HIGH: role astra-verify, sandbox read-only. task_kind verification inspects static evidence. task_kind measurement runs assigned tests in a Host-created writable source copy, never the original worktree, and returns a source-bound receipt. Available before unit release; no engineering or final-acceptance credit. No product edits.");
             schema["properties"]["role"]["enum"] = json!(["terra", "sol", "astra", "astra-verify"]);
             schema["properties"]["task_kind"] = json!({"type":"string", "enum":["verification", "measurement"]});
         }
@@ -645,6 +645,7 @@ impl Host {
         // Verification commands may mutate the repository indirectly; apply the
         // same root intent and interjection gates before handing them to bridge.
         let verification = short == "run_on_linux"
+            || (short == "codex_run" && args["task_kind"] == "measurement")
             || (short == "orch"
                 && args["args"].as_array().is_some_and(|a| {
                     a.iter()
@@ -716,6 +717,8 @@ impl Host {
         }
         let mut args = args.clone();
         if short == "codex_run" { args["parent_id"] = json!(caller_id); }
+        // Artifact placement is bound to Host identity, never a worker-selected session.
+        if short == "codex_run" && args["task_kind"] == "measurement" { args["session"] = json!(root); }
         if short == "goal" {
             args["session"] = json!(root);
         }

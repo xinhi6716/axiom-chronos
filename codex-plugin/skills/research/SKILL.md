@@ -5,6 +5,8 @@ description: Run an Axiom Chronos research question in the user's project.
 
 # Research
 
+Apply the shared **Workspace hygiene** rules in `../wish/SKILL.md` before invoking research; use the same configured stores and session-scoped auxiliary artifact location.
+
 Prefer the configured native MCP `session` tool. For a new question call it with `action: "begin"`, `project` as the absolute project directory, `skill: "research"`, and the user's question as `text`. To resume, use `action: "resume"` and `session` with its id. Preserve project, flags and user intent; do not silently discard an option the native schema cannot represent (such as `--max-turns`). Report the limitation or use a compatible CLI path when available.
 
 Keep the same MCP connection open. The response supplies `workflow` and Host `tools`; the current caller is the sole core. Follow that workflow and invoke its returned tools through `session` with `action: "call"`, `tool` and `arguments` on that connection. Let the engine workflow own role dispatch; do not start another core or native collaboration subagents. Research is read-only and plan-only, without engineering gates. Await synchronous calls rather than polling status.

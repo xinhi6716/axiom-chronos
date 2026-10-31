@@ -241,6 +241,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         }
     }
     let mut resolved = explicit.unwrap_or("").to_owned();
+    let measurement = if verifier && string(a, "task_kind") == Some("measurement") {
+        Some(super::measurement::Measurement::prepare(b.home()?, Path::new(cwd), string(a, "session"))?)
+    } else { None };
     let result = (|| -> Res<(String, Value)> {
         let server = b.codex()?;
         let model = match explicit {
@@ -250,9 +253,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         resolved = model.clone();
         let req = RunRequest {
             brief,
-            cwd: cwd.into(),
+            cwd: measurement.as_ref().map(|m| m.cwd.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.into()),
             model: model.clone(),
-            sandbox: string(a, "sandbox").unwrap_or("workspace-write").into(),
+            sandbox: if measurement.is_some() { "workspace-write".into() } else { string(a, "sandbox").unwrap_or("workspace-write").into() },
             effort: Some(
                 string(a, "effort")
                     .unwrap_or(if verifier {
@@ -263,7 +266,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                     .to_owned(),
             ),
             output_schema: a.get("output_schema").filter(|v| !v.is_null()).cloned(),
-            developer_instructions: if verifier {
+            developer_instructions: if measurement.is_some() {
+                Some("You are Astra HIGH, an independent measurement operator, not an engineer. Host supplied an isolated source snapshot as cwd. Run the assigned tests/benchmarks here; you may create measurement harnesses and results, but must not edit or delete existing source files, design improvements, or access the original worktree for writes. Use CARGO_TARGET_DIR supplied by Host. Record exact commands, exit codes, raw results and limitations in new files inside cwd; report their paths. A completed turn is not proof that tests passed. Do not dispatch other agents.".into())
+            } else if verifier {
                 Some("You are an independent read-only verifier. Do not run Cargo or any build, test, or other mutating command; inspect static files and Host receipts only. Do not modify anything. Report evidence and limitations.".into())
             } else {
                 string(a, "developer_instructions").map(str::to_owned)
@@ -282,6 +287,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let (requested_model, mut report) = match result {
         Ok(r) => r,
         Err(e) => {
+            if let Some(measurement) = &measurement {
+                measurement.finish(&mut json!({"status":"failed","error":e.to_json()}))?;
+            }
             if e.kind == "turn_unconfirmed" {
                 if let (Some(root), Some(u)) = (&store, unit) {
                     orch::quarantine_unit(root, u)?;
@@ -313,6 +321,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         }
         report["task_kind"] = json!(string(a, "task_kind"));
     }
+    if let Some(measurement) = &measurement { measurement.finish(&mut report)?; }
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         if report["error"]["kind"] == "turn_unconfirmed" {
             orch::quarantine_unit(root, u)?;
