@@ -1,5 +1,7 @@
 use axiom::session::{Attachment, Config};
 use serde_json::{json,Value};
+#[path = "../common/mod.rs"]
+mod common;
 #[test]
 fn caller_command_lock_blocks_reentry_across_attachments_and_releases_without_polling() {
     let temp=tempfile::tempdir().unwrap();
@@ -33,7 +35,7 @@ fn real_host_enforces_research_review_planning_and_restart() {
     let project=temp.path().join("demo");std::fs::create_dir(&project).unwrap();
     let home=temp.path().join("home");let record=temp.path().join("rpc.json");
     let config=Config { home:home.clone(), bin:std::env::current_exe().unwrap(), codex:Ok(vec![
-        "python".into(),"-I".into(),format!("{}/tests/session/authority_fake.py",env!("CARGO_MANIFEST_DIR")),
+        common::python(),"-I".into(),format!("{}/tests/session/authority_fake.py",env!("CARGO_MANIFEST_DIR")),
         "--scenario".into(),"role-flow".into(),"--home".into(),home.to_string_lossy().into(),
         "--project".into(),project.to_string_lossy().into(),"--slug".into(),"demo".into(),
         "--record".into(),record.to_string_lossy().into()]) };

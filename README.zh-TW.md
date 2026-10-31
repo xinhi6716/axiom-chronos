@@ -13,7 +13,7 @@
 
 用僅依賴 Codex 的 Rust 執行環境協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
 
-**公開測試版（beta）· 0.2.2-codex.dev.7。** 每次 commit 前請檢查 diff。
+**公開測試版（beta）· 0.2.2-codex.dev.8。** 每次 commit 前請檢查 diff。
 
 | 01 · 準備 | 02 · 描述 | 03 · 檢查 |
 | --- | --- | --- |
@@ -25,7 +25,7 @@
 
 ## 開始
 
-需要 Codex CLI，並登入可使用所需模型的帳號。在此 Codex-only checkout 的根目錄使用 Rust 從本機建置安裝單一 `axiom` 執行檔：
+需要 Codex CLI，並登入可使用所需模型的帳號；Host 搜尋工具另需 ripgrep（`rg`）。在此 Codex-only checkout 的根目錄使用 Rust 從本機建置安裝單一 `axiom` 執行檔：
 
 ```sh
 cargo install --path . --locked

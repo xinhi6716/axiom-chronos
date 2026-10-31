@@ -381,17 +381,20 @@ impl AppServer {
         let Some(c) = self.connection.lock().unwrap().clone() else {
             return;
         };
-        for (thread_id, turn_id) in turns {
-            let c = c.clone();
-            let id = self.ids.fetch_add(1, Ordering::Relaxed);
-            // Best-effort notifications are sent concurrently; turn owners verify terminal events.
-            thread::spawn(move || {
-                let _ = Self::send(
-                    &c,
-                    json!({"id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}}),
-                );
-            });
-        }
+        // Do not let shutdown kill the transport before interrupts are consumed.
+        // Requests have a bounded interrupt timeout and run concurrently; turn
+        // owners still require terminal events, not just these acknowledgements.
+        thread::scope(|scope| {
+            for (thread_id, turn_id) in turns {
+                let c = c.clone();
+                scope.spawn(move || {
+                    if self.request_on(&c, "turn/interrupt",
+                        json!({"threadId":thread_id,"turnId":turn_id})).is_err() {
+                        self.mark_unconfirmed();
+                    }
+                });
+            }
+        });
     }
     pub fn list_models(&self) -> Res<Vec<String>> {
         let mut result = Vec::new();

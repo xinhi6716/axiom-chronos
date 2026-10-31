@@ -245,7 +245,8 @@ fn exercise_with_busy_store(scenario: &str, notify: bool, busy: bool) {
         let reply = response(&capture, 3);
         // The transport completed, but this legacy unit has only been built:
         // independent review/release remains blocked, never outer success.
-        assert_eq!(reply["status"], "blocked", "{reply}");
+        assert_eq!(reply["status"], "blocked", "{reply}\nreport: {}",
+            fs::read_to_string(reply["saved_to"].as_str().unwrap_or("")).unwrap_or_default());
         assert_eq!(reply["transport_status"], "completed");
         assert_eq!(reply["outcome"], "blocked");
         assert!(reply.to_string().len() < 8192);
@@ -370,7 +371,7 @@ fn exercise_with_busy_store(scenario: &str, notify: bool, busy: bool) {
                 Some("completed" | "interrupted")
             ),
             _ => e["params"]["turn"]["status"] == "interrupted",
-        }));
+        }), "scenario={scenario}, notify={notify}, events={events:?}");
     if scenario == "attached-nested" {
         assert!(events.iter().any(|e| e["hostEvent"] == "threadStarted"
             && e["role"] == "memory-keeper"

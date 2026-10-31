@@ -161,7 +161,22 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
             } else { io(e) });
         }
     }
-    let _os_lock = os_lock;
+    // fork() in another thread can inherit this open file description until
+    // exec(). Closing only our descriptor can therefore leave flock held by
+    // that child. Release the lock explicitly before closing the descriptor.
+    struct OsLock(std::fs::File);
+    impl Drop for OsLock {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN); }
+            }
+            #[cfg(not(unix))]
+            let _ = &self.0;
+        }
+    }
+    let _os_lock = OsLock(os_lock);
     let path = store.join(".orch.lock");
     let pid = std::process::id().to_string();
     let create = || -> std::io::Result<()> {
@@ -215,6 +230,42 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
 }
+
+#[cfg(all(test, unix))]
+mod lock_regression {
+    use super::*;
+
+    #[test]
+    fn forked_child_does_not_extend_finished_store_lock() {
+        let store = tempfile::tempdir().unwrap();
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let child = with_lock(store.path(), false, || {
+            // Only async-signal-safe libc calls in the forked child: other test
+            // threads may own Rust allocator/runtime locks at fork time.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                unsafe {
+                    libc::close(pipe[1]);
+                    let mut byte = 0u8;
+                    libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                    libc::_exit(0);
+                }
+            }
+            Ok(pid)
+        }).unwrap();
+        let reacquired = with_lock(store.path(), false, || Ok(()));
+        let mut status = 0;
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+            libc::waitpid(child, &mut status, 0);
+        }
+        reacquired.expect("a forked child must not retain a completed store lock");
+    }
+}
+
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
     with_lock(store, false, || {
         let mut rows = read_units(store)?;

@@ -13,7 +13,7 @@
 
 Coordinate scoped code changes with the Codex-only Rust runtime. Keep verification records and reusable project context.
 
-**Public beta · 0.2.2-codex.dev.7.** Review each diff before committing.
+**Public beta · 0.2.2-codex.dev.8.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ Coordinate scoped code changes with the Codex-only Rust runtime. Keep verificati
 
 ## Start
 
-You need the Codex CLI, signed in to an account with the required models. From the root of this Codex-only checkout, build and install the single `axiom` binary locally with Rust:
+You need the Codex CLI, signed in to an account with the required models, and ripgrep (`rg`) for Host search tools. From the root of this Codex-only checkout, build and install the single `axiom` binary locally with Rust:
 
 ```sh
 cargo install --path . --locked

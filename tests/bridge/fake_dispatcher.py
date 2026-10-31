@@ -113,8 +113,10 @@ scenario = r'''    if scenario.startswith('pipeline'):
                 complete(tid,turn,'PRIVATE_WORKER_SENTINEL')
                 return
             if scenario=='attached-smoke':
-                assert call(tid,turn,'Bash',{'command':'git status --porcelain','timeout':10000})['success']
-                assert call(tid,turn,'Grep',{'pattern':'result.txt','path':str(Path(option('--project'))/'verify_smoke.py')})['success']
+                checked=call(tid,turn,'Bash',{'command':'git status --porcelain','timeout':10000})
+                assert checked['success'], checked
+                checked=call(tid,turn,'Grep',{'pattern':'result.txt','path':str(Path(option('--project'))/'verify_smoke.py')})
+                assert checked['success'], checked
             store=Path(option('--home'))/'orchestrate'/'demo'
             brief=store/'briefs'/'smoke.md'
             text='GOAL Write result.txt containing CHRONOS_SMOKE_OK, edit nothing else.\nSCOPE result.txt\nVERIFY '+option('--verify')+'\n'
@@ -122,6 +124,11 @@ scenario = r'''    if scenario.startswith('pipeline'):
             assert tool(tid,turn,'orch',{'project':'demo','args':['unit','add','smoke','--track','build','--brief',str(brief)]})['success']
             result=tool(tid,turn,'codex_run',{'project':'demo','unit':'smoke','role':'sol','cwd':option('--project')})
             assert result['success'] or scenario=='attached-verify', result
+            if scenario=='attached-verify':
+                # The killed verifier can return before the model interrupt.
+                # Keep this model pending to test interrupt delivery; attached-late
+                # separately covers completion racing the cancellation.
+                return
             complete(tid,turn,'PRIVATE_WORKER_SENTINEL'*2000)
         elif 'chronos_memory_record' in names:
             signal.write_text('nested-memory-running')

@@ -1,7 +1,7 @@
 {
   "name": "chronos",
   "displayName": "Axiom Chronos",
-  "version": "0.2.2-codex.dev.7",
+  "version": "0.2.2-codex.dev.8",
   "description": "Engine of Axiom Chronos, loaded by the axiom CLI for each session.",
   "author": {
     "name": "xinhi6716"
