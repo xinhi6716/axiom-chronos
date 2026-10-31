@@ -150,6 +150,14 @@ fn missing_store_gate_does_not_bypass_live_store_lock_or_corrupt_state() {
         goal::load(home, "locked").unwrap().unwrap().status,
         "active"
     );
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // Parallel tests may fork between acquisition and close. Explicitly
+        // release this fixture's flock, as the production OsLock guard does;
+        // closing our descriptor alone can leave a child holding the lock.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    }
     drop(lock);
     assert_eq!(
         goal::set_status(home, "locked", "done", None).unwrap_err().kind,
