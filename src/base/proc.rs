@@ -239,11 +239,15 @@ pub struct TerminalEvidence {
     pub cancelled: bool,
 }
 pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
+    run_shell_with_env(cmd,cwd,timeout,&[])
+}
+pub fn run_shell_with_env(cmd: &str, cwd: &Path, timeout: Duration, env: &[(&str,&std::ffi::OsStr)]) -> Res<ShellRun> {
     #[cfg(unix)]
     let args = vec!["sh".into(), "-c".into(), cmd.into()];
     #[cfg(windows)]
     let args = vec!["cmd".into(), "/D".into(), "/S".into(), "/C".into()];
     let mut shell = command(&args);
+    shell.envs(env.iter().copied());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

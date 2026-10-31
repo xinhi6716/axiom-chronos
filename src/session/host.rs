@@ -978,7 +978,7 @@ impl Host {
             authority::update(&self.home,&root,|s| {
                 if s.phase != authority::Phase::Planning { return Err(invalid("planning already running")); }
                 authority::check_research(s)?;
-                s.phase=authority::Phase::PlanningRunning;Ok(())
+                s.phase=authority::Phase::PlanningRunning;s.owner_pid=Some(std::process::id());Ok(())
             })?;
         }
         let thread = self.start_as(name, None, false, &cwd, reviewer_role)?;
@@ -1257,7 +1257,7 @@ impl Host {
         let root = self.root.lock().unwrap().clone();
         authority::update(&self.home,&root,|s| {
             if s.phase != authority::Phase::Research { return Err(invalid("research already running")); }
-            s.phase=authority::Phase::ResearchRunning;Ok(())
+            s.phase=authority::Phase::ResearchRunning;s.owner_pid=Some(std::process::id());Ok(())
         })?;
         // Each Agent call is independent, with its own cwd/search policy and handler.
         let planner = self.start_at("astra", None, args["web_search"] == true, &cwd)?;

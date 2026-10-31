@@ -82,3 +82,87 @@ for the actual child's ready marker before sending stop, and still requires
 both root and child interrupts. The earlier widespread Windows Git launch
 failure did not recur on the fresh runner; logs are retained without assigning
 an unsupported deterministic cause.
+
+
+## dev.9: long-call disconnect and pre-engineering recovery
+
+The live dev.8 session `3ca938e7853f809809d22d0101eeb4a3` lost its
+node_repl transport after the outer tool's 300-second timeout. Its durable
+phase remained `research_running`; the core dispatcher guard then refused
+re-entry. This is a failed acceptance run, not a completed product round.
+
+- Add `axiom session-call REQUEST.json`, using the existing Attachment and
+  Rust role gates, without a second core. Run through the host's persistent
+  process tool rather than a long node_repl call. Request ids bind immutable
+  tool arguments; responses persist before stdout delivery. Replay launches
+  no model. An uncertain engineering request cannot be replayed automatically.
+- Research/planning reservations record the host PID. Recovery requires both
+  exclusive caller-command OS lock acquisition and owner death, and only
+  resets these host-mediated, read-only model stages. Engineering ownership,
+  verification gates and role permissions remain untouched. A live/reused PID
+  blocks recovery. Legacy checkpoints lacking owner evidence fail closed.
+- The CLI retains request intent before dispatch; if authority reached a core
+  boundary before response persistence, replay returns that boundary. A crash
+  in an unresolved engineering stage remains an explicit recovery error.
+- Request files, raw logs and acceptance outputs belong outside the source
+  repository. The core awaits one process; process-wait returns are not model
+  status polling or evidence of a Chronos wakeup.
+
+Deterministic acceptance includes real CLI process kill during ResearchRunning,
+restart of the same immutable request, and byte-identical response replay with
+an unchanged model RPC log. Additional checks cover input collision, traversal,
+unknown-engineering refusal, boundary replay, live owner refusal, missing owner
+refusal, and preservation of core role restrictions. These deterministic fakes
+are development evidence, not a live-model completion-rate measurement. Fresh
+user-task acceptance and long-wait measurements are recorded separately.
+
+
+Fresh task `01a193bf-39e5-70a3-b06b-e5e8cb3f4576` recovered an actual
+research-owner process kill and passed intent review, but subsequently failed
+acceptance: ACCEPT created 107 untracked target files and invalidated the package
+source binding. Preserve this failed run; it is not an accepted end-to-end test.
+The existing Host/package runner isolated Cargo output, but record_accept and
+record_full did not. Both now use a per-execution Cargo target outside the source,
+with process-local environment (no global environment mutation). A real Cargo
+regression without .gitignore checks successful acceptance/full tests, absence
+of repo/target, and unchanged source identity. Source-mutation rejection remains.
+
+The explicit 310-second test passed in 311.02 seconds: kill after the full wait,
+recover to revision 1, replay the response with zero new model calls. This is a
+controlled fake-server transport/recovery measurement, not a live-model speedup.
+Windows and Linux full suites passed before the acceptance fix; both are rerun
+for the final source. A prior concurrent Windows deadline fixture timed out
+before its build checkpoint (3-second budget); production timeout behavior is unchanged. The test now creates an expired durable
+checkpoint after setup instead of requiring fixture compilation within three
+seconds, and asserts that restart preserves that exact expired deadline, launches
+no second worker and never reaches assembly. Raw failure evidence is retained
+outside the source tree.
+
+
+Fresh retry `01a193cc-7cd4-7672-a978-3f6c4823204b` also recovered the
+actual research process kill, then exposed the same Cargo output issue inside
+Terra's own tool calls before Host verification. It is retained as failed, not
+accepted. Workspace-write Codex threads now receive per-thread external
+CARGO_TARGET_DIR and the corresponding writable root through their local config;
+read-only roles receive no added write permission. No global config is changed.
+The config keys are documented at https://developers.openai.com/codex/config-reference.
+Tests bind per-thread isolation and read-only permissions; another fresh live task
+must establish that the real app-server honors those overrides.
+
+A Windows cancellation regression also reported a numeric verifier PID alive
+under concurrent test load. Its original cause is not established. The fixture
+now holds handles to the observed process objects to rule out PID reuse, without
+weakening the termination assertion; the focused test passed. Prior logs and
+failed live task evidence remain in the external evidence directory.
+
+
+Fresh acceptance `01a193d6-e673-72d3-8eb6-c0c74eb3d471` passed in 560.879
+seconds, including an actual research-owner termination, same-request recovery,
+intent review, Terra HIGH, Sol HIGH, Rust package verification and separate
+Astra HIGH final testing. Session `615f34a8868d6d3b106b8514a060aa4c` is `submitted`/`done`.
+The package SHA-256 is `sha256:0b5cdc17cd491182d4996eb66cf9a6db49a89f32504c442df3c529f856417900`; source is `tree:1cf2d4e4915d6cf957c5a8ff811ac26da341af8d`.
+Third-party checks recomputed the package hash and matched packaged source/test
+files byte-for-byte. Two prior fresh runs remain failed; this exposed task family
+does not estimate a general success rate. Full Windows and Linux test suites pass
+on the final candidate; raw logs and acceptance-receipt.json are outside the repo.
+This bootstrap repair is not one of the requested five product iteration rounds.

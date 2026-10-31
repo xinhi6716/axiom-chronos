@@ -37,6 +37,23 @@ fn setup(p: &Path) {
     fs::write(p.join("modules.md"), "## m\nPURPOSE x\nPATHS file.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nFULL TEST `echo ok`\n").unwrap();
 }
 #[test]
+fn cargo_acceptance_and_fulltest_preserve_unignored_source_tree() {
+    let root=tempfile::tempdir().unwrap();
+    let repo=root.path().join("repo");let store=root.path().join("store");
+    fs::create_dir_all(repo.join("src")).unwrap();fs::create_dir_all(&store).unwrap();setup(&store);
+    fs::write(repo.join("Cargo.toml"),"[package]\nname=\"acceptance-isolation\"\nversion=\"0.1.0\"\nedition=\"2021\"\n").unwrap();
+    fs::write(repo.join("src/main.rs"),"fn main() {}\n").unwrap();
+    let git=Command::new("git").args(["init","-q"]).current_dir(&repo).output().unwrap();assert!(git.status.success());
+    let lock=Command::new("cargo").args(["generate-lockfile","--offline"]).current_dir(&repo).output().unwrap();assert!(lock.status.success());
+    fs::write(store.join("brief.txt"),"GOAL x\nSCOPE Cargo.toml Cargo.lock src/\nVERIFY cargo test --locked --offline\n").unwrap();
+    fs::write(store.join("modules.md"),"## m\nPURPOSE x\nPATHS Cargo.toml Cargo.lock src/\nDEPENDS none\nCONTRACT x\nACCEPT tests `cargo test --locked --offline`\nFULL TEST `cargo test --locked --offline`\n").unwrap();
+    let before=snapshot(&repo,&[".".into()]);assert!(!before.is_empty());
+    let accept=record_accept(&store,"m",&repo).unwrap();assert_eq!(accept.exit_code,0,"{}",accept.output);
+    assert!(!repo.join("target").exists());assert_eq!(snapshot(&repo,&[".".into()]),before);
+    let full=record_full(&store,&repo,None).unwrap();assert_eq!(full.exit_code,0,"{}",full.output);
+    assert!(!repo.join("target").exists());assert_eq!(snapshot(&repo,&[".".into()]),before);
+}
+#[test]
 fn repeated_acceptance_preserves_only_identical_successful_review_chain() {
     let prefix = vec![
         row("run", "gpt-6-terra", 0, "", "1"),

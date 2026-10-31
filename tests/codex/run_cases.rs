@@ -24,6 +24,27 @@ fn request(cwd: &std::path::Path, brief: &str) -> RunRequest {
 fn server() -> AppServer {
     AppServer::new(common::fake("fake_codex"))
 }
+#[test]
+fn worker_cargo_targets_are_external_per_thread_and_do_not_widen_readonly_roles() {
+    let dir=common::temp();let server=server();
+    let mut req=request(dir.path(),"inspect config");
+    let mut targets=Vec::new();
+    for _ in 0..2 {
+        let report=server.run(&req).unwrap();
+        let echo:Value=serde_json::from_str(report["final_message"].as_str().unwrap()).unwrap();
+        let config=&echo["thread_params"]["config"];
+        let target=config["shell_environment_policy"]["set"]["CARGO_TARGET_DIR"].as_str().unwrap();
+        let path=std::path::Path::new(target);
+        assert!(path.is_absolute()&&path.is_dir()&&!path.starts_with(dir.path()));
+        assert_eq!(config["sandbox_workspace_write"]["writable_roots"],json!([target]));
+        targets.push(target.to_owned());
+    }
+    assert_ne!(targets[0],targets[1]);
+    req.sandbox="read-only".into();
+    let report=server.run(&req).unwrap();
+    let echo:Value=serde_json::from_str(report["final_message"].as_str().unwrap()).unwrap();
+    assert!(echo["thread_params"]["config"]["sandbox_workspace_write"].is_null());
+}
 
 #[test]
 fn actual_effort_uses_server_settings_evidence() {

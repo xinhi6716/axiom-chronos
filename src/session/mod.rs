@@ -70,7 +70,7 @@ impl Attachment {
         )?;
         let workflow = host.workflow(skill, text)?;
         if let Some(g) = &existing {
-            if g.status != "active" {
+            if g.status != "active" && args["preserve_goal"] != true {
                 goal::reopen(&config.home, &id)?;
             }
         } else if skill == "research" {
@@ -95,7 +95,56 @@ impl Attachment {
         }
         let gate=self.host.home.join("authority").join(&self.id).join("caller-command");
         std::fs::create_dir_all(&gate).map_err(|e|crate::base::Failure::new("io",e.to_string()))?;
-        crate::orch::with_lock(&gate,false,||self.host.call("core", &self.id, name, args, &[]))
+        crate::orch::with_lock(&gate,false,||self.call_locked(name,args))
+    }
+    fn call_locked(&self, name: &str, args: &serde_json::Value) -> crate::base::Res<serde_json::Value> {
+        if name == "Agent" && args["subagent_type"] == "chronos:dispatcher" {
+            authority::update(&self.host.home,&self.id,authority::recover_abandoned_stage)?;
+        }
+        self.host.call("core", &self.id, name, args, &[])
+    }
+    /// Durable, idempotent CLI transport. The caller supplies an immutable request
+    /// id; replay returns the recorded response without launching another model.
+    pub fn call_recorded(&self, request: &str, name: &str, args: &serde_json::Value) -> crate::base::Res<serde_json::Value> {
+        use crate::base::{self,Failure};
+        use serde_json::{json,Value};
+        base::require_slug("request",request)?;
+        let dir=self.host.home.join("authority").join(&self.id);
+        let gate=dir.join("caller-command");
+        std::fs::create_dir_all(&gate).map_err(|e|Failure::new("io",e.to_string()))?;
+        crate::orch::with_lock(&gate,false,|| {
+            let path=dir.join(format!("request-{request}.json"));
+            let input=json!({"tool":name,"arguments":args});
+            match std::fs::read(&path) {
+                Ok(bytes)=> {
+                    let record:Value=serde_json::from_slice(&bytes).map_err(|e|Failure::new("io",e.to_string()))?;
+                    if record["input"]!=input { return Err(Failure::new("request_conflict","request id reused with different input")); }
+                    if !record["response"].is_null() { return Ok(record["response"].clone()); }
+                    let flow=authority::read(&self.host.home,&self.id)?;
+                    if name=="Agent" && args["subagent_type"]=="chronos:dispatcher"
+                        && matches!(flow.phase,authority::Phase::IntentReview | authority::Phase::ReadySubmit | authority::Phase::Submitted) {
+                        let response=json!({"status":"completed","outcome":"awaiting_core","workflow":flow,"replayed":true});
+                        base::atomic_write(&path,&serde_json::to_vec_pretty(&json!({"input":input,"response":response})).map_err(|e|Failure::new("io",e.to_string()))?).map_err(|e|Failure::new("io",e.to_string()))?;
+                        return Ok(response);
+                    }
+                    // Only abandoned pre-engineering stages are safely replayable.
+                    if !matches!(flow.phase,authority::Phase::ResearchRunning | authority::Phase::PlanningRunning) {
+                        return Err(Failure::new("recovery_required","request outcome is unknown; engineering replay refused"));
+                    }
+                    authority::update(&self.host.home,&self.id,authority::recover_abandoned_stage)?;
+                },
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(e)=>return Err(Failure::new("io",e.to_string())),
+            }
+            base::atomic_write(&path,&serde_json::to_vec_pretty(&json!({"input":input,"response":null})).map_err(|e|Failure::new("io",e.to_string()))?).map_err(|e|Failure::new("io",e.to_string()))?;
+            let response=match self.call_locked(name,args) {
+                Ok(v)=>v,
+                Err(e)=>json!({"status":"bridge_error","error":{"kind":e.kind,"message":e.message}}),
+            };
+            let record=json!({"input":input,"response":response});
+            base::atomic_write(&path,&serde_json::to_vec_pretty(&record).map_err(|e|Failure::new("io",e.to_string()))?).map_err(|e|Failure::new("io",e.to_string()))?;
+            Ok(response)
+        })
     }
     pub fn status(&self) -> crate::base::Res<serde_json::Value> {
         let gate=self.host.home.join("authority").join(&self.id).join("caller-command");

@@ -254,6 +254,19 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        "session-call" if rest.len() == 1 => {
+            let result=(|| -> base::Res<serde_json::Value> {
+                let bytes=std::fs::read(&rest[0]).map_err(|e|base::Failure::new("io",e.to_string()))?;
+                let input:serde_json::Value=serde_json::from_slice(&bytes).map_err(|e|base::Failure::new("invalid_argument",e.to_string()))?;
+                let id=input["session"].as_str().ok_or_else(||base::Failure::new("invalid_argument","session required"))?;
+                let (host,_)=session::Attachment::open(&session::Config::from_env(),&serde_json::json!({"session":id,"preserve_goal":true}))?;
+                host.call_recorded(input["request_id"].as_str().unwrap_or(""),input["tool"].as_str().unwrap_or(""),&input["arguments"])
+            })();
+            match result {
+                Ok(v)=>{println!("{v}");if base::tool_succeeded(&v) {0} else {1}},
+                Err(e)=>{println!("{}",serde_json::json!({"status":"bridge_error","error":{"kind":e.kind,"message":e.message}}));1},
+            }
+        },
         "doctor" if rest.is_empty() => doctor::doctor(&mut io::stdout()),
         "bridge" if rest.is_empty() => bridge::serve(
             bridge::Config::from_env(),

@@ -442,6 +442,12 @@ fn update(store: &Path, unit: &str) -> Res<String> {
     set_unit_state(store, unit, &state)?;
     Ok(state)
 }
+fn verification_shell(command: &str, repo: &Path) -> Res<ShellRun> {
+    // Acceptance/full tests must not create untracked target files after the
+    // package source was bound. Match the already-isolated Host/package runners.
+    let target=base::cargo_target(repo,&format!("acceptance:{}",base::unique()))?;
+    base::proc::run_shell_with_env(command,repo,Duration::from_secs(1800),&[("CARGO_TARGET_DIR",target.as_os_str())])
+}
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
         .modules
@@ -456,7 +462,7 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .iter()
         .map(|u| unit_brief(store, &u.id).map(|b| b.scope))
         .collect::<Res<Vec<_>>>()?;
-    let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
+    let result = verification_shell(&m.accept_command, repo)?;
     for (u, scope) in units.into_iter().zip(scopes) {
         append_evidence(
             store,
@@ -486,7 +492,7 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
                 .ok_or_else(|| invalid("missing FULL TEST command"))?
         }
     };
-    let result = base::proc::run_shell(&command, repo, Duration::from_secs(1800))?;
+    let result = verification_shell(&command, repo)?;
     append_evidence(
         store,
         "_full",

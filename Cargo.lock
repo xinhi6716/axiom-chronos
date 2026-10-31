@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "axiom-chronos"
-version = "0.2.2-codex.dev.8"
+version = "0.2.2-codex.dev.9"
 dependencies = [
  "libc",
  "regex",

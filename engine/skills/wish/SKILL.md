@@ -11,7 +11,7 @@ The current caller is the root host; do not start another core model. Core owns 
 
 The current caller is the sole core. Core communicates with the user and relays the user's intent; it does not research, design, split work, implement, test, build or recover engineering operations.
 
-1. Declare the user-requested mode through `goal`, then call `Agent` with `subagent_type: "chronos:dispatcher"`, the project directory and the user's intent unchanged.
+1. Declare the user-requested mode through `goal`, then call `Agent` with `subagent_type: "chronos:dispatcher"`, `cwd` set to the absolute project directory and the user's intent unchanged. Omit `project` to use the persisted project slug (it is not a directory path).
 2. Dispatcher calls independent `subagent_type: "chronos:astra"` (Astra MAX). Rust returns an `intent_review` boundary containing a bounded intent summary and research revision.
 3. Core checks ONLY whether the proposal conflicts with user intent. Call `workflow` action `verdict`, current `revision`, and `decision: "pass"`; or `decision: "reject"` with the shortest conflict reason. Do not add technical designs or instructions. Rejection returns to dispatcher/research. Pass releases the research context and unlocks Astra HIGH planning.
 4. Call dispatcher again to relay the verdict and continue. Dispatcher owns Astra HIGH planning, Terra modules, Sol assembly, Astra HIGH tests and ordinary repairs. Await the synchronous call; never poll, use GOAL auto-continuation, inspect worker logs or take over engineering while waiting.

@@ -113,6 +113,13 @@ impl AppServer {
         thread["config"]["features"]["multi_agent"] = json!(false);
         thread["config"]["features"]["multi_agent_v2"] = json!(false);
         thread["config"]["features"]["view_image"] = json!(true);
+        if req.sandbox == "workspace-write" {
+            // Workers may run Cargo before Cargo.toml even exists. Keep their
+            // build outputs outside SCOPE without relying on generated .gitignore.
+            let target=base::cargo_target(std::path::Path::new(&req.cwd),&format!("worker:{}",base::unique()))?;
+            thread["config"]["shell_environment_policy"]["set"]["CARGO_TARGET_DIR"]=json!(target);
+            thread["config"]["sandbox_workspace_write"]["writable_roots"]=json!([target]);
+        }
         Ok((thread, disabled))
     }
     pub fn run(&self, req: &RunRequest) -> Res<Value> {

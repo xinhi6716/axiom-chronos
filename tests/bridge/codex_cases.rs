@@ -600,6 +600,16 @@ fn cancellation_reaps_running_verify_accept_and_fulltest_without_cancelling_othe
             })
         };
         let ids = wait_pids(&pids);
+        // Pin the observed Windows process objects until after the assertions.
+        // Otherwise high-concurrency tests can reuse a just-reaped numeric PID.
+        #[cfg(windows)]
+        let _observed_processes:Vec<std::os::windows::io::OwnedHandle> = ids.iter().chain(other_ids.iter()).map(|pid| unsafe {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Threading::{OpenProcess,PROCESS_QUERY_LIMITED_INFORMATION};
+            let handle=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,*pid);
+            assert!(!handle.is_null(),"cannot observe live verifier {pid}");
+            std::os::windows::io::OwnedHandle::from_raw_handle(handle)
+        }).collect();
         // VERIFY only starts after the worker's completed model report was persisted.
         if mode == "verify" {
             let report: Value =
@@ -1819,13 +1829,24 @@ fn persisted_deadline_is_not_renewed_by_restart_or_larger_requested_timeout() {
     let (repo, store) = pipeline_fixture(temp.path());
     pipeline_checkpoint(&store, &repo, 1);
     let b = pipeline_bridge(temp.path(), 0, "");
-    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build","timeout_s":3}));
+    let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","stop_after":"build","timeout_s":1800}));
     assert_eq!(result["outcome"], "blocked", "{result}");
     drop(b);
-    std::thread::sleep(std::time::Duration::from_millis(3100));
+    // This tests persisted expiry across restart, not whether this machine can
+    // build a fixture in three seconds. Inject an expired durable checkpoint
+    // after setup, keeping all delivery records consistent with that fixture.
+    let expired=axiom::base::proc::unix_ms().saturating_sub(1);
+    let path=store.join("core-wait.json");
+    let mut fixture:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for op in fixture["operations"].as_array_mut().unwrap() {
+        op["deadline_ms"]=json!(expired);
+        for delivery in op["outbox"].as_array_mut().unwrap() { delivery["deadline_ms"]=json!(expired); }
+    }
+    fs::write(path,serde_json::to_vec(&fixture).unwrap()).unwrap();
     let b = pipeline_bridge(temp.path(), 0, "");
     let result = invoke(&b, json!({"project":"demo","unit":"checkpointed","cwd":repo,"role":"terra","timeout_s":99999}));
     assert_eq!(result["outcome"], "timeout", "{result}");
+    assert_eq!(result["deadline_ms"],expired,"restart renewed the expired deadline");
     let state = orch::wait_state(&store).unwrap();
     assert_eq!(state.events.iter().filter(|e| e.kind == "dispatch").count(), 1);
     assert!(!state.events.iter().any(|e| e.kind == "assembly"));

@@ -183,7 +183,8 @@ fn exercise_with_busy_store(scenario: &str, notify: bool, busy: bool) {
             use std::os::unix::fs::PermissionsExt;
             let bin = temp.path().join("bin");
             fs::create_dir(&bin).unwrap();
-            fs::copy(shell, bin.join("sh")).unwrap();
+            // WSL may run a Windows checkout with CRLF; a shebang must use LF.
+            fs::write(bin.join("sh"),fs::read_to_string(shell).unwrap().replace("\r\n","\n")).unwrap();
             fs::set_permissions(bin.join("sh"), fs::Permissions::from_mode(0o755)).unwrap();
             let mut paths = vec![bin];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));

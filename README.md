@@ -13,7 +13,7 @@
 
 Coordinate scoped code changes with the Codex-only Rust runtime. Keep verification records and reusable project context.
 
-**Public beta · 0.2.2-codex.dev.8.** Review each diff before committing.
+**Public beta · 0.2.2-codex.dev.9.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |

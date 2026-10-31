@@ -15,11 +15,27 @@ pub struct State {
     pub revision: u64,
     pub research: Option<Value>,
     pub reason: String,
+    #[serde(default)]
+    pub owner_pid: Option<u32>,
 }
 impl Default for State {
     fn default() -> Self {
-        Self { phase: Phase::Research, revision: 0, research: None, reason: String::new() }
+        Self { phase: Phase::Research, revision: 0, research: None, reason: String::new(), owner_pid: None }
     }
+}
+/// Called only while Attachment holds the exclusive caller-command OS lock.
+/// A dead PID alone is insufficient: that lock must also exclude the old host.
+/// Only host-mediated research/planning are replayable; engineering is never reset.
+pub fn recover_abandoned_stage(state: &mut State) -> Res<()> {
+    if !matches!(state.phase, Phase::ResearchRunning | Phase::PlanningRunning) { return Ok(()); }
+    let owner = state.owner_pid.ok_or_else(|| Failure::new("recovery_required", "legacy running checkpoint has no owner evidence; automatic restart refused"))?;
+    if owner == 0 || crate::base::proc::pid_alive(owner) {
+        return Err(Failure::new("busy", "specialist owner is alive; do not redispatch"));
+    }
+    state.phase = if state.phase == Phase::ResearchRunning { Phase::Research } else { Phase::Planning };
+    state.owner_pid = None;
+    state.reason = format!("Recovered abandoned host-mediated stage: owner {owner} exited and caller-command OS lock acquired; engineering untouched");
+    Ok(())
 }
 fn denied(message: &str) -> Failure { Failure::new("permission_denied", message) }
 fn directory(home: &Path, session: &str) -> Res<PathBuf> {
@@ -114,6 +130,22 @@ pub fn verdict(state: &mut State, caller: &str, args: &Value) -> Res<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_requires_dead_owner_and_only_resets_pre_engineering() {
+        let mut s=State {phase:Phase::ResearchRunning,owner_pid:Some(std::process::id()),..State::default()};
+        assert_eq!(recover_abandoned_stage(&mut s).unwrap_err().kind,"busy");
+        s.owner_pid=None;
+        assert_eq!(recover_abandoned_stage(&mut s).unwrap_err().kind,"recovery_required");
+        let mut child=std::process::Command::new(if cfg!(windows) {"cmd"} else {"sh"})
+            .args(if cfg!(windows) {["/c","exit 0"]} else {["-c","exit 0"]}).spawn().unwrap();
+        let pid=child.id();child.wait().unwrap();
+        for (from,to) in [(Phase::ResearchRunning,Phase::Research),(Phase::PlanningRunning,Phase::Planning)] {
+            s.phase=from;s.owner_pid=Some(pid);
+            recover_abandoned_stage(&mut s).unwrap();assert_eq!(s.phase,to);
+        }
+        s.phase=Phase::Execution;s.owner_pid=Some(pid);
+        recover_abandoned_stage(&mut s).unwrap();assert_eq!(s.phase,Phase::Execution);
+    }
     #[test]
     fn core_cannot_engineer_or_bypass_dispatcher() {
         for phase in [Phase::Research, Phase::IntentReview, Phase::Planning, Phase::Execution, Phase::ReadySubmit] {
