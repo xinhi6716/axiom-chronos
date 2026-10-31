@@ -25,12 +25,14 @@ fn fixture(home: &Path, units: &[(&str, &str)]) -> (std::path::PathBuf, std::pat
     fs::create_dir_all(&repo).unwrap();
     fs::create_dir_all(&store).unwrap();
     fs::create_dir_all(store.join("inbox")).unwrap();
-    assert!(Command::new("git")
+    let initialized = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "git init: {:?}; stdout={}; stderr={}",
+        initialized.status, String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr));
     fs::write(repo.join("tracked.txt"), "fixture").unwrap();
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("src/mod.py"), "fixture").unwrap();

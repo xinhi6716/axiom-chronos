@@ -50,12 +50,14 @@ fn check(r: &Value, status: &str) {
     }
 }
 fn fixture(home: &std::path::Path) {
-    assert!(std::process::Command::new("git")
+    let initialized = std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(home)
-        .status()
-        .unwrap()
-        .success());
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "git init: {:?}; stdout={}; stderr={}",
+        initialized.status, String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr));
     let store = home.join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("brief.md");
