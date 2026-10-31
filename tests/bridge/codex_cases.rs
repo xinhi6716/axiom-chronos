@@ -1019,7 +1019,10 @@ fn preengineering_measurement_runs_without_releasing_units_and_seals_dirty_sourc
     let receipt: Value = serde_json::from_slice(&fs::read(r["measurement"]["receipt"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(receipt["snapshot_inputs_unchanged"], true);
     assert!(receipt["git_state"]["untracked"].as_str().unwrap().contains("dirty.txt"));
-    assert!(workspace.starts_with(temp.path().join("artifacts/baseline-test/measurements")));
+    // Runner TEMP may use a junction or DOS short name; compare resolved roots.
+    assert!(fs::canonicalize(workspace).unwrap().starts_with(
+        fs::canonicalize(temp.path().join("artifacts/baseline-test/measurements")).unwrap()
+    ));
     assert_eq!(identity, orch::snapshot(&repo, &[".".into()]));
     assert!(!orch::current_verified_unit(&store, "u", &repo).unwrap(), "baseline must not release engineering");
     let rejected = invoke(&b, json!({"cwd":repo,"role":"astra-verify","sandbox":"read-only","task_kind":"measurement","brief":"MEASURE_MUTATE_COPY"}));
