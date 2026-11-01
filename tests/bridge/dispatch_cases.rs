@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 #[path = "../common/mod.rs"]
 mod common;
 
+/// Every flow drives a real subprocess timeline. Serializing the flows keeps a
+/// small CI runner from making timing-sensitive runs flaky, while the rest of
+/// the suite stays parallel.
+static FLOW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Wire(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 impl std::io::Write for Wire {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -19,6 +24,7 @@ impl std::io::Write for Wire {
 }
 
 fn flow(mode: &str, approve: bool) {
+    let _serial = FLOW.lock().unwrap_or_else(|e| e.into_inner());
     use serde_json::{json, Value};
     let tmp = common::temp();
     let repo = tmp.path().join("repo");
@@ -104,6 +110,32 @@ fn flow(mode: &str, approve: bool) {
             .map(|s| serde_json::from_str::<Value>(s).unwrap())
             .collect::<Vec<_>>()
     };
+    // A fixture crash looks like a lost connection unless its traceback is
+    // surfaced, so failed assertions carry the replay trail.
+    let trail = || {
+        let all = rows();
+        let mut parts = vec![all
+            .iter()
+            .rev()
+            .take(14)
+            .rev()
+            .map(|r| r["kind"].as_str().unwrap_or("?").to_owned())
+            .collect::<Vec<_>>()
+            .join(" | ")];
+        for r in all.iter().filter(|r| {
+            matches!(
+                r["kind"].as_str(),
+                Some("fixture-error" | "fixture-thread-error")
+            )
+        }) {
+            parts.push(format!(
+                "{}: {}",
+                r["kind"].as_str().unwrap_or("fixture-error"),
+                r["traceback"].as_str().unwrap_or("")
+            ));
+        }
+        parts.join("\n")
+    };
     if !approve {
         assert_eq!(result["status"], "needs_intent_review", "{result}");
         assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
@@ -172,7 +204,7 @@ fn flow(mode: &str, approve: bool) {
             json!({"type":"resume","run_id":run,
             "recovery":{"retry_planning":{"reason":"the tester can now return inline held-out checks"}}}),
         );
-        assert_eq!(result["status"], "ready_to_commit", "{result}");
+        assert_eq!(result["status"], "ready_to_commit", "{result}\n{}", trail());
         let recovered = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
         assert_eq!(checkpoint::planning_epoch(&recovered), 1);
         assert_eq!(rows().iter().filter(|r| r["kind"] == "research").count(), 1);
@@ -184,7 +216,7 @@ fn flow(mode: &str, approve: bool) {
     if ["evaluation-unprepared", "evaluation-fake-ready"].contains(&mode) {
         // The dev.8 shape and its relabelled-public-check variant: preparation
         // must fail before any check is installed or any writer starts.
-        assert_eq!(result["status"], "blocked", "{result}");
+        assert_eq!(result["status"], "blocked", "{result}\n{}", trail());
         let reason = result["short_reason"].as_str().unwrap();
         assert!(
             reason.contains("independent evaluation preparation failed")
@@ -220,7 +252,7 @@ fn flow(mode: &str, approve: bool) {
     if mode == "baseline-infrastructure" {
         // The checks are genuine but the baseline says the infrastructure
         // cannot judge the product: engineering must stay closed.
-        assert_eq!(result["status"], "blocked", "{result}");
+        assert_eq!(result["status"], "blocked", "{result}\n{}", trail());
         assert!(
             result["short_reason"]
                 .as_str()
@@ -260,7 +292,7 @@ fn flow(mode: &str, approve: bool) {
     if mode == "writer-blocked" {
         // A normally terminating turn that reports a blocked unit must not
         // satisfy dependents, assembly or verification.
-        assert_eq!(result["status"], "blocked", "{result}");
+        assert_eq!(result["status"], "blocked", "{result}\n{}", trail());
         let reason = result["short_reason"].as_str().unwrap();
         assert!(reason.contains("reported blocked"), "{reason}");
         assert!(reason.contains("未開始工程"), "{reason}");
@@ -290,7 +322,7 @@ fn flow(mode: &str, approve: bool) {
     if ["verifier-upstream", "verifier-no-owner"].contains(&mode) {
         // Recovery follows the failure's origin: an upstream or unattributed
         // failure never consumes a SOL rework.
-        assert_eq!(result["status"], "blocked", "{result}");
+        assert_eq!(result["status"], "blocked", "{result}\n{}", trail());
         let reason = result["short_reason"].as_str().unwrap();
         if mode == "verifier-upstream" {
             assert!(reason.contains("no rework was scheduled"), "{reason}");

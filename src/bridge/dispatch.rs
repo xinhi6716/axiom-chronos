@@ -1760,9 +1760,24 @@ impl Pipeline {
             Ok(r) if matches!(r.terminal, TransportTerminal::Completed) => r,
             Ok(r) => {
                 if matches!(r.terminal, TransportTerminal::OutcomeUnknown) {
+                    // Keep the step, thread and last status so reconciliation
+                    // starts from evidence instead of a bare unknown terminal.
+                    let detail = r.report["error"]
+                        .as_object()
+                        .and_then(|e| e["message"].as_str().map(|m| format!(": {m}")))
+                        .or_else(|| {
+                            r.report["status"]
+                                .as_str()
+                                .map(|s| format!(" after status {s}"))
+                        })
+                        .unwrap_or_default();
                     return Err(Failure::new(
                         "outcome_unknown",
-                        "execution terminal could not be established",
+                        format!(
+                            "execution terminal could not be established for step {} on thread {}{detail}",
+                            spec.step_id,
+                            r.execution.thread_id
+                        ),
                     ));
                 }
                 // Surface the handler's typed failure instead of the transport

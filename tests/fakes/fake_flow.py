@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 sys.stdin.reconfigure(encoding='utf-8')
@@ -32,6 +33,27 @@ def log(kind, **values):
     with lock:
         with log_path.open('a', encoding='utf-8') as out:
             out.write(json.dumps(dict(kind=kind, time=time.monotonic(), **values)) + '\n')
+
+
+def fatal(exc_type, exc, tb):
+    # A fixture crash would otherwise look like a lost connection. Keep the
+    # traceback in the replay log so the failing test can name the real cause.
+    try:
+        log('fixture-error', traceback=''.join(traceback.format_exception(exc_type, exc, tb)))
+    finally:
+        sys.__excepthook__(exc_type, exc, tb)
+
+
+def thread_fatal(args):
+    try:
+        log('fixture-thread-error', thread=args.thread.name if args.thread else None,
+            traceback=''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+    finally:
+        threading.__excepthook__(args)
+
+
+sys.excepthook = fatal
+threading.excepthook = thread_fatal
 
 
 def finish(tid, text='done', failed=False):
@@ -225,7 +247,12 @@ for line in sys.stdin:
 
             def engineer(t=tid, b=brief, cwd=cfg['cwd']):
                 if mode not in ['content', 'writer-blocked']:
-                    barrier.wait()
+                    try:
+                        barrier.wait()
+                    except threading.BrokenBarrierError:
+                        # A loaded runner must not turn a rendezvous timeout
+                        # into a lost execution; record it and keep going.
+                        log('barrier-timeout', thread=t)
                 time.sleep(0.15)
                 name, text = ('one.txt', 'one') if 'write one' in b else ('two.txt', 'two')
                 Path(cwd, name).write_text(text)
