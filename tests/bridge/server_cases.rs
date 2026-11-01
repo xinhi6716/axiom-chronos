@@ -736,3 +736,72 @@ fn codex_alias_stop_is_scoped_to_its_bridge() {
         .unwrap()
         .contains("turn/interrupt"));
 }
+
+#[test]
+fn review_code_builtin_schema_preserves_pass_and_serious_findings() {
+    let temp = common::temp();
+    fs::write(temp.path().join("file.txt"), "review target").unwrap();
+    let b = Bridge::new(config(temp.path()));
+    for (contract, severity) in [
+        ("normal review", None),
+        ("NEEDS_FIX", Some("blocker")),
+        ("NEEDS_MAJOR_FIX", Some("major")),
+    ] {
+        let result = invoke(
+            &b,
+            "review_code",
+            json!({"project_dir":temp.path(),"paths":["file.txt"],"contract":contract}),
+        );
+        check(&result, "completed");
+        let output = &result["structuredContent"];
+        assert_eq!(
+            output["verdict"],
+            if severity.is_some() { "fail" } else { "pass" },
+            "{result}"
+        );
+        if let Some(severity) = severity {
+            // The fake returns pass with a serious finding; Rust must override it.
+            assert_eq!(output["structured_output"]["verdict"], "pass");
+            assert_eq!(output["findings"][0]["severity"], severity);
+        } else {
+            assert_eq!(output["findings"], json!([]));
+        }
+    }
+}
+
+#[test]
+fn review_code_loose_schemas_reproduce_protocol_400() {
+    let temp = common::temp();
+    let server = axiom::codex::AppServer::new(common::fake("fake_codex"));
+    let original = json!({"type":"object","required":["verdict","findings"],"properties":{
+        "verdict":{"type":"string","enum":["pass","fail"]},"findings":{"type":"array","items":{"type":"object"}}}});
+    let mut root_fixed = original.clone();
+    root_fixed["additionalProperties"] = json!(false);
+    let mut missing_required = root_fixed.clone();
+    missing_required["properties"]["findings"]["items"] = json!({"type":"object","additionalProperties":false,
+        "properties":{"severity":{"type":"string"},"message":{"type":"string"}},"required":["severity"]});
+    for schema in [original, root_fixed, missing_required] {
+        let report = server
+            .run(&axiom::codex::RunRequest {
+                brief: "Independently review these files against the contract".into(),
+                cwd: temp.path().to_string_lossy().into_owned(),
+                model: "gpt-6-astra".into(),
+                sandbox: "read-only".into(),
+                effort: None,
+                output_schema: Some(schema),
+                developer_instructions: None,
+                timeout_s: 10,
+                lean: false,
+                keep_plugins: vec![],
+                web_search: false,
+            })
+            .unwrap();
+        assert_eq!(report["status"], "failed", "{report}");
+        assert_eq!(report["error"]["kind"], "invalid_json_schema", "{report}");
+        let error: Value =
+            serde_json::from_str(report["error"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(error["status"], 400);
+        assert!(report["commands"].as_array().unwrap().is_empty());
+        assert!(report["structured_output"].is_null());
+    }
+}

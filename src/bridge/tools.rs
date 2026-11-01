@@ -64,7 +64,21 @@ fn astra_alias(b: &Bridge, a: &Value, review: bool) -> Res<Value> {
                 "review requires a contract and relative existing files",
             ));
         }
-        (format!("Independently review these files against the contract. Report findings and verdict; fail for blocker or major findings.\nFiles: {}\nContract:\n{}", paths.join(", "), s(a, "contract")), Some(json!({"type":"object","required":["verdict","findings"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"findings":{"type":"array","items":{"type":"object"}}}})))
+        (
+            format!("Independently review these files against the contract. Report findings and verdict; fail for blocker or major findings.\nFiles: {}\nContract:\n{}", paths.join(", "), s(a, "contract")),
+            Some(json!({
+                "type":"object", "additionalProperties":false,
+                "required":["verdict","findings"],
+                "properties":{
+                    "verdict":{"type":"string","enum":["pass","fail"]},
+                    "findings":{"type":"array","items":{
+                        "type":"object", "additionalProperties":false,
+                        "required":["severity","message"],
+                        "properties":{"severity":{"type":"string"},"message":{"type":"string"}}
+                    }}
+                }
+            })),
+        )
     } else {
         if s(a, "prompt").trim().is_empty() {
             return Err(Failure::new("invalid_argument", "prompt is required"));

@@ -55,6 +55,26 @@ def complete(thread_id, turn_id, status='completed', error=None):
     send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn_id, 'status': status, 'error': error, 'items': []}}})
 
 
+def review_schema_error(schema, path='schema'):
+    """The strict object rules exercised by the built-in review protocol."""
+    if not isinstance(schema, dict):
+        return f'{path} must be a schema object'
+    if schema.get('type') == 'object':
+        if schema.get('additionalProperties') is not False:
+            return f'{path}.additionalProperties is required to be false when strict is true'
+        properties = schema.get('properties', {})
+        required = schema.get('required', [])
+        if not isinstance(properties, dict) or not isinstance(required, list) or set(required) != set(properties) or len(required) != len(properties):
+            return f'{path}.required must include every declared property'
+        for name, prop in properties.items():
+            error = review_schema_error(prop, f'{path}.properties.{name}')
+            if error:
+                return error
+    elif schema.get('type') == 'array':
+        return review_schema_error(schema.get('items'), f'{path}.items')
+    return None
+
+
 threads = 0
 models = {}
 configs = {}
@@ -122,6 +142,13 @@ for line in sys.stdin:
         if 'HANGREQ' in text:
             continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
+        if 'Independently review these files' in text:
+            schema_error = review_schema_error(params.get('outputSchema'))
+            if schema_error:
+                body = json.dumps({'type': 'error', 'status': 400, 'error': {
+                    'type': 'invalid_request_error', 'message': schema_error, 'code': 'invalid_json_schema'}})
+                complete(thread_id, turn_id, 'failed', {'message': body, 'codexErrorInfo': 'other'})
+                continue
         if 'LATECALL' in text:
             complete(thread_id, turn_id)
             def late_call(tid=thread_id, turn=turn_id):
@@ -195,7 +222,8 @@ for line in sys.stdin:
                 'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
         final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
         if 'Independently review these files' in text:
-            final = json.dumps({'verdict': 'pass', 'findings': [{'severity': 'blocker', 'message': 'fix'}] if 'NEEDS_FIX' in text else []})
+            severity = 'major' if 'NEEDS_MAJOR_FIX' in text else 'blocker' if 'NEEDS_FIX' in text else None
+            final = json.dumps({'verdict': 'pass', 'findings': [{'severity': severity, 'message': 'fix'}] if severity else []})
         if params.get('outputSchema') and 'BADJSON' in text:
             final = 'not json'
         elif params.get('outputSchema') and 'WRONGSHAPE' in text:
