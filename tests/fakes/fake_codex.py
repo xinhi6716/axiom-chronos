@@ -12,8 +12,6 @@ if '--version' in sys.argv:
     sys.exit(0)
 
 pending_turns = {}
-dynamic_calls = {}
-dynamic_results = {}
 send_lock = threading.Lock()
 log_lock = threading.Lock()
 barrier = threading.Condition()
@@ -67,15 +65,11 @@ for line in sys.stdin:
     if method:
         log_record(method, params)
     if method is None:
-        if message.get('id') in dynamic_calls:
-            thread_id, turn_id = dynamic_calls.pop(message['id'])
-            log_record('fake/tool_response', message)
-            result = message.get('result', {})
-            dynamic_results.setdefault(thread_id, []).append(result)
-            if not any(tid == thread_id for tid, _ in dynamic_calls.values()):
-                valid = all(r.get('success') is True and r.get('contentItems', [{}])[0].get('type') == 'inputText' for r in dynamic_results.pop(thread_id))
-                item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': 'dynamic complete'})
-                complete(thread_id, turn_id, 'completed' if valid else 'failed')
+        if str(message.get('id', '')).startswith('tool-'):
+            key = str(message['id'])
+            turn = pending_turns.pop(key, None)
+            if turn:
+                complete(*turn, 'completed' if 'result' in message else 'failed')
             continue
         if 'error' in message:
             thread_id, turn_id = pending_turns.pop('approval')
@@ -83,11 +77,11 @@ for line in sys.stdin:
             complete(thread_id, turn_id)
         continue
     if method == 'initialize':
-        assert params.get('capabilities', {}).get('experimentalApi') is True
         send({'id': message['id'], 'result': {'userAgent': 'fake'}})
     elif method == 'model/list':
         if params.get('cursor'):
-            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-terra-lite'}]}})
+            efforts = [] if os.getenv('FAKE_NO_EFFORT') else [{'reasoningEffort': e} for e in ['medium', 'high', 'xhigh']]
+            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra', 'supportedReasoningEfforts': efforts}, {'id': 'gpt-6-terra-lite'}]}})
         else:
             send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6-luna', 'isDefault': True}, {'id': 'gpt-5.6-terra'}, {'model': 'gpt-6.9-terra'}], 'nextCursor': 'page-2'}})
     elif method == 'plugin/installed':
@@ -95,22 +89,14 @@ for line in sys.stdin:
             {'id': 'panel@personal', 'enabled': True}, {'id': 'keepme@personal', 'enabled': True}, {'id': 'off@personal', 'enabled': False}]}]}})
     elif method == 'config/read':
         send({'id': message['id'], 'result': {'config': {'mcp_servers': {'node_repl': {'command': 'x'}}}, 'origins': {}}})
-    elif method == 'skills/list':
-        send({'id': message['id'], 'result': {'data': [{'cwd': params['cwds'][0], 'errors': [], 'skills': [
-            {'name': 'ordinary', 'path': '/skills/ordinary/SKILL.md', 'enabled': True, 'scope': 'user', 'description': ''},
-            {'name': 'workflow', 'path': '/skills/workflow/SKILL.md', 'pluginId': 'keepme@personal', 'enabled': True, 'scope': 'user', 'description': ''}]}]}})
     elif method == 'thread/start':
         threads += 1
         thread_id = f'thread-{threads}'
-        models[thread_id] = 'actual-model' if params.get('model') == 'requested-model' else params.get('model')
+        models[thread_id] = params.get('model')
         config = params.get('config') or {}
         configs[thread_id] = config
         thread_params[thread_id] = params
-        mode = params.get('developerInstructions', '')
-        actual = 'gpt-6-sol' if mode == 'FAKE_WRONG_MODEL' else models[thread_id]
-        sandbox = 'workspaceWrite' if mode == 'FAKE_WRONG_SANDBOX' else ('readOnly' if params.get('sandbox') == 'read-only' else 'workspaceWrite')
-        approval = 'on-request' if mode == 'FAKE_WRONG_APPROVAL' else 'never'
-        send({'id': message['id'], 'result': {'thread': {'id': thread_id}, 'model': actual, 'sandbox': {'type': sandbox}, 'approvalPolicy': approval}})
+        send({'id': message['id'], 'result': {'thread': {'id': thread_id}}})
         send({'method': 'thread/started', 'params': {'thread': {'id': thread_id}}})
         servers = {'node_repl': ('mcp_servers', 'node_repl'), 'panel': ('plugins', 'panel@personal'), 'keepme': ('plugins', 'keepme@personal')}
         for server, (section, key) in servers.items():
@@ -123,31 +109,28 @@ for line in sys.stdin:
         turn_id = thread_id + '-turn'
         if 'HANGREQ' in text:
             continue
-        if 'NO_TURN_ID' in text:
-            send({'id':message['id'],'result':{'turn':{}}})
-            continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
-        if text == 'MEASURE_MUTATE_COPY':
-            from pathlib import Path
-            Path(thread_params[thread_id]['cwd'], 'tracked.txt').write_text('unauthorized edit')
-        if text == 'MEASURE_RUN':
-            import subprocess
-            from pathlib import Path
-            measured = subprocess.run([sys.executable, '-c', "from pathlib import Path; assert Path('tracked.txt').read_text() == 'fixture'; assert Path('dirty.txt').read_text() == 'uncommitted'; print('2 cases passed')"], cwd=thread_params[thread_id]['cwd'], capture_output=True, text=True)
-            Path(thread_params[thread_id]['cwd'], 'measurement-output.txt').write_text(measured.stdout + measured.stderr)
-            if measured.returncode:
-                complete(thread_id, turn_id, 'failed', {'message': measured.stderr})
-                continue
+        if 'LATECALL' in text:
+            complete(thread_id, turn_id)
+            def late_call(tid=thread_id, turn=turn_id):
+                time.sleep(0.03)
+                call_id = 'tool-' + turn
+                send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': tid, 'turnId': turn, 'callId': call_id, 'tool': 'child', 'arguments': {}}})
+            threading.Thread(target=late_call, daemon=True).start()
+            continue
+        if 'TOOLCALL' in text:
+            call_id = 'tool-' + turn_id
+            pending_turns[call_id] = (thread_id, turn_id)
+            send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': thread_id, 'turnId': turn_id, 'callId': call_id, 'tool': 'child', 'arguments': {}}})
+            continue
+        if 'PRETERMINAL' in text:
+            call_id = 'tool-' + turn_id
+            send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': thread_id, 'turnId': turn_id, 'callId': call_id, 'tool': 'child', 'arguments': {}}})
+            complete(thread_id, turn_id)
+            continue
         if 'CRASH' in text:
             sys.exit(7)
-        if 'REFUSE_INTERRUPT' in text:
-            pending_turns[turn_id] = (thread_id, turn_id, 'refuse')
-            continue
-        if 'NO_CONFIRM' in text:
-            pending_turns[turn_id] = (thread_id, turn_id, 'no_confirm')
-            continue
-        if 'LATE_COMPLETE' in text:
-            pending_turns[turn_id] = (thread_id, turn_id, 'late_complete')
+        if 'ACKONLY' in text:
             continue
         if 'HANG' in text:
             pending_turns[turn_id] = (thread_id, turn_id)
@@ -175,14 +158,6 @@ for line in sys.stdin:
                     complete(tid, turn)
             threading.Thread(target=finish_slow, daemon=True).start()
             continue
-        if 'DYNAMIC' in text:
-            for n in range(2):
-                call_id = f'dynamic-{thread_id}-{n}'
-                dynamic_calls[call_id] = (thread_id, turn_id)
-                send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': thread_id, 'turnId': turn_id, 'callId': call_id, 'tool': 'test', 'arguments': {'n': n, 'threadId': thread_id}}})
-            if 'DYNAMIC_EARLY' in text:
-                complete(thread_id, turn_id, 'interrupted' if 'CANCEL' in text else 'completed')
-            continue
         if 'APPROVAL' in text:
             pending_turns['approval'] = (thread_id, turn_id)
             send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
@@ -199,20 +174,6 @@ for line in sys.stdin:
             send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
             complete(thread_id, turn_id, 'failed', error)
             continue
-        if text.startswith('EFFORT_'):
-            scenarios = {
-                'EFFORT_NESTED': {'threadSettings': {'effort': 'high'}, 'effort': 'legacy'},
-                'EFFORT_MISSING': {'threadSettings': {}},
-                'EFFORT_NULL': {'threadSettings': {'effort': None}, 'effort': 'legacy'},
-                'EFFORT_INVALID': {'threadSettings': {'effort': 42}, 'effort': 'legacy'},
-                'EFFORT_EMPTY': {'threadSettings': {'effort': ''}, 'effort': 'legacy'},
-                'EFFORT_LEGACY': {'threadSettings': {}, 'effort': 'medium'},
-                'EFFORT_ROUTING': {'threadSettings': {}},
-            }
-            if text == 'EFFORT_ROUTING':
-                send({'method': 'thread/settings/updated', 'params': {'threadId': 'other-thread', 'threadSettings': {'effort': 'wrong-thread'}}})
-                send({'method': 'thread/settings/updated', 'params': {'threadId': thread_id, 'turnId': 'other-turn', 'threadSettings': {'effort': 'wrong-turn'}}})
-            send({'method': 'thread/settings/updated', 'params': {'threadId': thread_id, **scenarios[text]}})
         item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
         item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
                                   'changes': [{'path': 'src/mod.py', 'kind': {'type': 'add'}, 'diff': ''}]})
@@ -221,21 +182,21 @@ for line in sys.stdin:
         echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
                 'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
         final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
+        if 'Independently review these files' in text:
+            final = json.dumps({'verdict': 'pass', 'findings': [{'severity': 'blocker', 'message': 'fix'}] if 'NEEDS_FIX' in text else []})
         if params.get('outputSchema') and 'BADJSON' in text:
             final = 'not json'
         elif params.get('outputSchema') and 'WRONGSHAPE' in text:
             final = json.dumps({'wrong': 'shape'})
         item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
         complete(thread_id, turn_id)
+    elif method == 'thread/read':
+        send({'id': message['id'], 'result': {'thread': {'id': params['threadId'], 'turns': []}}})
+    elif method == 'command/exec':
+        send({'id': message['id'], 'result': {'exitCode': 0, 'stdout': 'sandboxed', 'stderr': '', 'timedOut': False}})
     elif method == 'turn/interrupt':
-        turn = pending_turns.get(params['turnId'])
-        if turn and len(turn) == 3 and turn[2] == 'refuse':
-            send({'id': message['id'], 'error': {'code': -32000, 'message': 'refused'}})
-            continue
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)
-        if turn and len(turn) == 2:
+        if turn:
             complete(*turn, 'interrupted')
-        elif turn and turn[2] == 'late_complete':
-            complete(*turn[:2], 'completed')
     time.sleep(0)

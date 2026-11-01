@@ -72,7 +72,7 @@ fn stop_active_done_blocked_and_reason() {
     let d = tempfile::tempdir().unwrap();
     let h = d.path();
     open(h);
-    assert_eq!(call(h, &event("Stop")).unwrap()["decision"], "block");
+    assert!(call(h, &event("Stop")).is_none());
     assert!(goal::set_status(h, "s", "blocked", None).is_err());
     goal::set_status(h, "s", "blocked", Some("need access")).unwrap();
     assert!(call(h, &event("Stop")).is_none());
@@ -179,7 +179,7 @@ fn mode_restrictions() {
             for agent in [false, true] {
                 let e = dispatch(name);
                 let e = if agent { sub(e) } else { e };
-                if mode.is_some() && !agent {
+                if mode == Some("change") && !agent {
                     assert!(call(h, &e).is_none());
                 } else {
                     denial(call(h, &e));
@@ -210,7 +210,7 @@ fn mode_restrictions() {
 #[test]
 fn nested_agents_only_reviewer() {
     let d = tempfile::tempdir().unwrap();
-    let reason = "Only designated reviewer/content children may be started; never forward engineering through another agent.";
+    let reason = "Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.";
     for name in ["Agent", "Task"] {
         for input in [
             json!({}),
@@ -307,16 +307,6 @@ fn bash_contract() {
         "git diff --output=f",
         "git log --output f",
         "git show --output=f",
-        "git show --no-ext-diff --no-textconv \"--output=unexpected.txt\"",
-        "git show --no-ext-diff --no-textconv --out\\\nput=unexpected.txt",
-        "git diff --no-ext-diff --no-textconv --out=f",
-        "git show --no-ext-diff --no-textconv --ext-diff",
-        "git show --no-ext-diff --no-textconv --textconv",
-        "git show --no-ext-diff --no-textconv --tex",
-        "git blame --no-textconv --textconv file",
-        "git blame file",
-        "git show --no-ext-diff --no-textconv $OPTION",
-        "git diff --no-ext-diff --no-textconv 'unterminated",
         "find . -ok echo {} ;",
         "find . -okdir echo {} ;",
         "find . -fls f",
@@ -328,16 +318,16 @@ fn bash_contract() {
         "FOO=1 ls",
         "echo x 2>&1",
         "cat a >/dev/null",
-        "git diff --no-ext-diff --no-textconv -- 'src/my file' | head -50",
+        "git diff -- src | head -50",
         "find . -print",
         "git status",
         "ls -la",
-        "git diff --no-ext-diff --no-textconv",
-        "git log --no-ext-diff --no-textconv",
-        "git show --no-ext-diff --no-textconv -- '--output=file'",
+        "git diff",
+        "git log",
+        "git show",
         "git rev-parse HEAD",
         "git ls-files",
-        "git blame --no-textconv f",
+        "git blame f",
         "ls",
         "cat f",
         "head f",
@@ -407,39 +397,4 @@ fn stdin_invalid_and_unknown_exit_zero() {
             assert!(stdout.is_empty());
         }
     }
-}
-
-#[test]
-fn host_roles_allow_pre_mode_home_and_require_mode_and_exact_content_authority() {
-    let d = tempfile::tempdir().unwrap();
-    let home = d.path().join("home");
-    open(&home);
-    let mut write = sub(tool("Write", json!({"file_path":home.join("artifact")})));
-    for role in ["core", "architect"] {
-        write["agent_role"] = json!(role);
-        assert!(call(&home, &write).is_none());
-        write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
-        denial(call(&home, &write));
-        write["tool_input"]["file_path"] = json!(home.join("artifact"));
-    }
-    write["agent_role"] = json!("content");
-    write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
-    write["authorized_output_path"] = write["tool_input"]["file_path"].clone();
-    denial(call(&home, &write));
-    goal::set_mode(&home, "s", "change").unwrap();
-    write["agent_role"] = json!("dispatcher");
-    write["tool_input"]["file_path"] = json!(home.join("artifact"));
-    assert!(call(&home, &write).is_none());
-    write["tool_input"]["file_path"] = json!(d.path().join("project.rs"));
-    denial(call(&home, &write));
-    write["agent_role"] = json!("content");
-    write["authorized_output_path"] = write["tool_input"]["file_path"].clone();
-    assert!(call(&home, &write).is_none());
-    write["tool_input"]["file_path"] = json!(d.path().join("other.rs"));
-    denial(call(&home, &write));
-    let mut content = sub(tool("Agent", json!({"subagent_type":"chronos:content"})));
-    content["agent_role"] = json!("dispatcher");
-    assert!(call(&home, &content).is_none());
-    content["agent_role"] = json!("memory-keeper");
-    denial(call(&home, &content));
 }

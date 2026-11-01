@@ -30,19 +30,6 @@ impl std::fmt::Display for Failure {
 }
 impl std::error::Error for Failure {}
 pub type Res<T> = Result<T, Failure>;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainOutcome {
-    AwaitingCore, Verified, Blocked, Failed, Timeout, Cancelled, Unconfirmed, ProtocolIncomplete,
-}
-impl DomainOutcome {
-    pub fn successful(self) -> bool { matches!(self, Self::AwaitingCore | Self::Verified) }
-}
-/// Transport completion alone cannot credit a failed/blocked domain outcome.
-pub fn tool_succeeded(v: &serde_json::Value) -> bool {
-    v["status"].as_str().is_none_or(|s| s == "completed")
-        && v.get("outcome").is_none_or(|o| serde_json::from_value::<DomainOutcome>(o.clone()).is_ok_and(DomainOutcome::successful))
-}
 pub fn resolve_command(env_name: &str, executable: &str) -> Res<Vec<String>> {
     if let Some(raw) = std::env::var_os(env_name).filter(|v| !v.is_empty()) {
         let parsed = raw
@@ -116,17 +103,12 @@ pub fn axiom_home() -> PathBuf {
         })
 }
 pub fn data_home() -> Res<PathBuf> {
-    std::env::var_os("AXIOM_DATA_HOME")
+    Ok(std::env::var_os("AXIOM_DATA_HOME")
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var_os("CLAUDE_PLUGIN_DATA").filter(|s| !s.is_empty()))
         .map(PathBuf::from)
-        .ok_or_else(|| {
-            Failure::new(
-                "config",
-                "AXIOM_DATA_HOME or CLAUDE_PLUGIN_DATA must be set",
-            )
-        })
+        .unwrap_or_else(|| axiom_home().join("data")))
 }
+
 pub fn require_slug(name: &str, value: &str) -> Res<()> {
     let b = value.as_bytes();
     if !b.is_empty()
@@ -198,104 +180,7 @@ pub fn unique() -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-/// Allocate a fresh, short Cargo target for one source and execution. The atomic
-/// directory creation is the collision arbiter even across processes.
-pub fn cargo_target(source: &Path, execution: &str) -> Res<PathBuf> {
-    if let Some(root)=std::env::var_os("AXIOM_CARGO_TARGET_ROOT") {
-        let root=PathBuf::from(root);
-        if !root.is_absolute() || root.to_string_lossy().encode_utf16().count()>50 {
-            return Err(Failure::new("cargo_target","AXIOM_CARGO_TARGET_ROOT must be an absolute path of at most 50 UTF-16 units"));
-        }
-        std::fs::create_dir_all(&root).map_err(|e|Failure::new("cargo_target",e.to_string()))?;
-        return cargo_target_in(source,execution,&[root]);
-    }
-    let mut roots = vec![std::env::temp_dir()];
-    #[cfg(windows)]
-    if let Some(drive) = std::env::var_os("SystemDrive") {
-        roots.push(PathBuf::from(format!("{}\\", drive.to_string_lossy())));
-    }
-    #[cfg(not(windows))]
-    roots.push(PathBuf::from("/tmp"));
-    cargo_target_in(source, execution, &roots)
-}
-
-/// The owning caller must establish terminal execution before invoking this.
-/// Preserve the tiny provenance marker; source, receipts and archived packages
-/// live elsewhere. Unknown/running executions must retain their target.
-pub fn prune_cargo_target(target:&Path)->Res<()> {
-    let invalid=|message:&str|Failure::new("cargo_target",message);
-    let name=target.file_name().and_then(|s|s.to_str()).unwrap_or("");
-    if !target.is_absolute() || !name.starts_with("ct-") || !name[3..].bytes().all(|b|b.is_ascii_hexdigit()) || name.len()!=27 {
-        return Err(invalid("not an owned Cargo target"));
-    }
-    let metadata=std::fs::symlink_metadata(target).map_err(|e|invalid(&e.to_string()))?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {return Err(invalid("target is a reparse point"));}
-    }
-    if metadata.file_type().is_symlink() {return Err(invalid("target is a link"));}
-    let binding:serde_json::Value=serde_json::from_slice(&std::fs::read(target.join(".chronos-binding.json")).map_err(|e|invalid(&e.to_string()))?).map_err(|e|invalid(&e.to_string()))?;
-    if binding["source"].as_str().is_none() || binding["execution"].as_str().is_none() || binding["nonce"].as_str().is_none() {return Err(invalid("missing target provenance"));}
-    for entry in std::fs::read_dir(target).map_err(|e|invalid(&e.to_string()))? {
-        let entry=entry.map_err(|e|invalid(&e.to_string()))?;
-        if entry.file_name()==".chronos-binding.json" {continue;}
-        let kind=entry.file_type().map_err(|e|invalid(&e.to_string()))?;
-        let result=if kind.is_dir(){std::fs::remove_dir_all(entry.path())}else{std::fs::remove_file(entry.path())};
-        result.map_err(|e|invalid(&e.to_string()))?;
-    }
-    Ok(())
-}
-
-/// Explicit candidates allow callers to test failure without changing process environment.
-pub fn cargo_target_in(source: &Path, execution: &str, roots: &[PathBuf]) -> Res<PathBuf> {
-    use sha2::{Digest, Sha256};
-    let source = std::fs::canonicalize(source)
-        .map_err(|e| Failure::new("cargo_target", format!("source identity unavailable: {e}")))?;
-    let mut errors = Vec::new();
-    for root in roots {
-        // Reserve space for Cargo's own deeply nested build artifacts.
-        if !root.is_absolute() || root.to_string_lossy().encode_utf16().count() > 50 {
-            errors.push(format!("{}: not an absolute short root", root.display()));
-            continue;
-        }
-        for _ in 0..8 {
-            let nonce = unique();
-            let mut hash = Sha256::new();
-            hash.update(source.as_os_str().to_string_lossy().as_bytes());
-            hash.update([0]);
-            hash.update(execution.as_bytes());
-            hash.update([0]);
-            hash.update(nonce.as_bytes());
-            let name = format!("ct-{:x}", hash.finalize());
-            let path = root.join(&name[..27]);
-            match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    let binding = serde_json::json!({"source":source,"execution":execution,"nonce":nonce});
-                    match std::fs::write(path.join(".chronos-binding.json"), binding.to_string()) {
-                        Ok(()) => return Ok(path),
-                        Err(e) => {
-                            let _ = std::fs::remove_dir_all(&path);
-                            errors.push(format!("{}: {e}", root.display()));
-                            break;
-                        }
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => { errors.push(format!("{}: {e}", root.display())); break; }
-            }
-        }
-    }
-    Err(Failure::new("cargo_target", format!("no writable short Cargo target root: {}", errors.join("; "))))
-}
 pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    atomic_write_steps(path, contents, |_| Ok(()))
-}
-fn atomic_write_steps(
-    path: &Path,
-    contents: &[u8],
-    mut step: impl FnMut(&str) -> std::io::Result<()>,
-) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let name = path
         .file_name()
@@ -307,61 +192,46 @@ fn atomic_write_steps(
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        step("created")?;
         f.write_all(contents)?;
-        step("written")?;
         f.sync_all()?;
-        step("synced")?;
         drop(f);
-        replace_file(&temp, path)?;
-        step("replaced")?;
-        sync_directory(parent)
+        replace_file(&temp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
 }
-/// Sync directory entries after rename on Unix. Windows uses write-through
-/// MoveFileExW instead (directory FlushFileBuffers is not supported there).
-pub fn sync_directory(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path)?.sync_all()
-    }
-    #[cfg(windows)]
-    {
-        let _ = path;
-        Ok(())
-    }
-}
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 #[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    // Rust file APIs accept long paths, but this raw Win32 call needs the
-    // extended-length prefix. Resolve the parent, never an existing target
-    // symlink: replacement must retain rename semantics.
-    let from = from.canonicalize()?;
-    let to = to.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new(".")).canonicalize()?.join(
-        to.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
-    );
     #[link(name = "kernel32")]
     extern "system" {
         fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
     }
-    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
+    // Win32 FFI does not add the long-path prefix that Rust filesystem calls do.
+    // Canonicalize the destination's parent, not a destination symlink.
+    let from = from.canonicalize()?;
+    let to =
+        to.parent()
+            .unwrap_or(Path::new("."))
+            .canonicalize()?
+            .join(to.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename")
+            })?);
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1 | 8) } == 0 {
         Err(std::io::Error::last_os_error())
     } else {
         Ok(())
     }
 }
+
 fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -416,93 +286,5 @@ pub fn family_of(model: &str) -> Family {
         Family::Anthropic
     } else {
         Family::Unknown
-    }
-}
-
-#[cfg(test)]
-mod atomic_fault_tests {
-    use super::*;
-    #[test]
-    fn atomic_child() {
-        let Some(dir) = std::env::var_os("CHRONOS_ATOMIC_CHILD") else {
-            return;
-        };
-        let dir = PathBuf::from(dir);
-        let at = std::env::var("CHRONOS_ATOMIC_PHASE").unwrap();
-        atomic_write_steps(&dir.join("state"), br#"{"version":2}"#, |phase| {
-            if phase == at {
-                std::fs::write(dir.join("ready"), phase)?;
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            Ok(())
-        })
-        .unwrap();
-    }
-    #[test]
-    fn killed_writer_preserves_whole_old_or_new_state_at_each_boundary() {
-        for phase in ["created", "written", "synced", "replaced"] {
-            let dir = tempfile::tempdir().unwrap();
-            atomic_write(&dir.path().join("state"), br#"{"version":1}"#).unwrap();
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "base::atomic_fault_tests::atomic_child"])
-                .env("CHRONOS_ATOMIC_CHILD", dir.path())
-                .env("CHRONOS_ATOMIC_PHASE", phase)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !dir.path().join("ready").exists() {
-                if std::time::Instant::now() > until {
-                    let _ = child.kill();
-                    panic!("child did not reach {phase}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            child.kill().unwrap();
-            assert!(!child.wait().unwrap().success());
-            let value: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(dir.path().join("state")).unwrap()).unwrap();
-            assert_eq!(value["version"], if phase == "replaced" { 2 } else { 1 });
-            // Orphan temp files are ignored, not promoted during restart.
-            atomic_write(&dir.path().join("state"), br#"{"version":3}"#).unwrap();
-        }
-    }
-    #[test]
-    fn write_sync_and_replace_failure_do_not_damage_committed_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state");
-        atomic_write(&path, b"old").unwrap();
-        for fail_at in ["created", "written", "synced"] {
-            assert!(atomic_write_steps(&path, b"new", |phase| {
-                if phase == fail_at {
-                    Err(std::io::Error::other("injected write/sync failure"))
-                } else {
-                    Ok(())
-                }
-            })
-            .is_err());
-            assert_eq!(std::fs::read(&path).unwrap(), b"old");
-            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        }
-        let target_dir = dir.path().join("directory");
-        std::fs::create_dir(&target_dir).unwrap();
-        assert!(atomic_write(&target_dir, b"new").is_err()); // Actual OS rename failure.
-        assert!(target_dir.is_dir());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
-    }
-    #[test]
-    #[cfg(windows)]
-    fn atomic_receipt_replacement_supports_long_windows_paths() {
-        let dir=tempfile::tempdir().unwrap();
-        let mut parent=dir.path().to_path_buf();
-        for _ in 0..5 {parent=parent.join("installed-probe-session-artifacts-0123456789");}
-        std::fs::create_dir_all(&parent).unwrap();
-        let path=parent.join("request.json");
-        assert!(path.as_os_str().len()>260);
-        atomic_write(&path,b"first").unwrap();
-        atomic_write(&path,b"second").unwrap();
-        assert_eq!(std::fs::read(path).unwrap(),b"second");
     }
 }

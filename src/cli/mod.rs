@@ -13,130 +13,169 @@ fn value(args: &[String], i: &mut usize, name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{name} requires a value"))
 }
 fn session_command(skill: &str, args: &[String]) -> i32 {
+    use crate::bridge::dispatch::{DispatchAction, RecoveryDecision};
     let mut project = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return usage(e),
     };
-    let mut turns = (skill == "research").then_some(40);
-    let (mut no_architect, mut astra, mut creative, mut resume, mut project_set) =
-        (false, false, false, None, false);
-    if skill == "wish" && args.iter().any(|a| a == "--resume") {
-        let mut j = 0;
-        let mut seen = false;
-        while j < args.len() {
-            match args[j].as_str() {
-                "--resume" if !seen && j + 1 < args.len() && !args[j + 1].starts_with('-') => {
-                    seen = true;
-                    j += 2;
-                }
-                "--max-turns" if j + 1 < args.len() => {
-                    j += 2;
-                }
-                _ => return usage("--resume takes only a session id"),
-            }
-        }
-        if !seen {
-            return usage("--resume takes only a session id");
-        }
-    }
+    let (mut action, mut request_id, mut digest, mut verdict, mut reason, mut recovery) =
+        (None, None, None, None, None, None);
+    let mut words = Vec::new();
+    let (mut creative, mut astra, mut no_architect) = (false, false, false);
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--project" => match value(args, &mut i, "--project") {
-                Ok(v) => {
-                    project = v.into();
-                    project_set = true;
+        let flag = args[i].as_str();
+        if !words.is_empty() {
+            words.extend_from_slice(&args[i..]);
+            break;
+        }
+        match flag {
+            "--creative" => creative = true,
+            "--astra" => astra = true,
+            "--no-architect" => no_architect = true,
+            "--max-turns" => return usage(
+                "--max-turns is unavailable with checkpoint dispatch; no turn limit was applied",
+            ),
+            "--project" | "--request-id" | "--research-digest" | "--verdict" | "--reason"
+            | "--recovery-file" | "--resume" | "--status" | "--cancel" | "--decide" => {
+                let v = match value(args, &mut i, flag) {
+                    Ok(v) if !v.is_empty() => v,
+                    Ok(_) => return usage(format!("{flag} cannot be empty")),
+                    Err(e) => return usage(e),
+                };
+                match flag {
+                    "--project" => project = v.into(),
+                    "--request-id" => request_id = Some(v),
+                    "--research-digest" => digest = Some(v),
+                    "--verdict" => verdict = Some(v),
+                    "--reason" => reason = Some(v),
+                    "--recovery-file" => recovery = Some(v),
+                    _ => {
+                        if action.is_some() {
+                            return usage("only one action is allowed");
+                        }
+                        action = Some((flag.to_owned(), v));
+                    }
                 }
-                Err(e) => return usage(e),
-            },
-            "--max-turns" => match value(args, &mut i, "--max-turns").and_then(|s| {
-                s.parse::<u32>()
-                    .map_err(|_| "--max-turns requires an integer".into())
-            }) {
-                Ok(v) => turns = Some(v),
-                Err(e) => return usage(e),
-            },
-            "--resume" if skill == "wish" => match value(args, &mut i, "--resume") {
-                Ok(v) if resume.is_none() => resume = Some(v),
-                _ => return usage("--resume takes only a session id"),
-            },
-            "--creative" if skill == "wish" => creative = true,
-            "--no-architect" if skill == "wish" => no_architect = true,
-            "--astra" if skill == "wish" => astra = true,
+            }
             "--" => {
-                i += 1;
+                words.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            s if s.starts_with('-') => return usage(format!("unrecognized option: {s}")),
-            _ => break,
+            x if x.starts_with('-') => return usage(format!("unrecognized option: {x}")),
+            _ => words.push(args[i].clone()),
         }
         i += 1;
     }
-    if let Some(id) = resume {
-        if i != args.len() || project_set || no_architect || astra || creative {
-            return usage("--resume takes only a session id");
+    let action = match action {
+        None if (!words.is_empty() || creative)
+            && digest.is_none()
+            && verdict.is_none()
+            && reason.is_none()
+            && recovery.is_none() =>
+        {
+            let mut intent = String::new();
+            if skill == "research" {
+                intent.push_str("Research only; stop at the research review boundary. ");
+            }
+            if creative {
+                intent.push_str("[creative] ");
+            }
+            if !creative && no_architect {
+                intent.push_str("[no-architect] ");
+            }
+            if !creative && astra {
+                intent.push_str("[astra] ");
+            }
+            intent.push_str(&words.join(" "));
+            DispatchAction::Start {
+                intent: intent.trim_end().to_owned(),
+            }
         }
-        let config = session::Config::from_env();
-        return match session::Attachment::open(
-            &config,
-            &serde_json::json!({"session":id,"max_turns":turns}),
-        ) {
-            Ok((_host, value)) => {
-                println!("{}", value);
-                0
+        Some((flag, id)) if words.is_empty() && !creative && !astra && !no_architect => {
+            match flag.as_str() {
+                "--resume" if digest.is_none() && verdict.is_none() && reason.is_none() => {
+                    let recovery = match recovery {
+                        Some(path) => match std::fs::read(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|b| {
+                                serde_json::from_slice::<RecoveryDecision>(&b)
+                                    .map_err(|e| e.to_string())
+                            }) {
+                            Ok(v) => Some(v),
+                            Err(e) => return usage(format!("invalid recovery file: {e}")),
+                        },
+                        None => None,
+                    };
+                    if let Some(ref decision) = recovery {
+                        use sha2::{Digest, Sha256};
+                        let refs: Vec<&crate::bridge::dispatch::ArtifactRef> = match decision {
+                            RecoveryDecision::AcceptTerminal { report, .. } => vec![report],
+                            RecoveryDecision::RetryAfterRepair {
+                                stopped_evidence,
+                                repair_evidence,
+                                ..
+                            } => vec![stopped_evidence, repair_evidence],
+                        };
+                        for artifact in refs {
+                            let bytes = match std::fs::read(&artifact.path) {
+                                Ok(bytes) => bytes,
+                                Err(e) => return usage(format!("invalid recovery artifact: {e}")),
+                            };
+                            if artifact.digest != format!("{:x}", Sha256::digest(&bytes)) {
+                                return usage("recovery artifact digest mismatch");
+                            }
+                        }
+                    }
+                    DispatchAction::Resume {
+                        run_id: id,
+                        recovery,
+                    }
+                }
+                "--status"
+                    if digest.is_none()
+                        && verdict.is_none()
+                        && reason.is_none()
+                        && recovery.is_none() =>
+                {
+                    DispatchAction::Status { run_id: id }
+                }
+                "--cancel" if digest.is_none() && verdict.is_none() && recovery.is_none() => {
+                    DispatchAction::Cancel {
+                        run_id: id,
+                        reason: reason.unwrap_or_else(|| "user requested cancellation".into()),
+                    }
+                }
+                "--decide" if recovery.is_none() => match (digest, verdict.as_deref(), reason) {
+                    (Some(research_digest), Some(v @ ("pass" | "fail")), Some(reason)) => {
+                        DispatchAction::Decide {
+                            run_id: id,
+                            research_digest,
+                            pass: v == "pass",
+                            reason,
+                        }
+                    }
+                    _ => return usage(
+                        "--decide requires --research-digest, --verdict pass|fail, and --reason",
+                    ),
+                },
+                _ => return usage("invalid action options"),
             }
-            Err(e) => usage(e.message),
-        };
-    }
-    if i == args.len() && !creative {
-        return usage(format!(
-            "{skill}: say what you want, e.g. axiom {skill} {}",
-            if skill == "wish" {
-                "add a --stats flag to cli.py"
-            } else {
-                "how does oxide thickness affect RRAM endurance?"
-            }
-        ));
-    }
-    if !project.is_absolute() {
-        project = match std::env::current_dir() {
-            Ok(p) => p.join(project),
-            Err(e) => return usage(e),
-        };
-    }
-    if !project.is_dir() {
-        return usage(format!(
-            "--project is not a directory: {}",
-            project.display()
-        ));
-    }
-    let text = if creative {
-        format!(
-            "[creative]{}",
-            if i == args.len() {
-                String::new()
-            } else {
-                format!(" {}", args[i..].join(" "))
-            }
-        )
-    } else {
-        format!(
-            "{}{}{}",
-            if no_architect { "[no-architect] " } else { "" },
-            if astra { "[astra] " } else { "" },
-            args[i..].join(" ")
-        )
+        }
+        _ => return usage("provide an intent or one action"),
     };
-    let config = session::Config::from_env();
-    match session::Attachment::open(
-        &config,
-        &serde_json::json!({"skill":skill,"text":text,"project":project,"max_turns":turns}),
+    match session::dispatch_action(
+        &session::Config::from_env(),
+        &project,
+        action,
+        request_id.unwrap_or_else(base::unique),
+        &mut io::stdout(),
     ) {
-        Ok((_host, value)) => {
-            println!("{}", value);
-            0
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("axiom: {e}");
+            1
         }
-        Err(e) => usage(e.message),
     }
 }
 fn orch_command(args: &[String]) -> i32 {
@@ -250,60 +289,16 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let rest = &args[1..];
     match cmd {
         "--version" if rest.is_empty() => {
-            println!("axiom-chronos {} (beta)", env!("CARGO_PKG_VERSION"));
+            println!("axiom-chronos {}", env!("CARGO_PKG_VERSION"));
             0
         }
         "wish" | "research" => session_command(cmd, rest),
-        "session-call" if rest.len() == 1 => {
-            let result=(|| -> base::Res<serde_json::Value> {
-                let bytes=std::fs::read(&rest[0]).map_err(|e|base::Failure::new("io",e.to_string()))?;
-                let input:serde_json::Value=serde_json::from_slice(&bytes).map_err(|e|base::Failure::new("invalid_argument",e.to_string()))?;
-                let id=input["session"].as_str().ok_or_else(||base::Failure::new("invalid_argument","session required"))?;
-                let (host,_)=session::Attachment::open(&session::Config::from_env(),&serde_json::json!({"session":id,"preserve_goal":true}))?;
-                host.call_recorded(input["request_id"].as_str().unwrap_or(""),input["tool"].as_str().unwrap_or(""),&input["arguments"])
-            })();
-            match result {
-                Ok(v)=>{println!("{v}");if base::tool_succeeded(&v) {0} else {1}},
-                Err(e)=>{println!("{}",serde_json::json!({"status":"bridge_error","error":{"kind":e.kind,"message":e.message}}));1},
-            }
-        },
         "doctor" if rest.is_empty() => doctor::doctor(&mut io::stdout()),
         "bridge" if rest.is_empty() => bridge::serve(
             bridge::Config::from_env(),
             io::BufReader::new(io::stdin()),
             io::stdout(),
         ),
-        "bridge" if rest.len() == 2 && rest[0] == "call" => {
-            use std::io::Read;
-            let mut data = String::new();
-            let read = if rest[1] == "-" {
-                io::stdin().read_to_string(&mut data)
-            } else {
-                std::fs::read_to_string(&rest[1]).map(|s| {
-                    data = s;
-                    data.len()
-                })
-            };
-            if let Err(e) = read {
-                return usage(e);
-            }
-            let input: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(e) => return usage(e),
-            };
-            let bridge = bridge::Bridge::new(bridge::Config::from_env());
-            let result = bridge::call(
-                &bridge,
-                input["name"].as_str().unwrap_or(""),
-                input.get("arguments").unwrap_or(&serde_json::Value::Null),
-            );
-            println!("{}", result);
-            if result["isError"] == true {
-                1
-            } else {
-                0
-            }
-        }
         "hook" if rest.is_empty() => hook::main_stdin(),
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),

@@ -100,7 +100,7 @@ fn unit_line(u: &Unit) -> String {
     .collect::<Vec<_>>()
     .join("\t")
 }
-fn save_units(store: &Path, rows: &[Unit]) -> Res<()> {
+pub(crate) fn save_units(store: &Path, rows: &[Unit]) -> Res<()> {
     let mut s = format!("{HEADER}\n");
     for row in rows {
         s.push_str(&unit_line(row));
@@ -120,7 +120,7 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
         ));
     }
     let text = std::fs::read_to_string(&row.brief).map_err(io)?;
-    parse_brief(&text).map_err(|field| fail(format!("brief {} has missing or invalid {field}; use the literal format in DISPATCH.md", row.brief)))
+    parse_brief(&text).map_err(|field| fail(format!("brief {} is missing {field}", row.brief)))
 }
 static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
@@ -133,50 +133,6 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone();
     let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
-    // Stable OS-held mutex: never unlink this inode. A crash releases the OS
-    // lock; --force may replace legacy metadata, never a live OS lock.
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    let os_lock = options.open(store.join(".orch.mutex")).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::WouldBlock
-            || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)))
-        {
-            Failure::new("busy", format!("store OS lock: {e}"))
-        } else {
-            io(e)
-        }
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(os_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            return Err(if e.kind() == std::io::ErrorKind::WouldBlock {
-                Failure::new("busy", "store OS lock held")
-            } else { io(e) });
-        }
-    }
-    // fork() in another thread can inherit this open file description until
-    // exec(). Closing only our descriptor can therefore leave flock held by
-    // that child. Release the lock explicitly before closing the descriptor.
-    struct OsLock(std::fs::File);
-    impl Drop for OsLock {
-        fn drop(&mut self) {
-            #[cfg(unix)]
-            {
-                use std::os::fd::AsRawFd;
-                unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN); }
-            }
-            #[cfg(not(unix))]
-            let _ = &self.0;
-        }
-    }
-    let _os_lock = OsLock(os_lock);
     let path = store.join(".orch.lock");
     let pid = std::process::id().to_string();
     let create = || -> std::io::Result<()> {
@@ -230,42 +186,6 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
 }
-
-#[cfg(all(test, unix))]
-mod lock_regression {
-    use super::*;
-
-    #[test]
-    fn forked_child_does_not_extend_finished_store_lock() {
-        let store = tempfile::tempdir().unwrap();
-        let mut pipe = [0; 2];
-        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
-        let child = with_lock(store.path(), false, || {
-            // Only async-signal-safe libc calls in the forked child: other test
-            // threads may own Rust allocator/runtime locks at fork time.
-            let pid = unsafe { libc::fork() };
-            assert!(pid >= 0);
-            if pid == 0 {
-                unsafe {
-                    libc::close(pipe[1]);
-                    let mut byte = 0u8;
-                    libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
-                    libc::_exit(0);
-                }
-            }
-            Ok(pid)
-        }).unwrap();
-        let reacquired = with_lock(store.path(), false, || Ok(()));
-        let mut status = 0;
-        unsafe {
-            libc::close(pipe[0]);
-            libc::close(pipe[1]);
-            libc::waitpid(child, &mut status, 0);
-        }
-        reacquired.expect("a forked child must not retain a completed store lock");
-    }
-}
-
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
     with_lock(store, false, || {
         let mut rows = read_units(store)?;
@@ -273,12 +193,6 @@ pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
             .iter_mut()
             .find(|u| u.id == unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-        let state =
-            if state == "verified" && !super::task_released(&super::wait::read(store)?, unit) {
-                "waiting-release"
-            } else {
-                state
-            };
         row.state = required(state, "state")?;
         save_units(store, &rows)
     })
@@ -822,10 +736,6 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
         let cmd = arg(args, 0)?;
         let sub = args.get(1).map(String::as_str).unwrap_or("");
         match (cmd, sub) {
-            ("wait", "enroll") => {
-                let state = super::wait::enroll(store)?;
-                Ok(format!("{}\n", serde_json::to_string(&state).map_err(|e| fail(e.to_string()))?))
-            }
             ("init", _) => {
                 std::fs::create_dir_all(store).map_err(io)?;
                 locked(store, force, &mut note, || {
@@ -867,7 +777,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 if !brief.is_empty() {
                     let text = std::fs::read_to_string(&brief).map_err(io)?;
                     let b = parse_brief(&text)
-                        .map_err(|field| fail(format!("brief {brief} has missing or invalid {field}; use the literal format in DISPATCH.md")))?;
+                        .map_err(|field| fail(format!("brief {brief} is missing {field}")))?;
                     let path = store.join("modules.md");
                     if path.exists() {
                         let map =

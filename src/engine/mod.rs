@@ -1,63 +1,59 @@
 use std::path::{Path, PathBuf};
 
+// Engine is the source of truth; the checked-in Codex package is its distributable copy.
 pub const FILES: &[(&str, &str)] = &[
-    ("agents/tester.md", include_str!("../../engine/agents/tester.md")),
-    (
-        ".claude-plugin/plugin.json",
-        include_str!("../../engine/.claude-plugin/plugin.json"),
-    ),
     ("DISPATCH.md", include_str!("../../engine/DISPATCH.md")),
     (
-        "agents/architect.md",
-        include_str!("../../engine/agents/architect.md"),
+        "agents/dispatcher.md",
+        include_str!("../../engine/agents/dispatcher.md"),
     ),
     (
         "agents/astra.md",
         include_str!("../../engine/agents/astra.md"),
     ),
     (
-        "agents/content.md",
-        include_str!("../../engine/agents/content.md"),
+        "agents/architect.md",
+        include_str!("../../engine/agents/architect.md"),
     ),
     (
-        "agents/critic.md",
-        include_str!("../../engine/agents/critic.md"),
+        "agents/engineer.md",
+        include_str!("../../engine/agents/engineer.md"),
     ),
     (
-        "agents/dispatcher.md",
-        include_str!("../../engine/agents/dispatcher.md"),
-    ),
-    (
-        "agents/memory-keeper.md",
-        include_str!("../../engine/agents/memory-keeper.md"),
+        "agents/assembler.md",
+        include_str!("../../engine/agents/assembler.md"),
     ),
     (
         "agents/reviewer.md",
         include_str!("../../engine/agents/reviewer.md"),
     ),
     (
-        "hooks/hooks.json",
-        include_str!("../../engine/hooks/hooks.json"),
+        "agents/memory-keeper.md",
+        include_str!("../../engine/agents/memory-keeper.md"),
     ),
     (
-        "research/audit.schema.json",
-        include_str!("../../engine/research/audit.schema.json"),
+        "agents/artifact.md",
+        include_str!("../../engine/agents/artifact.md"),
     ),
     (
-        "research/plan.schema.json",
-        include_str!("../../engine/research/plan.schema.json"),
+        ".codex-plugin/plugin.json",
+        include_str!("../../engine/.codex-plugin/plugin.json"),
     ),
     (
-        "research/review.schema.json",
-        include_str!("../../engine/research/review.schema.json"),
+        "skills/wish/SKILL.md",
+        include_str!("../../engine/skills/wish/SKILL.md"),
     ),
     (
         "skills/research/SKILL.md",
         include_str!("../../engine/skills/research/SKILL.md"),
     ),
     (
-        "skills/wish/SKILL.md",
-        include_str!("../../engine/skills/wish/SKILL.md"),
+        "assets/chronos.svg",
+        include_str!("../../codex-plugin/assets/chronos.svg"),
+    ),
+    (
+        "assets/chronos-dark.svg",
+        include_str!("../../codex-plugin/assets/chronos-dark.svg"),
     ),
 ];
 

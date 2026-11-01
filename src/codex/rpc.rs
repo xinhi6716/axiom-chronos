@@ -2,7 +2,7 @@ use crate::base::{proc, Failure, Res};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10,10 +10,8 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
-
-pub(crate) type ToolHandler = Arc<dyn Fn(&str, &Value) -> Value + Send + Sync>;
 
 pub const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 struct Connection {
@@ -22,56 +20,17 @@ struct Connection {
     alive: AtomicBool,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     events: Mutex<HashMap<String, (Sender<Value>, Option<Receiver<Value>>)>>,
-    tools: Mutex<HashMap<String, ToolHandler>>,
-    callbacks: Mutex<HashMap<(String, String), CallbackState>>,
-}
-#[derive(Default)]
-struct CallbackState {
-    active: usize,
-    completion: Option<Value>,
-}
-impl Connection {
-    fn publish(&self, thread: &str, event: Value) {
-        if let Some(entry) = self.events.lock().unwrap().get(thread) {
-            let _ = entry.0.send(event);
-        }
-    }
-    fn event(&self, thread: &str, event: Value) {
-        if event["method"] == "turn/completed" {
-            let key = (thread.to_owned(), event["params"]["turn"]["id"].as_str().unwrap_or("").to_owned());
-            let mut calls = self.callbacks.lock().unwrap();
-            if let Some(state) = calls.get_mut(&key) {
-                if event["params"]["turn"]["status"] == "completed" && state.active > 0 {
-                    state.completion = Some(event);
-                    return;
-                }
-                // Cancellation/failure must remain observable while a callback
-                // is stopping; it also invalidates a previously deferred success.
-                state.completion = None;
-            }
-        }
-        self.publish(thread, event);
-    }
-    fn callback_finished(&self, key: &(String, String)) {
-        let mut calls = self.callbacks.lock().unwrap();
-        let Some(state) = calls.get_mut(key) else { return; };
-        state.active -= 1;
-        if state.active == 0 {
-            let state = calls.remove(key).unwrap();
-            if self.alive.load(Ordering::Acquire) {
-                if let Some(event) = state.completion { self.publish(&key.0, event); }
-            }
-        }
-    }
+    closed_turns: Mutex<HashSet<(String, String)>>,
 }
 pub struct AppServer {
     command: Vec<String>,
     connection: Mutex<Option<Arc<Connection>>>,
     start: Mutex<()>,
     ids: AtomicU64,
+    generation: AtomicU64,
     turns: Mutex<HashSet<(String, String)>>,
     request_timeout: Option<Duration>,
-    unconfirmed: AtomicBool,
+    launch_cwd: Option<std::path::PathBuf>,
 }
 impl AppServer {
     pub fn new(command: Vec<String>) -> Self {
@@ -84,16 +43,19 @@ impl AppServer {
             connection: Mutex::new(None),
             start: Mutex::new(()),
             ids: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
             turns: Mutex::new(HashSet::new()),
             request_timeout: timeout,
-            unconfirmed: AtomicBool::new(false),
+            launch_cwd: None,
         }
     }
-    pub(crate) fn mark_unconfirmed(&self) {
-        self.unconfirmed.store(true, Ordering::Release);
-    }
-    pub(crate) fn has_unconfirmed(&self) -> bool {
-        self.unconfirmed.load(Ordering::Acquire)
+    pub(crate) fn check_server(&self, cwd: std::path::PathBuf, timeout_s: u64) -> Self {
+        let mut server = Self::with_request_timeout(
+            self.command.clone(),
+            Some(Duration::from_secs(timeout_s.saturating_add(30))),
+        );
+        server.launch_cwd = Some(cwd);
+        server
     }
     pub fn alive(&self) -> bool {
         self.connection.lock().unwrap().as_ref().is_some_and(|c| {
@@ -102,14 +64,11 @@ impl AppServer {
         })
     }
     pub fn close(&self) {
-        let connection = self.connection.lock().unwrap().take();
-        if let Some(c) = connection {
+        if let Some(c) = self.connection.lock().unwrap().take() {
             c.alive.store(false, Ordering::Release);
             proc::kill_tree(&mut c.child.lock().unwrap());
             c.pending.lock().unwrap().clear();
             c.events.lock().unwrap().clear();
-            let handlers = std::mem::take(&mut *c.tools.lock().unwrap());
-            drop(handlers);
         }
         self.turns.lock().unwrap().clear();
     }
@@ -128,24 +87,28 @@ impl AppServer {
             return Err(Failure::new("not_installed", "empty codex command"));
         }
         let mut cmd = proc::command(&self.command);
+        if let Some(cwd) = &self.launch_cwd {
+            cmd.current_dir(cwd);
+        }
         let mut child = cmd
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Failure::new("codex_exited", e.to_string()))?;
         let input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let c = Arc::new(Connection {
             child: Mutex::new(child),
             input: Mutex::new(input),
             alive: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
-            tools: Mutex::new(HashMap::new()),
-            callbacks: Mutex::new(HashMap::new()),
+            closed_turns: Mutex::new(HashSet::new()),
         });
+        self.generation.fetch_add(1, Ordering::AcqRel);
         *self.connection.lock().unwrap() = Some(c.clone());
         let reader = c.clone();
         thread::spawn(move || {
@@ -153,9 +116,7 @@ impl AppServer {
             let mut line = Vec::new();
             loop {
                 line.clear();
-                // A malformed peer must not cause an unbounded line allocation.
-                if !matches!((&mut output).take(16 * 1024 * 1024 + 1).read_until(b'\n', &mut line), Ok(n) if n > 0 && n <= 16 * 1024 * 1024)
-                {
+                if !matches!(output.read_until(b'\n', &mut line), Ok(n) if n > 0) {
                     break;
                 }
                 let text = String::from_utf8_lossy(&line);
@@ -163,51 +124,44 @@ impl AppServer {
                     continue;
                 };
                 if let Some(method) = msg.get("method").and_then(Value::as_str) {
-                    if let Some(id) = msg.get("id") {
-                        let handler = if method == "item/tool/call" {
-                            msg.pointer("/params/threadId")
-                                .and_then(Value::as_str)
-                                .and_then(|thread_id| {
-                                    reader.tools.lock().unwrap().get(thread_id).cloned()
-                                })
-                        } else {
-                            None
-                        };
-                        if let (Some(handler), Some(tool), Some(args)) = (
-                            handler,
-                            msg.pointer("/params/tool").and_then(Value::as_str),
-                            msg.pointer("/params/arguments"),
+                    let thread = msg.pointer("/params/threadId").and_then(Value::as_str);
+                    if method == "turn/completed" {
+                        if let (Some(thread), Some(turn)) = (
+                            thread,
+                            msg.pointer("/params/turn/id").and_then(Value::as_str),
                         ) {
-                            let c = reader.clone();
-                            let id = id.clone();
-                            let tool = tool.to_owned();
-                            let args = args.clone();
-                            let key = (msg["params"]["threadId"].as_str().unwrap_or("").to_owned(),
-                                msg["params"]["turnId"].as_str().unwrap_or("").to_owned());
-                            // Register on the reader before spawning: a terminal
-                            // event can arrive before the callback thread runs.
-                            c.callbacks.lock().unwrap().entry(key.clone()).or_default().active += 1;
-                            thread::spawn(move || {
-                                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&tool, &args)))
-                                    .unwrap_or_else(|_| json!({"contentItems":[{"type":"inputText","text":"tool handler failed"}],"success":false}));
-                                if c.alive.load(Ordering::Acquire) {
-                                    let _ = Self::send(&c, json!({"id":id,"result":result}));
-                                }
-                                c.callback_finished(&key);
-                            });
-                        } else if method == "item/tool/call" {
+                            reader
+                                .closed_turns
+                                .lock()
+                                .unwrap()
+                                .insert((thread.into(), turn.into()));
+                        }
+                    }
+                    if method == "item/tool/call"
+                        && thread
+                            .zip(msg.pointer("/params/turnId").and_then(Value::as_str))
+                            .is_some_and(|(thread, turn)| {
+                                reader
+                                    .closed_turns
+                                    .lock()
+                                    .unwrap()
+                                    .contains(&(thread.into(), turn.into()))
+                            })
+                    {
+                        if let Some(id) = msg.get("id") {
                             let _ = Self::send(
                                 &reader,
-                                json!({"id":id,"result":{"contentItems":[{"type":"inputText","text":"tool handler unavailable"}],"success":false}}),
+                                json!({"id":id,"error":{"code":-32602,"message":"tool request for closed turn"}}),
                             );
-                        } else {
+                        }
+                        continue;
+                    }
+                    if method != "item/tool/call" {
+                        if let Some(id) = msg.get("id") {
                             let _ = Self::send(
                                 &reader,
                                 json!({"id":id,"error":{"code":-32601,"message":"axiom bridge grants no interactive approvals"}}),
                             );
-                        }
-                        if method == "item/tool/call" {
-                            continue;
                         }
                     }
                     if let Some(id) = msg
@@ -215,25 +169,37 @@ impl AppServer {
                         .and_then(Value::as_str)
                         .or_else(|| msg.pointer("/params/thread/id").and_then(Value::as_str))
                     {
-                        reader.event(id, msg.clone());
+                        let delivered = reader
+                            .events
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .is_some_and(|entry| entry.0.send(msg.clone()).is_ok());
+                        if !delivered && method == "item/tool/call" {
+                            if let Some(request_id) = msg.get("id") {
+                                let _ = Self::send(
+                                    &reader,
+                                    json!({"id":request_id,"error":{"code":-32602,"message":"unknown thread"}}),
+                                );
+                            }
+                        }
                     }
                     let _ = method;
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
-                    let mut pending = reader.pending.lock().unwrap();
-                    if let Some(tx) = pending.remove(&id) {
-                        if let Some(thread_id) =
-                            msg.pointer("/result/thread/id").and_then(Value::as_str)
-                        {
-                            reader
-                                .events
-                                .lock()
-                                .unwrap()
-                                .entry(thread_id.to_owned())
-                                .or_insert_with(|| {
-                                    let (tx, rx) = mpsc::channel();
-                                    (tx, Some(rx))
-                                });
-                        }
+                    if let Some(thread_id) =
+                        msg.pointer("/result/thread/id").and_then(Value::as_str)
+                    {
+                        reader
+                            .events
+                            .lock()
+                            .unwrap()
+                            .entry(thread_id.to_owned())
+                            .or_insert_with(|| {
+                                let (tx, rx) = mpsc::channel();
+                                (tx, Some(rx))
+                            });
+                    }
+                    if let Some(tx) = reader.pending.lock().unwrap().remove(&id) {
                         let _ = tx.send(msg);
                     }
                 }
@@ -241,8 +207,13 @@ impl AppServer {
             reader.alive.store(false, Ordering::Release);
             reader.pending.lock().unwrap().clear();
             reader.events.lock().unwrap().clear();
-            let handlers = std::mem::take(&mut *reader.tools.lock().unwrap());
-            drop(handlers);
+        });
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if line.is_err() {
+                    break;
+                }
+            }
         });
         if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
         Ok(c)
@@ -254,19 +225,6 @@ impl AppServer {
             .map_err(|e| Failure::new("codex_exited", e.to_string()))
     }
     fn request_on(&self, c: &Connection, method: &str, params: Value) -> Res<Value> {
-        if method != "turn/interrupt" && proc::remaining(Duration::from_secs(1)).is_zero() {
-            return Err(Failure::new("timeout", format!("{method}: operation deadline exhausted before send")));
-        }
-        if method != "turn/interrupt"
-            && proc::current_cancellation()
-                .as_ref()
-                .is_some_and(|c| c.cancelled())
-        {
-            return Err(Failure::new(
-                "interrupted",
-                format!("{method} cancelled before sending"),
-            ));
-        }
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         {
@@ -283,44 +241,21 @@ impl AppServer {
         let timeout = self.request_timeout.unwrap_or_else(|| {
             Duration::from_secs(match method {
                 "initialize" => 60,
-                "turn/interrupt" => 2,
+                "turn/interrupt" => 30,
                 _ => 120,
             })
         });
-        // Interrupt/reap has its own bounded cleanup budget, not renewed work.
-        let timeout = if method == "turn/interrupt" { timeout } else { proc::remaining(timeout) };
-        let deadline = Instant::now() + timeout;
-        let cancellation = if method == "turn/interrupt" {
-            None
-        } else {
-            proc::current_cancellation()
-        };
-        let msg = loop {
-            if cancellation.as_ref().is_some_and(|c| c.cancelled()) {
-                c.pending.lock().unwrap().remove(&id);
-                return Err(Failure::new(
-                    if method == "turn/start" {
-                        "turn_unconfirmed"
-                    } else {
-                        "interrupted"
-                    },
-                    format!("{method} cancelled while awaiting response"),
-                ));
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+        let msg = match rx.recv_timeout(timeout) {
+            Ok(msg) => msg,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
                 c.pending.lock().unwrap().remove(&id);
                 return Err(Failure::new("timeout", format!("{method} timed out")));
             }
-            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
-                Ok(msg) => break msg,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Failure::new(
-                        "codex_exited",
-                        format!("codex app-server exited during {method}"),
-                    ))
-                }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Failure::new(
+                    "codex_exited",
+                    format!("codex app-server exited during {method}"),
+                ))
             }
         };
         if let Some(error) = msg.get("error") {
@@ -344,28 +279,77 @@ impl AppServer {
         let c = self.ensure_started()?;
         self.request_on(&c, method, params)
     }
-    pub(crate) fn register_tools(&self, thread_id: &str, handler: ToolHandler) -> Res<()> {
-        let connection = self.connection.lock().unwrap();
-        let c = connection
-            .as_ref()
-            .filter(|c| c.alive.load(Ordering::Acquire))
-            .ok_or_else(|| Failure::new("codex_exited", "codex app-server closed"))?;
-        let mut tools = c.tools.lock().unwrap();
-        if !c.alive.load(Ordering::Acquire) {
-            return Err(Failure::new("codex_exited", "codex app-server closed"));
+    pub(crate) fn request_cancellable(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: &AtomicBool,
+        deadline: std::time::Instant,
+        grace_ms: u64,
+    ) -> Res<Value> {
+        let c = self.ensure_started()?;
+        let id = self.ids.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut pending = c.pending.lock().unwrap();
+            if !c.alive.load(Ordering::Acquire) {
+                return Err(Failure::new("codex_exited", "connection lost"));
+            }
+            pending.insert(id, tx);
         }
-        let previous = tools.insert(thread_id.to_owned(), handler);
-        drop(tools);
-        drop(connection);
-        drop(previous);
-        Ok(())
+        if let Err(e) = Self::send(&c, json!({"id":id,"method":method,"params":params})) {
+            c.pending.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+        let mut grace = None;
+        loop {
+            let now = std::time::Instant::now();
+            if grace.is_none() && (cancel.load(Ordering::Acquire) || now >= deadline) {
+                grace = Some(now + Duration::from_millis(grace_ms));
+            }
+            if grace.is_some_and(|d| now >= d) {
+                c.pending.lock().unwrap().remove(&id);
+                return Err(Failure::new(
+                    "outcome_unknown",
+                    format!("{method} response not observed before cancellation grace"),
+                ));
+            }
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(msg) => {
+                    if let Some(error) = msg.get("error") {
+                        return Err(Failure::new("codex_rpc", format!("{method}: {error}")));
+                    }
+                    return msg.get("result").cloned().ok_or_else(|| {
+                        Failure::new("codex_rpc", format!("{method}: missing result"))
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Failure::new(
+                        "codex_exited",
+                        format!("connection lost during {method}"),
+                    ))
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
     }
-    pub(crate) fn unregister_tools(&self, thread_id: &str) {
-        let connection = self.connection.lock().unwrap().clone();
-        if let Some(c) = connection {
-            let handler = c.tools.lock().unwrap().remove(thread_id);
-            drop(handler);
+    pub(crate) fn responder(&self) -> Option<Arc<dyn Fn(Value) + Send + Sync>> {
+        let c = self.connection.lock().unwrap().clone()?;
+        Some(Arc::new(move |message| {
+            let _ = Self::send(&c, message);
+        }))
+    }
+    pub(crate) fn interrupt_nowait(&self, thread_id: &str, turn_id: &str) {
+        if let Some(c) = self.connection.lock().unwrap().clone() {
+            let id = self.ids.fetch_add(1, Ordering::Relaxed);
+            let _ = Self::send(
+                &c,
+                json!({"id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}}),
+            );
         }
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
     pub(crate) fn subscribe(&self, thread_id: &str) -> Receiver<Value> {
         let Some(c) = self.connection.lock().unwrap().clone() else {
@@ -395,19 +379,14 @@ impl AppServer {
             c.events.lock().unwrap().remove(thread_id);
         }
     }
-    pub(crate) fn interrupt(&self, thread_id: &str, turn_id: &str) -> Res<()> {
-        let c = self
-            .connection
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| Failure::new("codex_exited", "app-server closed"))?;
-        self.request_on(
-            &c,
-            "turn/interrupt",
-            json!({"threadId":thread_id,"turnId":turn_id}),
-        )
-        .map(|_| ())
+    pub(crate) fn interrupt(&self, thread_id: &str, turn_id: &str) {
+        if let Some(c) = self.connection.lock().unwrap().clone() {
+            let _ = self.request_on(
+                &c,
+                "turn/interrupt",
+                json!({"threadId":thread_id,"turnId":turn_id}),
+            );
+        }
     }
     pub(crate) fn register_turn(&self, thread_id: &str, turn_id: &str) {
         self.turns
@@ -426,20 +405,13 @@ impl AppServer {
         let Some(c) = self.connection.lock().unwrap().clone() else {
             return;
         };
-        // Do not let shutdown kill the transport before interrupts are consumed.
-        // Requests have a bounded interrupt timeout and run concurrently; turn
-        // owners still require terminal events, not just these acknowledgements.
-        thread::scope(|scope| {
-            for (thread_id, turn_id) in turns {
-                let c = c.clone();
-                scope.spawn(move || {
-                    if self.request_on(&c, "turn/interrupt",
-                        json!({"threadId":thread_id,"turnId":turn_id})).is_err() {
-                        self.mark_unconfirmed();
-                    }
-                });
-            }
-        });
+        for (thread_id, turn_id) in turns {
+            let _ = self.request_on(
+                &c,
+                "turn/interrupt",
+                json!({"threadId":thread_id,"turnId":turn_id}),
+            );
+        }
     }
     pub fn list_models(&self) -> Res<Vec<String>> {
         let mut result = Vec::new();
@@ -534,153 +506,13 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn parent_completion_waits_for_pending_dynamic_callbacks() {
-        parent_completion_gate(false);
-    }
-    #[test]
-    fn parent_cancellation_does_not_wait_for_pending_dynamic_callbacks() {
-        parent_completion_gate(true);
-    }
-    fn parent_completion_gate(cancel: bool) {
-        let python = if cfg!(windows) { "python" } else { "python3" };
-        let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
-        let server = AppServer::new(vec![python.into(), "-I".into(), fake.to_string_lossy().into_owned()]);
-        let started = server.request("thread/start", json!({"model":"m"})).unwrap();
-        let id = started["thread"]["id"].as_str().unwrap();
-        let events = server.subscribe(id);
-        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let worker_gate = gate.clone();
-        let (ready, entered) = mpsc::channel();
-        server.register_tools(id, Arc::new(move |_, _| {
-            ready.send(()).unwrap();
-            let (lock, changed) = &*worker_gate;
-            let _released = changed.wait_while(lock.lock().unwrap(), |v| !*v).unwrap();
-            json!({"success":true,"contentItems":[{"type":"inputText","text":"done"}]})
-        })).unwrap();
-        server.request("turn/start", json!({"threadId":id,"input":[{"type":"text","text":if cancel {"DYNAMIC_EARLY_CANCEL"} else {"DYNAMIC_EARLY"}}]})).unwrap();
-        for _ in 0..2 { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
-        let premature = loop {
-            match events.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) if event["method"] == "turn/completed" => break true,
-                Ok(_) => continue,
-                Err(mpsc::RecvTimeoutError::Timeout) => break false,
-                Err(e) => panic!("{e}"),
-            }
-        };
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-        assert_eq!(premature, cancel, "success must wait for callbacks; cancellation must not");
-        if cancel { return; }
-        loop {
-            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
-            if event["method"] == "turn/completed" { break; }
-        }
-    }
-
-    #[test]
-    fn dynamic_calls_can_make_nested_requests_in_parallel() {
-        use std::sync::Barrier;
-        let python = if cfg!(windows) { "python" } else { "python3" };
-        let fake =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
-        let server = Arc::new(AppServer::with_request_timeout(
-            vec![
-                python.into(),
-                "-I".into(),
-                fake.to_string_lossy().into_owned(),
-            ],
-            Some(Duration::from_secs(5)),
-        ));
-        let started = server
-            .request("thread/start", json!({"model":"m"}))
-            .unwrap();
-        let id = started["thread"]["id"].as_str().unwrap();
-        let events = server.subscribe(id);
-        let barrier = Arc::new(Barrier::new(2));
-        let nested = server.clone();
-        server.register_tools(id, Arc::new(move |tool, args| {
-            assert_eq!(tool, "test");
-            barrier.wait();
-            let models = nested.request("model/list", json!({})).unwrap();
-            assert!(models["data"].is_array());
-            json!({"contentItems":[{"type":"inputText","text":args["n"].to_string()}],"success":true})
-        })).unwrap();
-        server
-            .request(
-                "turn/start",
-                json!({"threadId":id,"input":[{"type":"text","text":"DYNAMIC"}]}),
-            )
-            .unwrap();
-        loop {
-            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
-            if event["method"] == "turn/completed" {
-                assert_eq!(event["params"]["turn"]["status"], "completed");
-                break;
-            }
-        }
-        server.unregister_tools(id);
-        server.unsubscribe(id);
-    }
-
-    #[test]
-    fn dynamic_calls_are_routed_to_independent_threads() {
-        use std::sync::Barrier;
-        let python = if cfg!(windows) { "python" } else { "python3" };
-        let fake =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
-        let server = AppServer::with_request_timeout(
-            vec![
-                python.into(),
-                "-I".into(),
-                fake.to_string_lossy().into_owned(),
-            ],
-            Some(Duration::from_secs(5)),
-        );
-        let barrier = Arc::new(Barrier::new(4));
-        let mut threads = Vec::new();
-        for expected in ["first", "second"] {
-            let started = server
-                .request("thread/start", json!({"model":"m"}))
-                .unwrap();
-            let id = started["thread"]["id"].as_str().unwrap().to_owned();
-            let events = server.subscribe(&id);
-            let barrier = barrier.clone();
-            let handler_id = id.clone();
-            server.register_tools(&id, Arc::new(move |tool, args| {
-                assert_eq!(tool, "test");
-                assert_eq!(args["threadId"], handler_id);
-                barrier.wait();
-                json!({"contentItems":[{"type":"inputText","text":format!("{expected}:{}", args["n"])}],"success":true})
-            })).unwrap();
-            server
-                .request(
-                    "turn/start",
-                    json!({"threadId":id,"input":[{"type":"text","text":"DYNAMIC"}]}),
-                )
-                .unwrap();
-            threads.push((id, events));
-        }
-        for (id, events) in threads {
-            loop {
-                let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
-                if event["method"] == "turn/completed" {
-                    assert_eq!(event["params"]["threadId"], id);
-                    assert_eq!(event["params"]["turn"]["status"], "completed");
-                    break;
-                }
-            }
-            server.unregister_tools(&id);
-            server.unsubscribe(&id);
-        }
-    }
-
-    #[test]
     fn notifications_and_cancel_reach_the_registered_turn() {
-        let python = if cfg!(windows) { "python" } else { "python3" };
+        let python = std::env::var("AXIOM_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let fake =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
         let server = AppServer::new(vec![
-            python.into(),
+            python,
             "-I".into(),
             fake.to_string_lossy().into_owned(),
         ]);

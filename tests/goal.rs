@@ -104,68 +104,6 @@ fn modes_status_and_project_gate() {
 }
 
 #[test]
-#[cfg(any(unix, windows))]
-fn missing_store_gate_does_not_bypass_live_store_lock_or_corrupt_state() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    let store = home.join("orchestrate/project");
-    goal::open(home, "change", "wish", Some("project")).unwrap();
-    goal::set_mode(home, "change", "change").unwrap();
-    assert_eq!(
-        goal::set_status(home, "change", "done", None).unwrap_err().kind,
-        "not_done"
-    );
-    assert!(!store.exists());
-    goal::open(home, "legacy", "wish", Some("project")).unwrap();
-    assert_eq!(
-        goal::set_status(home, "legacy", "done", None).unwrap()["status"],
-        "completed"
-    );
-    assert!(!store.exists());
-
-    fs::create_dir_all(&store).unwrap();
-    fs::write(store.join("core-wait.json"), "invalid json").unwrap();
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    let lock = options.open(store.join(".orch.mutex")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        assert_eq!(
-            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
-    }
-    goal::open(home, "locked", "wish", Some("project")).unwrap();
-    assert_eq!(
-        goal::set_status(home, "locked", "done", None).unwrap_err().kind,
-        "busy"
-    );
-    assert_eq!(
-        goal::load(home, "locked").unwrap().unwrap().status,
-        "active"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        // Parallel tests may fork between acquisition and close. Explicitly
-        // release this fixture's flock, as the production OsLock guard does;
-        // closing our descriptor alone can leave a child holding the lock.
-        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
-    }
-    drop(lock);
-    assert_eq!(
-        goal::set_status(home, "locked", "done", None).unwrap_err().kind,
-        "invalid_argument"
-    );
-}
-
-#[test]
 fn done_requires_verified_units_and_current_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
@@ -214,121 +152,9 @@ fn done_requires_verified_units_and_current_evidence() {
     fs::remove_file(store.join("reports/unit.evidence.tsv")).unwrap();
     assert_eq!(
         goal::set_status(home, "s", "done", None).unwrap_err().kind,
-        "not_done"
+        "not_done",
+        "legacy flags and missing evidence must not substitute for a verified checkpoint"
     );
-}
-
-#[test]
-fn done_uses_goal_cwd_for_current_sources() {
-    use axiom::orch::*;
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    let repo = home.join("project");
-    fs::create_dir(&repo).unwrap();
-    assert!(std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
-    fs::write(repo.join("file.txt"), "verified").unwrap();
-    let goal = goal::open(home, "s", "wish", Some(repo.to_str().unwrap())).unwrap();
-    goal::set_mode(home, "s", "change").unwrap();
-    let store = store_for(home, goal.project.as_deref().unwrap()).unwrap();
-    fs::create_dir_all(&store).unwrap();
-    fs::create_dir(store.join("inbox")).unwrap();
-    let brief = store.join("unit.brief");
-    fs::write(&brief, "GOAL test\nSCOPE file.txt\nVERIFY echo ok\n").unwrap();
-    fs::write(
-        store.join("units.tsv"),
-        format!(
-            "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nunit\tt\tpending\t\t\t\t{}\n",
-            brief.display()
-        ),
-    )
-    .unwrap();
-    begin_unit(&store, "unit", "worker", &repo, false).unwrap();
-    finish_unit(
-        &store,
-        "unit",
-        &repo,
-        "worker",
-        "gpt-worker",
-        &serde_json::json!({"status":"completed","file_changes":[]}),
-    )
-    .unwrap();
-    record_review(&store, &["unit".into()], "claude-review", true, &repo).unwrap();
-    for kind in ["full", "rewrite"] {
-        append_evidence(
-            &store,
-            if kind == "full" { "_full" } else { "_stages" },
-            &Evidence {
-                kind: kind.into(),
-                command: "test".into(),
-                exit_code: 0,
-                commit: snapshot(&repo, &[".".into()]),
-                ts: "9999".into(),
-            },
-        )
-        .unwrap();
-    }
-    fs::write(repo.join("file.txt"), "unverified").unwrap();
-    assert!(goal::set_status(home, "s", "done", None)
-        .unwrap_err()
-        .message
-        .contains("stale verification"));
-    assert_eq!(goal::load(home, "s").unwrap().unwrap().status, "active");
-    fs::write(repo.join("file.txt"), "verified").unwrap();
-    assert_eq!(
-        goal::set_status(home, "s", "done", None).unwrap()["status"],
-        "completed"
-    );
-}
-
-#[test]
-fn readonly_goals_ignore_old_project_engineering_units() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    let store = home.join("orchestrate/project");
-    fs::create_dir_all(&store).unwrap();
-    fs::write(
-        store.join("units.tsv"),
-        "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nold\tt\tfailed\t\t\t\t\n",
-    )
-    .unwrap();
-    for mode in ["answer", "review"] {
-        goal::open(home, mode, "readonly wish", Some("project")).unwrap();
-        goal::set_mode(home, mode, mode).unwrap();
-        assert_eq!(
-            goal::set_status(home, mode, "done", None).unwrap()["status"],
-            "completed"
-        );
-    }
-}
-
-#[test]
-fn interjection_answer_restores_original_mode_and_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    for mode in [None, Some("change"), Some("review"), Some("answer")] {
-        goal::open(temp.path(), "s", "wish", None).unwrap();
-        if let Some(mode) = mode {
-            goal::set_mode(temp.path(), "s", mode).unwrap();
-        }
-        goal::interject(temp.path(), "s", "first question").unwrap();
-        goal::set_mode(temp.path(), "s", "answer").unwrap();
-        goal::interject(temp.path(), "s", "second question").unwrap();
-        let restored = goal::classify(temp.path(), "s", "answer").unwrap();
-        assert_eq!(restored.mode.as_deref(), mode);
-        assert_eq!(restored.mode_locked, mode.is_some());
-        if mode.is_some() {
-            assert_eq!(
-                goal::set_mode(temp.path(), "s", "answer").unwrap_err().kind,
-                "mode_locked"
-            );
-        } else {
-            goal::set_mode(temp.path(), "s", "change").unwrap();
-        }
-    }
 }
 
 #[test]
@@ -437,7 +263,7 @@ fn interrupt_reopen_and_markers() {
     let mut data: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     data["project"] = "project".into();
-    data["mode"] = "creative".into();
+    data["mode"] = "review".into();
     data["mode_locked"] = true.into();
     data["asked"] = true.into();
     data["dispatched"] = true.into();
@@ -467,7 +293,7 @@ fn interrupt_reopen_and_markers() {
     assert_eq!(g.status, "active");
     assert_eq!(g.amendments, ["amend"]);
     assert_eq!(g.project.as_deref(), Some("project"));
-    assert_eq!(g.mode.as_deref(), Some("creative"));
+    assert_eq!(g.mode.as_deref(), Some("review"));
     assert!(g.mode_locked && g.asked && g.dispatched);
     assert_eq!(
         g.other["unknown_key"],

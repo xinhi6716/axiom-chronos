@@ -10,18 +10,6 @@ A worker stays small when the brief leaves nothing to infer. In 18 runs of delet
 GOAL    one observable outcome, one sentence
 SCOPE   the exact paths the worker may create, change or delete
 VERIFY  one command; exit code 0 means done
-DELIVERY implementation
-OUTPUTS exact relative output paths, separated by spaces
-```
-
-Machine syntax is literal: keep each field's value on its header line, begin the brief with GOAL, and use only paths in SCOPE/OUTPUTS (no explanations or semicolons). DELIVERY is exactly `implementation`, `verification` or `measurement`, never a sentence. OUTPUTS names actual required files within SCOPE. Put explanation in GOAL or indented CONTEXT. For example:
-
-```
-GOAL Implement the approved CLI contract and its integration tests
-SCOPE src/main.rs tests/cli.rs README.md Cargo.lock
-VERIFY cargo test --test cli --locked --offline
-DELIVERY implementation
-OUTPUTS src/main.rs tests/cli.rs README.md Cargo.lock
 ```
 
 Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream report or retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)); the full template is for coordinators.
@@ -39,10 +27,8 @@ Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the u
 - No persona, tone or background the unit does not use.
 
 
-## Ownership and recovery
+## Codex Rust assembly
 
-The external core holds intent/authorization, not design or worker reports. Independent Astra max owns planning and technical rulings; Terra high dispatcher owns the engineering subtree, Terra high modular workers, Sol high assembly, Terra medium memory, Luna only nonengineering content. Read-only dispatcher native tools do not prohibit its supplied Host dynamic dispatch tools in inherited change mode. No additional core. Preserve authorized uncommitted edits; include referenced nested tests/helpers in scope.
+The current external ASTRA medium is the only core. `dispatch` starts a read-only Terra medium coordinator, which calls independent Astra MAX research and returns `needs_intent_review` with its digest. Core pass/reject is explicit. Approval runs a fresh Astra HIGH planner, frozen baseline checks, ready scoped Terra units concurrently, mandatory SOL HIGH assembly, a fresh independent Astra HIGH verifier invoking frozen IDs through Rust, and Terra medium memory. Luna is available only for non-engineering artifacts. All leaves are fresh, lean and carry no root conversation. The Rust role profiles under `agents/` are resources, not native agent registrations.
 
-Keep contracts, failure evidence, identities and next actions in the owner store at stage boundaries. Send bounded status/summary/artifact pointers upward (at most 8 KiB; core summary at most 100 words); pass only necessary actual upstream excerpts downward. Unconfirmed turns retain quarantine until external termination confirmation, never blind retry. Model completion, unit evidence, assembly and installed-product checks are distinct.
-
-Independent Astra HIGH uses `role: "astra-verify"`, explicit `sandbox: "read-only"` and `task_kind: "verification"` or `"measurement"`; assign only verification or measurements, never product modification or improvement. Astra MAX remains the research role. The report distinguishes requested effort from actual effort, which may be unknown.
+Terminal completion is not task/test success. The root awaits an authority boundary with `max_wait_ms=0`; each execution has a finite budget. The same request id/input replays the saved boundary. Unknown writes retain reservations and require history/repair reconciliation; no polling core, GOAL continuation or promise to wake an offline host. A dedicated command-only AppServer launches with process cwd=scratch, with only scratch writable. Commands use explicit product paths or a prepared scratch copy. Generic projects finish at `ready_to_commit`; no remote, commit or Rust package release is required by the pipeline.

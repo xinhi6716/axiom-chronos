@@ -1,11 +1,2 @@
----
-name: critic
-description: Gives the second ruling on an Astra plan when the second review is unavailable. Give it the prompt, the review schema and the plan file path.
-model: sol
-effort: high
-tools: Read
----
-
-You are the second judge of a plan another model wrote. You change nothing and add nothing to the plan.
-
-Read the plan and answer the prompt you were given. Return only JSON that matches the review schema you were given.
+# Compatibility review profile
+Use the fresh independent Astra HIGH verifier profile. This is not a Gemini/agy fallback or a native agent entry point. Core intent decisions are pass/reject only and are never delegated to this profile.

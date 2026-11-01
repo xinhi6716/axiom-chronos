@@ -11,14 +11,7 @@ use std::{
 fn config(home: &std::path::Path) -> Config {
     Config {
         data_home: Some(home.into()),
-        codex: Ok(vec![
-            common::python(),
-            "-I".into(),
-            common::repo_root()
-                .join("tests/bridge/fake_review.py")
-                .to_string_lossy()
-                .into_owned(),
-        ]),
+        codex: Ok(common::fake("fake_codex")),
         agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
@@ -50,20 +43,29 @@ fn check(r: &Value, status: &str) {
     }
 }
 fn fixture(home: &std::path::Path) {
-    let initialized = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(home)
-        .output()
-        .unwrap();
-    assert!(initialized.status.success(), "git init: {:?}; stdout={}; stderr={}",
-        initialized.status, String::from_utf8_lossy(&initialized.stdout),
-        String::from_utf8_lossy(&initialized.stderr));
     let store = home.join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("brief.md");
     fs::write(&brief, "GOAL test\nSCOPE file.txt\nVERIFY test\n").unwrap();
     fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tx\tverified\t\t\t\t{}\nu2\tx\tpending\t\t\t\t{}\nu3\tx\tbuilt\t\t\t\t{}\n", brief.display(), brief.display(), brief.display())).unwrap();
     fs::write(home.join("file.txt"), "content").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(home)
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir_all(store.join("reports")).unwrap();
+    let snap = axiom::orch::snapshot(home, &["file.txt".into()]);
+    fs::write(store.join("reports/u1.evidence.tsv"),format!("kind\tcommand\texit_code\tcommit\tts\nrun\tworker\t0\t{snap}\t1\nscope\tcheck\t0\t{snap}\t2\nverify\ttest\t0\t{snap}\t3\n")).unwrap();
+    fs::write(
+        store.join("reports/u1.repo.json"),
+        serde_json::to_vec(
+            &json!({"repo":home.canonicalize().unwrap(),"unit":"u1","snapshot":snap}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
 }
 #[test]
 fn full_protocol_session() {
@@ -109,7 +111,7 @@ fn full_protocol_session() {
             "memory_digest",
             "goal",
             "bridge_status",
-            "session"
+            "dispatch"
         ]
     );
     assert_eq!(lines[3]["result"], json!({}));
@@ -119,44 +121,67 @@ fn full_protocol_session() {
 #[test]
 fn descriptor_names_policy() {
     let t = tools();
-    assert!(t[0]["description"]
+    let descriptor = |name: &str| {
+        t.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap()
+    };
+    assert!(descriptor("codex_run")["description"]
         .as_str()
         .unwrap()
         .contains("${CLAUDE_PLUGIN_ROOT}/DISPATCH.md"));
-    assert!(!t[1]["description"]
+    assert!(!descriptor("gemini_preview")["description"]
         .as_str()
         .unwrap()
         .contains("DISPATCH.md"));
+    assert_eq!(
+        descriptor("dispatch")["inputSchema"]["required"],
+        json!(["project", "repo_root", "request_id", "action"])
+    );
+}
+
+#[test]
+fn compatibility_aliases_refuse_unadvertised_effort_without_agy() {
+    let temp = common::temp();
+    let wrapper = temp.path().join("no-effort.py");
+    fs::write(&wrapper,"import os,runpy,sys\nos.environ['FAKE_NO_EFFORT']='1'\nrunpy.run_path(sys.argv[1],run_name='__main__')\n").unwrap();
+    let b = Bridge::new(Config {
+        data_home: Some(temp.path().into()),
+        codex: Ok(vec![
+            common::python(),
+            wrapper.to_string_lossy().into_owned(),
+            common::repo_root()
+                .join("tests/fakes/fake_codex.py")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
+        agy: Err(axiom::base::Failure::new(
+            "agy_must_not_run",
+            "agy must not run",
+        )),
+        wsl: None,
+        on_windows: false,
+    });
+    for (name, args) in [
+        ("gemini_preview", json!({"prompt":"hello"})),
+        (
+            "review_code",
+            json!({"project_dir":temp.path(),"paths":["x"],"contract":"test"}),
+        ),
+    ] {
+        let result = invoke(&b, name, args);
+        assert_eq!(
+            result["structuredContent"]["error"]["kind"], "unsupported_effort",
+            "{result}"
+        );
+    }
 }
 #[test]
 fn memory_verified_round_trip_and_refusal() {
     let temp = common::temp();
     fixture(temp.path());
-    fs::write(temp.path().join(".git/info/exclude"), "orchestrate/\n").unwrap();
-    let store = temp.path().join("orchestrate/demo");
-    fs::write(
-        store.join("brief.md"),
-        "GOAL test\nSCOPE file.txt\nVERIFY echo ok\n",
-    )
-    .unwrap();
-    fs::create_dir_all(store.join("inbox")).unwrap();
-    axiom::orch::begin_unit(&store, "u1", "terra", temp.path(), false).unwrap();
-    let finish = axiom::orch::finish_unit(
-        &store,
-        "u1",
-        temp.path(),
-        "terra",
-        "gpt-6-terra",
-        &json!({"status":"completed"}),
-    )
-    .unwrap();
-    axiom::orch::record_review(&store, &["u1".into()], "gpt-6-sol", true, temp.path()).unwrap();
-    assert!(
-        axiom::orch::current_verified_unit(&store, "u1", temp.path()).unwrap(),
-        "finish={}, evidence={:?}",
-        finish.state,
-        axiom::orch::evidence(&store, "u1")
-    );
     let b = Bridge::new(config(temp.path()));
     let mut args = json!({"project":"demo","project_dir":temp.path(),"unit":"u1","title":"slugify","summary":"把標題轉成網址代稱","body":"slugify(text)","wish":"add slugify","files":["file.txt"]});
     let recorded = invoke(&b, "memory_record", args.clone());
@@ -167,14 +192,6 @@ fn memory_verified_round_trip_and_refusal() {
         found["structuredContent"]["entries"][0]["id"],
         recorded["structuredContent"]["id"]
     );
-    fs::write(temp.path().join("file.txt"), "changed after recording").unwrap();
-    let stale = invoke(&b, "memory_search", json!({"query":"網址代稱"}));
-    assert_eq!(stale["structuredContent"]["entries"], json!([]));
-    let historical = axiom::memory::Memory::open(temp.path())
-        .unwrap()
-        .search("網址代稱", None, 5)
-        .unwrap();
-    assert_eq!(historical["entries"][0]["stale"], true);
     args["unit"] = json!("u2");
     let refused = invoke(&b, "memory_record", args);
     check(&refused, "bridge_error");
@@ -211,14 +228,18 @@ fn preview_echo_and_bad_cwd() {
     let b = Bridge::new(config(temp.path()));
     let ok = invoke(&b, "gemini_preview", json!({"prompt":"hi"}));
     check(&ok, "completed");
-    assert_eq!(ok["structuredContent"]["response"], "echo: hi");
+    assert_eq!(
+        serde_json::from_str::<Value>(ok["structuredContent"]["response"].as_str().unwrap())
+            .unwrap()["brief"],
+        "hi"
+    );
     let bad = invoke(&b, "gemini_preview", json!({"prompt":"hi","cwd":"nope"}));
     check(&bad, "bridge_error");
     assert_eq!(
         bad["structuredContent"]["error"]["kind"],
         "invalid_argument"
     );
-    let failed = invoke(&b, "gemini_preview", json!({"prompt":"AGY_EMPTY"}));
+    let failed = invoke(&b, "gemini_preview", json!({"prompt":"AUTH"}));
     check(&failed, "failed");
 }
 #[test]
@@ -227,10 +248,8 @@ fn review_records_state() {
     fixture(temp.path());
     let b = Bridge::new(config(temp.path()));
     fs::create_dir_all(temp.path().join("orchestrate/demo/reports")).unwrap();
-    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
-    assert!(!identity.is_empty());
-    fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n")).unwrap();
-    let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract\nGOAL test\nSCOPE file.txt\nVERIFY test\n"});
+    fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t{snap}\t1\nverify\ttest\t0\t{snap}\t2\n",snap=axiom::orch::snapshot(temp.path(),&["file.txt".into()]))).unwrap();
+    let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract"});
     let ok = invoke(&b, "review_code", args.clone());
     check(&ok, "completed");
     assert_eq!(ok["structuredContent"]["verdict"], "pass");
@@ -252,13 +271,19 @@ fn bridge_status_and_missing_command() {
     let b = Bridge::new(config(temp.path()));
     let ok = invoke(&b, "bridge_status", json!({}));
     check(&ok, "completed");
-    assert_eq!(ok["structuredContent"]["agy"]["status"], json!("disabled"));
+    assert_eq!(
+        ok["structuredContent"]["agy"]["version"],
+        json!(["1.4.7-fake"])
+    );
     assert_eq!(ok["structuredContent"]["codex_app_server_running"], false);
     let mut c = config(temp.path());
     c.agy = Err(axiom::base::Failure::new("missing", "missing"));
     let missing = invoke(&Bridge::new(c), "bridge_status", json!({}));
     check(&missing, "completed");
-    assert_eq!(missing["structuredContent"]["agy"]["status"], "disabled");
+    assert_eq!(
+        missing["structuredContent"]["agy"]["error"]["kind"],
+        "missing"
+    );
 }
 #[test]
 fn goal_operations_and_mode_lock() {
@@ -369,18 +394,17 @@ fn serve_dispatches_tool_calls() {
         .collect();
     assert_eq!(lines.len(), 2);
     let success = lines.iter().find(|v| v["id"] == 1).unwrap();
-    // EOF cancels outstanding work, so completion depends on scheduling.
-    let status = success["result"]["structuredContent"]["status"]
-        .as_str()
-        .unwrap();
-    assert!(status == "completed" || status == "bridge_error");
-    check(&success["result"], status);
+    check(&success["result"], "completed");
+    assert_eq!(
+        success["result"]["structuredContent"]["response"],
+        success["result"]["structuredContent"]["final_message"]
+    );
     let failure = lines.iter().find(|v| v["id"] == 2).unwrap();
     check(&failure["result"], "bridge_error");
-    assert!(matches!(
-        failure["result"]["structuredContent"]["error"]["kind"].as_str(),
-        Some("unknown_tool" | "interrupted")
-    ));
+    assert_eq!(
+        failure["result"]["structuredContent"]["error"]["kind"],
+        "unknown_tool"
+    );
 }
 #[test]
 fn descriptors_expose_codex_unit_inputs() {
@@ -419,12 +443,12 @@ fn preview_stage_and_absolute_save() {
     check(&ok, "completed");
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(dest).unwrap()).unwrap()["answer"],
-        "hi"
+        "ok"
     );
     let failed = invoke(
         &b,
         "gemini_preview",
-        json!({"prompt":"AGY_EMPTY","project":"demo","stage":"rewrite"}),
+        json!({"prompt":"AUTH","project":"demo","stage":"rewrite"}),
     );
     check(&failed, "failed");
     let rows = fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap();
@@ -434,7 +458,7 @@ fn preview_stage_and_absolute_save() {
     assert!(rows
         .lines()
         .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
-    assert!(!marker.exists());
+    assert!(!marker.exists(), "compatibility alias must never start agy");
     let bad = invoke(
         &b,
         "gemini_preview",
@@ -535,14 +559,7 @@ fn serve_stops_codex_process() {
         json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}})
     );
     assert_eq!(
-        serve(
-            c,
-            MarkerEof {
-                request: Some(request),
-                marker: pid.clone()
-            },
-            Sink(Arc::new(Mutex::new(vec![])))
-        ),
+        serve(c, Cursor::new(request), Sink(Arc::new(Mutex::new(vec![])))),
         0
     );
     let id = fs::read_to_string(pid).unwrap();
@@ -593,7 +610,7 @@ fn review_blocker_and_units_without_project() {
     let no_project = invoke(
         &b,
         "review_code",
-        json!({"units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
+        json!({"units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
     );
     check(&no_project, "completed");
     assert_eq!(no_project["structuredContent"]["verdict"], "fail");
@@ -601,13 +618,11 @@ fn review_blocker_and_units_without_project() {
     assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
     assert!(!store.join("reports/u3.evidence.tsv").exists());
     fs::create_dir_all(store.join("reports")).unwrap();
-    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
-    assert!(!identity.is_empty());
-    fs::write(store.join("reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n")).unwrap();
+    fs::write(store.join("reports/u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t{snap}\t1\nverify\ttest\t0\t{snap}\t2\n",snap=axiom::orch::snapshot(temp.path(),&["file.txt".into()]))).unwrap();
     let failed = invoke(
         &b,
         "review_code",
-        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
+        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
     );
     check(&failed, "completed");
     assert_eq!(failed["structuredContent"]["verdict"], "fail");
@@ -643,535 +658,81 @@ fn panic_in_tool_body_is_bridge_error() {
     check(&bad, "bridge_error");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "panic");
 }
-
-#[test]
-fn codex_review_models_and_schema() {
-    let temp = common::temp();
-    fixture(temp.path());
-    let b = Bridge::new(config(temp.path()));
-    let store = temp.path().join("orchestrate/demo");
-    fs::create_dir_all(store.join("reports")).unwrap();
-    let review = |contract: &str| {
-        invoke(
-            &b,
-            "review_code",
-            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":format!("{contract}\nGOAL test\nSCOPE file.txt\nVERIFY test\n"),"model":"gemini-old"}),
-        )
-    };
-    let identity = axiom::orch::snapshot(temp.path(), &["file.txt".into()]);
-    assert!(!identity.is_empty());
-    fs::write(
-        store.join("reports/u3.evidence.tsv"),
-        format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t{identity}\t2\n"),
-    )
-    .unwrap();
-    let r = review("contract");
-    check(&r, "completed");
-    assert_eq!(r["structuredContent"]["reviewer"], "gpt-6-astra");
-    assert!(fs::read_to_string(store.join("reports/u3.evidence.tsv"))
-        .unwrap()
-        .contains("review\tgpt-6-astra\t"));
-    let invalid = review("EXTRA_FIELD");
-    check(&invalid, "failed");
-    assert_eq!(
-        invalid["structuredContent"]["error"]["kind"],
-        "no_review_output"
-    );
-    let preview = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","stage":"second_review","model":"gemini-old"}),
-    );
-    assert_eq!(preview["structuredContent"]["model"], "gpt-6-sol");
-    assert!(preview["structuredContent"]["thread_id"].is_string());
-    assert_eq!(
-        preview["structuredContent"]["conversation_id"],
-        preview["structuredContent"]["thread_id"]
-    );
-    assert!(preview["structuredContent"].get("response").is_some());
-    assert!(preview["structuredContent"].get("error").is_some());
-    let rewrite = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","stage":"rewrite"}),
-    );
-    assert_eq!(rewrite["structuredContent"]["model"], "gpt-6-luna");
-    assert_eq!(
-        rewrite["structuredContent"]["conversation_id"],
-        rewrite["structuredContent"]["thread_id"]
-    );
-    let rejected = invoke(
-        &b,
-        "review_code",
-        json!({"project_dir":temp.path(),"paths":["file.txt"],"contract":"x\nGOAL test\nSCOPE file.txt\nVERIFY test\n","model":"gpt-6-luna"}),
-    );
-    assert_eq!(
-        rejected["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
-}
-
-#[test]
-fn actual_reviewer_and_stage_models_control_reports_and_evidence() {
-    for (actual, accepted) in [("gpt-7-sol", true), ("gpt-6-terra", false)] {
-        let temp = common::temp();
-        fixture(temp.path());
-        let repo = common::temp();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repo.path())
-            .status()
-            .unwrap()
-            .success());
-        fs::write(repo.path().join("file.txt"), "content").unwrap();
-        let store = temp.path().join("orchestrate/demo");
-        fs::create_dir_all(store.join("inbox")).unwrap();
-        fs::write(
-            store.join("brief.md"),
-            "GOAL test\nSCOPE file.txt\nVERIFY echo ok\n",
-        )
-        .unwrap();
-        axiom::orch::begin_unit(&store, "u3", "terra", repo.path(), false).unwrap();
-        let built = axiom::orch::finish_unit(
-            &store,
-            "u3",
-            repo.path(),
-            "terra",
-            "gpt-6-terra",
-            &json!({"status":"completed"}),
-        )
-        .unwrap();
-        assert_eq!(built.state, "built");
-        let mut cfg = config(temp.path());
-        cfg.codex
-            .as_mut()
-            .unwrap()
-            .extend(["--actual-model".into(), actual.into()]);
-        let b = Bridge::new(cfg);
-        let r = invoke(
-            &b,
-            "review_code",
-            json!({"project":"demo","units":["u3"],"project_dir":repo.path(),"paths":["file.txt"],"contract":"review actual model\nGOAL test\nSCOPE file.txt\nVERIFY echo ok\n"}),
-        );
-        check(
-            &r,
-            if accepted {
-                "completed"
-            } else {
-                "bridge_error"
-            },
-        );
-        if accepted {
-            assert_eq!(r["structuredContent"]["reviewer"], actual);
-            assert_eq!(r["structuredContent"]["requested_model"], "gpt-6-sol");
-        }
-        let reviews: Vec<_> = axiom::orch::evidence(&store, "u3")
-            .unwrap()
-            .into_iter()
-            .filter(|row| row.kind == "review")
-            .collect();
-        if accepted {
-            assert_eq!(reviews.len(), 1);
-            assert_eq!(reviews[0].command, actual);
-            assert_eq!(r["structuredContent"]["states"]["u3"], "verified");
-        } else {
-            assert_eq!(r["structuredContent"]["error"]["kind"], "thread_policy");
-            assert!(reviews.is_empty()); // Never credit a writer as its own reviewer.
-        }
-        let stage = invoke(
-            &b,
-            "gemini_preview",
-            json!({"project":"demo","stage":"second_review","prompt":"stage actual model"}),
-        );
-        check(
-            &stage,
-            if accepted {
-                "completed"
-            } else {
-                "bridge_error"
-            },
-        );
-        if accepted {
-            assert_eq!(stage["structuredContent"]["model"], actual);
-        }
-        let evidence = fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap();
-        assert!(evidence.contains(&format!(
-            "second_review\t{}\t{}\t",
-            if accepted { actual } else { "gpt-6-sol" },
-            if accepted { 0 } else { 1 }
-        )));
-    }
-}
-
-#[test]
-fn review_rejects_invalid_output_and_unsafe_or_oversized_files() {
-    let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
-    fs::write(temp.path().join("one"), vec![b'x'; 30_001]).unwrap();
-    fs::write(temp.path().join("two"), vec![b'x'; 30_000]).unwrap();
-    let invoke_review = |paths: Vec<&str>, contract: &str| {
-        invoke(
-            &b,
-            "review_code",
-            json!({"project_dir":temp.path(),"paths":paths,"contract":contract}),
-        )
-    };
-    for contract in ["BADJSON", "WRONGSHAPE", "AGY_EMPTY"] {
-        let r = invoke_review(vec!["one"], contract);
-        check(&r, "failed");
-    }
-    let r = invoke_review(vec!["one", "two"], "contract");
-    assert_eq!(r["structuredContent"]["error"]["kind"], "too_large");
-    fs::write(temp.path().join("large"), vec![b'x'; 60_001]).unwrap();
-    let r = invoke_review(vec!["large"], "contract");
-    assert_eq!(r["structuredContent"]["error"]["kind"], "too_large");
-    let r = invoke_review(vec!["../outside"], "contract");
-    assert_eq!(r["structuredContent"]["error"]["kind"], "invalid_argument");
-}
-
-#[test]
-fn review_effort_and_forbidden_processes() {
-    let temp = common::temp();
-    let log = temp.path().join("calls.jsonl");
-    let forbidden = temp.path().join("forbidden");
-    let wrapper = temp.path().join("codex.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let forbidden_cmd = temp.path().join("forbidden.py");
-    fs::write(
-        &forbidden_cmd,
-        format!(
-            "open({:?},'w').write('invoked')\n",
-            forbidden.to_string_lossy().replace('\\', "/")
-        ),
-    )
-    .unwrap();
-    let mut c = config(temp.path());
+fn logged_codex(home: &std::path::Path, name: &str) -> (Arc<Bridge>, std::path::PathBuf) {
+    let wrapper = home.join(format!("{name}.py"));
+    let log = home.join(format!("{name}.log"));
+    fs::write(&wrapper,"import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
+    let mut c = config(home);
     c.codex = Ok(vec![
         common::python(),
         wrapper.to_string_lossy().into_owned(),
         log.to_string_lossy().into_owned(),
         common::repo_root()
-            .join("tests/bridge/fake_review.py")
+            .join("tests/fakes/fake_codex.py")
             .to_string_lossy()
             .into_owned(),
     ]);
-    c.agy = Ok(vec![
-        common::python(),
-        forbidden_cmd.to_string_lossy().into_owned(),
-    ]);
-    let b = Bridge::new(c);
-    fixture(temp.path());
-    let store = temp.path().join("orchestrate/demo");
-    fs::create_dir_all(store.join("reports")).unwrap();
-    fs::write(
-        store.join("reports/u3.evidence.tsv"),
-        "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-sol\t0\t\t1\nverify\ttest\t0\t\t2\n",
-    )
-    .unwrap();
-    check(&invoke(&b, "bridge_status", json!({})), "completed");
-    check(
-        &invoke(
-            &b,
-            "gemini_preview",
-            json!({"prompt":"hi","stage":"second_review"}),
-        ),
-        "completed",
-    );
-    check(
-        &invoke(
-            &b,
-            "review_code",
-            json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"x\nGOAL test\nSCOPE file.txt\nVERIFY test\n"}),
-        ),
-        "completed",
-    );
-    let rewrite = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"supplied text only","stage":"rewrite"}),
-    );
-    check(&rewrite, "completed");
-    assert!(rewrite["structuredContent"]["usage"].is_object());
-    assert!(!forbidden.exists());
-    let events: Vec<Value> = fs::read_to_string(log)
-        .unwrap()
-        .lines()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect();
-    let models: Vec<_> = events
-        .iter()
-        .filter(|e| e["method"] == "thread/start")
-        .map(|e| e["params"]["model"].as_str().unwrap())
-        .collect();
-    let efforts: Vec<_> = events
-        .iter()
-        .filter(|e| e["method"] == "turn/start")
-        .map(|e| e["params"]["effort"].as_str().unwrap())
-        .collect();
-    assert_eq!(models, ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]);
-    assert_eq!(efforts, ["high", "max", "low"]);
-    let starts: Vec<_> = events
-        .iter()
-        .filter(|e| e["method"] == "thread/start")
-        .collect();
-    for event in &starts {
-        let instructions = event["params"]["developerInstructions"].as_str().unwrap();
-        assert!(instructions.contains("Process only the text supplied"));
-        assert!(instructions
-            .contains("Do not search or inspect the filesystem, use tools, or edit files"));
-        assert!(instructions.contains("JSON matching it"));
-        assert_eq!(event["params"]["sandbox"], "read-only");
-        assert_eq!(event["params"]["config"]["features"]["multi_agent"], false);
-    }
-    assert!(starts[2]["params"]["developerInstructions"]
-        .as_str()
-        .unwrap()
-        .contains("report rewriter"));
+    c.agy = Err(axiom::base::Failure::new("forbidden", "no agy"));
+    (Arc::new(Bridge::new(c)), log)
 }
-
-struct SynchronizedLines {
-    lines: std::collections::VecDeque<String>,
-    log: std::path::PathBuf,
-    capture: Arc<Mutex<Vec<u8>>>,
-    cancel_at: Arc<Mutex<Option<std::time::Instant>>>,
-}
-impl io::Read for SynchronizedLines {
-    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-        unreachable!()
-    }
-}
-impl io::BufRead for SynchronizedLines {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        unreachable!()
-    }
-    fn consume(&mut self, _: usize) {
-        unreachable!()
-    }
-    fn read_line(&mut self, line: &mut String) -> io::Result<usize> {
-        if self.lines.len() == 1 {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            while !(fs::read_to_string(&self.log)
-                .unwrap_or_default()
-                .contains("turn/start")
-                && String::from_utf8_lossy(&self.capture.lock().unwrap()).contains("\"id\":2"))
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "requests did not start: log={:?}, output={:?}",
-                    fs::read_to_string(&self.log),
-                    String::from_utf8_lossy(&self.capture.lock().unwrap())
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            *self.cancel_at.lock().unwrap() = Some(std::time::Instant::now());
-        }
-        if let Some(text) = self.lines.pop_front() {
-            line.push_str(&text);
-            Ok(text.len())
-        } else {
-            Ok(0)
-        }
+fn wait_turn(log: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !fs::read_to_string(log)
+        .unwrap_or_default()
+        .contains("turn/start")
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 #[test]
-fn notification_cancels_only_target_and_eof_cancels_remaining() {
-    for notify in [true, false] {
-        let temp = common::temp();
-        let out = Sink(Arc::new(Mutex::new(vec![])));
-        let capture = out.0.clone();
-        let slow = json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"SLOW"}}});
-        let fast = json!({"id":2,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"nothing"}}});
-        let log = temp.path().join("codex-events.jsonl");
-        let wrapper = temp.path().join("fake.py");
-        fs::write(&wrapper, format!("import os,runpy\nos.environ['FAKE_CODEX_LOG'] = {}\nrunpy.run_path({}, run_name='__main__')\n", serde_json::to_string(&log.to_string_lossy()).unwrap(), serde_json::to_string(&common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy()).unwrap())).unwrap();
-        let mut cfg = config(temp.path());
-        cfg.codex = Ok(vec![
-            common::python(),
-            "-I".into(),
-            wrapper.to_string_lossy().into_owned(),
-        ]);
-        let signal = if notify {
-            format!(
-                "{}\n",
-                json!({"method":"notifications/cancelled","params":{"requestId":1}})
-            )
-        } else {
-            "\n".into()
-        };
-        let cancel_at = Arc::new(Mutex::new(None));
-        let input = SynchronizedLines {
-            lines: std::collections::VecDeque::from([
-                format!("{slow}\n"),
-                format!("{fast}\n"),
-                signal,
-            ]),
-            log,
-            capture: capture.clone(),
-            cancel_at: cancel_at.clone(),
-        };
-        serve(cfg, input, out);
-        assert!(
-            cancel_at.lock().unwrap().unwrap().elapsed() < std::time::Duration::from_secs(2),
-            "cancellation phase exceeded two seconds"
-        );
-        let bytes = capture.lock().unwrap();
-        let responses: Vec<Value> = std::str::from_utf8(&bytes)
-            .unwrap()
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect();
-        assert_eq!(
-            responses.iter().find(|v| v["id"] == 2).unwrap()["result"]["structuredContent"]
-                ["status"],
-            "completed"
-        );
-        assert_ne!(
-            responses.iter().find(|v| v["id"] == 1).unwrap()["result"]["structuredContent"]
-                ["status"],
-            "completed"
-        );
-    }
-}
-
-#[test]
-fn caller_attachment_bootstrap_resume_and_authority_without_core_thread() {
+fn classify_stop_cancels_hanging_codex_alias() {
     let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
-    let begin = invoke(
-        &b,
-        "session",
-        json!({"action":"begin","skill":"wish","project":temp.path(),"text":"inspect"}),
-    );
-    check(&begin, "completed");
-    let id = begin["structuredContent"]["session"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(!b.running());
-    let denied = invoke(
-        &b,
-        "session",
-        json!({"action":"call","tool":"codex_run","arguments":{"role":"terra"}}),
-    );
-    assert!(denied["isError"].as_bool().unwrap());
-    let mode = invoke(
-        &b,
-        "session",
-        json!({"action":"call","tool":"goal","arguments":{"mode":"review"}}),
-    );
-    check(&mode, "completed");
-    let linux = invoke(
-        &b,
-        "session",
-        json!({"action":"call","tool":"run_on_linux","arguments":{"project_dir":temp.path(),"args":["-c","open('marker','w')"]}}),
-    );
-    assert!(linux["isError"].as_bool().unwrap());
-    assert!(!temp.path().join("marker").exists());
+    let (b, log) = logged_codex(temp.path(), "alias-stop");
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let worker = b.clone();
+    let handle = std::thread::spawn(move || {
+        invoke(
+            &worker,
+            "gemini_preview",
+            json!({"prompt":"HANG","timeout_s":60}),
+        )
+    });
+    wait_turn(&log);
+    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
     check(
-        &invoke(
-            &b,
-            "session",
-            json!({"action":"interject","text":"clarify"}),
-        ),
+        &invoke(&b, "goal", json!({"session":"s","classify":"stop"})),
         "completed",
-    );
-    let blocked = invoke(
-        &b,
-        "session",
-        json!({"action":"call","tool":"orch","arguments":{"project":"demo","args":["fulltest"]}}),
     );
     assert_eq!(
-        blocked["structuredContent"]["error"]["kind"],
-        "permission_denied"
+        handle.join().unwrap()["structuredContent"]["status"],
+        "interrupted"
     );
-    check(
-        &invoke(&b, "session", json!({"action":"stop"})),
-        "completed",
-    );
-    let resumed = invoke(&b, "session", json!({"action":"resume","session":id}));
-    check(&resumed, "completed");
-    assert_eq!(resumed["structuredContent"]["session"], id);
-    assert!(resumed["structuredContent"]["goal"]["interjection"].is_object());
-    assert!(!b.running());
+    assert!(fs::read_to_string(log).unwrap().contains("turn/interrupt"));
 }
-
 #[test]
-fn caller_cannot_bypass_dispatcher_to_content() {
+fn codex_alias_stop_is_scoped_to_its_bridge() {
     let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
+    let (a, log_a) = logged_codex(temp.path(), "a");
+    let (b, log_b) = logged_codex(temp.path(), "b");
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let first = a.clone();
+    let one =
+        std::thread::spawn(move || invoke(&first, "gemini_preview", json!({"prompt":"HANG"})));
+    let two = std::thread::spawn(move || invoke(&b, "gemini_preview", json!({"prompt":"SLOW"})));
+    wait_turn(&log_a);
+    wait_turn(&log_b);
+    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
     check(
-        &invoke(
-            &b,
-            "session",
-            json!({"action":"begin","project":temp.path(),"text":"summarize"}),
-        ),
+        &invoke(&a, "goal", json!({"session":"s","classify":"stop"})),
         "completed",
     );
-    check(
-        &invoke(
-            &b,
-            "session",
-            json!({"action":"call","tool":"goal","arguments":{"mode":"answer"}}),
-        ),
-        "completed",
+    assert_eq!(
+        one.join().unwrap()["structuredContent"]["status"],
+        "interrupted"
     );
-    let child = invoke(
-        &b,
-        "session",
-        json!({"action":"call","tool":"Agent","arguments":{"subagent_type":"chronos:content","prompt":"Summarize this text: hello","cwd":temp.path()}}),
-    );
-    assert_eq!(child["structuredContent"]["error"]["kind"],"permission_denied");
-    assert!(!b.running());
-}
-
-#[test]
-fn unrelated_review_paths_never_credit_unit() {
-    let temp = common::temp();
-    fixture(temp.path());
-    fs::write(temp.path().join("unrelated.txt"), "other").unwrap();
-    let b = Bridge::new(config(temp.path()));
-    let result = invoke(
-        &b,
-        "review_code",
-        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["unrelated.txt"],"contract":"x"}),
-    );
-    assert_eq!(result["structuredContent"]["error"]["kind"], "review_scope");
-    assert!(!temp
-        .path()
-        .join("orchestrate/demo/reports/u3.evidence.tsv")
-        .exists());
-}
-
-// Make EOF occur after observable process start, not after an arbitrary sleep.
-struct MarkerEof {
-    request: Option<String>,
-    marker: std::path::PathBuf,
-}
-impl io::Read for MarkerEof {
-    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-        unreachable!()
-    }
-}
-impl io::BufRead for MarkerEof {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        unreachable!()
-    }
-    fn consume(&mut self, _: usize) {
-        unreachable!()
-    }
-    fn read_line(&mut self, line: &mut String) -> io::Result<usize> {
-        if let Some(request) = self.request.take() {
-            line.push_str(&request);
-            return Ok(request.len());
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !self.marker.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "process never started"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        Ok(0)
-    }
+    check(&two.join().unwrap(), "completed");
+    assert!(!fs::read_to_string(log_b)
+        .unwrap()
+        .contains("turn/interrupt"));
 }

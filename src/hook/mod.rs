@@ -51,52 +51,6 @@ fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
     normalize(&p).starts_with(normalize(home))
 }
 
-fn shell_words(command: &str) -> Option<Vec<Vec<String>>> {
-    let mut segments = vec![Vec::new()];
-    let mut word = String::new();
-    let mut started = false;
-    let mut quote = None;
-    let mut chars = command.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' && quote != Some('\'') {
-            let next = chars.next()?;
-            if next == '\n' {
-                continue;
-            }
-            if quote == Some('"') && !"$`\"\\".contains(next) {
-                word.push('\\');
-            }
-            word.push(next);
-            started = true;
-        } else if quote == Some(c) {
-            quote = None;
-        } else if quote.is_none() && (c == '\'' || c == '"') {
-            quote = Some(c);
-            started = true;
-        } else if c == '$' || c == '`' || (quote.is_none() && "*?[]{}()".contains(c)) {
-            return None;
-        } else if quote.is_none() && (c.is_whitespace() || "&|;".contains(c)) {
-            if started {
-                segments.last_mut()?.push(std::mem::take(&mut word));
-                started = false;
-            }
-            if "&|;\n\r".contains(c) {
-                segments.push(Vec::new());
-            }
-        } else {
-            word.push(c);
-            started = true;
-        }
-    }
-    if quote.is_some() {
-        return None;
-    }
-    if started {
-        segments.last_mut()?.push(word);
-    }
-    Some(segments)
-}
-
 pub fn read_only_bash(command: &str) -> bool {
     if command.contains("$(") || command.contains('`') {
         return false;
@@ -108,11 +62,8 @@ pub fn read_only_bash(command: &str) -> bool {
     if cleaned.contains('>') || cleaned.contains('<') {
         return false;
     }
-    let Some(segments) = shell_words(&cleaned) else {
-        return false;
-    };
-    for segment in segments {
-        let mut words = segment.iter().map(String::as_str).peekable();
+    for segment in cleaned.split(['&', '|', ';', '\n', '\r']) {
+        let mut words = segment.split_whitespace().peekable();
         while words.peek().is_some_and(|w| {
             w.split_once('=').is_some_and(|(k, _)| {
                 !k.is_empty()
@@ -124,7 +75,7 @@ pub fn read_only_bash(command: &str) -> bool {
             words.next();
         }
         let Some(cmd) = words.next() else {
-            if !segment.is_empty() {
+            if !segment.trim().is_empty() {
                 return false;
             }
             continue;
@@ -166,57 +117,10 @@ pub fn read_only_bash(command: &str) -> bool {
                 }) {
                     return false;
                 }
-                if matches!(subcommand, Some("diff" | "log" | "show")) {
-                    let mut no_external = false;
-                    let mut no_textconv = false;
-                    for w in words {
-                        if w == "--" {
-                            break;
-                        }
-                        let option = w.split('=').next().unwrap_or(w);
-                        if option.starts_with("--")
-                            && option.len() > 2
-                            && ("--output".starts_with(option) || w.starts_with("--output="))
-                        {
-                            return false;
-                        }
-                        match w {
-                            "--no-ext-diff" => no_external = true,
-                            "--ext-diff" => no_external = false,
-                            "--no-textconv" => no_textconv = true,
-                            "--textconv" => no_textconv = false,
-                            _ if option.starts_with("--")
-                                && option.len() > 2
-                                && ("--ext-diff".starts_with(option)
-                                    || "--textconv".starts_with(option)) =>
-                            {
-                                return false
-                            }
-                            _ => (),
-                        }
-                    }
-                    if !no_external || !no_textconv {
-                        return false;
-                    }
-                } else if subcommand == Some("blame") {
-                    let mut no_textconv = false;
-                    for w in words {
-                        if w == "--" {
-                            break;
-                        }
-                        let option = w.split('=').next().unwrap_or(w);
-                        if option == "--no-textconv" {
-                            no_textconv = true;
-                        } else if option.starts_with("--")
-                            && option.len() > 2
-                            && "--textconv".starts_with(option)
-                        {
-                            return false;
-                        }
-                    }
-                    if !no_textconv {
-                        return false;
-                    }
+                if matches!(subcommand, Some("diff" | "log" | "show"))
+                    && words.any(|w| w == "--output" || w.starts_with("--output="))
+                {
+                    return false;
                 }
             }
             _ => return false,
@@ -264,33 +168,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 context(format!("This message amends Chronos goal {session}. The user's words take precedence over the plan. Classify it with the bridge goal tool as amend, answer or stop."))
             }
         }
-        "Stop" => {
-            let g = goal::load(home?, session).ok()??;
-            (g.status == "active")
-                .then(|| json!({"decision":"block", "reason":stop_reason(session, &g)}))
-        }
+        "Stop" => None,
         "PreToolUse" => {
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
             let agent = event.get("agent_id").is_some();
-            let role = event.get("agent_role").and_then(Value::as_str);
             let input = event.get("tool_input").unwrap_or(&Value::Null);
             if agent
                 && matches!(tool, "Agent" | "Task")
-                && !(input.get("subagent_type").and_then(Value::as_str) == Some("chronos:reviewer")
-                    || (role == Some("dispatcher")
-                        && matches!(
-                            input["subagent_type"].as_str(),
-                            Some(
-                                "chronos:content"
-                                    | "chronos:memory-keeper"
-                                    | "chronos:astra"
-                                    | "chronos:architect"
-                                    | "chronos:critic"
-                                    | "chronos:tester"
-                            )
-                        )))
+                && input.get("subagent_type").and_then(Value::as_str) != Some("chronos:reviewer")
             {
-                return deny("Only designated reviewer/content children may be started; never forward engineering through another agent.");
+                return deny("Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.");
             }
             if tool == CODEX && !agent {
                 return deny("codex_run is for the chronos agents. Hand building to chronos:dispatcher and Astra plans to chronos:astra.");
@@ -300,9 +187,10 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let mode = g.mode.as_deref();
             let dispatcher = (tool == "Agent" || tool == "Task")
                 && input.get("subagent_type").and_then(Value::as_str) == Some("chronos:dispatcher");
-            if (dispatcher && mode.is_none())
-                || (mode != Some("change") && tool == CODEX
-                        && input.get("sandbox").and_then(Value::as_str) != Some("read-only"))
+            if mode != Some("change")
+                && (dispatcher
+                    || (tool == CODEX
+                        && input.get("sandbox").and_then(Value::as_str) != Some("read-only")))
             {
                 return deny(if mode.is_none() {
                     "Declare the mode with the goal tool before dispatching or using a writable sandbox."
@@ -310,18 +198,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     "The goal mode is review/answer; dispatch and writable sandboxes require change mode."
                 });
             }
-            let restricted = role.is_some() || !agent || matches!(mode, Some("review" | "answer"));
+            let restricted = !agent || matches!(mode, Some("review" | "answer"));
             if restricted && ["Write", "Edit", "NotebookEdit"].contains(&tool) {
                 let path = input
                     .get("file_path")
                     .or_else(|| input.get("notebook_path"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let content_output = role == Some("content")
-                    && mode.is_some()
-                    && event.get("authorized_output_path").and_then(Value::as_str) == Some(path);
-                if !content_output && !inside(home, path, event.get("cwd").and_then(Value::as_str))
-                {
+                if !inside(home, path, event.get("cwd").and_then(Value::as_str)) {
                     return deny("Writes outside the data home are not allowed for this caller or goal mode.");
                 }
             }

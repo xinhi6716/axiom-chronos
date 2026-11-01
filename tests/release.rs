@@ -37,11 +37,42 @@ fn rust_release_contract() {
         for forbidden in ["pipx", "bun", "axiom_python", "--model", "`60`"] {
             assert!(!lower.contains(forbidden), "{name} contains {forbidden}");
         }
-        for required in ["beta", "0.2.2-codex.dev.14", "interjection"] {
+        for required in ["0.3.0-codex.dev.1"] {
             assert!(lower.contains(required), "{name} missing {required}");
         }
     }
     let bridge = fs::read_to_string(root.join("docs/bridge.md")).unwrap();
     assert!(bridge.contains("axiom bridge"));
     assert!(!bridge.contains("orch.ts"));
+}
+
+#[test]
+fn codex_source_package_is_complete_and_versioned() {
+    let home = tempfile::tempdir().unwrap();
+    let package = axiom::engine::plugin_dir(home.path()).unwrap();
+    assert!(package.starts_with(home.path()));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(package.join(".codex-plugin/plugin.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    for path in [
+        "skills/wish/SKILL.md",
+        "skills/research/SKILL.md",
+        "assets/chronos.svg",
+        "assets/chronos-dark.svg",
+    ] {
+        assert!(!fs::read(package.join(path)).unwrap().is_empty(), "{path}");
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        ".codex-plugin/plugin.json",
+        "skills/wish/SKILL.md",
+        "skills/research/SKILL.md",
+    ] {
+        assert_eq!(
+            fs::read(package.join(path)).unwrap(),
+            fs::read(root.join("codex-plugin").join(path)).unwrap(),
+            "{path}"
+        );
+    }
 }
