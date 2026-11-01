@@ -227,6 +227,12 @@ fn exercise_with_busy_store(scenario: &str, notify: bool, busy: bool) {
     );
     let begin=response(&capture,1);
     assert_eq!(begin["status"],"completed");
+    // This fixture exercises existing legacy journals, not new-session planning.
+    let legacy_id=begin["session"].as_str().unwrap();
+    let legacy_home=&home;
+    let mut legacy=axiom::goal::load(legacy_home,legacy_id).unwrap().unwrap();
+    legacy.project=Some("demo".into());legacy.other.remove("workflow_version");
+    fs::write(legacy_home.join("goals").join(format!("{legacy_id}.json")),serde_json::to_vec(&legacy).unwrap()).unwrap();
     // Test downstream callbacks from a trusted, approved execution checkpoint.
     let dir=home.join("authority").join(begin["session"].as_str().unwrap());
     fs::create_dir_all(&dir).unwrap();

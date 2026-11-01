@@ -3,6 +3,7 @@ pub(crate) mod host;
 pub mod render;
 pub mod run;
 mod tools;
+mod preflight;
 pub use render::*;
 pub use run::*;
 
@@ -78,6 +79,7 @@ impl Attachment {
         } else {
             goal::open(&config.home, &id, text, Some(cwd))?;
         }
+        if existing.is_none() { goal::bind_session(&config.home, &id)?; }
         *host.root.lock().unwrap() = id.clone();
         let result = json!({"status":"completed","session":id,"skill":skill,"workflow":workflow,"tools":host::specs("core"),"max_turns":args["max_turns"],"goal":goal::load(&config.home, &id)?});
         Ok((Self { host, id }, result))

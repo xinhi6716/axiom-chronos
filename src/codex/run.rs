@@ -138,6 +138,7 @@ impl AppServer {
             ));
         }
         let (mut thread, disabled) = self.thread_start_params(req)?;
+        let cargo_target=thread["config"]["shell_environment_policy"]["set"]["CARGO_TARGET_DIR"].as_str().map(std::path::PathBuf::from);
         if req.lean {
             thread["baseInstructions"] = json!(LEAN_WORKER_BASE_INSTRUCTIONS);
         }
@@ -352,6 +353,10 @@ impl AppServer {
         }
         if !confirmed {
             self.mark_unconfirmed();
+        } else if report["status"]=="completed" {
+            if let Some(target)=cargo_target {
+                if let Err(e)=base::prune_cargo_target(&target) {report["cache_cleanup_error"]=json!(e.to_json());}
+            }
         }
         self.unregister_turn(&thread_id, turn_id);
         self.unsubscribe(&thread_id);

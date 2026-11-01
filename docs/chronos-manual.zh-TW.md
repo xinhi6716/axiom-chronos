@@ -1,6 +1,38 @@
 # Chronos Codex 使用說明書
 
-截至 2026-11-01（台北時間）。版本沿革包含 `0.2.2-codex.dev.10`；dev.9 基線提交為 `e1a23801ad4f6c6295bdec36cf80f53691777e79`。本機安裝版本以安裝收據及 bridge 實際版本為準。使用者要求的至少五輪產品迭代尚未開始：**0／至少 5**。先前的移植、修復、內部重試與驗收，不算這五輪。
+截至 2026-11-01（台北時間）：已安裝並啟用 **0.2.2-codex.dev.10**，修復交付提交 `3dcb40c2ca628cbc6830305f5515f0e1cfee92fb`，已推送 `codex-only`；[Windows／Ubuntu CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41249608330) 均通過。重開後確認現有 bridge 程序使用 dev.10。
+
+**產品迭代完成數仍為 0／至少 5。** 第一輪已完成研究、意圖審核與規劃，曾卡在工程前基線；能力衝突已修復，但原 session `c308b6183976af5288614e4ba80fc863` 仍為 blocked，未自動恢復。修復測試不計入產品輪次。
+
+## dev.11 修復內容（驗證與安裝狀態以交付收據為準）
+
+- 新 session 的工程資料使用 `orchestrate/<project>-<session>/`；同 session 恢復沿用自身資料，不以最近更新的其他 goal 推測歸屬。舊共享目錄不自動搬移。
+- 規劃者提交 `preflight.json`：`full_test` 必須與 modules.md 完全一致，列出需要的能力及凍結探測請求。這是契約相容性檢查，不代表測試命令已成功執行。每次預檢保存成功或失敗收據。
+- 調度者可用 `workflow replan` 修正尚未開始工程的不可行契約；必須有短原因，保留核准研究與舊規劃目錄。已開始、未知結果或已有工程證據不得自動清除重來。
+- `workflow installed_probe` 由 Host 啟動獨立 Astra HIGH 唯讀驗證。凍結請求使用 `role: astra-verify`、`effort: high`、`sandbox: read-only`、`task_kind: verification`。保存實際執行檔、雜湊、版本、程序與模型報告；相同輸入／來源／執行檔重放既有結果，未知結果不重派。這不等同另開 MCP 連線，也不自動判定答案正確。
+- `submit` 只封存本輪工程驗收。核心依使用者授權完成 Git／安裝交付後，可以透過調度者交給 content 更新明確指定的專案 Markdown；不能趁機更動程式或驗收證據。最後才標記 goal done。
+
+修復驗證（2026-11-01）：Windows／Linux 完整回歸與後續權限、session、交付門檻回歸通過，Rust 套件封裝驗證通過。三個新 session 的真實模型短測保留於 `chronos-artifacts/maintenance/dev11-contract-recovery/live-task*`：第一次暴露 Windows 深路徑寫入失敗；第二次暴露文件未寫入卻完成；第三次 `ed42adda0caa8a866953d1089c161726` 已跑通工程前 probe、工程／驗收、核心提交、content 寫入 RELEASE.md 與 goal done。最後完成要求實際 Host Write 見證及非空文件，不能拿先前工程成功代替文件交付。這是已曝光的開發回歸，並非獨立驗收或性能提升證明；新版安裝後仍須確認執行身分。
+
+RSI 尚未完成可靠的自動演化閉環；上述修復不代表五輪完成，也不代表未量測的性能或 token 改善。修復期間允許直接維護插件來源，沿用分工、證據、低耦合與最小上下文原則；不要要求故障插件調度自己的修復。
+
+## 暫存與編譯產物
+
+此電腦的 Chronos bridge 與專案 shell 環境已設定 `TEMP`／`TMP` 為 `E:/codex/chronos-runtime/tmp`，`AXIOM_CARGO_TARGET_ROOT` 為 `E:/codex/chronos-runtime/cargo-tmp`。明確設定的 Cargo 暫存根無效時會報錯，不會悄悄改用 C 槽。短根目錄限制仍為 50 個 UTF-16 單位，以容納 Cargo 深層路徑。
+
+dev.11 在可確認完成的驗證、成功封裝及完成的寫入 worker 後清理編譯產物，保留小型 `.chronos-binding.json` 作來源記錄；正式套件與測試收據在 session store 保留。未知、被中斷或尚未成功封裝的工作保留暫存供診斷，不宣稱所有失敗都已自動清理。
+
+2026-11-01 清點的 C 槽 Chronos 相關暫存為 48.104 GiB；已可還原地移出約 48.104 GiB 至 `E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/backups/c-orphan-cache-20261101`，C 槽根目錄與使用者 TEMP 的相關目錄數已確認為 0。這是邏輯檔案容量，並非測得的實體磁碟回收量。搬移清單與收據在 `chronos-artifacts/maintenance/dev11-contract-recovery/c-*.json`；未刪除原始資料或正式安裝。
+
+## 給新 task 的核心
+
+1. 開啟 `E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex`，閱讀本說明書，再依使用者當次指令決定測試或迭代範圍。
+2. 使用 Chronos wish／research 的原生 bridge 入口。目前對話就是核心，不另外建立核心或用原生 collaboration 取代調度。
+3. 新任務建立自己的 session；只有使用者要求續接時才恢復舊 session。沿用已設定資料目錄，不搬動資料庫、不手改狀態或解除鎖。
+4. 核心只傳達意圖、做最簡意圖複核與重大判斷，並提交通過驗收的輪次。工程與量測由調度者安排；發出指令後等待同一呼叫返回。
+5. 「工程前獨立基線」使用下文 dev.10 量測入口，不呼叫必須等待工程完成的最終 tester。完成一次工具呼叫不代表通過測試。
+
+閱讀本文件不構成啟動五輪迭代的授權。
 
 ## 核心功能與分工
 
@@ -37,6 +69,7 @@ Chronos 是 Rust 實作的 Codex 子代理調度與驗收系統。**目前這個
 | dev.4–7：等待與驗收 | 加入跨連線 caller-command 鎖、有界調度續行與一般測試修復；修重複成功驗收使審查失效、輸入錯誤過早鎖住階段、重驗／重新封裝契約；完成新 task 實測 |
 | dev.8：跨平台穩定性 | 修 Unix fork 繼承檔案鎖與取消／關閉競態；補 CI 依賴與實際啟動事件同步；倉庫整理為僅 `main`、`codex-only` |
 | dev.9：斷線恢復與建置隔離 | 新增持久化 `session-call`，相同請求重播不重新呼叫模型；在取得獨占鎖且確認原 owner 已死時恢復研究／規劃；隔離工程子代理、Host 驗證、封裝及最終驗收的 Cargo 輸出，避免 `target/` 污染來源或觸發越界 |
+| dev.10：解除基線死鎖 | 新增 Astra HIGH 隔離副本量測與來源／產物收據，允許在工程釋放前執行；保留最終驗收門檻。補正 Unix 夾具解鎖與 Windows 路徑比較，兩平台 CI 通過 |
 
 詳細歷史與失敗證據見 [稽核紀錄](audit-2026-10-31.md)、[角色流程修復紀錄](role-authority-repair.md)。舊文中的「輪次」與已刪除分支名稱是歷史紀錄，不是本次五輪進度。
 
@@ -53,10 +86,10 @@ Chronos 是 Rust 實作的 Codex 子代理調度與驗收系統。**目前這個
 
 - dev.9 本地 Windows、Linux 完整測試及 Cargo 套件驗證通過；310 秒等待後的程序中斷、恢復、結果重播測試通過，重播新增模型呼叫為 0。
 - 第三個全新 task 在實際研究程序中斷後自行恢復，完整走到 `submitted`／`done`；前兩次失敗亦保留。這是同一已曝光小任務的驗收，不能推算一般任務成功率。
-- [本次 GitHub CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41244046665) 已確認 `completed / success`，對應上述程式提交。
+- dev.10 完整 CI 與 Rust 套件驗證通過；安裝後全新 bridge 的實際 Astra HIGH 量測完成兩個 Rust 測試，退出碼 0，原專案未變。這不等於原契約四個獨立基線案例已完成。
 - 結果不明的工程操作仍保守阻擋；舊檢查點沒有 owner 證據時不自動重啟。Rust 鎖不能保證桌面宿主完全不重入模型或發等待訊息，也不限制核心在 Chronos 以外的原生工具。
 - 正式 bridge 執行檔：`E:/codex/chronos-runtime/0.2.2-codex.dev.10/axiom.exe`；實際資料目錄沿用 `.codex/config.toml`，目前位於 `experiments/chronos-role-flow-dev7/home`，名稱舊不代表執行檔仍是舊版。
-- 安裝與驗收收據：`E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/iteration/dev9-recovery/`。不要直接修改插件快取；改來源後重建。保留官方整合與原圖標。
+- 安裝與驗收收據：`E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/maintenance/dev10-baseline-fix/installation-receipt.json`。不要直接修改插件快取；改來源後重建。保留官方整合與原圖標。
 
 這份說明書不會啟動工作；目前五輪迭代仍停止，須依使用者的新指示開始。
 
@@ -81,8 +114,8 @@ Pstack／Chronos 的狀態機管理工作階段與持久化狀態，**不是整�
 
 - 正常呼叫沿用設定的資料庫與 session；重試不另開資料庫。TODO、檢查點、日誌、驗收證據使用引擎回傳的位置，不另建平行狀態檔。
 - 必要的外部請求檔、測試沙箱、日誌與備份集中在 `AXIOM_HOME/artifacts/<session-id>/`；使用者指定產物目錄時以指定位置為準。正式交付檔案仍放專案約定位置。
-- 本機既有歷史產物已集中在 `E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/`；`tests` 放測試、`evidence` 放日誌與收據、`backups` 放保存備份。舊路徑保留 Windows junction 相容連結，並非第二份資料；詳見該目錄的 README 與搬移收據。
-- 活躍資料目錄與 runtime 保留原位。整理時發現 dev.8 與 dev.9 bridge 同時存活：磁碟設定將隨安裝更新至 dev.10，不代表已建立的舊連線熱更新；新工作應確認連線版本，必要時重開 Codex。不要中止別的既有工作來強制更新。
+- 本機既有歷史產物已集中在 `E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/`；`tests` 放測試、`evidence` 放日誌與收據、`backups` 放保存備份。已移除 14 個過期 junction 入口；舊文件中的歷史路徑可依 `maintenance/relocation-plan.json` 查找現在位置。僅 `E:/codex/chronos-iteration-evidence` 因舊 session 引用而隱藏保留，並非第二份資料。
+- 活躍資料目錄與 runtime 保留原位；重開後確認只有 dev.10 bridge 存活。未來更新仍須確認新連線版本，不中止其他既有工作來強制更新。
 - 入口的收納規則屬技能約束；dev.10 新增的隔離量測與來源檢查則由 Rust 執行。
 - 修改插件須改來源，再經正式安裝流程更新；不直接編輯快取。只有 Rust／內嵌引擎有改動才需重新編譯執行檔；每次更新需核對來源、套件與實際連線版本。
 
@@ -97,3 +130,17 @@ Host 封存包含未提交變更的 Git 可見來源，保存原始檔案與量�
 限制：不包含 Git 忽略的輸入；符號連結與 submodule 拒絕處理；data home 必須在原專案之外。測試結果仍需查驗實際命令、退出碼與原始輸出，模型 turn 完成不等於測試通過。量測入口可解除本次基線能力衝突，但不提供任意階段回退，也不重啟結果不明的工程。
 
 本次驗證涵蓋待施工單元仍未釋放時執行量測、dirty 來源複製、越權修改副本失敗、核心與審核前角色拒絕，以及實際 Astra HIGH 執行兩個 Rust 單元測試。這些是修復驗證，不是五輪產品迭代或原契約四個獨立基線案例的完成紀錄。
+
+## 本機資料夾索引
+
+| 位置（相對於 `E:/codex/OPEN_DESIGN/axiom`） | 用途 |
+|---|---|
+| `axiom-chronos-codex/` | Codex 專用版來源，分支 `codex-only` |
+| `axiom-chronos/` | 原版來源，分支 `main` |
+| `experiments/chronos-role-flow-dev7/home/` | **使用中的持久化資料庫，名稱保留，不移動** |
+| `chronos-artifacts/tests/` | 已封存的測試專案；不用已移除的舊入口續跑 |
+| `chronos-artifacts/evidence/`、`backups/` | 歷史量測、日誌、收據與備份 |
+| `chronos-artifacts/maintenance/dev10-baseline-fix/` | dev.10 修復、失敗案例、安裝與 CI 證據 |
+| `chronos-artifacts/tests/chronos-five-rounds/active-runtime.json` | 本機 runtime 版本與收據指標，不是自動續行開關 |
+
+`axiom-forge/`、`outputs/`、`work/`、其他 `experiments/` 內容與上層其他專案未搬動。歷史測試的信任路徑已改指向封存位置；既有日誌與來源綁定證據不改寫。原始碼、官方整合、活躍資料庫及執行檔未因這次整理改動。

@@ -106,6 +106,28 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     save(home, session, &goal)?;
     Ok(goal)
 }
+/// New attached workflows own an isolated orchestration namespace. Legacy
+/// sessions keep their existing store and are never silently migrated.
+pub(crate) fn bind_session(home: &Path, session: &str) -> Res<Goal> {
+    let mut g = required(home, session)?;
+    let alias = g.project.clone().ok_or_else(|| Failure::new("invalid_argument", "missing project"))?;
+    let prefix: String = alias.chars().take(24).collect();
+    g.project = Some(format!("{prefix}-{session}"));
+    g.other.insert("project_alias".into(), Value::String(alias));
+    g.other.insert("workflow_version".into(), Value::from(2));
+    save(home, session, &g)?;
+    Ok(g)
+}
+pub(crate) fn revise_store(home:&Path,session:&str,revision:u64)->Res<Goal> {
+    let mut g=required(home,session)?;
+    if g.other.get("workflow_version")!=Some(&Value::from(2)) {return Err(Failure::new("recovery_required","legacy shared stores require a new explicitly requested session; not migrated automatically"));}
+    let alias=g.other.get("project_alias").and_then(Value::as_str).unwrap_or("project");
+    let prefix:String=alias.chars().take(20).collect();
+    let previous=g.project.clone();
+    g.project=Some(format!("{prefix}-{session}-p{revision}"));
+    g.other.entry("previous_projects").or_insert(Value::Array(vec![])).as_array_mut().ok_or_else(||Failure::new("invalid_json","invalid project history"))?.push(serde_json::json!(previous));
+    save(home,session,&g)?;Ok(g)
+}
 /// Research has its own plan/review/ruling workflow, not engineering unit gates.
 /// Only the host may select this at session creation; bridge goal inputs cannot.
 pub(crate) fn open_research(
@@ -262,7 +284,10 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
         if let Some(project) = &goal.project {
             if home.join("authority").join(session).join("state.json").is_file()
                 && crate::session::authority::read(home,session)?.phase == crate::session::authority::Phase::Submitted {
-                crate::orch::round_evidence_gate(&crate::orch::store_for(home,project)?, Path::new(goal.cwd.as_deref().ok_or_else(|| Failure::new("invalid_argument","missing project directory"))?))?;
+                let repo=Path::new(goal.cwd.as_deref().ok_or_else(|| Failure::new("invalid_argument","missing project directory"))?);
+                if goal.other.get("workflow_version")==Some(&Value::from(2)) {
+                    crate::session::authority::check_delivery_complete(home,session,repo)?;
+                } else {crate::orch::round_evidence_gate(&crate::orch::store_for(home,project)?,repo)?;}
             } else {
             crate::orch::done_gate_in_repo(
                 &crate::orch::store_for(home, project)?,

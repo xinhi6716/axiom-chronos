@@ -17,10 +17,22 @@ pub struct State {
     pub reason: String,
     #[serde(default)]
     pub owner_pid: Option<u32>,
+    #[serde(default)]
+    pub plan_revision:u64,
+    #[serde(default)]
+    pub plan_hash:Option<String>,
+    #[serde(default)]
+    pub submitted_source:Option<String>,
+    #[serde(default)]
+    pub delivery_paths:Vec<String>,
+    #[serde(default)]
+    pub delivery_written:Vec<String>,
+    #[serde(default)]
+    pub submitted_evidence:Option<String>,
 }
 impl Default for State {
     fn default() -> Self {
-        Self { phase: Phase::Research, revision: 0, research: None, reason: String::new(), owner_pid: None }
+        Self { phase: Phase::Research, revision: 0, research: None, reason: String::new(), owner_pid: None,plan_revision:0,plan_hash:None,submitted_source:None,delivery_paths:vec![],delivery_written:vec![],submitted_evidence:None }
     }
 }
 /// Called only while Attachment holds the exclusive caller-command OS lock.
@@ -70,7 +82,7 @@ pub fn guard(state: &State, caller: &str, tool: &str, args: &Value) -> Res<()> {
         match tool {
             "workflow" | "goal" => return Ok(()),
             "Agent" if args["subagent_type"] == "chronos:dispatcher"
-                && matches!(state.phase, Phase::Research | Phase::Planning | Phase::Execution) => return Ok(()),
+                && matches!(state.phase, Phase::Research | Phase::Planning | Phase::Execution | Phase::Submitted) => return Ok(()),
             _ => return Err(denied("core may relay intent to dispatcher, judge intent compatibility, and submit only; engineering and direct specialist calls are forbidden")),
         }
     }
@@ -81,7 +93,8 @@ pub fn guard(state: &State, caller: &str, tool: &str, args: &Value) -> Res<()> {
             "chronos:astra" => state.phase == Phase::Research,
             "chronos:architect" => state.phase == Phase::Planning,
             "chronos:reviewer" | "chronos:critic" | "chronos:tester" => state.phase == Phase::Execution,
-            "chronos:content" | "chronos:memory-keeper" => matches!(state.phase, Phase::Research | Phase::Planning | Phase::Execution),
+            "chronos:content" => matches!(state.phase, Phase::Research | Phase::Planning | Phase::Execution | Phase::Submitted),
+            "chronos:memory-keeper" => matches!(state.phase, Phase::Research | Phase::Planning | Phase::Execution),
             _ => false,
         };
         if !allowed { return Err(denied("specialist is forbidden in the current workflow phase")); }
@@ -100,9 +113,48 @@ pub fn guard(state: &State, caller: &str, tool: &str, args: &Value) -> Res<()> {
     }
     if caller == "dispatcher" && matches!(state.phase, Phase::IntentReview | Phase::ReadySubmit | Phase::Submitted)
         && !matches!(tool, "workflow" | "Read" | "Glob" | "Grep") {
+        if state.phase==Phase::Submitted && tool=="Agent" && args["subagent_type"]=="chronos:content" {return Ok(());}
         return Err(denied("workflow is waiting at the core boundary; no further dispatch or mutation"));
     }
     Ok(())
+}
+/// Submitted code evidence is not relabelled as coverage for later documents.
+/// Only exact Markdown outputs authorized by core may differ at delivery.
+pub(crate) fn check_delivery(home:&Path,session:&str,repo:&Path)->Res<()> {
+    let state=read(home,session)?;
+    if state.phase!=Phase::Submitted {return Err(denied("round not submitted"));}
+    let goal=crate::goal::load(home,session)?.ok_or_else(||denied("missing goal"))?;
+    let store=crate::orch::store_for(home,goal.project.as_deref().ok_or_else(||denied("missing project"))?)?;
+    if state.submitted_evidence.as_deref()!=Some(evidence_identity(&store)?.as_str()) {return Err(denied("submitted evidence changed"));}
+    let before=state.submitted_source.as_deref().and_then(|s|s.strip_prefix("tree:")).ok_or_else(||denied("missing submitted source identity"))?;
+    let current=crate::orch::snapshot(repo,&[".".into()]);
+    let after=current.strip_prefix("tree:").ok_or_else(||denied("missing delivery source"))?;
+    let output=std::process::Command::new("git").current_dir(repo).args(["diff","--name-only","-z",before,after,"--"]).output().map_err(|e|Failure::new("io",e.to_string()))?;
+    if !output.status.success() {return Err(denied("cannot verify delivery diff"));}
+    for path in output.stdout.split(|b|*b==0).filter(|b|!b.is_empty()) {
+        let path=std::str::from_utf8(path).map_err(|_|denied("invalid delivery path"))?;
+        let resolved=super::tools::resolved(&repo.join(path))?;
+        if !state.delivery_paths.iter().any(|allowed|Path::new(allowed)==resolved) {return Err(denied("product source changed after submission; documents cannot bypass engineering acceptance"));}
+    }
+    Ok(())
+}
+pub(crate) fn check_delivery_complete(home:&Path,session:&str,repo:&Path)->Res<()> {
+    check_delivery(home,session,repo)?;
+    let state=read(home,session)?;
+    for path in &state.delivery_paths {
+        if !state.delivery_written.contains(path) || !std::fs::metadata(path).is_ok_and(|m|m.is_file() && m.len()>0) {
+            return Err(Failure::new("delivery_incomplete",format!("authorized document has no confirmed nonempty Write: {path}")));
+        }
+    }
+    Ok(())
+}
+pub(super) fn evidence_identity(store:&Path)->Res<String> {
+    use sha2::{Digest,Sha256};
+    let mut files=std::fs::read_dir(store).map_err(|e|Failure::new("io",e.to_string()))?.filter_map(Result::ok)
+        .map(|e|e.path()).filter(|p|p.is_file() && p.file_name().and_then(|s|s.to_str()).is_some_and(|s|s.ends_with(".evidence.tsv") || ["modules.md","preflight.json","units.tsv","core-wait.json","core-wait.v1.json","wait-required"].contains(&s))).collect::<Vec<_>>();
+    files.sort();let mut hash=Sha256::new();
+    for file in files {hash.update(file.file_name().unwrap().to_string_lossy().as_bytes());hash.update(std::fs::read(file).map_err(|e|Failure::new("io",e.to_string()))?);}
+    Ok(format!("{:x}",hash.finalize()))
 }
 pub fn check_research(state: &State) -> Res<()> {
     use sha2::{Digest, Sha256};
@@ -131,6 +183,27 @@ pub fn verdict(state: &mut State, caller: &str, args: &Value) -> Res<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_allows_only_authorized_docs_and_sealed_evidence() {
+        let t=tempfile::tempdir().unwrap();let repo=t.path().join("repo");let home=t.path().join("home");
+        std::fs::create_dir(&repo).unwrap();
+        let git=|args:&[&str]| {assert!(std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap().status.success());};
+        git(&["init"]);git(&["config","user.email","test@example.invalid"]);git(&["config","user.name","Test"]);
+        std::fs::write(repo.join("code.rs"),"original").unwrap();std::fs::write(repo.join("manual.md"),"old").unwrap();git(&["add","."]);git(&["commit","-m","fixture"]);
+        crate::goal::open(&home,"delivery","tiny",repo.to_str()).unwrap();let g=crate::goal::bind_session(&home,"delivery").unwrap();
+        let store=crate::orch::store_for(&home,g.project.as_deref().unwrap()).unwrap();std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("test.evidence.tsv"),"sealed").unwrap();
+        update(&home,"delivery",|s| {s.phase=Phase::Submitted;s.submitted_source=Some(crate::orch::snapshot(&repo,&[".".into()]));s.submitted_evidence=Some(evidence_identity(&store)?);s.delivery_paths=vec![super::super::tools::resolved(&repo.join("manual.md"))?.to_string_lossy().into_owned()];Ok(())}).unwrap();
+        std::fs::write(repo.join("manual.md"),"release result").unwrap();check_delivery(&home,"delivery",&repo).unwrap();
+        // Existing files and text-only model promises cannot satisfy delivery.
+        assert_eq!(check_delivery_complete(&home,"delivery",&repo).unwrap_err().kind,"delivery_incomplete");
+        update(&home,"delivery",|s| {s.delivery_written=s.delivery_paths.clone();Ok(())}).unwrap();
+        check_delivery_complete(&home,"delivery",&repo).unwrap();
+        std::fs::write(repo.join("manual.md"),"").unwrap();assert!(check_delivery_complete(&home,"delivery",&repo).is_err());
+        std::fs::write(repo.join("manual.md"),"release result").unwrap();
+        std::fs::write(repo.join("code.rs"),"changed").unwrap();assert!(check_delivery(&home,"delivery",&repo).is_err());
+        std::fs::write(repo.join("code.rs"),"original").unwrap();std::fs::write(store.join("test.evidence.tsv"),"forged").unwrap();assert!(check_delivery(&home,"delivery",&repo).is_err());
+    }
     #[test]
     fn recovery_requires_dead_owner_and_only_resets_pre_engineering() {
         let mut s=State {phase:Phase::ResearchRunning,owner_pid:Some(std::process::id()),..State::default()};

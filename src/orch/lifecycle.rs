@@ -550,6 +550,9 @@ pub(crate) fn host_verification_check(
     };
     if let Some(before_run) = before_run { before_run()?; }
     let run = base::proc::run_shell(&command, repo, Duration::from_secs(1800));
+    if run.as_ref().is_ok_and(|r|!r.timed_out) && !base::proc::current_cancellation().is_some_and(|c|c.cancelled()) {
+        if let Err(e)=base::prune_cargo_target(&target) {eprintln!("Cargo cache cleanup: {}",e.message);}
+    }
     let after = snapshot(repo, &[".".into()]);
     let stdout = std::fs::read(&out).ok();
     let stderr = std::fs::read(&err).ok();

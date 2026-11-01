@@ -194,7 +194,11 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut attempt = 0;
     let mut guard = UnitGuard(None);
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
-        let active = goal::find_active(b.home()?, project.unwrap())?;
+        let active = if let Some(id) = string(a, "session") {
+            let g=goal::load(b.home()?,id)?.ok_or_else(||invalid("missing bound session"))?;
+            if g.project.as_deref()!=project || g.status!="active" { return Err(invalid("session/project mismatch or inactive goal")); }
+            Some((id.to_owned(),g))
+        } else { goal::find_active(b.home()?, project.unwrap())? };
         if let Some((_, g)) = &active {
             if g.interjection.is_some() {
                 return Err(Failure::new(
@@ -831,6 +835,7 @@ fn enrolled_round(
             base::unique()
         ));
         base::atomic_write(&archive, &bytes).map_err(|e| Failure::new("io", e.to_string()))?;
+        if let Err(e)=base::prune_cargo_target(&cargo_target) {eprintln!("Cargo cache cleanup: {}",e.message);}
         let package_report = json!({"source_identity":package_source,"package_path":archive,"cargo_package_path":path,"package_hash":hash,"commands":commands,"verification_receipt":receipt});
         progress("package", &package_report)?;
         finish_phase(&mut op, "package", "verification", package_report.clone())?;

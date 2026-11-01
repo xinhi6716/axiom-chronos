@@ -1,6 +1,6 @@
 [package]
 name = "axiom-chronos"
-version = "0.2.2-codex.dev.10"
+version = "0.2.2-codex.dev.11"
 edition = "2021"
 
 [lib]

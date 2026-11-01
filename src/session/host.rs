@@ -44,6 +44,8 @@ pub(super) struct Host {
 fn invalid(s: impl Into<String>) -> Failure {
     Failure::new("invalid_argument", s)
 }
+#[path = "contract_ops.rs"]
+mod contract_ops;
 struct Producer<'a>(&'a AtomicUsize);
 struct TurnBudget { remaining: Duration, last: Instant }
 impl TurnBudget {
@@ -155,7 +157,7 @@ pub(super) fn specs(role: &str) -> Value {
     let bridge = bridge::tools();
     Value::Array(capabilities(role).into_iter().map(|name| {
         let (mut description, mut schema) = match name {
-            "workflow" => ("Durable role workflow. Core: status, verdict(pass/reject, revision, short reason), submit. Dispatcher: status and ready after all tests. No model may set a phase.".into(), json!({"type":"object","properties":{"action":{"type":"string","enum":["status","verdict","ready","submit"]},"revision":{"type":"integer"},"decision":{"type":"string","enum":["pass","reject"]},"reason":{"type":"string","maxLength":160}},"required":["action"]})),
+            "workflow" => ("Durable role workflow. Core: status, verdict(pass/reject, revision, short reason), submit. Dispatcher: capabilities, installed_probe(request_file), replan(short reason), status and ready. Replan is pre-engineering only; core may delegate exact Markdown delivery after submit. No model may set a phase.".into(), json!({"type":"object","properties":{"action":{"type":"string","enum":["status","capabilities","installed_probe","replan","verdict","ready","submit"]},"revision":{"type":"integer"},"decision":{"type":"string","enum":["pass","reject"]},"reason":{"type":"string","maxLength":160},"request_file":{"type":"string"}},"required":["action"]})),
             "Agent" => ("Call a distinct Chronos agent. Astra calls use an independent planner context, never the core thread.".into(), json!({"type":"object","properties":{"subagent_type":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"},"project":{"type":"string"},"cwd":{"type":"string"},"timeout_s":{"type":"integer","minimum":1},"schema_path":{"type":"string"},"save_to":{"type":"string"},"web_search":{"type":"boolean"},"output_paths":{"type":"array","items":{"type":"string"}}},"required":["subagent_type","prompt"]})),
             "Read" => ("Read UTF-8 text. For images use the native view_image tool.".into(), json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["file_path"]})),
             "Write" => ("Write data-home artifacts, or root-authorized exact content output files. Never implement software features through content.".into(), json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]})),
@@ -367,7 +369,7 @@ impl Host {
     }
     fn instructions(&self, name: &str) -> Res<String> {
         let contract = if name == "core" {
-            "You are Chronos core, the external user-intent boundary. Relay user intent ONLY to chronos:dispatcher. Do not research, design, plan, inspect implementation, run tests, build, recover operations or assemble. The Rust workflow returns an intent_review boundary: respond only with workflow verdict pass, or reject plus the shortest user-intent conflict reason. After pass, dispatcher calls Astra HIGH architect, Terra workers, Sol assembly and Astra HIGH testing. Only a ready_submit boundary authorizes workflow submit, followed by goal completion. Ordinary engineering failures stay in dispatcher. User communication and major user-owned judgments remain yours. Never directly call another specialist or create another core."
+            "You are Chronos core, the external user-intent boundary. Relay user intent ONLY to chronos:dispatcher. Do not research, design, plan, inspect implementation, run tests, build, recover operations or assemble. The Rust workflow returns an intent_review boundary: respond only with workflow verdict pass, or reject plus the shortest user-intent conflict reason. After pass, dispatcher calls Astra HIGH architect, Terra workers, Sol assembly and Astra HIGH testing. Only a ready_submit boundary authorizes workflow submit. After submit, perform user-authorized Git/install release operations, then delegate exact Markdown delivery to dispatcher/content using output_paths. Complete goal only after delivery. Do not interpret submitted as all release work completed. Ordinary engineering failures stay in dispatcher. User communication and major user-owned judgments remain yours. Never directly call another specialist or create another core."
                 .to_owned()
         } else {
             std::fs::read_to_string(self.plugin.join("agents").join(format!("{name}.md")))
@@ -551,8 +553,33 @@ impl Host {
         self.step(caller_id)?;
         let short = name.strip_prefix("chronos_").unwrap_or(name);
         let authority_root = self.root.lock().unwrap().clone();
+        // Bind every mutating project tool to this caller's goal, not the most
+        // recently touched goal for a shared project slug.
+        let mut bound_args = args.clone();
+        if let Some(g) = goal::load(&self.home, &authority_root)? {
+            if g.other.get("workflow_version") == Some(&json!(2)) {
+                if let Some(requested) = args["project"].as_str() {
+                    let prior=g.other.get("previous_projects").and_then(Value::as_array).is_some_and(|v|v.iter().any(|v|v==requested));
+                    if Some(requested) != g.project.as_deref() && Some(requested) != g.other.get("project_alias").and_then(Value::as_str) && !prior {
+                        return Err(Failure::new("permission_denied", "project belongs to another session"));
+                    }
+                    bound_args["project"] = json!(g.project);
+                }
+                if matches!(short, "orch" | "codex_run" | "review_code" | "gemini_preview") {
+                    bound_args["project"] = json!(g.project);
+                }
+            }
+        }
+        let args = &bound_args;
         let authority_state = authority::read(&self.home, &authority_root)?;
         authority::guard(&authority_state, caller, short, args)?;
+        if short=="codex_run" && args.get("unit").is_some() {
+            if let Some(expected)=&authority_state.plan_hash {
+                let g=goal::load(&self.home,&authority_root)?.ok_or_else(||invalid("missing goal"))?;
+                let store=orch::store_for(&self.home,g.project.as_deref().ok_or_else(||invalid("missing project"))?)?;
+                if &super::preflight::validate(&store)?!=expected {return Err(Failure::new("preflight_failed","contract changed after preflight; request controlled replan before engineering"));}
+            }
+        }
         if short == "workflow" { return self.workflow_action(caller, args); }
         if caller == "core" && short == "goal" && args["status"] == "done"
             && authority_state.phase != authority::Phase::Submitted
@@ -604,10 +631,24 @@ impl Host {
             .unwrap_or_else(|| self.cwd.clone());
         if short == "Write" {
             let target = tools::resolved(&tools::path(&cwd, string(args, "file_path")))?;
-            if target.starts_with(tools::resolved(&self.home.join("authority"))?) {
+            if ["authority", "goals", "engine"].iter().any(|dir| tools::resolved(&self.home.join(dir)).is_ok_and(|p| target.starts_with(p))) {
                 return Err(Failure::new("permission_denied", "authority state is Host-owned"));
             }
             let home = tools::resolved(&self.home.join("orchestrate"))?;
+            if target.starts_with(&home) {
+                if let Some(g) = goal::load(&self.home, &root)? {
+                    if g.other.get("workflow_version") == Some(&json!(2)) {
+                        let store=orch::store_for(&self.home,g.project.as_deref().ok_or_else(||invalid("missing project"))?)?;
+                        if !target.starts_with(tools::resolved(&store)?) || target.starts_with(tools::resolved(&store.join("reports"))?) {
+                            return Err(Failure::new("permission_denied", "cross-session and Host receipt writes are forbidden"));
+                        }
+                        if ["modules.md","preflight.json"].iter().any(|p|tools::resolved(&store.join(p)).is_ok_and(|p|p==target))
+                            && !(caller=="architect" && authority_state.phase==authority::Phase::PlanningRunning) {
+                            return Err(Failure::new("permission_denied","only the active planner may revise the plan; use workflow replan"));
+                        }
+                    }
+                }
+            }
             let name = target
                 .file_name()
                 .unwrap_or_default()
@@ -706,7 +747,7 @@ impl Host {
             return result;
         }
         if ["Read", "Glob", "Grep", "Write", "Bash"].contains(&short) {
-            return tools::dispatch(
+            let result=tools::dispatch(
                 &self.home,
                 &cwd,
                 short,
@@ -714,11 +755,23 @@ impl Host {
                 if caller == "content" { outputs } else { &[] },
                 &self.cancelled,
             );
+            if result.is_ok() && short=="Write" && caller=="content" && authority_state.phase==authority::Phase::Submitted {
+                let path=tools::resolved(&tools::path(&cwd,string(args,"file_path")))?.to_string_lossy().into_owned();
+                authority::update(&self.home,&root,|s| {
+                    if !s.delivery_paths.contains(&path) {return Err(invalid("unregistered delivery output"));}
+                    if !s.delivery_written.contains(&path) {s.delivery_written.push(path);}
+                    Ok(())
+                })?;
+            }
+            return result;
         }
         let mut args = args.clone();
         if short == "codex_run" { args["parent_id"] = json!(caller_id); }
         // Artifact placement is bound to Host identity, never a worker-selected session.
-        if short == "codex_run" && args["task_kind"] == "measurement" { args["session"] = json!(root); }
+        if short == "codex_run" && (args["task_kind"] == "measurement"
+            || goal::load(&self.home,&root)?.is_some_and(|g|g.other.get("workflow_version")==Some(&json!(2)))) {
+            args["session"] = json!(root);
+        }
         if short == "goal" {
             args["session"] = json!(root);
         }
@@ -768,7 +821,13 @@ impl Host {
     fn workflow_action(&self, caller: &str, args: &Value) -> Res<Value> {
         let root = self.root.lock().unwrap().clone();
         match args["action"].as_str() {
-            Some("status") => Ok(json!({"status":"completed","workflow":authority::read(&self.home,&root)?})),
+            Some("status") => Ok(json!({"status":"completed","workflow":authority::read(&self.home,&root)?,"session":root,"project":goal::load(&self.home,&root)?.and_then(|g|g.project)})),
+            Some("capabilities") => Ok(json!({"status":"completed","version":env!("CARGO_PKG_VERSION"),"session":root,
+                "measurement":{"role":"astra-verify","effort":"high","task_kind":"measurement"},
+                "installed_probe":{"role":"astra-verify","effort":"high","task_kind":"verification","executor":"Host on this installed bridge; fresh model thread"},
+                "delivery":"core performs authorized Git/install; after submit core may authorize dispatcher/content for exact markdown output paths"})),
+            Some("installed_probe") => self.installed_probe(caller,args),
+            Some("replan") => self.replan(caller,args),
             Some("verdict") => {
                 // Validate before releasing the ephemeral research context.
                 let mut checked = authority::read(&self.home,&root)?;
@@ -834,6 +893,7 @@ impl Host {
                     let expected = if submit { authority::Phase::ReadySubmit } else { authority::Phase::Execution };
                     if s.phase != expected { return Err(invalid("invalid workflow boundary")); }
                     s.phase = if submit { authority::Phase::Submitted } else { authority::Phase::ReadySubmit };
+                    s.submitted_source=Some(current.clone());s.delivery_paths.clear();s.delivery_written.clear();s.submitted_evidence=Some(authority::evidence_identity(&store)?);
                     Ok(json!({"status":"completed","phase":s.phase,"revision":s.revision}))
                 })
             }
@@ -889,6 +949,21 @@ impl Host {
                     ));
                 }
                 outputs.push(p);
+            }
+        }
+        let root=self.root.lock().unwrap().clone();
+        if authority::read(&self.home,&root)?.phase==authority::Phase::Submitted {
+            if !matches!(name,"dispatcher"|"content") || outputs.is_empty() {return Err(invalid("post-submit delivery requires exact core-authorized Markdown outputs"));}
+            let project=tools::resolved(&self.cwd)?;
+            for path in &outputs {
+                if !path.starts_with(&project) || path.extension().and_then(|s|s.to_str())!=Some("md") {return Err(invalid("post-submit content is confined to exact project Markdown files"));}
+            }
+            if caller=="core" {
+                authority::check_delivery(&self.home,&root,&self.cwd)?;
+                authority::update(&self.home,&root,|s| {
+                    for path in &outputs {let path=path.to_string_lossy().into_owned();s.delivery_written.retain(|p|p!=&path);if !s.delivery_paths.contains(&path){s.delivery_paths.push(path);}}
+                    Ok(())
+                })?;
             }
         }
         if name == "astra" {
@@ -985,14 +1060,17 @@ impl Host {
             })?;
         }
         let thread = self.start_as(name, None, false, &cwd, reviewer_role)?;
+        let prompt=if outputs.is_empty() {string(args,"prompt").to_owned()} else {
+            format!("{}\nHost-authorized exact output_paths: {}. This is existing Chronos delegation. Content may use the supplied dynamic Write on these exact paths; dispatcher may only delegate subsets. Native read-only sandbox does not prohibit Host Write. Completion requires actual outputs, not a text-only promise.",string(args,"prompt"),serde_json::to_string(&outputs).map_err(io)?)
+        };
         // Dispatcher receives delegation authority, never direct write authority.
         self.register(&thread, name, outputs)?;
         let timeout=args["timeout_s"].as_u64().filter(|n| *n > 0).unwrap_or(1800);
         let root=self.root.lock().unwrap().clone();
         let result = if name=="dispatcher" && authority::read(&self.home,&root)?.research.is_some() {
-            self.dispatch_until_boundary(&thread,string(args,"prompt"),timeout)
+            self.dispatch_until_boundary(&thread,&prompt,timeout)
         } else {
-            self.turn(&thread, name, string(args, "prompt"), None,timeout)
+            self.turn(&thread, name, &prompt, None,timeout)
         };
         self.server.unregister_tools(&thread);
         if name == "tester" {
@@ -1021,12 +1099,21 @@ impl Host {
                 (|| -> Res<()> {
                 let g = goal::load(&self.home, &root)?.ok_or_else(|| invalid("missing goal"))?;
                 let store = orch::store_for(&self.home, g.project.as_deref().ok_or_else(|| invalid("missing project"))?)?;
-                let map = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
-                orch::parse_map(&map).map_err(invalid)?;
+                let plan_hash=if g.other.get("workflow_version")==Some(&json!(2)) {
+                    let attempt=authority::read(&self.home,&root)?.plan_revision+1;
+                    let result=super::preflight::validate(&store);
+                    super::preflight::archive(&store,attempt,&result)?;
+                    Some(result?)
+                } else {
+                    let map = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
+                    orch::parse_map(&map).map_err(invalid)?;
+                    None
+                };
                 orch::wait::enroll(&store)?;
                 authority::update(&self.home, &root, |s| {
                     if s.phase != authority::Phase::PlanningRunning { return Err(invalid("stale planning result")); }
                     s.phase = authority::Phase::Execution;
+                    s.plan_revision+=1;s.plan_hash=plan_hash.clone();s.owner_pid=None;
                     Ok(())
                 })?;
                 Ok(())
@@ -1047,7 +1134,8 @@ impl Host {
         }
         if name == "dispatcher" {
             let root = self.root.lock().unwrap().clone();
-            let project = args["project"].as_str().map(str::to_owned).or(
+            let current=goal::load(&self.home,&root)?;
+            let project = current.as_ref().filter(|g|g.other.get("workflow_version")==Some(&json!(2))).and_then(|g|g.project.clone()).or_else(||args["project"].as_str().map(str::to_owned)).or(
                 goal::load(&self.home, &root)?.and_then(|g| g.project))
                 .ok_or_else(|| invalid("dispatcher needs active goal"))?;
             let store = orch::store_for(&self.home, &project)?;
@@ -1072,6 +1160,13 @@ impl Host {
                     &e.kind,
                     format!("{}; dispatcher evidence: {}", e.message, saved.display()),
                 ));
+            }
+            if authority::read(&self.home,&root)?.phase==authority::Phase::Submitted {
+                if let Err(e)=authority::check_delivery_complete(&self.home,&root,&self.cwd) {
+                    report["status"]=json!("blocked");report["error"]=json!(e.to_json());
+                    base::atomic_write(&saved,&serde_json::to_vec_pretty(&report).map_err(io)?).map_err(io)?;
+                    return Err(Failure::new(&e.kind,format!("{}; dispatcher evidence: {}",e.message,saved.display())));
+                }
             }
             // The dispatcher is still a live producer until its reply is ready.
             // Store contention here is transient, not a dispatcher failure.
@@ -1177,11 +1272,15 @@ impl Host {
     /// an active child; continuation occurs only after dispatcher turn completion.
     fn dispatch_until_boundary(&self, thread: &str, prompt: &str, timeout: u64) -> Res<Value> {
         let root=self.root.lock().unwrap().clone();
-        let g=goal::load(&self.home,&root)?.ok_or_else(||invalid("missing goal"))?;
-        let store=orch::store_for(&self.home,g.project.as_deref().ok_or_else(||invalid("missing project"))?)?;
+        let current_store=|| -> Res<PathBuf> {
+            let g=goal::load(&self.home,&root)?.ok_or_else(||invalid("missing goal"))?;
+            orch::store_for(&self.home,g.project.as_deref().ok_or_else(||invalid("missing project"))?)
+        };
         let progress=|| -> Res<String> {
             use sha2::{Digest,Sha256};
             let mut hash=Sha256::new();
+            let store=current_store()?;
+            hash.update(store.to_string_lossy().as_bytes());
             hash.update(serde_json::to_vec(&authority::read(&self.home,&root)?).map_err(io)?);
             for file in ["units.tsv","core-wait.json"] {
                 match std::fs::read(store.join(file)) {
@@ -1200,6 +1299,8 @@ impl Host {
             let remaining=timeout.saturating_sub(start.elapsed().as_secs());
             if remaining==0 { return Err(Failure::new("timeout","dispatcher boundary budget exhausted")); }
             let report=self.turn(thread,"dispatcher",&input,None,remaining)?;
+            let store=current_store()?;
+            std::fs::create_dir_all(store.join("reports")).map_err(io)?;
             let artifact=store.join(format!("reports/dispatcher-step-{}-{step}.json",thread));
             base::atomic_write(&artifact,&serde_json::to_vec_pretty(&report).map_err(io)?).map_err(io)?;
             if report["status"]!="completed" { return Ok(report); }

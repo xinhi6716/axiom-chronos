@@ -201,6 +201,14 @@ pub fn unique() -> String {
 /// Allocate a fresh, short Cargo target for one source and execution. The atomic
 /// directory creation is the collision arbiter even across processes.
 pub fn cargo_target(source: &Path, execution: &str) -> Res<PathBuf> {
+    if let Some(root)=std::env::var_os("AXIOM_CARGO_TARGET_ROOT") {
+        let root=PathBuf::from(root);
+        if !root.is_absolute() || root.to_string_lossy().encode_utf16().count()>50 {
+            return Err(Failure::new("cargo_target","AXIOM_CARGO_TARGET_ROOT must be an absolute path of at most 50 UTF-16 units"));
+        }
+        std::fs::create_dir_all(&root).map_err(|e|Failure::new("cargo_target",e.to_string()))?;
+        return cargo_target_in(source,execution,&[root]);
+    }
     let mut roots = vec![std::env::temp_dir()];
     #[cfg(windows)]
     if let Some(drive) = std::env::var_os("SystemDrive") {
@@ -209,6 +217,34 @@ pub fn cargo_target(source: &Path, execution: &str) -> Res<PathBuf> {
     #[cfg(not(windows))]
     roots.push(PathBuf::from("/tmp"));
     cargo_target_in(source, execution, &roots)
+}
+
+/// The owning caller must establish terminal execution before invoking this.
+/// Preserve the tiny provenance marker; source, receipts and archived packages
+/// live elsewhere. Unknown/running executions must retain their target.
+pub fn prune_cargo_target(target:&Path)->Res<()> {
+    let invalid=|message:&str|Failure::new("cargo_target",message);
+    let name=target.file_name().and_then(|s|s.to_str()).unwrap_or("");
+    if !target.is_absolute() || !name.starts_with("ct-") || !name[3..].bytes().all(|b|b.is_ascii_hexdigit()) || name.len()!=27 {
+        return Err(invalid("not an owned Cargo target"));
+    }
+    let metadata=std::fs::symlink_metadata(target).map_err(|e|invalid(&e.to_string()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {return Err(invalid("target is a reparse point"));}
+    }
+    if metadata.file_type().is_symlink() {return Err(invalid("target is a link"));}
+    let binding:serde_json::Value=serde_json::from_slice(&std::fs::read(target.join(".chronos-binding.json")).map_err(|e|invalid(&e.to_string()))?).map_err(|e|invalid(&e.to_string()))?;
+    if binding["source"].as_str().is_none() || binding["execution"].as_str().is_none() || binding["nonce"].as_str().is_none() {return Err(invalid("missing target provenance"));}
+    for entry in std::fs::read_dir(target).map_err(|e|invalid(&e.to_string()))? {
+        let entry=entry.map_err(|e|invalid(&e.to_string()))?;
+        if entry.file_name()==".chronos-binding.json" {continue;}
+        let kind=entry.file_type().map_err(|e|invalid(&e.to_string()))?;
+        let result=if kind.is_dir(){std::fs::remove_dir_all(entry.path())}else{std::fs::remove_file(entry.path())};
+        result.map_err(|e|invalid(&e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Explicit candidates allow callers to test failure without changing process environment.
@@ -306,6 +342,13 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    // Rust file APIs accept long paths, but this raw Win32 call needs the
+    // extended-length prefix. Resolve the parent, never an existing target
+    // symlink: replacement must retain rename semantics.
+    let from = from.canonicalize()?;
+    let to = to.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new(".")).canonicalize()?.join(
+        to.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
+    );
     #[link(name = "kernel32")]
     extern "system" {
         fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
@@ -448,5 +491,18 @@ mod atomic_fault_tests {
         assert!(atomic_write(&target_dir, b"new").is_err()); // Actual OS rename failure.
         assert!(target_dir.is_dir());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+    #[test]
+    #[cfg(windows)]
+    fn atomic_receipt_replacement_supports_long_windows_paths() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut parent=dir.path().to_path_buf();
+        for _ in 0..5 {parent=parent.join("installed-probe-session-artifacts-0123456789");}
+        std::fs::create_dir_all(&parent).unwrap();
+        let path=parent.join("request.json");
+        assert!(path.as_os_str().len()>260);
+        atomic_write(&path,b"first").unwrap();
+        atomic_write(&path,b"second").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(),b"second");
     }
 }

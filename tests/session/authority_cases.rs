@@ -110,7 +110,10 @@ fn caller_command_lock_blocks_reentry_across_attachments_and_releases_without_po
     for handle in handles {handle.join().unwrap();}
 }
 #[test]
-fn real_host_enforces_research_review_planning_and_restart() {
+fn real_host_enforces_research_review_planning_and_restart() { exercise_authority(false); }
+#[test]
+fn real_host_replans_into_fresh_store_and_completes_preflight() { exercise_authority(true); }
+fn exercise_authority(replan:bool) {
     let temp=tempfile::tempdir().unwrap();
     let project=temp.path().join("demo");std::fs::create_dir(&project).unwrap();
     let home=temp.path().join("home");let record=temp.path().join("rpc.json");
@@ -118,14 +121,14 @@ fn real_host_enforces_research_review_planning_and_restart() {
         common::python(),"-I".into(),format!("{}/tests/session/authority_fake.py",env!("CARGO_MANIFEST_DIR")),
         "--scenario".into(),"role-flow".into(),"--home".into(),home.to_string_lossy().into(),
         "--project".into(),project.to_string_lossy().into(),"--slug".into(),"demo".into(),
-        "--record".into(),record.to_string_lossy().into()]) };
+        "--repair-contract".into(),if replan {"1".into()}else{"0".into()},"--record".into(),record.to_string_lossy().into()]) };
     let (host,opened)=Attachment::open(&config,&json!({"project":project,"text":"tiny CLI","skill":"wish"})).unwrap();
     host.call("goal",&json!({"mode":"change"})).unwrap();
     for tool in ["Write","Bash","orch","codex_run"] {
         assert!(host.call(tool,&json!({"actor":"dispatcher"})).is_err(),"{tool}");
     }
     assert!(host.call("Agent",&json!({"subagent_type":"chronos:astra","prompt":"bypass"})).is_err());
-    let args=json!({"subagent_type":"chronos:dispatcher","project":"demo","cwd":project,"prompt":"tiny CLI"});
+    let args=json!({"subagent_type":"chronos:dispatcher","project":"demo","cwd":project,"prompt":"tiny CLI","timeout_s":30});
     let first=host.call("Agent",&args).unwrap();
     assert_eq!(first["workflow"]["phase"],"intent_review","{first}");
     let revision=first["workflow"]["revision"].clone();

@@ -762,3 +762,17 @@ fn absolute_deadline_scope_cannot_be_renewed_and_prevents_command_launch() {
     });
     assert!(!remaining(Duration::from_secs(99)).is_zero());
 }
+
+#[test]
+fn terminal_cargo_cleanup_preserves_provenance_and_refuses_unowned_paths() {
+    let temp=common::temp();
+    let target=base::cargo_target(temp.path(),"cleanup-regression").unwrap();
+    let marker=std::fs::read(target.join(".chronos-binding.json")).unwrap();
+    std::fs::create_dir(target.join("debug")).unwrap();
+    std::fs::write(target.join("debug/large-output"),vec![7u8;1024*1024]).unwrap();
+    base::prune_cargo_target(&target).unwrap();
+    assert_eq!(std::fs::read(target.join(".chronos-binding.json")).unwrap(),marker);
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(),1);
+    assert!(base::prune_cargo_target(temp.path()).is_err());
+    std::fs::remove_dir_all(target).unwrap();
+}

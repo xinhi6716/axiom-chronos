@@ -446,7 +446,11 @@ fn verification_shell(command: &str, repo: &Path) -> Res<ShellRun> {
     // Acceptance/full tests must not create untracked target files after the
     // package source was bound. Match the already-isolated Host/package runners.
     let target=base::cargo_target(repo,&format!("acceptance:{}",base::unique()))?;
-    base::proc::run_shell_with_env(command,repo,Duration::from_secs(1800),&[("CARGO_TARGET_DIR",target.as_os_str())])
+    let result=base::proc::run_shell_with_env(command,repo,Duration::from_secs(1800),&[("CARGO_TARGET_DIR",target.as_os_str())]);
+    if result.as_ref().is_ok_and(|r|!r.timed_out) && !base::proc::current_cancellation().is_some_and(|c|c.cancelled()) {
+        if let Err(e)=base::prune_cargo_target(&target) {eprintln!("Cargo cache cleanup: {}",e.message);}
+    }
+    result
 }
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?

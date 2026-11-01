@@ -1084,7 +1084,11 @@ fn pipeline_checkpoint_with_severity(store: &Path, repo: &Path, round: u32, seve
     orch::checkpoint(store,serde_json::from_value(json!({"task":"checkpointed","module":"m","round":round,"owner":"terra","dependencies":[],"outputs":["src/lib.rs"],"evidence":["tests"],"next_action":"build","issue":"issue","proposal":"proposal","evidence_version":round,"contract":orch::contract_identity(store,"checkpointed").unwrap(),"repo":repo,"severity":severity,"findings":[]})).unwrap()).unwrap();
 }
 fn seed_execution(b: &Bridge) {
-    let (id,_)=axiom::goal::find_active(b.home().unwrap(),"demo").unwrap().unwrap();
+    let status=call(b,"session",&json!({"action":"status"}));
+    let id=status["structuredContent"]["session"].as_str().unwrap();
+    let mut legacy=axiom::goal::load(b.home().unwrap(),id).unwrap().unwrap();
+    legacy.project=Some("demo".into());legacy.other.remove("workflow_version");
+    fs::write(b.home().unwrap().join("goals").join(format!("{id}.json")),serde_json::to_vec(&legacy).unwrap()).unwrap();
     let dir=b.home().unwrap().join("authority").join(id);fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("state.json"),json!({"phase":"execution","revision":1,"research":null,"reason":"trusted downstream fixture"}).to_string()).unwrap();
 }
@@ -1095,6 +1099,12 @@ fn pipeline_core_status(b: &Bridge, repo: &Path) -> Value {
         &json!({"action":"begin","project":repo,"text":"verify Rust product"}),
     );
     assert_eq!(begin["structuredContent"]["status"], "completed", "{begin}");
+    // This fixture exercises existing legacy journals, not new-session planning.
+    let legacy_id=begin["structuredContent"]["session"].as_str().unwrap();
+    let legacy_home=b.home().unwrap();
+    let mut legacy=axiom::goal::load(legacy_home,legacy_id).unwrap().unwrap();
+    legacy.project=Some("demo".into());legacy.other.remove("workflow_version");
+    fs::write(legacy_home.join("goals").join(format!("{legacy_id}.json")),serde_json::to_vec(&legacy).unwrap()).unwrap();
     // Downstream pipeline fixture starts after the independently tested review/planning prefix.
     let dir=b.home().unwrap().join("authority").join(begin["structuredContent"]["session"].as_str().unwrap());
     fs::create_dir_all(&dir).unwrap();
