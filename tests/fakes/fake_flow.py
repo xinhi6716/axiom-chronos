@@ -85,13 +85,13 @@ for line in sys.stdin:
             log('research', thread=tid, effort=p.get('effort'), brief=brief)
             finish(tid, json.dumps({'summary': 'independent research', 'findings': ['freeze Python checks before writes']}))
         elif 'ROLE Planner' in brief:
-            check = "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert (p/'one.txt').read_text()=='one'; assert (p/'two.txt').read_text()=='two'; Path('scratch-proof').write_text('ok'); print('real frozen check passed')"
+            check = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); assert Path(os.environ['CARGO_TARGET_DIR']).name=='planned-target' and Path(os.environ['CARGO_TARGET_DIR']).parent.samefile(Path.cwd()), 'frozen target overwritten'; assert (p/'one.txt').read_text()=='one'; assert (p/'two.txt').read_text()=='two'; Path('scratch-proof').write_text('ok'); print('real frozen check passed')"
             if mode == 'failed-check':
                 check = 'raise SystemExit(7)'
             plan = {'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
                               {'kind':'engineer','id': 'u2', 'brief': 'write two', 'scope': ['two.txt'], 'depends_on': []}],
                     'checks': [{'id': 'frozen-python', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
-                                'args': ['-I', '-c', check, '{repo}'], 'env': [], 'timeout_s': 10}]}
+                                'args': ['-I', '-c', check, '{repo}'], 'env': [{'name':'CARGO_TARGET_DIR','value':'{scratch}/planned-target'}], 'timeout_s': 10}]}
             if mode == 'content':
                 plan['units'][1].update(kind='content', scope=[])
                 plan['assembly_scope'] = ['one.txt', 'two.txt']

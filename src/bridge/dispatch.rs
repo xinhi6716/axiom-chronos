@@ -1051,7 +1051,9 @@ impl Pipeline {
         ] {
             let p = scratch.join(dir);
             std::fs::create_dir_all(&p).map_err(io)?;
-            env.insert(key.into(), p.to_string_lossy().into_owned());
+            // Defaults must not silently change the frozen command contract.
+            env.entry(key.into())
+                .or_insert_with(|| p.to_string_lossy().into_owned());
         }
         let result = self.server.exec_check(&codex::CommandSpec {
             program: expand(&f.program),
