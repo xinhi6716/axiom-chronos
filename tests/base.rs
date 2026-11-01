@@ -631,7 +631,7 @@ fn cargo_targets_are_short_writable_bound_and_isolated() {
         let builds: Vec<_> = [(&a, &paths[0], "source-a"), (&b, &paths[1], "source-b")]
             .into_iter().map(|(source, target, expected)| s.spawn(move || {
                 let result = Command::new("cargo").args(["build", "--locked", "--offline"]).current_dir(source).env("CARGO_TARGET_DIR", target).output().unwrap();
-                assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                assert!(result.status.success(), "cargo build failed: status={:?}; source={}; target={}; stdout={}; stderr={}", result.status, source.display(), target.display(), String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
                 let binary = target.join("debug").join(format!("short-target-fixture{}", std::env::consts::EXE_SUFFIX));
                 let run = Command::new(binary).output().unwrap();
                 assert!(run.status.success());
