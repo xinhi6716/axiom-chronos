@@ -68,3 +68,11 @@ dev.5 的工程單元依規劃中的相對 scratch 路徑寫出範圍而被拒�
 同版移除 Windows 的 PID-only taskkill /T 清理，改以父子建立時間、快照時間上限與持有的 handle 驗證後終止子程序。dev.5 CI 曾異常退出，兩者因果尚未證實；不得把該次 CI 寫成成功。實際 Terra 暫存環境短測通過，產品目錄保持空白；證據保存於重建資料目錄。
 
 dev.6 通過 179 項本地測試及 Windows／Ubuntu CI，但新 task 僅完成第一輪；第二輪將指定 scratch 內的測試腳本誤判為產品越界，尚未完成三輪。dev.7 對寫入回報允許該 attempt 的絕對 scratch 路徑，解析連結與已刪除檔案的存活父目錄，仍拒絕其他 attempt、相對路徑及上層跳脫。回歸模型現在也回報暫存檔案事件，避免僅測 shell 寫入而漏掉 apply_patch 回報。新 task 驗收結果另行記錄，不預先宣告通過。
+
+### dev.7 重建驗收（2026-11-01）
+
+- 產品 commit：`9db1414c40cea34866db521ddff13cd53ef40051`，版本 `0.3.0-codex.dev.7`。180 項本地測試、[該 commit 的 Windows／Ubuntu CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41298645363) 通過；來源套件、安裝快取與 Rust 執行檔身分已核對，新 MCP 程序回報相同版本。
+- 全新 ASTRA xhigh task `01a196b6-e180-7152-84d6-08aa67b29818` 僅收到三輪 linecount 使用者任務，沒有舊 checkpoint 或中途補指令。三輪各自完成研究、意圖複核、規劃、工程、SOL 組裝、獨立驗證與記憶，皆達 `ready_to_commit`；提交依序為 `0b8d5cb`、`980aea6`、`e02868d`，最終工作樹乾淨。
+- 另逐一重建三個提交，執行未提供給 worker 的 28 次 CLI 檢查，28 次通過。角色與 checkpoint 核對為 3／3 通過；核心呼叫只有三組 `start`／`decide`，沒有 GOAL、status 輪詢、舊工具接管或核心產品修改。
+- 原始結果在本機 `E:/codex/chronos-runtime/acceptance/codex-rebuild-dev7/`：`frozen-scenario.json`、`fixture.json`、`holdout-results.json`、`workflow-results.json`、`chat-audit.json` 與逐提交建置輸出。安裝／CI 收據在 `chronos-artifacts/evidence/codex-rebuild-20261101/installation/dev7/`。
+- 限制：只有一個 Windows 實際任務樣本，耗時 1,867.626 秒（約 31 分鐘）；不能據此宣稱效能或 token 改善。此測試證明三輪受管流程可完成，不證明程序崩潰後會自行喚醒，也不代表 Rust 能封鎖宿主核心的原生工具或免除宿主等待期間的模型續行。正式產品三輪迭代另以新 task 開始，本次重建與短任務驗收不計入。
