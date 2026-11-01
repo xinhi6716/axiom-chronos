@@ -150,12 +150,166 @@ fn flow(mode: &str, approve: bool) {
             .any(|a| a.outcome == Some(checkpoint::AttemptOutcome::Failed)));
         assert_eq!(rows().iter().filter(|r| r["kind"] == "research").count(), 1);
     }
+    if mode == "evaluation-recovered" {
+        // A preparation failure is a typed, recoverable planning boundary.
+        assert_eq!(result["status"], "blocked", "{result}");
+        assert!(
+            result["short_reason"]
+                .as_str()
+                .unwrap()
+                .contains("independent evaluation preparation failed"),
+            "{result}"
+        );
+        assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+        assert!(!repo.join("one.txt").exists());
+        let failed = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(failed.phase, Phase::Planning);
+        assert!(failed.steps.get("baseline").is_none());
+        assert!(failed.checks.is_empty());
+        assert!(!failed.receipts.keys().any(|k| k.starts_with("evaluation-")));
+        result = invoke(
+            "retry-evaluation",
+            json!({"type":"resume","run_id":run,
+            "recovery":{"retry_planning":{"reason":"the tester can now return inline held-out checks"}}}),
+        );
+        assert_eq!(result["status"], "ready_to_commit", "{result}");
+        let recovered = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(checkpoint::planning_epoch(&recovered), 1);
+        assert_eq!(rows().iter().filter(|r| r["kind"] == "research").count(), 1);
+        assert!(recovered
+            .receipts
+            .keys()
+            .any(|k| k.starts_with("planning-retry-")));
+    }
+    if ["evaluation-unprepared", "evaluation-fake-ready"].contains(&mode) {
+        // The dev.8 shape and its relabelled-public-check variant: preparation
+        // must fail before any check is installed or any writer starts.
+        assert_eq!(result["status"], "blocked", "{result}");
+        let reason = result["short_reason"].as_str().unwrap();
+        assert!(
+            reason.contains("independent evaluation preparation failed")
+                || reason.contains("repeats a public regression command"),
+            "{reason}"
+        );
+        assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+        assert!(!repo.join("one.txt").exists());
+        let failed = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(failed.phase, Phase::Planning);
+        assert!(failed.steps.get("baseline").is_none());
+        assert!(failed.checks.is_empty(), "no acceptance check is installed");
+        assert!(
+            !failed.receipts.keys().any(|k| k.starts_with("evaluation-")),
+            "a failed preparation is not saved as an evaluation receipt"
+        );
+        assert!(
+            !failed.receipts.keys().any(|k| k.starts_with("baseline-")),
+            "the baseline must not run on an uninstalled plan"
+        );
+        // Research and the typed failure stay; a new planning epoch is legal.
+        let retried = invoke(
+            "retry-unprepared",
+            json!({"type":"resume","run_id":run,
+            "recovery":{"retry_planning":{"reason":"runtime now offers an inline tester contract"}}}),
+        );
+        assert_ne!(retried["status"], "ready_to_commit", "{retried}");
+        let retried_run = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(checkpoint::planning_epoch(&retried_run), 1);
+        assert_eq!(rows().iter().filter(|r| r["kind"] == "research").count(), 1);
+        return;
+    }
+    if mode == "baseline-infrastructure" {
+        // The checks are genuine but the baseline says the infrastructure
+        // cannot judge the product: engineering must stay closed.
+        assert_eq!(result["status"], "blocked", "{result}");
+        assert!(
+            result["short_reason"]
+                .as_str()
+                .unwrap()
+                .contains("acceptance infrastructure not ready"),
+            "{result}"
+        );
+        assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+        assert!(!repo.join("one.txt").exists());
+        let c = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(c.phase, Phase::Planning);
+        assert!(c.plan.is_some());
+        assert!(
+            c.checks
+                .keys()
+                .all(|id| c.receipts.contains_key(&format!("baseline-{id}"))),
+            "the baseline ran every frozen check"
+        );
+        assert!(
+            c.receipts.get(checkpoint::BASELINE_GATE).is_none(),
+            "no gate receipt may authorize writers"
+        );
+        let retried = invoke(
+            "retry-frozen-baseline",
+            json!({"type":"resume","run_id":run,
+            "recovery":{"retry_planning":{"reason":"must not unfreeze an installed plan"}}}),
+        );
+        assert_ne!(retried["status"], "ready_to_commit", "{retried}");
+        assert_eq!(
+            checkpoint::load_run(&home.join("orchestrate/demo"), run)
+                .unwrap()
+                .phase,
+            Phase::Planning
+        );
+        return;
+    }
+    if mode == "writer-blocked" {
+        // A normally terminating turn that reports a blocked unit must not
+        // satisfy dependents, assembly or verification.
+        assert_eq!(result["status"], "blocked", "{result}");
+        let reason = result["short_reason"].as_str().unwrap();
+        assert!(reason.contains("reported blocked"), "{reason}");
+        assert!(reason.contains("未開始工程"), "{reason}");
+        assert!(!rows().iter().any(|r| r["kind"] == "assembly"));
+        let c = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(c.phase, Phase::Engineering);
+        assert!(c
+            .attempts
+            .values()
+            .any(|a| a.outcome == Some(checkpoint::AttemptOutcome::Blocked)));
+        assert!(!c.receipts.keys().any(|k| k.starts_with("review-")));
+        assert!(!c.receipts.contains_key("assembly"));
+        assert!(!repo.join("one.txt").exists());
+        let saved = c
+            .attempts
+            .values()
+            .find(|a| a.outcome == Some(checkpoint::AttemptOutcome::Blocked))
+            .and_then(|a| a.raw_result.as_ref())
+            .map(|r| std::fs::read_to_string(&r.path).unwrap())
+            .unwrap();
+        assert!(
+            saved.contains("未開始工程"),
+            "the refusal report is retained"
+        );
+        return;
+    }
+    if ["verifier-upstream", "verifier-no-owner"].contains(&mode) {
+        // Recovery follows the failure's origin: an upstream or unattributed
+        // failure never consumes a SOL rework.
+        assert_eq!(result["status"], "blocked", "{result}");
+        let reason = result["short_reason"].as_str().unwrap();
+        if mode == "verifier-upstream" {
+            assert!(reason.contains("no rework was scheduled"), "{reason}");
+            assert!(reason.contains("upstream"), "{reason}");
+        } else {
+            assert!(reason.contains("defect_owner=none"), "{reason}");
+        }
+        let c = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert!(!c.receipts.keys().any(|k| k.starts_with("rework-")));
+        assert_eq!(rows().iter().filter(|r| r["kind"] == "assembly").count(), 1);
+        return;
+    }
     if ![
         "normal",
         "content",
         "repairable-review",
         "evaluation",
         "planning-retry",
+        "evaluation-recovered",
     ]
     .contains(&mode)
     {
@@ -226,7 +380,7 @@ fn flow(mode: &str, approve: bool) {
     );
     assert!(c.receipts.contains_key("memory"));
     let records = rows();
-    if ["evaluation", "planning-retry"].contains(&mode) {
+    if ["evaluation", "planning-retry", "evaluation-recovered"].contains(&mode) {
         let prep = records
             .iter()
             .find(|r| r["kind"] == "evaluation-prepared")
@@ -248,6 +402,13 @@ fn flow(mode: &str, approve: bool) {
             if brief.starts_with("ROLE Engineer") || brief.starts_with("ROLE Assembler") {
                 assert!(!brief.contains("PRIVATE_EVALUATION_CANARY"));
                 assert!(!brief.contains(&evaluation.path.to_string_lossy().to_string()));
+                // Non-leaking prerequisite proof: the writer is told Rust
+                // already froze and classified the checks before it started.
+                assert!(
+                    brief.contains("acceptance infrastructure was classified ready"),
+                    "{brief}"
+                );
+                assert!(brief.contains("private held-out checks"), "{brief}");
             }
         }
         assert!(checkpoint::resolve_attempt(
@@ -530,4 +691,35 @@ fn rejection_requires_matching_digest_and_cancel_requires_reason() {
 #[test]
 fn luna_content_is_read_only_and_sol_integrates_the_artifact() {
     flow("content", true);
+}
+
+#[test]
+fn prepared_evaluation_that_reports_failure_blocks_before_baseline() {
+    flow("evaluation-unprepared", true);
+}
+
+#[test]
+fn relabelled_public_check_is_not_held_out_acceptance() {
+    flow("evaluation-fake-ready", true);
+}
+
+#[test]
+fn preparation_failure_recovers_through_a_new_planning_epoch() {
+    flow("evaluation-recovered", true);
+}
+
+#[test]
+fn baseline_infrastructure_failure_keeps_engineering_closed() {
+    flow("baseline-infrastructure", true);
+}
+
+#[test]
+fn writer_refusal_after_a_normal_turn_does_not_unlock_dependents() {
+    flow("writer-blocked", true);
+}
+
+#[test]
+fn upstream_and_unattributed_verifier_failures_do_not_consume_sol_rework() {
+    flow("verifier-upstream", true);
+    flow("verifier-no-owner", true);
 }

@@ -435,3 +435,110 @@ fn verifier_review_requires_independent_thread_and_frozen_evidence() {
     review.snapshot = good;
     assert!(record_independent_review(&store, "r", rev, &review).is_ok());
 }
+
+#[test]
+fn engineering_requires_typed_baseline_observations_and_the_gate() {
+    // Baseline receipts alone are observations; only the typed gate receipt
+    // authorizes writers, so an unprepared or infrastructure-failed baseline
+    // cannot open engineering.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let store = tmp.path().join("store");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let intent = reference(&store.join("intent"), b"intent");
+    let research = reference(&store.join("research"), b"research");
+    let plan = reference(&store.join("plan"), b"plan");
+    let brief = reference(&store.join("brief"), b"brief");
+    let mut rev = create_run(
+        &store,
+        &RunSeed {
+            run_id: "r".into(),
+            repo: RepoIdentity {
+                canonical_root: repo.canonicalize().unwrap(),
+                identity_digest: "repo".into(),
+            },
+            intent,
+        },
+    )
+    .unwrap()
+    .revision;
+    rev = record_receipt(&store, "r", rev, "research", &research).unwrap();
+    rev = record_core_decision(
+        &store,
+        "r",
+        rev,
+        &CoreDecision {
+            research_digest: research.digest,
+            pass: true,
+            reason: "yes".into(),
+        },
+    )
+    .unwrap();
+    rev = advance_phase(&store, "r", rev, Phase::IntentReview).unwrap();
+    rev = advance_phase(&store, "r", rev, Phase::Planning).unwrap();
+    let mut check = FrozenCheck {
+        check_id: "test".into(),
+        program: "test".into(),
+        args: vec![],
+        env: Default::default(),
+        timeout_s: 10,
+        snapshot: Snapshot {
+            source_digest: String::new(),
+            plan_digest: String::new(),
+            checks_digest: String::new(),
+        },
+        spec_digest: String::new(),
+    };
+    check.spec_digest = check_spec_digest(&check).unwrap();
+    check.snapshot = frozen_snapshot(&repo, &plan, &[check.clone()]).unwrap();
+    let step = StepSpec {
+        run_id: "r".into(),
+        step_id: "u1".into(),
+        purpose: Purpose::Engineer,
+        brief_ref: brief,
+        scope: vec!["one.txt".into()],
+        dependency_ids: vec![],
+        check_ids: vec!["test".into()],
+    };
+    rev = install_plan(&store, "r", rev, &plan, &[step], &[check.clone()]).unwrap();
+    assert!(advance_phase(&store, "r", rev, Phase::Engineering)
+        .unwrap_err()
+        .message
+        .contains("phase transition missing evidence"));
+    let result = CheckResult {
+        check_id: "test".into(),
+        snapshot: check.snapshot.clone(),
+        spec_digest: check.spec_digest.clone(),
+        exit_code: Some(1),
+        policy_applied: true,
+        stdout: reference(&store.join("stdout"), b"out"),
+        stderr: reference(&store.join("stderr"), b"err"),
+        executor: ExecutorIdentity {
+            attempt_id: "a".into(),
+            thread_id: "t".into(),
+            model: "m".into(),
+            purpose: Purpose::Verifier,
+            policy: ExecutionPolicy::ScratchCheck,
+        },
+    };
+    let baseline = reference(
+        &store.join("baseline"),
+        &serde_json::to_vec(&result).unwrap(),
+    );
+    rev = record_receipt(&store, "r", rev, "baseline-test", &baseline).unwrap();
+    assert!(
+        advance_phase(&store, "r", rev, Phase::Engineering).is_err(),
+        "baseline receipts do not classify the infrastructure"
+    );
+    let gate = reference(&store.join("gate"), b"ready");
+    rev = record_receipt(&store, "r", rev, BASELINE_GATE, &gate).unwrap();
+    advance_phase(&store, "r", rev, Phase::Engineering).unwrap();
+    assert_eq!(load_run(&store, "r").unwrap().phase, Phase::Engineering);
+}

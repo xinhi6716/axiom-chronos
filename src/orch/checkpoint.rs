@@ -20,7 +20,10 @@ wire_enum!(RunStatus { NeedsIntentReview, Running, Blocked, OutcomeUnknown, Read
 wire_enum!(ExecutionPolicy { ProductReadOnly, WorkspaceWrite, ScratchCheck });
 wire_struct!(StepSpec { run_id: String, step_id: String, purpose: Purpose, brief_ref: ArtifactRef, scope: Vec<String>, dependency_ids: Vec<String>, check_ids: Vec<String> });
 wire_enum!(AttemptState { Prepared, Dispatching, Running, Terminal, OutcomeUnknown });
-wire_enum!(AttemptOutcome { Completed, Failed, Cancelled });
+// Blocked: the turn ended normally but the leaf reported, in its typed work
+// result, that the business goal was not achieved. It never satisfies a
+// dependency and needs no transport repair.
+wire_enum!(AttemptOutcome { Completed, Failed, Cancelled, Blocked });
 wire_struct!(Attempt { attempt_id: String, step_id: String, input_digest: String, state: AttemptState, generation: Option<u64>, thread_id: Option<String>, turn_id: Option<String>, raw_result: Option<ArtifactRef>, outcome: Option<AttemptOutcome>, last_event_sequence: u64 });
 wire_struct!(CoreDecision { research_digest: String, pass: bool, reason: String });
 wire_struct!(FrozenCheck { check_id: String, program: String, args: Vec<String>, env: BTreeMap<String,String>, timeout_s: u64, snapshot: Snapshot, spec_digest: String });
@@ -94,6 +97,9 @@ pub enum RecoveryDecision {
         reason: String,
     },
 }
+
+/// Receipt for the typed baseline classification that authorizes engineering.
+pub const BASELINE_GATE: &str = "gate-baseline";
 
 fn fail(s: impl Into<String>) -> Failure {
     Failure::new("checkpoint", s)
@@ -970,7 +976,18 @@ pub fn advance_phase(store: &Path, id: &str, rev: u64, phase: Phase) -> Res<u64>
                         .as_ref()
                         .is_some_and(|r| r.digest == d.research_digest)
             }),
-            (Phase::Planning, Phase::Engineering) => c.plan.is_some() && !c.steps.is_empty(),
+            // Writers start only after every frozen check ran in the baseline
+            // and the acceptance infrastructure was classified ready.
+            (Phase::Planning, Phase::Engineering) => {
+                c.plan.is_some()
+                    && !c.steps.is_empty()
+                    && c.checks
+                        .keys()
+                        .all(|id| c.receipts.contains_key(&format!("baseline-{id}")))
+                    && c.receipts
+                        .get(BASELINE_GATE)
+                        .is_some_and(|r| artifact(r).is_ok())
+            }
             (Phase::Engineering, Phase::Assembling) => c
                 .steps
                 .values()
@@ -1179,6 +1196,7 @@ pub fn resolve_attempt(store: &Path, id: &str, rev: u64, decision: &RecoveryDeci
                     Some("completed") => AttemptOutcome::Completed,
                     Some("failed") => AttemptOutcome::Failed,
                     Some("cancelled") => AttemptOutcome::Cancelled,
+                    Some("blocked") => AttemptOutcome::Blocked,
                     _ => return Err(fail("terminal evidence missing outcome")),
                 };
                 finish_result(store, id, c, attempt_id, outcome, &bytes)?;

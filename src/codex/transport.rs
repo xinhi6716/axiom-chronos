@@ -400,7 +400,9 @@ impl super::AppServer {
                                     json!({"id":id,"result":{"success":r.success,"contentItems":r.content_items}})
                                 }
                                 Ok(Err(e)) => {
-                                    json!({"id":id,"error":{"code":-32603,"message":e.message}})
+                                    // Keep the typed failure so a blocked run can
+                                    // report the business reason, not the wrapper.
+                                    json!({"id":id,"error":{"code":-32603,"message":e.message,"data":e.to_json()}})
                                 }
                                 Err(_) => {
                                     json!({"id":id,"error":{"code":-32603,"message":"handler panicked"}})

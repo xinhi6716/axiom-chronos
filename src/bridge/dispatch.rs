@@ -201,6 +201,62 @@ fn tool(name: &str, properties: Value) -> DynamicTool {
         input_schema: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
     }
 }
+/// Typed business result of a writing leaf. A normally terminated turn is only
+/// transport evidence; dependencies follow this status.
+fn writer_schema() -> Value {
+    json!({"type":"object","required":["status","summary","artifact"],"additionalProperties":false,"properties":{
+        "status":{"type":"string","enum":["completed","blocked"]},
+        "summary":{"type":"string"},
+        "artifact":{"type":["string","null"]}}})
+}
+fn writes_work(purpose: &Purpose) -> bool {
+    matches!(
+        purpose,
+        Purpose::Engineer | Purpose::Content | Purpose::Assembler
+    )
+}
+/// Reason a writer did not achieve its goal; `None` only for a typed completion.
+fn work_blocked(report: &Value) -> Option<String> {
+    // History replays carry the typed result only as the final message text.
+    let parsed = report["final_message"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let out = if report["structured_output"].is_null() {
+        parsed.as_ref().unwrap_or(&Value::Null)
+    } else {
+        &report["structured_output"]
+    };
+    match out["status"].as_str() {
+        Some("completed") => None,
+        Some("blocked") => Some(
+            out["summary"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("no reason given")
+                .to_owned(),
+        ),
+        _ => Some("missing machine-readable work status".into()),
+    }
+}
+fn blocked_failure(step: &str, reason: &str) -> Failure {
+    Failure::new(
+        "work_blocked",
+        format!("work unit {step} reported blocked: {reason}. Dependents, assembly and verification were not started on it. The frozen plan and this evidence are retained; fix the stated prerequisite and start a new run instead of resuming this one for a different result."),
+    )
+}
+/// Concrete typed failure a tool handler raised during a leaf attempt. The
+/// transport keeps it beside the wrapper message so a blocked run reports the
+/// business reason instead of "tool_handler_failed".
+fn cause_failure(report: &Value) -> Option<Failure> {
+    report["error"]["causes"].as_array()?.iter().find_map(|c| {
+        let data = &c["error"]["data"];
+        let kind = data["kind"].as_str()?;
+        Some(Failure::new(
+            kind,
+            data["message"].as_str().unwrap_or("no message"),
+        ))
+    })
+}
 struct Bound {
     pipeline: Arc<Pipeline>,
     purpose: Purpose,
@@ -339,7 +395,7 @@ impl ToolHandler for Bound {
                 }
                 let args: Args = serde_json::from_value(call.arguments).map_err(io)?;
                 p.batch(&args.unit_ids)?;
-                json!({"completed":args.unit_ids})
+                json!({"terminal":args.unit_ids,"note":"Rust recorded each unit's typed work outcome; blocked units do not satisfy dependents."})
             }
             (Purpose::Verifier, "verify_run") => {
                 #[derive(Deserialize)]
@@ -599,6 +655,14 @@ impl Bridge {
                             p.server.read_attempt(thread, a.turn_id.as_deref())
                         {
                             let outcome = match report.terminal {
+                                TransportTerminal::Completed
+                                    if p.load()?.steps.get(&a.step_id).is_some_and(|s| {
+                                        writes_work(&s.purpose)
+                                            && work_blocked(&report.report).is_some()
+                                    }) =>
+                                {
+                                    AttemptOutcome::Blocked
+                                }
                                 TransportTerminal::Completed => AttemptOutcome::Completed,
                                 TransportTerminal::Failed => AttemptOutcome::Failed,
                                 TransportTerminal::Cancelled => AttemptOutcome::Cancelled,
@@ -837,7 +901,7 @@ impl Pipeline {
             .load()?
             .research
             .ok_or_else(|| fail("research missing"))?;
-        let spec=self.spec(&self.planning_step("planner")?,Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required. Also return independent_evaluation: a concise preparation brief when the intent requires held-out/independent acceptance, otherwise null. Rust will then invoke a separate read-only ASTRA HIGH tester to create and seal self-contained private check commands BEFORE baseline and engineering. Missing independent runner/sample files are not a blocker: requesting their preparation is your responsibility. Keep public regression checks and private evaluation preparation distinct.",self.intent()?,research.path),vec![],vec![])?;
+        let spec=self.spec(&self.planning_step("planner")?,Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required. Also return independent_evaluation: a concise brief of WHAT behavior held-out/independent acceptance must cover when the intent requires it, otherwise null. Actual runtime capability, do not promise more: Rust then invokes a separate read-only ASTRA HIGH tester that only returns inline check commands with a typed ready/failed status; it cannot write files, run commands, trial-run or seal anything itself. Rust persists and SHA-256-freezes accepted commands, executes every frozen check in the baseline before engineering (product read-only, per-check scratch cwd), and starts writers only after a typed baseline classification says the acceptance infrastructure is ready. Isolation is contextual: writer and assembler briefs never receive private checks or the tester report, but there is no OS-level guarantee that writers cannot read the run store. Therefore never require OS-unreadable private areas, tester-run sealing or trial runs, and never make units wait for, request or verify evaluation-preparation or baseline reports: Rust enforces that ordering before any unit starts. Missing independent runner/sample files are not a blocker. Keep public regression checks and private evaluation preparation distinct.",self.intent()?,research.path),vec![],vec![])?;
         let schema = json!({"type":"object","required":["assembly_scope","units","checks"],"additionalProperties":false,"properties":{"assembly_scope":{"type":["array","null"],"minItems":1,"items":{"type":"string"}},"units":{"type":"array","items":{"type":"object","required":["kind","id","brief","scope","depends_on"],"additionalProperties":false,"properties":{"kind":{"type":["string","null"],"enum":["engineer","content",null]},"id":{"type":"string"},"brief":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}},"depends_on":{"type":"array","items":{"type":"string"}}}}},"checks":{"type":"array","minItems":1,"items":{"type":"object","required":["id","program","args","env","timeout_s"],"additionalProperties":false,"properties":{"id":{"type":"string"},"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}},"timeout_s":{"type":"integer","minimum":1,"maximum":1800}}}}}});
         let mut schema = schema;
         schema["required"]
@@ -948,9 +1012,29 @@ impl Pipeline {
             }
             let epoch = checkpoint::planning_epoch(&self.load()?);
             let prep = self.spec(&format!("evaluation-prep-{epoch}"), Purpose::Verifier,
-                &format!("PREPARE INDEPENDENT EVALUATION before engineering. You are a separate ASTRA HIGH tester, not a planner or engineer. Approved public plan: {:?}. Evaluation requirements: {}. Intent: {}. Create compact, self-contained executable checks with NEW held-out cases from the approved behavior and evaluation method. Existing runners or sample files are NOT prerequisites: return inline scripts/arguments that construct fixtures in {{scratch}} and inspect the product at {{repo}}. The Rust executor will persist and hash these commands and inputs before baseline or engineering. Do not modify product or run development. Do not merely invoke existing public tests or pretend a fake role is live acceptance. Each check id must start independent-. Return JSON {{summary,checks}} using the same program/args/env/timeout_s check format. Use actual available local executables; commands run with scratch cwd and may write only scratch. Do not depend on any uncreated runner, later writer-owned test or mutable external data. Keep each inline command compact. Missing product behavior may fail the baseline; missing evaluation infrastructure must not be assumed away.",r.path,brief,self.intent()?),vec![],vec![])?;
-            let (report, receipt, _) = self.role(&prep, vec![], Some(json!({"type":"object","required":["summary","checks"],"additionalProperties":false,"properties":{"summary":{"type":"string"},"checks":check_schema}})))?;
+                &format!("PREPARE INDEPENDENT EVALUATION before engineering. You are a separate ASTRA HIGH tester, not a planner or engineer. Approved public plan: {:?}. Evaluation requirements: {}. Intent: {}. Your real capability: you are read-only and return check definitions only; you do not write, run, trial-run or seal anything. Rust persists and SHA-256-freezes accepted commands, runs each in the baseline before engineering with the product read-only and a fresh per-check scratch cwd, and withholds your report and commands from writer briefs (contextual isolation, not an OS guarantee). Create compact, self-contained executable checks with NEW held-out cases from the approved behavior and evaluation method. Existing runners or sample files are NOT prerequisites: return inline scripts/arguments that construct fixtures in {{scratch}} and inspect the product at {{repo}}. Every check must reference {{repo}} and decide pass/fail from actual product behavior. Do not modify product or run development. Do not merely invoke existing public tests or pretend a fake role is live acceptance. Each check id must start independent-. Return JSON {{status,summary,exposure,checks}}: status=ready only when the checks are genuine held-out acceptance of the product; status=failed with the concrete reason and checks=[] when you cannot produce them. Never return placeholder, fixed-exit or self-declared-failure checks. exposure states which cases stay private and the limits of this isolation. Use the same program/args/env/timeout_s check format and actual available local executables; commands may write only scratch. Do not depend on any uncreated runner, later writer-owned test or mutable external data. Keep each inline command compact. Missing product behavior may fail the baseline; missing evaluation infrastructure must not be assumed away.",r.path,brief,self.intent()?),vec![],vec![])?;
+            let mut prep_checks = check_schema.clone();
+            prep_checks["minItems"] = json!(0);
+            let (report, receipt, _) = self.role(&prep, vec![], Some(json!({"type":"object","required":["status","summary","exposure","checks"],"additionalProperties":false,"properties":{"status":{"type":"string","enum":["ready","failed"]},"summary":{"type":"string"},"exposure":{"type":"string"},"checks":prep_checks}})))?;
             let value = Self::output(&report)?;
+            if value["status"] != "ready" {
+                return Err(Failure::new(
+                    "evaluation_unprepared",
+                    format!(
+                        "independent evaluation preparation failed before engineering: {}. No checks were installed and no writer started; research and the failure evidence are preserved, so the corrected prerequisite may be retried with recovery retry_planning.",
+                        value["summary"].as_str().unwrap_or("no reason given")
+                    ),
+                ));
+            }
+            if value["exposure"]
+                .as_str()
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(Failure::new(
+                    "evaluation_unprepared",
+                    "independent evaluation preparation reported ready without stating the exposure boundary; which cases stay private is part of the contract. No checks were installed and no writer started.".to_owned(),
+                ));
+            }
             let independent: Vec<Check> =
                 serde_json::from_value(value["checks"].clone()).map_err(io)?;
             if independent.is_empty()
@@ -961,6 +1045,45 @@ impl Pipeline {
                 return Err(fail(
                     "independent evaluator must supply named executable checks",
                 ));
+            }
+            // A command that never reads the product cannot be its acceptance;
+            // this rejects fixed-exit placeholders even when status claims ready.
+            if let Some(c) = independent.iter().find(|c| {
+                !std::iter::once(&c.program)
+                    .chain(&c.args)
+                    .chain(c.env.iter().map(|e| &e.value))
+                    .any(|s| s.contains("{repo}"))
+            }) {
+                return Err(Failure::new(
+                    "evaluation_unprepared",
+                    format!("independent check {} does not inspect the product ({{repo}}); placeholder commands are not acceptance. No checks were installed and no writer started.", c.id),
+                ));
+            }
+            // Relabelling a public regression check is not held-out acceptance.
+            if let Some(c) = independent.iter().find(|i| {
+                check_specs.iter().any(|p| {
+                    p.program == i.program
+                        && p.args == i.args
+                        && p.env
+                            .iter()
+                            .map(|e| (&e.name, &e.value))
+                            .collect::<Vec<_>>()
+                            == i.env
+                                .iter()
+                                .map(|e| (&e.name, &e.value))
+                                .collect::<Vec<_>>()
+                })
+            }) {
+                return Err(Failure::new(
+                    "evaluation_unprepared",
+                    format!("independent check {} repeats a public regression command; public checks cannot be relabelled as held-out acceptance. No checks were installed and no writer started.", c.id),
+                ));
+            }
+            if independent
+                .iter()
+                .any(|i| check_specs.iter().any(|p| p.id == i.id))
+            {
+                return Err(fail("independent check ID collides with a public check"));
             }
             self.receipt(&format!("evaluation-{epoch}"), &receipt)?;
             check_specs.extend(independent);
@@ -1014,8 +1137,8 @@ impl Pipeline {
             return Err(fail("plan must scope mandatory assembly writes"));
         }
         steps.push(self.spec("assembly",Purpose::Assembler,&format!("Integrate all units for approved intent: {}. Read only the provided engineering/content result references. Preserve other owners. Run appropriate public checks; reports alone are not success. Do not inspect private evaluation artifacts. No commit, push or install.",self.intent()?),assembly_scope,ids.clone())?);
-        steps.push(self.spec("baseline",Purpose::Verifier,"Execute frozen baseline checks before engineering. Invoke verify_run for EVERY ID in VERIFY. Failures are baseline observations, not permission to change acceptance criteria. Return observations.",vec![],ids.clone())?);
-        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string}. Reject real defects in this run's current deliverable. Commit, push, installation and subsequent rounds happen after ready_to_commit; do not reject their absence before that boundary. Completion alone is not a pass. Never reveal held-out inputs, expected values, private command bodies or private output paths in feedback to writers; report actionable defect categories without exposing those cases.",vec![],ids)?);
+        steps.push(self.spec("baseline",Purpose::Verifier,"Execute frozen baseline checks before engineering. Invoke verify_run for EVERY ID in VERIFY, then classify each actual result: passed (exit 0); product_missing (fails only because the deliverable does not exist yet); product_defect (existing product behaves wrongly); infrastructure_failure (the check itself cannot run or cannot meaningfully judge the product: broken command, missing executable, timeout, placeholder or self-declared preparation failure). Product failures are expected pre-change observations, not permission to change acceptance criteria. Return JSON {infrastructure_ready:boolean, summary:string, observations:[{check_id, classification}]} covering every ID. Never quote private command bodies, held-out inputs or expected values.",vec![],ids.clone())?);
+        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string,defect_owner}. defect_owner=none when pass; assembly when SOL can repair the defect inside the unchanged assembly scope and frozen checks; upstream when the cause is the plan, the evaluation preparation, a missing prerequisite or capability that assembly cannot legally change. Reject real defects in this run's current deliverable. Commit, push, installation and subsequent rounds happen after ready_to_commit; do not reject their absence before that boundary. Completion alone is not a pass. Never reveal held-out inputs, expected values, private command bodies or private output paths in feedback to writers; report actionable defect categories without exposing those cases.",vec![],ids)?);
         steps.push(self.spec("memory",Purpose::Memory,"Record only independently verified outcomes. Invoke record_memory with the provided review evidence digest and concise reusable summary. Do not claim installation, release, push or independent live acceptance.",vec![],vec![])?);
         self.edit(|c| {
             checkpoint::install_plan(&self.store, &self.run, c.revision, &r, &steps, &checks)
@@ -1029,7 +1152,11 @@ impl Pipeline {
             .filter(|s| {
                 matches!(s.purpose, Purpose::Engineer | Purpose::Content)
                     && !c.attempts.values().any(|a| {
-                        a.step_id == s.step_id && a.outcome == Some(AttemptOutcome::Completed)
+                        a.step_id == s.step_id
+                            && matches!(
+                                a.outcome,
+                                Some(AttemptOutcome::Completed | AttemptOutcome::Blocked)
+                            )
                     })
                     && s.dependency_ids.iter().all(|d| {
                         c.attempts.values().any(|a| {
@@ -1057,11 +1184,17 @@ impl Pipeline {
                 .filter(|s| ids.contains(&s.step_id))
                 .map(|s| {
                     scope.spawn(move || {
-                        let result = self.role(&s, vec![], None).map(|_| ());
-                        if result.is_err() {
-                            self.cancel.store(true, Ordering::Release);
+                        let result = self.role(&s, vec![], Some(writer_schema())).map(|_| ());
+                        match result {
+                            // A typed refusal is a known business result: record it,
+                            // let peers finish, and let drive stop dependents.
+                            Err(e) if e.kind == "work_blocked" => Ok(()),
+                            Err(e) => {
+                                self.cancel.store(true, Ordering::Release);
+                                Err(e)
+                            }
+                            ok => ok,
                         }
-                        result
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1177,6 +1310,89 @@ impl Pipeline {
         let s = self.spec(id, Purpose::Dispatcher, brief, vec![], vec![])?;
         self.role(&s, tools, None).map(|_| ())
     }
+    /// First listed step whose only terminal work result is a typed refusal.
+    fn blocked_step(c: &Checkpoint, steps: &[&str]) -> Option<Failure> {
+        steps.iter().find_map(|id| {
+            let attempts = c.attempts.values().filter(|a| a.step_id == *id);
+            if attempts
+                .clone()
+                .any(|a| a.outcome == Some(AttemptOutcome::Completed))
+            {
+                return None;
+            }
+            let a = attempts
+                .filter(|a| a.outcome == Some(AttemptOutcome::Blocked))
+                .last()?;
+            let reason = a
+                .raw_result
+                .as_ref()
+                .and_then(|r| std::fs::read(&r.path).ok())
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| work_blocked(&v))
+                .unwrap_or_else(|| "saved report unavailable".into());
+            Some(blocked_failure(id, &reason))
+        })
+    }
+    /// Separate acceptance-infrastructure readiness from expected pre-change
+    /// product failures, cross-checked against the executed baseline receipts.
+    fn baseline_gate(&self, report: &Value, r: &ArtifactRef) -> Res<()> {
+        let c = self.load()?;
+        let out = Self::output(report)?;
+        let mut seen = BTreeMap::new();
+        for o in out["observations"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(class)) = (o["check_id"].as_str(), o["classification"].as_str())
+            {
+                if seen.insert(id.to_owned(), class.to_owned()).is_some() {
+                    return Err(fail("baseline classified a check twice"));
+                }
+            }
+        }
+        let mut problems = vec![];
+        if seen.keys().any(|id| !c.checks.contains_key(id)) {
+            problems.push("classification names an unknown check".to_owned());
+        }
+        for id in c.checks.keys() {
+            let receipt = c
+                .receipts
+                .get(&format!("baseline-{id}"))
+                .ok_or_else(|| fail("baseline omitted frozen checks"))?;
+            let result: CheckResult =
+                serde_json::from_slice(&std::fs::read(&receipt.path).map_err(io)?).map_err(io)?;
+            match (seen.get(id).map(String::as_str), result.exit_code) {
+                (None, _) => problems.push(format!("{id} unclassified")),
+                (_, None) => {
+                    problems.push(format!("{id} did not exit (timeout or launch failure)"))
+                }
+                (_, _) if !result.policy_applied => {
+                    problems.push(format!("{id} ran without the check policy"))
+                }
+                (Some("infrastructure_failure"), _) => {
+                    problems.push(format!("{id} classified infrastructure_failure"))
+                }
+                (Some(class), Some(code)) if (code == 0) != (class == "passed") => problems.push(
+                    format!("{id} classification {class} contradicts exit {code}"),
+                ),
+                (Some("passed" | "product_missing" | "product_defect"), _) => {}
+                (Some(class), _) => {
+                    problems.push(format!("{id} has unknown classification {class}"))
+                }
+            }
+        }
+        if out["infrastructure_ready"] != true && problems.is_empty() {
+            problems.push("verifier reported infrastructure not ready".into());
+        }
+        if !problems.is_empty() {
+            return Err(Failure::new(
+                "evaluation_infrastructure",
+                format!(
+                    "acceptance infrastructure not ready before engineering ({}): {}. No writer started; the frozen plan and checks stay as evidence, and this run cannot unfreeze them. Fix the check, command or environment cause and start a new run. Classification also has to match the executed baseline receipts.",
+                    problems.join("; "),
+                    out["summary"].as_str().unwrap_or("")
+                ),
+            ));
+        }
+        self.receipt(checkpoint::BASELINE_GATE, r)
+    }
     fn drive(self: &Arc<Self>) -> Res<()> {
         loop {
             let c = self.load()?;
@@ -1193,12 +1409,20 @@ impl Pipeline {
                 Phase::Planning => {
                     self.coordinator(&self.planning_step("coord-plan")?,"Read-only dispatcher. Approved research exists. Call run_plan once for a fresh independent Astra HIGH plan. Do not engineer or become a core.",vec![tool("run_plan",json!({}))])?;
                     let c = self.load()?;
-                    self.role(
-                        c.steps
-                            .get("baseline")
-                            .ok_or_else(|| fail("planner did not install baseline step"))?,
+                    if !c.steps.contains_key("baseline") {
+                        return Err(Failure::new(
+                            "plan_not_installed",
+                            "planning returned no installable plan, so Rust installed no baseline or engineering steps. No check ran and no writer started; read the coordinator report for the model's stated reason, fix it, and start a new run.",
+                        ));
+                    }
+                    let (report, r, _) = self.role(
+                        c.steps.get("baseline").ok_or_else(|| fail("missing baseline step"))?,
                         vec![tool("verify_run", json!({"check_id":{"type":"string"}}))],
-                        None,
+                        Some(json!({"type":"object","required":["infrastructure_ready","summary","observations"],"additionalProperties":false,"properties":{
+                            "infrastructure_ready":{"type":"boolean"},"summary":{"type":"string"},
+                            "observations":{"type":"array","items":{"type":"object","required":["check_id","classification"],"additionalProperties":false,"properties":{
+                                "check_id":{"type":"string"},
+                                "classification":{"type":"string","enum":["passed","product_missing","product_defect","infrastructure_failure"]}}}}}})),
                     )?;
                     let c = self.load()?;
                     if c.checks
@@ -1207,9 +1431,19 @@ impl Pipeline {
                     {
                         return Err(fail("baseline omitted frozen checks"));
                     }
+                    self.baseline_gate(&report, &r)?;
                     self.phase(Phase::Engineering)?;
                 }
                 Phase::Engineering => {
+                    let units = c
+                        .steps
+                        .values()
+                        .filter(|s| matches!(s.purpose, Purpose::Engineer | Purpose::Content))
+                        .map(|s| s.step_id.as_str())
+                        .collect::<Vec<_>>();
+                    if let Some(e) = Self::blocked_step(&c, &units) {
+                        return Err(e);
+                    }
                     let ready = self.ready_units()?;
                     if ready.is_empty() {
                         if c.steps
@@ -1249,12 +1483,15 @@ impl Pipeline {
                     } else {
                         format!("assembly-rework-{n}")
                     };
+                    if let Some(e) = Self::blocked_step(&c, &[step.as_str()]) {
+                        return Err(e);
+                    }
                     let (_, r, _) = self.role(
                         c.steps
                             .get(&step)
                             .ok_or_else(|| fail("mandatory assembly missing"))?,
                         vec![],
-                        None,
+                        Some(writer_schema()),
                     )?;
                     self.receipt("assembly", &r)?;
                     self.phase(Phase::Verifying)?;
@@ -1276,7 +1513,7 @@ impl Pipeline {
                                 .map(|_| ())
                         })?;
                     }
-                    let (report,r,executor)=self.role(c.steps.get(&step).ok_or_else(||fail("missing verifier step"))?,vec![tool("verify_run",json!({"check_id":{"type":"string"}}))],Some(json!({"type":"object","required":["pass","summary"],"properties":{"pass":{"type":"boolean"},"summary":{"type":"string"}},"additionalProperties":false})))?;
+                    let (report,r,executor)=self.role(c.steps.get(&step).ok_or_else(||fail("missing verifier step"))?,vec![tool("verify_run",json!({"check_id":{"type":"string"}}))],Some(json!({"type":"object","required":["pass","summary","defect_owner"],"properties":{"pass":{"type":"boolean"},"summary":{"type":"string"},"defect_owner":{"type":"string","enum":["none","assembly","upstream"]}},"additionalProperties":false})))?;
                     let c = self.load()?;
                     if c.checks
                         .keys()
@@ -1312,6 +1549,27 @@ impl Pipeline {
                         .map(|_| ())
                     })?;
                     if !pass {
+                        let out = Self::output(&report)?;
+                        let summary = out["summary"].as_str().unwrap_or("");
+                        // Recovery follows the failure's origin: SOL may only
+                        // change assembly scope, so upstream causes must not be
+                        // retried as rework, and a rejected deliverable needs a
+                        // repairable owner.
+                        match out["defect_owner"].as_str() {
+                            Some("upstream") => {
+                                return Err(Failure::new(
+                                    "upstream_defect",
+                                    format!("independent verifier attributed the failure to an upstream cause (the plan, the evaluation preparation or a missing prerequisite), which SOL assembly cannot repair inside the unchanged scope and frozen checks; no rework was scheduled. {summary}. The frozen plan, checks and reports stay as evidence: fix the stated cause and start a new run."),
+                                ));
+                            }
+                            Some("assembly") => {}
+                            _ => {
+                                return Err(Failure::new(
+                                    "verification_attribution_invalid",
+                                    format!("independent verifier returned pass=false with defect_owner=none, so no legal repair target was named; no rework was scheduled and nothing was retried. {summary}"),
+                                ));
+                            }
+                        }
                         self.edit(|c| {
                             checkpoint::prepare_rework(&self.store, &self.run, c.revision)
                                 .map(|_| ())
@@ -1455,7 +1713,20 @@ impl Pipeline {
                 if spec.purpose == Purpose::Verifier { c.receipts.get(&format!("evaluation-{}", checkpoint::planning_epoch(&c))) } else { None }
             )
         } else if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler) {
-            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.\nCompleted prerequisite unit reports: {:?}.\nRust assigned this absolute scratch directory: {}. AXIOM_SCRATCH, CARGO_TARGET_DIR and temporary-directory environment variables are already set for your shell. All build/test output goes there, never to a relative scratch/ directory under the repository. This concrete runtime location supersedes generic scratch wording in a unit brief.", c.plan, writer_reports, scratch.as_ref().map(|p| command_path(p)).unwrap_or_default())
+            // Non-leaking prerequisite proof: counts and Rust-enforced facts only.
+            let private = c
+                .checks
+                .keys()
+                .filter(|id| id.starts_with("independent-"))
+                .count();
+            let gate = if c.receipts.contains_key(checkpoint::BASELINE_GATE) {
+                format!("Rust already verified the prerequisites before any writer started: {} frozen checks (of which {private} are private held-out checks whose contents are withheld from writers by design) executed in the baseline and the acceptance infrastructure was classified ready; pre-change product failures are expected. Engineering is authorized; do not wait for, request or search for evaluation-preparation or baseline reports.", c.checks.len())
+            } else {
+                "Rust baseline gate receipt is missing; report blocked rather than guessing.".into()
+            };
+            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.\nPrerequisites: {gate}\nCompleted prerequisite unit reports: {:?}.\nRust assigned this absolute scratch directory: {}. AXIOM_SCRATCH, CARGO_TARGET_DIR and temporary-directory environment variables are already set for your shell. All build/test output goes there, never to a relative scratch/ directory under the repository. This concrete runtime location supersedes generic scratch wording in a unit brief.\nReturn JSON {{status,summary,artifact:null}}: status=completed only when this unit's deliverable is in place (or verifiably already satisfied, with that evidence); otherwise status=blocked with the concrete missing prerequisite. A blocked result stops dependents.", c.plan, writer_reports, scratch.as_ref().map(|p| command_path(p)).unwrap_or_default())
+        } else if spec.purpose == Purpose::Content {
+            "\nReturn JSON {status,summary,artifact}: put the full requested artifact text in artifact with status=completed, or status=blocked with the concrete reason and artifact=null.".into()
         } else {
             String::new()
         };
@@ -1494,6 +1765,11 @@ impl Pipeline {
                         "execution terminal could not be established",
                     ));
                 }
+                // Surface the handler's typed failure instead of the transport
+                // wrapper, so the blocked reason names the real cause.
+                let failure = cause_failure(&r.report).unwrap_or_else(|| {
+                    fail(format!("{:?} failed: {}", spec.purpose, r.report["error"]))
+                });
                 self.edit(|c| {
                     checkpoint::commit_result(
                         &self.store,
@@ -1508,10 +1784,7 @@ impl Pipeline {
                         &r.report,
                     )
                 })?;
-                return Err(fail(format!(
-                    "{:?} failed: {}",
-                    spec.purpose, r.report["error"]
-                )));
+                return Err(failure);
             }
             Err(e) => return Err(e),
         };
@@ -1559,6 +1832,13 @@ impl Pipeline {
             report.report["scope_checked"] = json!(true);
             report.report["scope_snapshot"] = json!(crate::orch::snapshot(&self.repo, &spec.scope));
         }
+        // Transport completion is not work success: writers must return a
+        // typed completed status before they can satisfy any dependency.
+        let blocked = if writes_work(&spec.purpose) {
+            work_blocked(&report.report)
+        } else {
+            None
+        };
         let saved = self
             .edit(|c| {
                 checkpoint::commit_result(
@@ -1566,11 +1846,18 @@ impl Pipeline {
                     &self.run,
                     c.revision,
                     &claim.attempt.attempt_id,
-                    AttemptOutcome::Completed,
+                    if blocked.is_some() {
+                        AttemptOutcome::Blocked
+                    } else {
+                        AttemptOutcome::Completed
+                    },
                     &report.report,
                 )
             })?
             .value;
+        if let Some(reason) = blocked {
+            return Err(blocked_failure(&spec.step_id, &reason));
+        }
         Ok((report.report, saved, identity(report.execution.thread_id)))
     }
 }
@@ -1610,6 +1897,45 @@ mod scratch_scope_tests {
                 &scratch.join("escape/checks.py").to_string_lossy()
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod work_result_tests {
+    use super::*;
+    #[test]
+    fn typed_work_status_decides_success_without_requiring_a_change() {
+        let completed = json!({"structured_output":{"status":"completed","summary":"already satisfied","artifact":null},"final_message":null});
+        assert!(
+            work_blocked(&completed).is_none(),
+            "an already-satisfied unit must not be forced to manufacture changes"
+        );
+        let blocked = json!({"structured_output":{"status":"blocked","summary":"prerequisite missing","artifact":null},"final_message":null});
+        assert_eq!(
+            work_blocked(&blocked).as_deref(),
+            Some("prerequisite missing")
+        );
+        // A normally terminating turn without the typed result is not success.
+        let missing = json!({"structured_output":null,"final_message":null});
+        assert_eq!(
+            work_blocked(&missing).as_deref(),
+            Some("missing machine-readable work status")
+        );
+        // A replayed history turn carries the typed result as final text.
+        let replay = json!({"structured_output":null,
+            "final_message":"{\"status\":\"blocked\",\"summary\":\"no runner\",\"artifact\":null}"});
+        assert_eq!(work_blocked(&replay).as_deref(), Some("no runner"));
+    }
+
+    #[test]
+    fn transport_wrapper_does_not_hide_the_typed_failure() {
+        let report = json!({"error":{"kind":"tool_handler_failed","message":"wrapper","causes":[
+            {"id":"tool-1","error":{"code":-32603,"message":"wrapper","data":{"kind":"evaluation_unprepared","message":"preparation failed"}}}]}});
+        let failure = cause_failure(&report).expect("typed cause");
+        assert_eq!(failure.kind, "evaluation_unprepared");
+        assert_eq!(failure.message, "preparation failed");
+        assert!(cause_failure(&json!({"error":null})).is_none());
+        assert!(cause_failure(&json!({})).is_none());
     }
 }
 
