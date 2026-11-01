@@ -114,8 +114,9 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 
 ### dev.10：維護中（尚未發布）
 
-以下描述工作樹中已實作的行為，不代表新版已安裝或通過驗收。
+以下為 dev.10 修復與局部比較結果；完整版本安裝、獨立任務及正式 RSI 功能仍依各階段證據確認。
 
+- `review_code` 的內建 strict 輸出 schema 明確列出封閉 object 與必填欄位，修復 Codex API 拒絕不完整 schema 的問題；自訂 schema 仍由呼叫者提供。
 - 動態工具保留具體錯誤型別與原因，blocked／outcome unknown 的原因另存並綁定 checkpoint 版本；`status` 與相同 request 的重送會讀取可核對的紀錄。舊紀錄若沒有原因則回報未知，不補造原因；舊的成功結果重送時仍須符合目前的驗收門檻。
 - 新 scratch 路徑以完整 run／attempt／check 身分雜湊縮短，舊 run 的既有 scratch 經身分及連結檢查後可沿用。縮短路徑不保證所有工具鏈的長路徑問題均已排除。
 - 規劃重試依序帶入已核准的修復理由，不能藉此改變已凍結檢查。檢查環境變數依平台規則判斷重複名稱：Windows 不區分大小寫，其他平台區分；暫存預設不覆蓋明確指定的值。私有檢查保留 `independent-` 前綴，須包含 `{repo}`，且不能與公開檢查使用相同 program／args／env；這些形式檢查不能證明案例語意獨立或真的讀取產品。
@@ -127,5 +128,9 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 - 獨立驗收準備可選擇一次受管 Rust runner 編譯／連結，使用固定命令；準備時不執行 runner、產品或測試案例，也不是任意命令工具。編譯失敗時不自動改用其他檢查；編譯通過只證明該次編譯與連結，Rust 巨集仍可能讀取宿主檔案，不能視為 OS 讀取隔離或驗收通過。
 - 真實 Windows／Codex 0.159.3 協定診斷已驗證固定命令可在 scratch sandbox 編譯、連結及執行同 SHA-256 的 runner，指定的 scratch 外寫入遭拒；設定為 `service_tier=default`，零模型 thread／turn。這是受控能力診斷，未測網路阻斷或 OS 讀取隔離，也不代替完整工作流驗收。[原始證據](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/runner-os-sandbox-protocol-20261101/run-02/summary.json)。
 
-終態入口共同驗證 turn 與模型收據；未派送的 `Prepared` 可保存取消證據。設定修復後須明確 Resume，且只對可核對實際 callback、coordinator attempt 及整批成員的失敗唯讀調度者開放重試；未知 writer 仍禁止重派。模型與事件證據採內容定址，孤立檔案不覆寫已引用證據，也不阻擋新的 thread。這些恢復路徑已通過定向回歸；完整測試套件、Windows／Linux CI、安裝與新 fixture 的未曝光驗收均待驗證，目前沒有可比較的效能或 token 量測。
+終態入口共同驗證 turn 與模型收據；未派送的 `Prepared` 可保存取消證據。設定修復後須明確 Resume，且只對可核對實際 callback、coordinator attempt 及整批成員的失敗唯讀調度者開放重試；未知 writer 仍禁止重派。模型與事件證據採內容定址，孤立檔案不覆寫已引用證據，也不阻擋新的 thread。這些恢復與記憶路徑已通過定向回歸；`0ddef71` 的完整本地測試通過。後續效能與 strict-schema 變更的整合測試、Windows／Linux CI、安裝與新 fixture 驗收待完成。
+
+已封存的局部比較：移除研究調度與準備者各一份重複意圖；四次單角色 ABBA 重播皆通過品質檢查，調度者平均 input tokens 由 19,981 到 19,509.5（本組樣本約少 2.36%）。快取量不同，不能推論費用或速度；準備者因缺功能 oracle 未實跑。[原始用量](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/optimization-live-usage-model-identity-addendum-20261102/results/coordinator-abba-summary.json)。
+
+相容投影改為單次讀取 checks／reviews，完整 source snapshot 在批次前後各算一次，各 unit scope 仍獨立計算；source 改變即撤銷整批通過判定。權威 gate 沿用完整 review 校驗，移除其中已被覆蓋的重複 check 校驗，未快取跨 callback 的來源。兩組固定負載的投影中位時間分別少 59.96%／76.71%，驗證少 33.48%／37.53%，均符合事先固定的 10% 與樣本區間不重疊門檻；原契約及舊非法狀態拒絕均通過。這是單機分時局部函式比較，背景負載不同，不能當作完整 Chronos／模型延遲改善。[逐筆計時](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/optimization-evaluation-v2-20261101/results/candidate-observation-summary.json)。
 

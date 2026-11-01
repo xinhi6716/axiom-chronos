@@ -2407,6 +2407,8 @@ pub fn verified_review(c: &Checkpoint) -> Option<&ArtifactRef> {
         })
 }
 fn valid_review(c: &Checkpoint) -> bool {
+    // validate_review requires every frozen check exactly once, validates each
+    // result and its current source/logs, and returns pass only if all exited 0.
     verified_review(c).is_some()
 }
 pub(crate) fn approved_research(c: &Checkpoint) -> bool {
@@ -2423,7 +2425,6 @@ pub(crate) fn ready_evidence(c: &Checkpoint) -> bool {
         && approved_research(c)
         && baseline_authorized(c).is_ok()
         && !c.checks.is_empty()
-        && c.checks.keys().all(|id| successful_check(c, id))
         && valid_review(c)
         && assembly_evidence(c)
         && c.receipts
@@ -2435,7 +2436,6 @@ pub fn verified_outcome(c: &Checkpoint) -> bool {
         && baseline_authorized(c).is_ok()
         && assembly_evidence(c)
         && !c.checks.is_empty()
-        && c.checks.keys().all(|id| successful_check(c, id))
         && valid_review(c)
 }
 /// Keep executable IDs/specifications fixed; bind the final verification to the
@@ -4431,6 +4431,47 @@ mod verified_artifact_tests {
         let mut c = load_run(&store, "run").unwrap();
         c.phase = Phase::Verifying;
         assert!(verified_outcome(&c));
+        let ready = |checkpoint: &Checkpoint| {
+            let mut checkpoint = checkpoint.clone();
+            checkpoint.phase = Phase::ReadyToCommit;
+            checkpoint.receipts.insert("memory".into(), brief.clone());
+            ready_evidence(&checkpoint)
+        };
+        assert!(ready(&c));
+
+        // Both outcome gates rely on the review's complete check validation.
+        // Hash-valid replacement receipts must not weaken that requirement.
+        for field in ["exit", "policy", "spec", "source", "model", "thread"] {
+            let mut changed = result.clone();
+            match field {
+                "exit" => changed.exit_code = Some(1),
+                "policy" => changed.policy_applied = false,
+                "spec" => changed.spec_digest = "changed".into(),
+                "source" => changed.snapshot.source_digest = "changed".into(),
+                "model" => changed.executor.model = "changed".into(),
+                "thread" => changed.executor.thread_id = "changed".into(),
+                _ => unreachable!(),
+            }
+            let receipt = save_evidence(&store, "run", "check", field, &changed).unwrap();
+            let mut altered = c.clone();
+            altered.receipts.insert("check-check".into(), receipt);
+            assert!(!verified_outcome(&altered), "accepted changed {field}");
+            assert!(!ready(&altered), "ready accepted changed {field}");
+        }
+        fs::write(repo.join("source"), b"changed").unwrap();
+        assert!(!verified_outcome(&c));
+        assert!(!ready(&c));
+        fs::write(repo.join("source"), b"source").unwrap();
+        for key in ["check-check", "review-attempt"] {
+            let path = &c.receipts[key].path;
+            let original = fs::read(path).unwrap();
+            fs::write(path, b"tampered").unwrap();
+            assert!(!verified_outcome(&c), "accepted tampered {key}");
+            assert!(!ready(&c), "ready accepted tampered {key}");
+            fs::write(path, original).unwrap();
+        }
+        assert!(verified_outcome(&c));
+        assert!(ready(&c));
 
         // Even a hash-valid replacement raw report must agree with the typed
         // review decision and attribution. A real failed assembly review is
@@ -4484,6 +4525,7 @@ mod verified_artifact_tests {
         );
 
         fs::write(&stdout.path, b"changed").unwrap();
+        assert!(!ready(&c));
         assert!(
             !verified_outcome(&c),
             "modified stdout cannot support acceptance"
@@ -4491,11 +4533,13 @@ mod verified_artifact_tests {
         fs::write(&stdout.path, b"expected output").unwrap();
         assert!(verified_outcome(&c));
         fs::write(&stderr.path, b"changed").unwrap();
+        assert!(!ready(&c));
         assert!(
             !verified_outcome(&c),
             "modified stderr cannot support acceptance"
         );
         fs::remove_file(&stderr.path).unwrap();
+        assert!(!ready(&c));
         assert!(
             !verified_outcome(&c),
             "missing output cannot support acceptance"

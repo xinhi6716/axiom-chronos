@@ -2209,7 +2209,7 @@ impl Pipeline {
                         .keys()
                         .filter(|k| k.starts_with("intent-rejection-"))
                         .count();
-                    self.coordinator(&format!("coord-research-{revision}"),&format!("Read-only dispatcher. Call run_research once for independent Astra MAX research of intent: {}. Do not implement, approve or continue beyond research. External core decides pass/reject.",self.intent()?),vec![tool("run_research",json!({}))])?;
+                    self.coordinator(&format!("coord-research-{revision}"),"Read-only dispatcher. Call run_research once for independent Astra MAX research. Do not implement, approve or continue beyond research. External core decides pass/reject.",vec![tool("run_research",json!({}))])?;
                     self.phase(Phase::IntentReview)?;
                 }
                 Phase::Planning => {
@@ -2500,9 +2500,13 @@ impl Pipeline {
             .filter_map(|a| a.raw_result.clone())
             .collect::<Vec<_>>();
         let context = if spec.purpose == Purpose::Verifier {
+            let intent = if spec.step_id.starts_with("evaluation-prep-") {
+                String::new()
+            } else {
+                format!("\nIntent: {}", self.intent()?)
+            };
             format!(
-                "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}\nPrivate evaluation (verifier only): {:?}",
-                self.intent()?,
+                "{intent}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}\nPrivate evaluation (verifier only): {:?}",
                 c.research,
                 c.plan,
                 c.receipts
@@ -2547,7 +2551,7 @@ impl Pipeline {
             Purpose::Content => include_str!("../../engine/agents/artifact.md"),
         };
         let req = RunRequest { brief:format!("ROLE {:?}\nGOAL\n{}{}\nSCOPE\n{:?}\nVERIFY\n{:?}",spec.purpose,brief,context,spec.scope,spec.check_ids), cwd:self.repo.to_string_lossy().into_owned(),model:model.clone(),sandbox:if writing {"workspace-write"} else {"read-only"}.into(),effort:Some(effort.into()),output_schema:schema,
-            developer_instructions:Some(format!("{}\nSingle-purpose lean leaf, not a core. Use only the brief and registered tools. No native collaboration, other agents, GOAL continuation, commits, installation or push. Preserve other owners. Engineering writes only within SCOPE; other roles must not modify product. Return requested structured result, explicitly report failure. Model completion is not verification.",profile)), timeout_s:1800,lean:true,keep_plugins:vec![],web_search:spec.purpose==Purpose::Research };
+            developer_instructions:Some(format!("{}\nSingle-purpose lean leaf, not a core. Use only the brief and registered tools. Batch independent reads and reuse supplied evidence. Test unresolved failures, then stop when the fixed checks and requested boundary are satisfied. No native collaboration, other agents, GOAL continuation, commits, installation or push. Preserve other owners. Engineering writes only within SCOPE; other roles must not modify product. Return requested structured result, explicitly report failure. Model completion is not verification.",profile)), timeout_s:1800,lean:true,keep_plugins:vec![],web_search:spec.purpose==Purpose::Research };
         let result = self.server.run_with_options(
             &req,
             RunOptions {
