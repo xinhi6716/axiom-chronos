@@ -1,8 +1,14 @@
 # Chronos Codex 使用說明書
 
-截至 2026-11-01（台北時間）：已安裝 **0.2.2-codex.dev.11**，功能修復提交 `2929bd2`，事件日誌修正提交 `cc5269d228e8214db3c47067ca03825a3ae13fbb`，均已推送 `codex-only`；[Windows／Ubuntu 完整 CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41257830163) 均通過。版本化執行檔與安裝執行檔 SHA256 相同，重新啟動的 bridge 已回報 dev.11；舊對話的既有程序不代表熱更新。安裝收據位於 `chronos-artifacts/maintenance/dev11-contract-recovery/installation-receipt.json`。
+本機目前套件版本、來源提交、執行檔 SHA256 與 CI 結果以 `chronos-artifacts/tests/chronos-five-rounds/active-runtime.json` 及其 `acceptance_receipt` 為準。版本號相同不代表舊對話中的 bridge 已熱更新；後續輪次須核對實際執行身分。下列版本段落保存歷次修復內容，不代替當前驗收收據。
 
 **產品迭代完成數仍為 0／至少 5。** 第一輪已完成研究、意圖審核與規劃，曾卡在工程前基線；能力衝突已修復，但原 session `c308b6183976af5288614e4ba80fc863` 仍為 blocked，未自動恢復。修復測試不計入產品輪次。
+
+## dev.12 父子呼叫完成門檻
+
+App-server 若在動態工具回呼尚未結束時送出成功的 `turn/completed`，Rust 依 thread／turn 暫存該事件，最後一個回呼回傳後才放行。登記發生於接收執行緒啟動回呼之前，避免啟動競態；取消與失敗事件不等待回呼，避免停止流程被鎖住。此等待不新增模型呼叫或核心輪詢。開發回歸已先在舊實作重現提前放行，並保存於 `chronos-artifacts/maintenance/dev11-contract-recovery/parent-completion-negative.log`。
+
+dev.12 回歸：成功回覆等待回呼、取消不等待回呼、平行回呼與巢狀 RPC 通過。Linux 的 lib／bridge／session／release 回歸通過；Windows 的 lib／session／release 及獨立取消測試通過。Windows 並行 bridge 回歸曾有一例取消耗時超過兩秒，未修改門檻，原失敗紀錄保留；完整 CI 結果另記於安裝收據。
 
 ## dev.11 修復內容（驗證與安裝狀態以交付收據為準）
 

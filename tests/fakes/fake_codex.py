@@ -180,6 +180,8 @@ for line in sys.stdin:
                 call_id = f'dynamic-{thread_id}-{n}'
                 dynamic_calls[call_id] = (thread_id, turn_id)
                 send({'id': call_id, 'method': 'item/tool/call', 'params': {'threadId': thread_id, 'turnId': turn_id, 'callId': call_id, 'tool': 'test', 'arguments': {'n': n, 'threadId': thread_id}}})
+            if 'DYNAMIC_EARLY' in text:
+                complete(thread_id, turn_id, 'interrupted' if 'CANCEL' in text else 'completed')
             continue
         if 'APPROVAL' in text:
             pending_turns['approval'] = (thread_id, turn_id)

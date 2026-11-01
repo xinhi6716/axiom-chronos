@@ -23,6 +23,46 @@ struct Connection {
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     events: Mutex<HashMap<String, (Sender<Value>, Option<Receiver<Value>>)>>,
     tools: Mutex<HashMap<String, ToolHandler>>,
+    callbacks: Mutex<HashMap<(String, String), CallbackState>>,
+}
+#[derive(Default)]
+struct CallbackState {
+    active: usize,
+    completion: Option<Value>,
+}
+impl Connection {
+    fn publish(&self, thread: &str, event: Value) {
+        if let Some(entry) = self.events.lock().unwrap().get(thread) {
+            let _ = entry.0.send(event);
+        }
+    }
+    fn event(&self, thread: &str, event: Value) {
+        if event["method"] == "turn/completed" {
+            let key = (thread.to_owned(), event["params"]["turn"]["id"].as_str().unwrap_or("").to_owned());
+            let mut calls = self.callbacks.lock().unwrap();
+            if let Some(state) = calls.get_mut(&key) {
+                if event["params"]["turn"]["status"] == "completed" && state.active > 0 {
+                    state.completion = Some(event);
+                    return;
+                }
+                // Cancellation/failure must remain observable while a callback
+                // is stopping; it also invalidates a previously deferred success.
+                state.completion = None;
+            }
+        }
+        self.publish(thread, event);
+    }
+    fn callback_finished(&self, key: &(String, String)) {
+        let mut calls = self.callbacks.lock().unwrap();
+        let Some(state) = calls.get_mut(key) else { return; };
+        state.active -= 1;
+        if state.active == 0 {
+            let state = calls.remove(key).unwrap();
+            if self.alive.load(Ordering::Acquire) {
+                if let Some(event) = state.completion { self.publish(&key.0, event); }
+            }
+        }
+    }
 }
 pub struct AppServer {
     command: Vec<String>,
@@ -104,6 +144,7 @@ impl AppServer {
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
+            callbacks: Mutex::new(HashMap::new()),
         });
         *self.connection.lock().unwrap() = Some(c.clone());
         let reader = c.clone();
@@ -141,12 +182,18 @@ impl AppServer {
                             let id = id.clone();
                             let tool = tool.to_owned();
                             let args = args.clone();
+                            let key = (msg["params"]["threadId"].as_str().unwrap_or("").to_owned(),
+                                msg["params"]["turnId"].as_str().unwrap_or("").to_owned());
+                            // Register on the reader before spawning: a terminal
+                            // event can arrive before the callback thread runs.
+                            c.callbacks.lock().unwrap().entry(key.clone()).or_default().active += 1;
                             thread::spawn(move || {
                                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&tool, &args)))
                                     .unwrap_or_else(|_| json!({"contentItems":[{"type":"inputText","text":"tool handler failed"}],"success":false}));
                                 if c.alive.load(Ordering::Acquire) {
                                     let _ = Self::send(&c, json!({"id":id,"result":result}));
                                 }
+                                c.callback_finished(&key);
                             });
                         } else if method == "item/tool/call" {
                             let _ = Self::send(
@@ -168,9 +215,7 @@ impl AppServer {
                         .and_then(Value::as_str)
                         .or_else(|| msg.pointer("/params/thread/id").and_then(Value::as_str))
                     {
-                        if let Some(entry) = reader.events.lock().unwrap().get(id) {
-                            let _ = entry.0.send(msg.clone());
-                        }
+                        reader.event(id, msg.clone());
                     }
                     let _ = method;
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
@@ -487,6 +532,50 @@ fn compare_versions(a: &str, b: &str, role: &str) -> std::cmp::Ordering {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn parent_completion_waits_for_pending_dynamic_callbacks() {
+        parent_completion_gate(false);
+    }
+    #[test]
+    fn parent_cancellation_does_not_wait_for_pending_dynamic_callbacks() {
+        parent_completion_gate(true);
+    }
+    fn parent_completion_gate(cancel: bool) {
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
+        let server = AppServer::new(vec![python.into(), "-I".into(), fake.to_string_lossy().into_owned()]);
+        let started = server.request("thread/start", json!({"model":"m"})).unwrap();
+        let id = started["thread"]["id"].as_str().unwrap();
+        let events = server.subscribe(id);
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let worker_gate = gate.clone();
+        let (ready, entered) = mpsc::channel();
+        server.register_tools(id, Arc::new(move |_, _| {
+            ready.send(()).unwrap();
+            let (lock, changed) = &*worker_gate;
+            let _released = changed.wait_while(lock.lock().unwrap(), |v| !*v).unwrap();
+            json!({"success":true,"contentItems":[{"type":"inputText","text":"done"}]})
+        })).unwrap();
+        server.request("turn/start", json!({"threadId":id,"input":[{"type":"text","text":if cancel {"DYNAMIC_EARLY_CANCEL"} else {"DYNAMIC_EARLY"}}]})).unwrap();
+        for _ in 0..2 { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+        let premature = loop {
+            match events.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) if event["method"] == "turn/completed" => break true,
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => break false,
+                Err(e) => panic!("{e}"),
+            }
+        };
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_eq!(premature, cancel, "success must wait for callbacks; cancellation must not");
+        if cancel { return; }
+        loop {
+            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            if event["method"] == "turn/completed" { break; }
+        }
+    }
 
     #[test]
     fn dynamic_calls_can_make_nested_requests_in_parallel() {
