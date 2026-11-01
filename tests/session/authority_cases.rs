@@ -113,6 +113,34 @@ fn caller_command_lock_blocks_reentry_across_attachments_and_releases_without_po
 fn real_host_enforces_research_review_planning_and_restart() { exercise_authority(false); }
 #[test]
 fn real_host_replans_into_fresh_store_and_completes_preflight() { exercise_authority(true); }
+#[test]
+fn dispatcher_pending_interjection_returns_to_core_without_retry() {
+    let temp=tempfile::tempdir().unwrap();
+    let project=temp.path().join("demo");std::fs::create_dir(&project).unwrap();
+    let home=temp.path().join("home");let record=temp.path().join("rpc.json");
+    let marker=temp.path().join("dispatcher-ready");
+    let config=Config {home:home.clone(),bin:std::env::current_exe().unwrap(),codex:Ok(vec![
+        common::python(),"-I".into(),format!("{}/tests/session/authority_fake.py",env!("CARGO_MANIFEST_DIR")),
+        "--scenario".into(),"role-flow".into(),"--home".into(),home.to_string_lossy().into(),
+        "--project".into(),project.to_string_lossy().into(),"--slug".into(),"demo".into(),
+        "--pause-dispatch".into(),marker.to_string_lossy().into(),"--record".into(),record.to_string_lossy().into()])};
+    let (host,opened)=Attachment::open(&config,&json!({"project":project,"text":"tiny CLI","skill":"wish"})).unwrap();
+    host.call("goal",&json!({"mode":"change"})).unwrap();
+    let args=json!({"subagent_type":"chronos:dispatcher","cwd":project,"prompt":"tiny CLI","timeout_s":30});
+    let first=host.call("Agent",&args).unwrap();
+    host.call("workflow",&json!({"action":"verdict","revision":first["workflow"]["revision"],"decision":"pass"})).unwrap();
+    let worker=std::thread::spawn(move || host.call("Agent",&args));
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(20);
+    while !marker.exists() && std::time::Instant::now()<deadline {std::thread::sleep(std::time::Duration::from_millis(20));}
+    assert!(marker.exists());
+    let session=opened["session"].as_str().unwrap();
+    axiom::goal::interject(&home,session,"expand external research").unwrap();
+    std::fs::write(marker.with_extension("release"),"go").unwrap();
+    assert_eq!(worker.join().unwrap().unwrap_err().kind,"pending_interjection");
+    assert!(axiom::goal::load(&home,session).unwrap().unwrap().interjection.is_some());
+    let rpc:Value=serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    assert_eq!(rpc["requests"].as_array().unwrap().iter().filter(|r| r["method"]=="turn/start" && r["params"]["input"][0]["text"].as_str().unwrap_or("").starts_with("Rust has retained this command")).count(),0);
+}
 fn exercise_authority(replan:bool) {
     let temp=tempfile::tempdir().unwrap();
     let project=temp.path().join("demo");std::fs::create_dir(&project).unwrap();

@@ -1306,6 +1306,12 @@ impl Host {
             let artifact=store.join(format!("reports/dispatcher-step-{}-{step}.json",thread));
             base::atomic_write(&artifact,&serde_json::to_vec_pretty(&report).map_err(io)?).map_err(io)?;
             if report["status"]!="completed" { return Ok(report); }
+            // Only core may classify changed user intent. Once all callbacks
+            // have settled, release this command instead of retrying a dispatcher
+            // whose tools are deliberately gated by the pending interjection.
+            if goal::load(&self.home,&root)?.is_some_and(|g|g.interjection.is_some()) {
+                return Err(Failure::new("pending_interjection",format!("core must classify pending user intent before resuming the same session; dispatcher evidence: {}",artifact.display())));
+            }
             let flow=authority::read(&self.home,&root)?;
             if matches!(flow.phase,authority::Phase::IntentReview | authority::Phase::ReadySubmit | authority::Phase::Submitted) {
                 return Ok(report);
