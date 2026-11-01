@@ -26,4 +26,13 @@ jobs:
       - run: rg --version
       - run: cargo build --locked
       - run: cargo test --locked
+      - name: Windows process and Cargo race regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          1..10 | ForEach-Object {
+            Write-Output "Windows race regression sample $_/10"
+            cargo test --locked --test base
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - run: cargo run --locked -- --version
