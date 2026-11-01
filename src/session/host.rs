@@ -253,10 +253,12 @@ impl Host {
         Ok(())
     }
     pub fn log(&self, event: &Value) -> Res<()> {
+        // Serialize before touching the append-only stream: Display emits many
+        // small writes and can expose a partial JSON record during cancellation.
+        let mut record = serde_json::to_vec(event).map_err(io)?;
+        record.push(b'\n');
         let mut log = self.log.lock().unwrap();
-        writeln!(log, "{event}")
-            .and_then(|_| log.flush())
-            .map_err(io)
+        log.write_all(&record).and_then(|_| log.flush()).map_err(io)
     }
     pub fn drain_notices(&self) -> Vec<Value> {
         std::mem::take(&mut *self.notices.lock().unwrap())
