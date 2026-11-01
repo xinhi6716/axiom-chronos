@@ -35,6 +35,7 @@ fn options(handler: Option<Arc<dyn ToolHandler>>) -> RunOptions {
         cancel: Arc::new(AtomicBool::new(false)),
         cancel_grace_ms: 500,
         skill_paths: vec![],
+        scratch: None,
     }
 }
 struct Nested {

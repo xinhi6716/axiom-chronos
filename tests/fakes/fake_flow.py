@@ -100,6 +100,13 @@ for line in sys.stdin:
             finish(tid, json.dumps(plan))
         elif 'ROLE Engineer' in brief:
             log('engineer-start', thread=tid)
+            env = cfg['config']['shell_environment_policy']['set']
+            work = Path(env['AXIOM_SCRATCH'])
+            assert work.is_absolute() and work.is_dir()
+            assert Path(cfg['cwd']).resolve() not in work.resolve().parents
+            assert Path(env['CARGO_TARGET_DIR']).parent.samefile(work)
+            assert len(cfg['config']['sandbox_workspace_write']['writable_roots']) == 1
+            (work/'development-output').write_text('scratch-only')
             if mode == 'failed-peer':
                 if 'write one' in brief:
                     finish(tid, 'injected engineering failure', failed=True)

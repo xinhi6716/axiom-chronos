@@ -810,7 +810,7 @@ impl Pipeline {
             .load()?
             .research
             .ok_or_else(|| fail("research missing"))?;
-        let spec=self.spec("planner",Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required.",self.intent()?,research.path),vec![],vec![])?;
+        let spec=self.spec("planner",Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required.",self.intent()?,research.path),vec![],vec![])?;
         let schema = json!({"type":"object","required":["assembly_scope","units","checks"],"additionalProperties":false,"properties":{"assembly_scope":{"type":["array","null"],"minItems":1,"items":{"type":"string"}},"units":{"type":"array","items":{"type":"object","required":["kind","id","brief","scope","depends_on"],"additionalProperties":false,"properties":{"kind":{"type":["string","null"],"enum":["engineer","content",null]},"id":{"type":"string"},"brief":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}},"depends_on":{"type":"array","items":{"type":"string"}}}}},"checks":{"type":"array","minItems":1,"items":{"type":"object","required":["id","program","args","env","timeout_s"],"additionalProperties":false,"properties":{"id":{"type":"string"},"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}},"timeout_s":{"type":"integer","minimum":1,"maximum":1800}}}}}});
         let (report, _, _) = self.role(&spec, vec![], Some(schema))?;
         let value = Self::output(&report)?;
@@ -1356,6 +1356,19 @@ impl Pipeline {
         });
         let brief = std::fs::read_to_string(&spec.brief_ref.path).map_err(io)?;
         let c = self.load()?;
+        let scratch = if writing {
+            let path = self
+                .store
+                .join("runs")
+                .join(&self.run)
+                .join("scratch")
+                .join(&claim.attempt.attempt_id)
+                .join("work");
+            std::fs::create_dir_all(&path).map_err(io)?;
+            Some(PathBuf::from(command_path(&path)))
+        } else {
+            None
+        };
         let context = if matches!(spec.purpose, Purpose::Verifier | Purpose::Memory) {
             format!(
                 "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}",
@@ -1368,7 +1381,7 @@ impl Pipeline {
                     .collect::<Vec<_>>()
             )
         } else if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler) {
-            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.", c.plan)
+            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.\nRust assigned this absolute scratch directory: {}. AXIOM_SCRATCH, CARGO_TARGET_DIR and temporary-directory environment variables are already set for your shell. All build/test output goes there, never to a relative scratch/ directory under the repository. This concrete runtime location supersedes generic scratch wording in a unit brief.", c.plan, scratch.as_ref().map(|p| command_path(p)).unwrap_or_default())
         } else {
             String::new()
         };
@@ -1395,6 +1408,7 @@ impl Pipeline {
                 cancel: self.cancel.clone(),
                 cancel_grace_ms: self.grace,
                 skill_paths: vec![],
+                scratch,
             },
         );
         let mut report = match result {
@@ -1454,6 +1468,7 @@ impl Pipeline {
                         .is_none_or(|p| !crate::orch::covers(&spec.scope, &p))
                 });
             if outside || reported_outside {
+                report.report["error"] = json!({"kind":"scope_violation","message":"worker changed paths outside assigned product scope; use the assigned external scratch directory for build output"});
                 self.edit(|c| {
                     checkpoint::commit_result(
                         &self.store,

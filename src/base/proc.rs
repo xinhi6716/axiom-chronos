@@ -25,12 +25,7 @@ pub fn kill_tree(child: &mut Child) {
     }
     #[cfg(windows)]
     {
-        kill_windows_descendants(child.id());
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &child.id().to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        kill_windows_descendants(child);
     }
     let _ = child.kill();
     let start = Instant::now();
@@ -42,8 +37,20 @@ pub fn kill_tree(child: &mut Child) {
     }
 }
 #[cfg(windows)]
-fn kill_windows_descendants(root: u32) {
+fn kill_windows_descendants(child: &Child) {
     use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    #[derive(Clone, Copy, Default)]
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    impl FileTime {
+        fn value(self) -> u64 {
+            (u64::from(self.high) << 32) | u64::from(self.low)
+        }
+    }
     #[repr(C)]
     struct Entry {
         size: u32,
@@ -65,8 +72,32 @@ fn kill_windows_descendants(root: u32) {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
         fn TerminateProcess(process: *mut c_void, code: u32) -> i32;
         fn CloseHandle(handle: *mut c_void) -> i32;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            created: *mut FileTime,
+            exited: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn GetSystemTimeAsFileTime(time: *mut FileTime);
+    }
+    unsafe fn created(process: *mut c_void) -> Option<u64> {
+        let mut times = [FileTime::default(); 4];
+        (GetProcessTimes(
+            process,
+            &mut times[0],
+            &mut times[1],
+            &mut times[2],
+            &mut times[3],
+        ) != 0)
+            .then(|| times[0].value())
     }
     unsafe {
+        let Some(root_created) = created(child.as_raw_handle()) else {
+            return;
+        };
+        let mut cutoff = FileTime::default();
+        GetSystemTimeAsFileTime(&mut cutoff);
         let snapshot = CreateToolhelp32Snapshot(2, 0);
         if snapshot as isize == -1 {
             return;
@@ -80,23 +111,35 @@ fn kill_windows_descendants(root: u32) {
             ok = Process32NextW(snapshot, &mut entry);
         }
         CloseHandle(snapshot);
-        let mut descendants = vec![root];
+        let mut descendants = vec![(child.id(), root_created)];
+        let mut handles = Vec::new();
         let mut i = 0;
         while i < descendants.len() {
-            let parent = descendants[i];
+            let (parent, parent_created) = descendants[i];
             for &(_, pid) in edges.iter().filter(|(p, _)| *p == parent) {
-                if !descendants.contains(&pid) {
-                    descendants.push(pid);
+                if pid == std::process::id() || descendants.iter().any(|(p, _)| *p == pid) {
+                    continue;
+                }
+                // Pin identity while walking and terminating. Parent PID alone
+                // can describe a dead, unrelated process whose PID was reused.
+                let process = OpenProcess(1 | 0x1000, 0, pid);
+                if process.is_null() {
+                    continue;
+                }
+                if let Some(time) = created(process)
+                    .filter(|time| *time >= parent_created && *time <= cutoff.value())
+                {
+                    descendants.push((pid, time));
+                    handles.push(process);
+                } else {
+                    CloseHandle(process);
                 }
             }
             i += 1;
         }
-        for pid in descendants.into_iter().skip(1).rev() {
-            let process = OpenProcess(1, 0, pid);
-            if !process.is_null() {
-                TerminateProcess(process, 1);
-                CloseHandle(process);
-            }
+        for process in handles.into_iter().rev() {
+            TerminateProcess(process, 1);
+            CloseHandle(process);
         }
     }
 }

@@ -84,6 +84,7 @@ pub struct RunOptions {
     pub cancel: Arc<AtomicBool>,
     pub cancel_grace_ms: u64,
     pub skill_paths: Vec<PathBuf>,
+    pub scratch: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,6 +188,31 @@ impl super::AppServer {
         let disabled = self.lean_policy(req, &mut thread_params)?;
         if req.lean {
             thread_params["config"]["features"]["multi_agent"] = json!(false);
+        }
+        if let Some(scratch) = &options.scratch {
+            let canonical = scratch
+                .canonicalize()
+                .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+            let repo = PathBuf::from(&req.cwd)
+                .canonicalize()
+                .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+            if req.sandbox != "workspace-write"
+                || canonical.starts_with(&repo)
+                || repo.starts_with(&canonical)
+            {
+                return Err(Failure::new(
+                    "invalid_argument",
+                    "writer scratch must be outside the product repository",
+                ));
+            }
+            std::fs::create_dir_all(scratch.join("target"))
+                .map_err(|e| Failure::new("io", e.to_string()))?;
+            thread_params["config"]["sandbox_workspace_write"]["writable_roots"] =
+                json!([canonical]);
+            thread_params["config"]["shell_environment_policy"]["set"] = json!({
+                "AXIOM_SCRATCH":scratch, "CARGO_TARGET_DIR":scratch.join("target"),
+                "TEMP":scratch, "TMP":scratch, "TMPDIR":scratch
+            });
         }
         let started = match &options.thread {
             ThreadMode::FreshPersistent => self.request("thread/start", thread_params)?,

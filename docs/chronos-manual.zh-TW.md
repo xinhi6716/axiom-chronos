@@ -1,6 +1,6 @@
 # Chronos Codex 使用說明
 
-版本：`0.3.0-codex.dev.5`，從標準版 `e27de7a` 重建的開發候選。
+版本：`0.3.0-codex.dev.6`，從標準版 `e27de7a` 重建的開發候選。
 
 ## 核心與分工
 
@@ -62,3 +62,7 @@ dev.2 的新 task 正確維持逐輪／權限邊界，但暴露驗證器覆寫�
 dev.3 的三項凍結檢查通過，但工程測試單元在尋找檢查定義時讀到相鄰驗收資料，獨立性失效，未列成功。dev.4 將核准計畫的懶載入參照提供給工程／組裝單元；新測試的驗收資料另放工作區外，舊案例保留為已曝光回歸資料。此為參照與工作區安排，不冒稱作業系統讀取隔離。
 
 dev.4 的實際 PowerShell 驗證暴露 Windows verbatim 根路徑混用斜線，導致 Select-String 讀取失敗。dev.5 對命令佔位符使用可攜顯示路徑，canonical 路徑仍保留作身分比較，並加入真正的 PowerShell 路徑回歸測試。
+
+dev.5 的工程單元依規劃中的相對 scratch 路徑寫出範圍而被拒絕。dev.6 改由 Rust 為每個寫入 attempt 分配倉庫外暫存根、注入建置／暫存環境並授予該根寫入；產品 scope 不擴大，違反時保留明確 scope_violation。設定依據：[OpenAI 設定參考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+同版移除 Windows 的 PID-only taskkill /T 清理，改以父子建立時間、快照時間上限與持有的 handle 驗證後終止子程序。dev.5 CI 曾異常退出，兩者因果尚未證實；不得把該次 CI 寫成成功。實際 Terra 暫存環境短測通過，產品目錄保持空白；證據保存於重建資料目錄。
