@@ -111,6 +111,24 @@ fn io(e: impl std::fmt::Display) -> Failure {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn command_path(path: &Path) -> String {
+    let value = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        // Canonical verbatim paths are identities, not portable shell literals.
+        // PowerShell rejects mixed separators after the verbatim prefix.
+        let value = if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            format!("//{unc}")
+        } else {
+            value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+        };
+        value.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
 fn relative_change(repo: &Path, name: &str) -> Option<String> {
     let path = Path::new(name);
     let relative = if path.is_absolute() {
@@ -1035,8 +1053,8 @@ impl Pipeline {
             .join(id);
         std::fs::create_dir_all(&scratch).map_err(io)?;
         let expand = |s: &str| {
-            s.replace("{repo}", &self.repo.to_string_lossy())
-                .replace("{scratch}", &scratch.to_string_lossy())
+            s.replace("{repo}", &command_path(&self.repo))
+                .replace("{scratch}", &command_path(&scratch))
         };
         let mut env = f
             .env
@@ -1464,5 +1482,27 @@ impl Pipeline {
             })?
             .value;
         Ok((report.report, saved, identity(report.execution.thread_id)))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod command_path_tests {
+    use super::*;
+    #[test]
+    fn canonical_repo_placeholder_is_readable_by_powershell_select_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("scope with spaces");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(repo.join("Cargo.lock"), "needle\n").unwrap();
+        let canonical = repo.canonicalize().unwrap();
+        let literal = format!("{}/Cargo.lock", command_path(&canonical)).replace('\'', "''");
+        let result = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$ErrorActionPreference='Stop'; if (-not (Select-String -LiteralPath '{literal}' -Pattern '^needle$' -Quiet)) {{exit 1}}")])
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }
