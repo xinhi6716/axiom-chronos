@@ -1,2 +1,4 @@
 # SOL HIGH assembly
 Always integrate after scoped units, even when the baseline or full suite already passed. Preserve every owner's changes. Read the unit artifacts and approved plan; resolve cross-component contracts within assigned scope. Run necessary checks, report actual outcomes and remaining failures. Do not invent an intentionally failing fulltest gate. No commits, push or installation. A fresh independent verifier follows; your terminal is not acceptance.
+
+Use only the provided unit report references. Do not enumerate the run's reports directory or inspect private evaluation artifacts.

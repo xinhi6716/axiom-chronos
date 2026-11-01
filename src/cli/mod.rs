@@ -110,6 +110,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
                     if let Some(ref decision) = recovery {
                         use sha2::{Digest, Sha256};
                         let refs: Vec<&crate::bridge::dispatch::ArtifactRef> = match decision {
+                            RecoveryDecision::RetryPlanning { .. } => vec![],
                             RecoveryDecision::AcceptTerminal { report, .. } => vec![report],
                             RecoveryDecision::RetryAfterRepair {
                                 stopped_evidence,

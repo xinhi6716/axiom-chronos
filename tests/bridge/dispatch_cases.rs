@@ -93,7 +93,7 @@ fn flow(mode: &str, approve: bool) {
         .attempts
         .values()
         .all(|a| a.state == checkpoint::AttemptState::Terminal));
-    let result = invoke(
+    let mut result = invoke(
         "decide",
         json!({"type":"decide","run_id":run,"research_digest":c.research.unwrap().digest,"pass":approve,"reason":"core intent decision"}),
     );
@@ -127,7 +127,38 @@ fn flow(mode: &str, approve: bool) {
         assert_eq!(approved["status"], "ready_to_commit", "{approved}");
         return;
     }
-    if !["normal", "content", "repairable-review"].contains(&mode) {
+    if mode == "planning-retry" {
+        assert_eq!(result["status"], "blocked");
+        assert!(
+            result["short_reason"]
+                .as_str()
+                .unwrap()
+                .contains("implementable units"),
+            "{result}"
+        );
+        assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+        result = invoke(
+            "retry-planning",
+            json!({"type":"resume","run_id":run,
+            "recovery":{"retry_planning":{"reason":"runtime now prepares independent evaluation"}}}),
+        );
+        let recovered = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+        assert_eq!(checkpoint::planning_epoch(&recovered), 1);
+        assert!(recovered
+            .attempts
+            .values()
+            .any(|a| a.outcome == Some(checkpoint::AttemptOutcome::Failed)));
+        assert_eq!(rows().iter().filter(|r| r["kind"] == "research").count(), 1);
+    }
+    if ![
+        "normal",
+        "content",
+        "repairable-review",
+        "evaluation",
+        "planning-retry",
+    ]
+    .contains(&mode)
+    {
         assert_ne!(result["status"], "ready_to_commit", "{result}");
         if mode == "failed-peer" {
             assert!(
@@ -154,6 +185,21 @@ fn flow(mode: &str, approve: bool) {
             json!({"type":"resume","run_id":run,"recovery":null}),
         );
         assert_ne!(resumed["status"], "ready_to_commit", "{resumed}");
+        let invalid_retry = invoke(
+            "reject-planning-retry",
+            json!({"type":"resume","run_id":run,
+            "recovery":{"retry_planning":{"reason":"must not bypass frozen plan or unknown writer"}}}),
+        );
+        assert_ne!(
+            invalid_retry["status"], "ready_to_commit",
+            "{invalid_retry}"
+        );
+        assert_eq!(
+            checkpoint::planning_epoch(
+                &checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap()
+            ),
+            0
+        );
         assert_eq!(
             rows()
                 .iter()
@@ -180,6 +226,40 @@ fn flow(mode: &str, approve: bool) {
     );
     assert!(c.receipts.contains_key("memory"));
     let records = rows();
+    if ["evaluation", "planning-retry"].contains(&mode) {
+        let prep = records
+            .iter()
+            .find(|r| r["kind"] == "evaluation-prepared")
+            .unwrap();
+        let first_write = records
+            .iter()
+            .find(|r| r["kind"] == "engineer-start")
+            .unwrap();
+        assert!(prep["time"].as_f64().unwrap() < first_write["time"].as_f64().unwrap());
+        assert!(c.checks.contains_key("independent-output"));
+        let public_plan = std::fs::read_to_string(&c.plan.as_ref().unwrap().path).unwrap();
+        assert!(!public_plan.contains("PRIVATE_EVALUATION_CANARY"));
+        let evaluation = c
+            .receipts
+            .get(&format!("evaluation-{}", checkpoint::planning_epoch(&c)))
+            .unwrap();
+        for row in records.iter().filter(|r| r["kind"] == "turn") {
+            let brief = row["params"]["input"][0]["text"].as_str().unwrap();
+            if brief.starts_with("ROLE Engineer") || brief.starts_with("ROLE Assembler") {
+                assert!(!brief.contains("PRIVATE_EVALUATION_CANARY"));
+                assert!(!brief.contains(&evaluation.path.to_string_lossy().to_string()));
+            }
+        }
+        assert!(checkpoint::resolve_attempt(
+            &home.join("orchestrate/demo"),
+            run,
+            c.revision,
+            &checkpoint::RecoveryDecision::RetryPlanning {
+                reason: "must not unfreeze completed plan".into()
+            }
+        )
+        .is_err());
+    }
     assert!(records
         .iter()
         .filter(|r| r["kind"] == "research")
@@ -249,6 +329,14 @@ fn flow(mode: &str, approve: bool) {
     use std::path::Path;
 }
 
+#[test]
+fn independent_evaluation_is_created_before_writes_and_omitted_from_writer_context() {
+    flow("evaluation", true);
+}
+#[test]
+fn failed_read_only_planning_can_resume_without_repeating_research_or_erasing_failure() {
+    flow("planning-retry", true);
+}
 #[test]
 fn batch_failure_cancels_pending_peer_instead_of_waiting_for_its_execution_budget() {
     let started = std::time::Instant::now();

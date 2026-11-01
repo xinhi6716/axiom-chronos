@@ -14,6 +14,8 @@ mode = sys.argv[2] if len(sys.argv) > 2 else 'normal'
 lock = threading.Lock()
 threads = {}
 pending = {}
+verify_queue = {}
+call_counts = {}
 barrier = threading.Barrier(2, timeout=10)
 
 
@@ -37,7 +39,8 @@ def finish(tid, text='done', failed=False):
 
 
 def call(tid, name, args, final='done'):
-    cid = 'tool-' + tid
+    call_counts[tid] = call_counts.get(tid, 0) + 1
+    cid = 'tool-' + tid + '-' + str(call_counts[tid])
     pending[cid] = (tid, final)
     send({'id': cid, 'method': 'item/tool/call', 'params': {
         'threadId': tid, 'turnId': tid + '-turn', 'callId': cid,
@@ -51,6 +54,9 @@ for line in sys.stdin:
         if msg.get('id') in pending:
             tid, final = pending.pop(msg['id'])
             log('reply', thread=tid, response=msg)
+            if verify_queue.get(tid) and 'error' not in msg and msg.get('result', {}).get('success'):
+                call(tid, 'verify_run', {'check_id': verify_queue[tid].pop(0)}, final)
+                continue
             finish(tid, final, 'error' in msg or not msg.get('result', {}).get('success'))
         continue
     if method == 'initialize':
@@ -88,7 +94,7 @@ for line in sys.stdin:
             check = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); assert Path(os.environ['CARGO_TARGET_DIR']).name=='planned-target' and Path(os.environ['CARGO_TARGET_DIR']).parent.samefile(Path.cwd()), 'frozen target overwritten'; assert (p/'one.txt').read_text()=='one'; assert (p/'two.txt').read_text()=='two'; Path('scratch-proof').write_text('ok'); print('real frozen check passed')"
             if mode == 'failed-check':
                 check = 'raise SystemExit(7)'
-            plan = {'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
+            plan = {'independent_evaluation': 'Check the two outputs independently before release' if mode in ['evaluation', 'planning-retry'] else None, 'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
                               {'kind':'engineer','id': 'u2', 'brief': 'write two', 'scope': ['two.txt'], 'depends_on': []}],
                     'checks': [{'id': 'frozen-python', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
                                 'args': ['-I', '-c', check, '{repo}'], 'env': [{'name':'CARGO_TARGET_DIR','value':'{scratch}/planned-target'}], 'timeout_s': 10}]}
@@ -97,7 +103,16 @@ for line in sys.stdin:
                 plan['assembly_scope'] = ['one.txt', 'two.txt']
             if mode == 'repairable-review':
                 plan['assembly_scope'] = ['one.txt', 'two.txt', 'review-fix']
+            if mode == 'planning-retry' and not log_path.with_suffix('.failed-plan').exists():
+                log_path.with_suffix('.failed-plan').write_text('preserve first failure')
+                plan['units'] = []
             finish(tid, json.dumps(plan))
+        elif 'PREPARE INDEPENDENT EVALUATION' in brief:
+            assert cfg['sandbox'] == 'read-only' and cfg['model'].endswith('-astra')
+            assert p['effort'] == 'high'
+            log('evaluation-prepared', thread=tid)
+            code = "from pathlib import Path; import sys; private_case='PRIVATE_EVALUATION_CANARY'; p=Path(sys.argv[1]); assert (p/'one.txt').read_text()+'|'+(p/'two.txt').read_text()=='one|two'"
+            finish(tid, json.dumps({'summary':'new private evaluation', 'checks':[{'id':'independent-output','program':sys.executable,'args':['-I','-c',code,'{repo}'],'env':[],'timeout_s':10}]}))
         elif 'ROLE Engineer' in brief:
             log('engineer-start', thread=tid)
             env = cfg['config']['shell_environment_policy']['set']
@@ -142,7 +157,9 @@ for line in sys.stdin:
                 finish(tid, json.dumps({'pass': True, 'summary': 'unsubstantiated claim'}))
             else:
                 passed = mode != 'rejected-review' and (mode != 'repairable-review' or Path(cfg['cwd'], 'review-fix').exists())
-                call(tid, 'verify_run', {'check_id': 'arbitrary' if mode == 'unknown-check' else 'frozen-python'}, json.dumps({'pass': passed, 'summary': 'checked independently'}))
+                ids = json.loads(brief.rsplit('VERIFY\n', 1)[1])
+                verify_queue[tid] = ids[1:]
+                call(tid, 'verify_run', {'check_id': 'arbitrary' if mode == 'unknown-check' else ids[0]}, json.dumps({'pass': passed, 'summary': 'checked independently'}))
         elif 'record_memory' in names:
             schema = cfg['dynamicTools'][0]['inputSchema']
             evidence = schema['properties']['evidence_id']['enum'][0]

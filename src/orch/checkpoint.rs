@@ -79,6 +79,9 @@ pub struct ReconcileResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryDecision {
+    RetryPlanning {
+        reason: String,
+    },
     AcceptTerminal {
         attempt_id: String,
         report: ArtifactRef,
@@ -399,7 +402,7 @@ pub fn install_plan(
         }
         c.plan = Some(plan.clone());
         for (id, s) in &c.steps {
-            if !ss.contains_key(id) && matches!(s.purpose, Purpose::Dispatcher | Purpose::Research | Purpose::Planner) {
+            if !ss.contains_key(id) && (matches!(s.purpose, Purpose::Dispatcher | Purpose::Research | Purpose::Planner) || s.step_id.starts_with("evaluation-prep-")) {
                 ss.insert(id.clone(), s.clone());
             }
         }
@@ -449,6 +452,12 @@ pub fn claim_step(store: &Path, rev: u64, spec: &StepSpec, input_digest: &str) -
                     Purpose::Research => c.phase == Phase::Research && c.plan.is_none(),
                     Purpose::Planner => {
                         c.phase == Phase::Planning && approved_research(c) && c.plan.is_none()
+                    }
+                    Purpose::Verifier => {
+                        c.phase == Phase::Planning
+                            && approved_research(c)
+                            && c.plan.is_none()
+                            && spec.step_id.starts_with("evaluation-prep-")
                     }
                     _ => false,
                 };
@@ -929,7 +938,7 @@ pub fn prepare_rework(store: &Path, id: &str, rev: u64) -> Res<u64> {
             return Err(fail("rework requires a known rejected review; at most two repairs"));
         }
         let evidence: BTreeMap<_, _> = c.receipts.iter()
-            .filter(|(k, _)| k.starts_with("check-") || k.starts_with("review-"))
+            .filter(|(k, _)| (k.starts_with("check-") && !k.starts_with("check-independent-")) || k.starts_with("review-"))
             .map(|(k, v)| (k.clone(), v.clone())).collect();
         let number = count + 1;
         let feedback = save_evidence(store, id, "rework", &number.to_string(), &evidence)?;
@@ -1109,6 +1118,40 @@ pub fn reconcile_run(
 }
 pub fn resolve_attempt(store: &Path, id: &str, rev: u64, decision: &RecoveryDecision) -> Res<u64> {
     match decision {
+        RecoveryDecision::RetryPlanning { reason } => {
+            nonempty(reason)?;
+            Ok(mutate(store, id, rev, |c| {
+                if c.phase != Phase::Planning || c.plan.is_some() || !c.checks.is_empty()
+                    || !approved_research(c) || !c.reservations.is_empty()
+                    || c.attempts.values().any(|a| a.state != AttemptState::Terminal
+                        || c.steps.get(&a.step_id).is_none_or(|s|
+                            !matches!(s.purpose, Purpose::Dispatcher | Purpose::Research | Purpose::Planner)
+                            && !(s.purpose == Purpose::Verifier && s.step_id.starts_with("evaluation-prep-"))))
+                {
+                    return Err(fail("planning retry requires approved research, no frozen plan, no writes and all attempts terminal"));
+                }
+                let epoch = planning_epoch(c) + 1;
+                if epoch > 2 {
+                    return Err(fail("planning retry limit reached; retain evidence and start a new run"));
+                }
+                let attempts: Vec<_> = c.attempts.values().filter(|a|
+                    c.steps[&a.step_id].purpose != Purpose::Research
+                    && !a.step_id.starts_with("coord-research-")).map(|a| a.attempt_id.clone()).collect();
+                if attempts.is_empty() {
+                    return Err(fail("no planning attempt to retire"));
+                }
+                let bytes = serde_json::to_vec(&serde_json::json!({"epoch":epoch,"reason":reason,"attempt_ids":attempts})).map_err(io)?;
+                let path = run_dir(store, id)?.join(format!("planning-retry-{epoch}.json"));
+                base::atomic_write(&path, &bytes).map_err(io)?;
+                let receipt = ArtifactRef {path, digest:digest(&bytes)};
+                c.receipts.insert(format!("planning-retry-{epoch}"), receipt.clone());
+                for attempt in attempts {
+                    c.receipts.insert(format!("planning-retired-{attempt}"), receipt.clone());
+                }
+                c.status = RunStatus::Running;
+                Ok(())
+            })?.revision)
+        }
         RecoveryDecision::AcceptTerminal {
             attempt_id,
             report,
@@ -1197,6 +1240,19 @@ pub fn resolve_attempt(store: &Path, id: &str, rev: u64, decision: &RecoveryDeci
         }
     }
 }
+pub fn planning_epoch(c: &Checkpoint) -> usize {
+    c.receipts
+        .keys()
+        .filter(|k| k.starts_with("planning-retry-"))
+        .count()
+}
+
+pub fn failed_attempt_needs_repair(c: &Checkpoint, a: &Attempt) -> bool {
+    a.outcome == Some(AttemptOutcome::Failed)
+        && !c
+            .receipts
+            .contains_key(&format!("planning-retired-{}", a.attempt_id))
+}
 pub fn record_receipt(
     store: &Path,
     id: &str,
@@ -1212,6 +1268,8 @@ pub fn record_receipt(
         || kind.starts_with("intent-rejection-")
         || kind.starts_with("rejected-research-")
         || kind.starts_with("event-")
+        || kind.starts_with("planning-retry-")
+        || kind.starts_with("planning-retired-")
     {
         return Err(fail("reserved receipt kind"));
     }

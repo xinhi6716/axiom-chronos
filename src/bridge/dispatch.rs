@@ -628,7 +628,7 @@ impl Bridge {
             } else if c
                 .attempts
                 .values()
-                .any(|a| a.outcome == Some(AttemptOutcome::Failed))
+                .any(|a| checkpoint::failed_attempt_needs_repair(&c, a))
             {
                 reason = "saved failed execution requires repair before a new attempt".into();
             } else {
@@ -703,6 +703,8 @@ impl Bridge {
 #[serde(deny_unknown_fields)]
 struct Plan {
     #[serde(default)]
+    independent_evaluation: Option<String>,
+    #[serde(default)]
     assembly_scope: Option<Vec<String>>,
     units: Vec<Unit>,
     checks: Vec<Check>,
@@ -748,6 +750,14 @@ struct Pipeline {
     generation: AtomicU64,
 }
 impl Pipeline {
+    fn planning_step(&self, name: &str) -> Res<String> {
+        let epoch = checkpoint::planning_epoch(&self.load()?);
+        Ok(if epoch == 0 {
+            name.into()
+        } else {
+            format!("{name}-{epoch}")
+        })
+    }
     fn load(&self) -> Res<Checkpoint> {
         checkpoint::load_run(&self.store, &self.run)
     }
@@ -827,13 +837,22 @@ impl Pipeline {
             .load()?
             .research
             .ok_or_else(|| fail("research missing"))?;
-        let spec=self.spec("planner",Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required.",self.intent()?,research.path),vec![],vec![])?;
+        let spec=self.spec(&self.planning_step("planner")?,Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required. Also return independent_evaluation: a concise preparation brief when the intent requires held-out/independent acceptance, otherwise null. Rust will then invoke a separate read-only ASTRA HIGH tester to create and seal self-contained private check commands BEFORE baseline and engineering. Missing independent runner/sample files are not a blocker: requesting their preparation is your responsibility. Keep public regression checks and private evaluation preparation distinct.",self.intent()?,research.path),vec![],vec![])?;
         let schema = json!({"type":"object","required":["assembly_scope","units","checks"],"additionalProperties":false,"properties":{"assembly_scope":{"type":["array","null"],"minItems":1,"items":{"type":"string"}},"units":{"type":"array","items":{"type":"object","required":["kind","id","brief","scope","depends_on"],"additionalProperties":false,"properties":{"kind":{"type":["string","null"],"enum":["engineer","content",null]},"id":{"type":"string"},"brief":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}},"depends_on":{"type":"array","items":{"type":"string"}}}}},"checks":{"type":"array","minItems":1,"items":{"type":"object","required":["id","program","args","env","timeout_s"],"additionalProperties":false,"properties":{"id":{"type":"string"},"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}},"timeout_s":{"type":"integer","minimum":1,"maximum":1800}}}}}});
+        let mut schema = schema;
+        schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("independent_evaluation"));
+        schema["properties"]["independent_evaluation"] = json!({"type":["string","null"]});
+        let check_schema = schema["properties"]["checks"].clone();
         let (report, _, _) = self.role(&spec, vec![], Some(schema))?;
         let value = Self::output(&report)?;
         let plan: Plan = serde_json::from_value(value.clone()).map_err(io)?;
-        if plan.checks.is_empty() {
-            return Err(fail("plan has no checks"));
+        if plan.checks.is_empty() || plan.units.is_empty() {
+            return Err(fail(
+                "plan must provide implementable units and public regression checks",
+            ));
         }
         let r = artifact(&self.artifacts(), &serde_json::to_vec(&value).map_err(io)?)?;
         let mut steps = vec![];
@@ -858,6 +877,7 @@ impl Pipeline {
                 ]
                 .contains(&unit.id.as_str())
                 || unit.id.starts_with("coord-")
+                || unit.id.starts_with("evaluation-prep-")
             {
                 return Err(fail("invalid engineering unit"));
             }
@@ -921,8 +941,31 @@ impl Pipeline {
                 return Err(fail("cyclic or missing engineering dependency"));
             }
         }
-        let mut checks = plan
-            .checks
+        let mut check_specs = plan.checks;
+        if let Some(brief) = plan.independent_evaluation {
+            if brief.trim().is_empty() {
+                return Err(fail("independent evaluation brief is empty"));
+            }
+            let epoch = checkpoint::planning_epoch(&self.load()?);
+            let prep = self.spec(&format!("evaluation-prep-{epoch}"), Purpose::Verifier,
+                &format!("PREPARE INDEPENDENT EVALUATION before engineering. You are a separate ASTRA HIGH tester, not a planner or engineer. Approved public plan: {:?}. Evaluation requirements: {}. Intent: {}. Create compact, self-contained executable checks with NEW held-out cases from the approved behavior and evaluation method. Existing runners or sample files are NOT prerequisites: return inline scripts/arguments that construct fixtures in {{scratch}} and inspect the product at {{repo}}. The Rust executor will persist and hash these commands and inputs before baseline or engineering. Do not modify product or run development. Do not merely invoke existing public tests or pretend a fake role is live acceptance. Each check id must start independent-. Return JSON {{summary,checks}} using the same program/args/env/timeout_s check format. Use actual available local executables; commands run with scratch cwd and may write only scratch. Do not depend on any uncreated runner, later writer-owned test or mutable external data. Keep each inline command compact. Missing product behavior may fail the baseline; missing evaluation infrastructure must not be assumed away.",r.path,brief,self.intent()?),vec![],vec![])?;
+            let (report, receipt, _) = self.role(&prep, vec![], Some(json!({"type":"object","required":["summary","checks"],"additionalProperties":false,"properties":{"summary":{"type":"string"},"checks":check_schema}})))?;
+            let value = Self::output(&report)?;
+            let independent: Vec<Check> =
+                serde_json::from_value(value["checks"].clone()).map_err(io)?;
+            if independent.is_empty()
+                || independent
+                    .iter()
+                    .any(|c| !c.id.starts_with("independent-"))
+            {
+                return Err(fail(
+                    "independent evaluator must supply named executable checks",
+                ));
+            }
+            self.receipt(&format!("evaluation-{epoch}"), &receipt)?;
+            check_specs.extend(independent);
+        }
+        let mut checks = check_specs
             .into_iter()
             .map(|c| {
                 crate::base::require_slug("check_id", &c.id)?;
@@ -970,9 +1013,9 @@ impl Pipeline {
         if assembly_scope.is_empty() {
             return Err(fail("plan must scope mandatory assembly writes"));
         }
-        steps.push(self.spec("assembly",Purpose::Assembler,&format!("Integrate all units for approved intent: {}. Read scoped result artifacts in {:?}. Preserve other owners. Run appropriate checks; reports alone are not success. No commit, push or install.",self.intent()?,self.store.join("runs").join(&self.run).join("reports")),assembly_scope,ids.clone())?);
+        steps.push(self.spec("assembly",Purpose::Assembler,&format!("Integrate all units for approved intent: {}. Read only the provided engineering/content result references. Preserve other owners. Run appropriate public checks; reports alone are not success. Do not inspect private evaluation artifacts. No commit, push or install.",self.intent()?),assembly_scope,ids.clone())?);
         steps.push(self.spec("baseline",Purpose::Verifier,"Execute frozen baseline checks before engineering. Invoke verify_run for EVERY ID in VERIFY. Failures are baseline observations, not permission to change acceptance criteria. Return observations.",vec![],ids.clone())?);
-        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string}. Reject real defects in this run's current deliverable. Commit, push, installation and subsequent rounds happen after ready_to_commit; do not reject their absence before that boundary. Completion alone is not a pass.",vec![],ids)?);
+        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string}. Reject real defects in this run's current deliverable. Commit, push, installation and subsequent rounds happen after ready_to_commit; do not reject their absence before that boundary. Completion alone is not a pass. Never reveal held-out inputs, expected values, private command bodies or private output paths in feedback to writers; report actionable defect categories without exposing those cases.",vec![],ids)?);
         steps.push(self.spec("memory",Purpose::Memory,"Record only independently verified outcomes. Invoke record_memory with the provided review evidence digest and concise reusable summary. Do not claim installation, release, push or independent live acceptance.",vec![],vec![])?);
         self.edit(|c| {
             checkpoint::install_plan(&self.store, &self.run, c.revision, &r, &steps, &checks)
@@ -1148,7 +1191,7 @@ impl Pipeline {
                     self.phase(Phase::IntentReview)?;
                 }
                 Phase::Planning => {
-                    self.coordinator("coord-plan","Read-only dispatcher. Approved research exists. Call run_plan once for a fresh independent Astra HIGH plan. Do not engineer or become a core.",vec![tool("run_plan",json!({}))])?;
+                    self.coordinator(&self.planning_step("coord-plan")?,"Read-only dispatcher. Approved research exists. Call run_plan once for a fresh independent Astra HIGH plan. Do not engineer or become a core.",vec![tool("run_plan",json!({}))])?;
                     let c = self.load()?;
                     self.role(
                         c.steps
@@ -1386,19 +1429,33 @@ impl Pipeline {
         } else {
             None
         };
+        let writer_reports = c
+            .attempts
+            .values()
+            .filter(|a| {
+                a.outcome == Some(AttemptOutcome::Completed)
+                    && c.steps.get(&a.step_id).is_some_and(|s| {
+                        matches!(s.purpose, Purpose::Engineer | Purpose::Content)
+                            && (spec.purpose == Purpose::Assembler
+                                || spec.dependency_ids.contains(&a.step_id))
+                    })
+            })
+            .filter_map(|a| a.raw_result.clone())
+            .collect::<Vec<_>>();
         let context = if matches!(spec.purpose, Purpose::Verifier | Purpose::Memory) {
             format!(
-                "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}",
+                "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}\nPrivate evaluation (verifier only): {:?}",
                 self.intent()?,
                 c.research,
                 c.plan,
                 c.receipts
                     .iter()
                     .filter(|(k, _)| k.starts_with("review-"))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                if spec.purpose == Purpose::Verifier { c.receipts.get(&format!("evaluation-{}", checkpoint::planning_epoch(&c))) } else { None }
             )
         } else if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler) {
-            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.\nRust assigned this absolute scratch directory: {}. AXIOM_SCRATCH, CARGO_TARGET_DIR and temporary-directory environment variables are already set for your shell. All build/test output goes there, never to a relative scratch/ directory under the repository. This concrete runtime location supersedes generic scratch wording in a unit brief.", c.plan, scratch.as_ref().map(|p| command_path(p)).unwrap_or_default())
+            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.\nCompleted prerequisite unit reports: {:?}.\nRust assigned this absolute scratch directory: {}. AXIOM_SCRATCH, CARGO_TARGET_DIR and temporary-directory environment variables are already set for your shell. All build/test output goes there, never to a relative scratch/ directory under the repository. This concrete runtime location supersedes generic scratch wording in a unit brief.", c.plan, writer_reports, scratch.as_ref().map(|p| command_path(p)).unwrap_or_default())
         } else {
             String::new()
         };

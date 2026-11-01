@@ -330,11 +330,15 @@ impl super::AppServer {
         let mut cancel_deadline = None;
         let mut terminal: Option<TransportTerminal> = None;
         let mut handler_failed = false;
+        let mut handler_errors = Vec::new();
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
         loop {
-            while let Ok(failed) = done_rx.try_recv() {
+            while let Ok(error) = done_rx.try_recv() {
                 active = active.saturating_sub(1);
-                handler_failed |= failed;
+                if let Some(error) = error {
+                    handler_failed = true;
+                    handler_errors.push(error);
+                }
             }
             // The reader delivers requests and the terminal in wire order. Only
             // callbacks received before that terminal belong to this execution.
@@ -402,8 +406,8 @@ impl super::AppServer {
                                     json!({"id":id,"error":{"code":-32603,"message":"handler panicked"}})
                                 }
                             };
-                            reply(response);
-                            let _ = done.send(failed);
+                            reply(response.clone());
+                            let _ = done.send(if failed { Some(response) } else { None });
                         });
                     } else if event.get("id").is_some() {
                         report["refused_requests"]
@@ -514,8 +518,12 @@ impl super::AppServer {
             }
         } else if handler_failed {
             report["status"] = json!("failed");
+            let message = handler_errors
+                .iter()
+                .find_map(|e| e["error"]["message"].as_str())
+                .unwrap_or("dynamic tool handler failed");
             report["error"] =
-                json!({"kind":"tool_handler_failed","message":"dynamic tool handler failed"});
+                json!({"kind":"tool_handler_failed","message":message,"causes":handler_errors});
         }
         let result = RunReport {
             execution: key.clone(),
