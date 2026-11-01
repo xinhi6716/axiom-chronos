@@ -1,6 +1,6 @@
 # Chronos Codex 使用說明書
 
-截至 2026-11-01（台北時間）：已安裝並啟用 **0.2.2-codex.dev.10**，修復交付提交 `3dcb40c2ca628cbc6830305f5515f0e1cfee92fb`，已推送 `codex-only`；[Windows／Ubuntu CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41249608330) 均通過。重開後確認現有 bridge 程序使用 dev.10。
+截至 2026-11-01（台北時間）：已安裝 **0.2.2-codex.dev.11**，功能修復提交 `2929bd2`，事件日誌修正提交 `cc5269d228e8214db3c47067ca03825a3ae13fbb`，均已推送 `codex-only`；[Windows／Ubuntu 完整 CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41257830163) 均通過。版本化執行檔與安裝執行檔 SHA256 相同，重新啟動的 bridge 已回報 dev.11；舊對話的既有程序不代表熱更新。安裝收據位於 `chronos-artifacts/maintenance/dev11-contract-recovery/installation-receipt.json`。
 
 **產品迭代完成數仍為 0／至少 5。** 第一輪已完成研究、意圖審核與規劃，曾卡在工程前基線；能力衝突已修復，但原 session `c308b6183976af5288614e4ba80fc863` 仍為 blocked，未自動恢復。修復測試不計入產品輪次。
 
