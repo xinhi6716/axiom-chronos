@@ -1349,6 +1349,8 @@ impl Pipeline {
                     .filter(|(k, _)| k.starts_with("review-"))
                     .collect::<Vec<_>>()
             )
+        } else if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler) {
+            format!("\nApproved plan with frozen check definitions: {:?}. Read this artifact when needed; do not search sibling directories, other runs or independent acceptance data for missing instructions.", c.plan)
         } else {
             String::new()
         };
