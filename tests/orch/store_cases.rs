@@ -1,7 +1,9 @@
-use axiom::orch::{run, Output};
+use axiom::orch::{run, with_lock, Output};
 use std::{
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);
@@ -214,6 +216,248 @@ fn errors_and_locks() {
     assert!(call(p, &["standing", "add", "y"], false, false)
         .stderr
         .contains("replacing stale store lock"));
+}
+
+struct LockChild(Child);
+impl Drop for LockChild {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+fn wait_for_file(path: &Path) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "timed out waiting for {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+fn lock_child(store: &Path, tag: &str) -> LockChild {
+    LockChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "store_cases::lock_child_process", "--nocapture"])
+            .env("AXIOM_TEST_LOCK_STORE", store)
+            .env("AXIOM_TEST_LOCK_TAG", tag)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+// Executed by the test harness in a separate OS process. File handshakes make
+// entry and exit from the critical section deterministic.
+#[test]
+fn lock_child_process() {
+    let Some(store) = std::env::var_os("AXIOM_TEST_LOCK_STORE") else {
+        return;
+    };
+    let store = PathBuf::from(store);
+    let tag = std::env::var("AXIOM_TEST_LOCK_TAG").unwrap();
+    std::fs::write(store.join(format!("{tag}-ready")), "ready").unwrap();
+    wait_for_file(&store.join("start"));
+    let result = with_lock(&store, false, || {
+        std::fs::write(
+            store.join(format!("{tag}-entered")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        wait_for_file(&store.join("release"));
+        Ok(())
+    });
+    if let Err(error) = result {
+        std::fs::write(store.join(format!("{tag}-error")), error.message).unwrap();
+    }
+}
+
+#[test]
+fn stale_lock_recovery_serializes_independent_processes() {
+    let t = Temp::new();
+    let p = &t.0;
+    std::fs::write(p.join(".orch.lock"), "4294967295\n").unwrap();
+    let mut a = lock_child(p, "a");
+    let mut b = lock_child(p, "b");
+    wait_for_file(&p.join("a-ready"));
+    wait_for_file(&p.join("b-ready"));
+    std::fs::write(p.join("start"), "go").unwrap();
+    let started = Instant::now();
+    loop {
+        let entered = ["a", "b"]
+            .into_iter()
+            .filter(|tag| p.join(format!("{tag}-entered")).exists())
+            .count();
+        let rejected = ["a", "b"]
+            .into_iter()
+            .filter(|tag| p.join(format!("{tag}-error")).exists())
+            .count();
+        assert!(entered <= 1, "two processes entered the same store");
+        if entered == 1 && rejected == 1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "no lock result"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let marker = std::fs::read_to_string(p.join(".orch.lock")).unwrap();
+    let entered_pid = ["a", "b"]
+        .into_iter()
+        .find_map(|tag| std::fs::read_to_string(p.join(format!("{tag}-entered"))).ok())
+        .unwrap();
+    assert_eq!(marker.trim(), entered_pid.trim());
+    std::fs::write(p.join("release"), "go").unwrap();
+    assert!(a.0.wait().unwrap().success());
+    assert!(b.0.wait().unwrap().success());
+    assert!(!p.join(".orch.lock").exists());
+}
+
+#[test]
+fn killed_holder_releases_kernel_lock_and_is_recoverable() {
+    let t = Temp::new();
+    let p = &t.0;
+    let mut holder = lock_child(p, "holder");
+    wait_for_file(&p.join("holder-ready"));
+    std::fs::write(p.join("start"), "go").unwrap();
+    wait_for_file(&p.join("holder-entered"));
+    let error = with_lock(p, false, || Ok(())).unwrap_err();
+    assert!(error.message.contains("store lock held"));
+    holder.0.kill().unwrap();
+    holder.0.wait().unwrap();
+    with_lock(p, false, || Ok(())).unwrap();
+    assert!(!p.join(".orch.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fork_inherited_guard_does_not_block_next_lock() {
+    struct Forked {
+        pid: libc::pid_t,
+        release: i32,
+    }
+    impl Forked {
+        fn release(&mut self) {
+            let byte = [1u8];
+            unsafe {
+                assert_eq!(libc::write(self.release, byte.as_ptr().cast(), 1), 1);
+                libc::close(self.release);
+                self.release = -1;
+                let mut status = 0;
+                assert_eq!(libc::waitpid(self.pid, &mut status, 0), self.pid);
+                assert!(libc::WIFEXITED(status));
+                assert_eq!(libc::WEXITSTATUS(status), 0);
+            }
+            self.pid = 0;
+        }
+    }
+    impl Drop for Forked {
+        fn drop(&mut self) {
+            unsafe {
+                if self.release >= 0 {
+                    libc::close(self.release);
+                }
+                if self.pid > 0 {
+                    libc::kill(self.pid, libc::SIGKILL);
+                    libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                }
+            }
+        }
+    }
+
+    let t = Temp::new();
+    let p = &t.0;
+    let mut ready = [0; 2];
+    let mut release = [0; 2];
+    unsafe {
+        assert_eq!(libc::pipe(ready.as_mut_ptr()), 0);
+        assert_eq!(libc::pipe(release.as_mut_ptr()), 0);
+    }
+    let mut child = None;
+    with_lock(p, false, || {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // After fork in the multithreaded test harness, use only
+            // async-signal-safe libc calls until _exit.
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                let byte = [1u8];
+                let sent = libc::write(ready[1], byte.as_ptr().cast(), 1);
+                let mut done = [0u8];
+                let received = libc::read(release[0], done.as_mut_ptr().cast(), 1);
+                libc::_exit(if sent == 1 && received == 1 { 0 } else { 1 });
+            }
+        }
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        child = Some(Forked {
+            pid,
+            release: release[1],
+        });
+        let mut poll = libc::pollfd {
+            fd: ready[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 10_000) }, 1);
+        let mut byte = [0u8];
+        assert_eq!(
+            unsafe { libc::read(ready[0], byte.as_mut_ptr().cast(), 1) },
+            1
+        );
+        unsafe { libc::close(ready[0]) };
+        Ok(())
+    })
+    .unwrap();
+    assert!(!p.join(".orch.lock").exists());
+    // The child remains alive holding the inherited descriptor. Explicit
+    // unlock must let a fresh descriptor enter before that child exits.
+    let next = with_lock(p, false, || Ok(()));
+    child.as_mut().unwrap().release();
+    next.unwrap();
+}
+
+#[test]
+fn panic_clears_pid_marker_and_releases_gate() {
+    let t = Temp::new();
+    let p = &t.0;
+    let result = std::panic::catch_unwind(|| {
+        let _: axiom::base::Res<()> = with_lock(p, false, || panic!("injected panic"));
+    });
+    assert!(result.is_err());
+    assert!(!p.join(".orch.lock").exists());
+    with_lock(p, false, || Ok(())).unwrap();
+}
+
+#[test]
+fn legacy_unknown_and_explicit_force_preserve_existing_contract() {
+    let t = Temp::new();
+    let p = &t.0;
+    std::fs::write(p.join(".orch.lock"), b"").unwrap();
+    let error = with_lock(p, false, || Ok(())).unwrap_err();
+    assert!(error.message.contains("pid unknown"));
+    assert_eq!(std::fs::read(p.join(".orch.lock")).unwrap(), b"");
+    with_lock(p, true, || Ok(())).unwrap();
+
+    // Preserve the explicit old force override. It can overlap another writer;
+    // ordinary calls are guarded and must never steal this active lock.
+    let mut holder = lock_child(p, "holder");
+    wait_for_file(&p.join("holder-ready"));
+    std::fs::write(p.join("start"), "go").unwrap();
+    wait_for_file(&p.join("holder-entered"));
+    assert!(with_lock(p, false, || Ok(())).is_err());
+    with_lock(p, true, || Ok(())).unwrap();
+    std::fs::write(p.join("release"), "go").unwrap();
+    assert!(holder.0.wait().unwrap().success());
 }
 #[test]
 fn old_stores_read() {

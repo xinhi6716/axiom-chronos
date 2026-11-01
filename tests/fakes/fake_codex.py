@@ -89,14 +89,26 @@ for line in sys.stdin:
             {'id': 'panel@personal', 'enabled': True}, {'id': 'keepme@personal', 'enabled': True}, {'id': 'off@personal', 'enabled': False}]}]}})
     elif method == 'config/read':
         send({'id': message['id'], 'result': {'config': {'mcp_servers': {'node_repl': {'command': 'x'}}}, 'origins': {}}})
-    elif method == 'thread/start':
-        threads += 1
-        thread_id = f'thread-{threads}'
+    elif method in ['thread/start', 'thread/resume']:
+        if method == 'thread/start':
+            threads += 1
+            thread_id = f'thread-{threads}'
+        else:
+            thread_id = params['threadId']
         models[thread_id] = params.get('model')
         config = params.get('config') or {}
         configs[thread_id] = config
         thread_params[thread_id] = params
-        send({'id': message['id'], 'result': {'thread': {'id': thread_id}}})
+        result = {'thread': {'id': thread_id}, 'model': params.get('model')}
+        if params.get('model') == 'configured-model-missing':
+            del result['model']
+        elif params.get('model') == 'configured-model-null':
+            result['model'] = None
+        elif params.get('model') == 'configured-model-empty':
+            result['model'] = ''
+        elif params.get('model') == 'configured-model-mismatch':
+            result['model'] = 'other-model'
+        send({'id': message['id'], 'result': result})
         send({'method': 'thread/started', 'params': {'thread': {'id': thread_id}}})
         servers = {'node_repl': ('mcp_servers', 'node_repl'), 'panel': ('plugins', 'panel@personal'), 'keepme': ('plugins', 'keepme@personal')}
         for server, (section, key) in servers.items():
@@ -191,7 +203,18 @@ for line in sys.stdin:
         item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
         complete(thread_id, turn_id)
     elif method == 'thread/read':
-        send({'id': message['id'], 'result': {'thread': {'id': params['threadId'], 'turns': []}}})
+        thread = {'id': params['threadId'], 'turns': []}
+        if params['threadId'].startswith('history-'):
+            thread['turns'] = [
+                {'id': 'history-target', 'status': 'completed', 'error': None,
+                 'items': [{'type': 'agentMessage', 'id': 'history-message', 'text': 'target turn'}]},
+                {'id': 'unrelated-last', 'status': 'completed', 'error': None, 'items': []},
+            ]
+            if params['threadId'] == 'history-null':
+                thread['model'] = None
+            elif params['threadId'] == 'history-configured':
+                thread['model'] = 'current-thread-configuration'
+        send({'id': message['id'], 'result': {'thread': thread}})
     elif method == 'command/exec':
         send({'id': message['id'], 'result': {'exitCode': 0, 'stdout': 'sandboxed', 'stderr': '', 'timedOut': False}})
     elif method == 'turn/interrupt':

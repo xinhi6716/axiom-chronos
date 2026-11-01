@@ -38,6 +38,139 @@ fn options(handler: Option<Arc<dyn ToolHandler>>) -> RunOptions {
         scratch: None,
     }
 }
+
+fn logged_server(dir: &std::path::Path) -> (AppServer, std::path::PathBuf) {
+    let log = dir.join("rpc.jsonl");
+    let wrapper = dir.join("fake_wrapper.py");
+    std::fs::write(&wrapper,
+        "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
+    let args = vec![
+        crate::common::python(),
+        "-I".into(),
+        wrapper.to_string_lossy().into_owned(),
+        log.to_string_lossy().into_owned(),
+        crate::common::repo_root()
+            .join("tests/fakes/fake_codex.py")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    (AppServer::new(args), log)
+}
+
+fn rpc_log(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn invalid_configured_model_never_starts_a_turn() {
+    for model in [
+        "configured-model-missing",
+        "configured-model-null",
+        "configured-model-empty",
+        "configured-model-mismatch",
+    ] {
+        for resume in [false, true] {
+            let dir = crate::common::temp();
+            let (server, log) = logged_server(dir.path());
+            let mut req = request(dir.path(), "test");
+            req.model = model.into();
+            let mut opts = options(None);
+            if resume {
+                opts.thread = ThreadMode::Resume {
+                    thread_id: "resume-thread".into(),
+                };
+            }
+            assert_eq!(
+                server.run_with_options(&req, opts).unwrap_err().kind,
+                "model_identity"
+            );
+            assert!(!rpc_log(&log)
+                .iter()
+                .any(|event| event["method"] == "turn/start"));
+        }
+    }
+}
+
+struct ObserveModel {
+    log: std::path::PathBuf,
+    events: std::sync::Mutex<Vec<RunEvent>>,
+}
+impl RunObserver for ObserveModel {
+    fn on_event(&self, event: &RunEvent) -> axiom::base::Res<()> {
+        assert_eq!(event.requested_model, "gpt-6-astra");
+        assert_eq!(event.configured_model, "gpt-6-astra");
+        assert_eq!(event.requested_effort.as_deref(), Some("high"));
+        if matches!(event.kind, RunEventKind::BeforeTurn) {
+            assert!(event.execution.turn_id.is_none());
+            assert!(!rpc_log(&self.log)
+                .iter()
+                .any(|e| e["method"] == "turn/start"));
+        }
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn observer_receives_model_evidence_before_turn_start() {
+    let dir = crate::common::temp();
+    let (server, log) = logged_server(dir.path());
+    let observer = Arc::new(ObserveModel {
+        log,
+        events: Default::default(),
+    });
+    let mut req = request(dir.path(), "test");
+    req.model = "gpt-6-astra".into();
+    req.effort = Some("high".into());
+    let mut opts = options(None);
+    opts.observer = Some(observer.clone());
+    let report = server.run_with_options(&req, opts).unwrap();
+    assert!(matches!(report.terminal, TransportTerminal::Completed));
+    assert_eq!(report.report["requested_model"], "gpt-6-astra");
+    assert_eq!(report.report["configured_model"], "gpt-6-astra");
+    assert_eq!(report.report["model_source"], "requested");
+    assert!(matches!(
+        observer.events.lock().unwrap()[0].kind,
+        RunEventKind::BeforeTurn
+    ));
+}
+
+#[test]
+fn history_preserves_nullable_configuration_and_requires_the_bound_turn() {
+    let dir = crate::common::temp();
+    let (server, log) = logged_server(dir.path());
+    assert!(matches!(
+        server.read_attempt("history-null", None).unwrap(),
+        AttemptRead::Unknown { .. }
+    ));
+    assert!(rpc_log(&log).is_empty());
+    for (thread, expected) in [
+        ("history-null", serde_json::Value::Null),
+        ("history-missing", serde_json::Value::Null),
+        ("history-configured", json!("current-thread-configuration")),
+    ] {
+        let AttemptRead::Terminal(report) =
+            server.read_attempt(thread, Some("history-target")).unwrap()
+        else {
+            panic!("terminal absent")
+        };
+        assert_eq!(report.report["model"], expected);
+        assert_eq!(report.report["model_source"], "thread/read");
+        assert_eq!(report.report["final_message"], "target turn");
+        assert_eq!(report.execution.turn_id.as_deref(), Some("history-target"));
+        assert!(report.report.get("configured_model").is_none());
+    }
+    assert!(matches!(
+        server
+            .read_attempt("history-null", Some("missing"))
+            .unwrap(),
+        AttemptRead::Unknown { .. }
+    ));
+}
 struct Nested {
     server: Arc<AppServer>,
     cwd: std::path::PathBuf,

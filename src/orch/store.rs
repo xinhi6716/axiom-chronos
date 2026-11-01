@@ -123,6 +123,82 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
     parse_brief(&text).map_err(|field| fail(format!("brief {} is missing {field}", row.brief)))
 }
 static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+// `close` alone may leave a Unix flock held when a concurrently forked child
+// inherited the same open file description before exec. Explicit unlock also
+// runs during unwinding, after the later-created PID marker guard is dropped.
+struct StoreGate(std::fs::File);
+impl Drop for StoreGate {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+// Publish the legacy-visible PID marker only after its entire content is on
+// disk. A killed process can leave a private temporary file, but never an
+// empty `.orch.lock` that other callers cannot safely identify or recover.
+fn publish_lock(path: &Path, pid: &str) -> std::io::Result<()> {
+    publish_lock_using(path, pid, |source, target| {
+        std::fs::hard_link(source, target)
+    })
+}
+
+fn publish_lock_using(
+    path: &Path,
+    pid: &str,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock has no parent")
+    })?;
+    let temp = parent.join(format!(".orch-lock-{pid}-{}.tmp", base::unique()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        writeln!(file, "{pid}")?;
+        file.sync_all()?;
+        drop(file);
+        // hard_link is atomic and fails when the destination already exists;
+        // rename would replace an existing marker on Unix.
+        publish(&temp, path)
+    })();
+    let _ = std::fs::remove_file(temp);
+    result
+}
+
+// A failed process query can mean access denied rather than a dead PID.
+// Treat all indeterminate results as live; PID reuse may conservatively leave
+// a stale marker, but must never authorize stealing an unrelated live lock.
+fn definitely_dead(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid > i32::MAX as u32 {
+            return true;
+        }
+        (unsafe { libc::kill(pid as i32, 0) }) != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return GetLastError() == ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0;
+        let result = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        result != 0 && code != STILL_ACTIVE as u32
+    }
+}
+
 fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
     let m = LOCKS
@@ -135,13 +211,33 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
     let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
     let path = store.join(".orch.lock");
     let pid = std::process::id().to_string();
-    let create = || -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        writeln!(file, "{pid}")
+    // This persistent coordination file is never removed. The OS releases its
+    // advisory lock when a process exits, including an abrupt termination.
+    // An explicitly forced CLI operation retains its old ability to override a
+    // live marker; like the previous implementation that override can overlap
+    // a writer. Unforced updated processes never bypass this lock.
+    let gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(store.join(".orch.guard"))
+        .map_err(io)?;
+    let _gate = match gate.try_lock() {
+        Ok(()) => Some(StoreGate(gate)),
+        Err(std::fs::TryLockError::WouldBlock) if force => None,
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            let holder = if holder.trim().is_empty() {
+                "unknown"
+            } else {
+                holder.trim()
+            };
+            return Err(fail(format!("store lock held by pid {holder}")));
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(io(e)),
     };
+    let create = || publish_lock(&path, &pid);
     if let Err(e) = create() {
         if e.kind() != std::io::ErrorKind::AlreadyExists {
             return Err(io(e));
@@ -156,7 +252,7 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
             .parse::<u32>()
             .ok()
             .filter(|p| *p > 0 && p.to_string() == holder)
-            .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p));
+            .is_some_and(definitely_dead);
         if dead {
             note.push_str(&format!(
                 "replacing stale store lock (pid {holder} is dead)\n"
@@ -186,6 +282,110 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
 }
+
+#[cfg(test)]
+mod lock_publication_tests {
+    use super::*;
+    use std::{
+        process::{Command, Stdio},
+        sync::Barrier,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn publication_child() {
+        let Some(path) = std::env::var_os("AXIOM_TEST_LOCK_PUBLICATION") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let ready = path.with_extension("ready");
+        publish_lock_using(&path, &std::process::id().to_string(), |source, target| {
+            // The real publication helper has written and synced the PID;
+            // the parent kills this process before the atomic link operation.
+            std::fs::write(&ready, "ready")?;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if !ready.exists() {
+                    return std::fs::hard_link(source, target);
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn killed_between_staging_and_publication_leaves_no_unknown_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".orch.lock");
+        let ready = path.with_extension("ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "orch::store::lock_publication_tests::publication_child",
+                "--nocapture",
+            ])
+            .env("AXIOM_TEST_LOCK_PUBLICATION", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        while !ready.exists() {
+            if start.elapsed() >= Duration::from_secs(15) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("publication child did not reach its pre-link barrier");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!path.exists());
+        assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".orch-lock-")));
+        with_lock(dir.path(), false, || Ok(())).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn complete_pid_is_published_once_without_replacing_another_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(".orch.lock");
+        let barrier = Barrier::new(8);
+        let outcomes = std::thread::scope(|scope| {
+            (1..=8)
+                .map(|pid| {
+                    let lock = &lock;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        publish_lock(lock, &pid.to_string())
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| error.kind() == std::io::ErrorKind::AlreadyExists));
+        assert!((1..=8).contains(
+            &std::fs::read_to_string(&lock)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
     with_lock(store, false, || {
         let mut rows = read_units(store)?;

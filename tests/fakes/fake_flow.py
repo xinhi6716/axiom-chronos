@@ -1,5 +1,6 @@
 """RPC regression fixture, not live acceptance or a production execution path."""
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -21,7 +22,22 @@ call_counts = {}
 barrier = threading.Barrier(2, timeout=10)
 
 PUBLIC_CHECK = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); assert Path(os.environ['CARGO_TARGET_DIR']).name=='planned-target' and Path(os.environ['CARGO_TARGET_DIR']).parent.samefile(Path.cwd()), 'frozen target overwritten'; assert (p/'one.txt').read_text()=='one'; assert (p/'two.txt').read_text()=='two'; Path('scratch-proof').write_text('ok'); print('real frozen check passed')"
+PARENT_CHECK = "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert (p/'first'/'one.txt').read_text()=='one'; assert (p/'second'/'two.txt').read_text()=='two'"
 PRIVATE_CHECK = "from pathlib import Path; import sys; private_case='PRIVATE_EVALUATION_CANARY'; p=Path(sys.argv[1]); assert (p/'one.txt').read_text()+'|'+(p/'two.txt').read_text()=='one|two'"
+ENV_CHECK = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); name='one.txt' if os.environ['AXIOM_CASE']=='public' else 'two.txt'; assert (p/name).read_text() in ('one','two')"
+CASE_CHECK = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); name='one.txt' if 'AXIOM_CASE' in os.environ else 'two.txt'; assert (p/name).read_text() in ('one','two')"
+UNICODE_CASE_CHECK = "from pathlib import Path; import sys,os; p=Path(sys.argv[1]); name='one.txt' if 'AXIOM_ÉTAT' in os.environ else 'two.txt'; assert (p/name).read_text() in ('one','two')"
+FIRST_RECOVERY = 'first correction: use independent-h for the private ID'
+SECOND_RECOVERY = 'second correction: prepare an inline acceptance check'
+RUNNER_SOURCE = r'''use std::{env, fs, path::Path};
+fn main() {
+    let mut args = env::args().skip(1);
+    let root = args.next().unwrap();
+    while let Some(name) = args.next() {
+        let expected = args.next().unwrap();
+        assert_eq!(fs::read_to_string(Path::new(&root).join(name)).unwrap(), expected);
+    }
+}'''
 
 
 def send(value):
@@ -56,12 +72,12 @@ sys.excepthook = fatal
 threading.excepthook = thread_fatal
 
 
-def finish(tid, text='done', failed=False):
+def finish(tid, text='done', failed=False, cancelled=False):
     turn = tid + '-turn'
     send({'method': 'item/completed', 'params': {'threadId': tid, 'turnId': turn,
           'item': {'type': 'agentMessage', 'id': 'message', 'text': text}}})
     send({'method': 'turn/completed', 'params': {'threadId': tid,
-          'turn': {'id': turn, 'status': 'failed' if failed else 'completed'}}})
+          'turn': {'id': turn, 'status': 'failed' if failed else 'cancelled' if cancelled else 'completed'}}})
 
 
 def call(tid, name, args, final='done', schema=None):
@@ -111,7 +127,24 @@ def independent_checks():
         return [{'id': 'independent-copy', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
                  'args': ['-I', '-c', PUBLIC_CHECK, '{repo}'],
                  'env': [{'name': 'CARGO_TARGET_DIR', 'value': '{scratch}/planned-target'}], 'timeout_s': 10}]
-    return [{'id': 'independent-output', 'program': sys.executable,
+    if mode in ['evaluation-reordered-env', 'evaluation-distinct-env']:
+        return [{'id': 'independent-output', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
+                 'args': ['-I', '-c', ENV_CHECK, '{repo}'],
+                 'env': [{'name': 'AXIOM_CASE', 'value': 'public' if mode == 'evaluation-reordered-env' else 'private'},
+                         {'name': 'CARGO_TARGET_DIR', 'value': '{scratch}/planned-target'}], 'timeout_s': 10}]
+    if mode in ['evaluation-case-variant', 'evaluation-unicode-case-variant']:
+        name = 'axiom_case' if mode == 'evaluation-case-variant' else 'axiom_état'
+        check = CASE_CHECK if mode == 'evaluation-case-variant' else UNICODE_CASE_CHECK
+        return [{'id': 'independent-output', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
+                 'args': ['-I', '-c', check, '{repo}'],
+                 'env': [{'name': name, 'value': 'same'},
+                         {'name': 'CARGO_TARGET_DIR', 'value': '{scratch}/planned-target'}], 'timeout_s': 10}]
+    if mode == 'private-duplicate-env':
+        return [{'id': 'independent-output', 'program': sys.executable,
+                 'args': ['-I', '-c', PRIVATE_CHECK, '{repo}'],
+                 'env': [{'name': 'AXIOM_CASE', 'value': 'a'}, {'name': 'AXIOM_CASE', 'value': 'b'}],
+                 'timeout_s': 10}]
+    return [{'id': 'independent-h' if mode in ['planning-retry', 'retry-second-epoch'] else 'independent-output', 'program': sys.executable,
              'args': ['-I', '-c', PRIVATE_CHECK, '{repo}'], 'env': [], 'timeout_s': 10}]
 
 
@@ -143,7 +176,10 @@ def verifier_result(tid, brief):
                            'defect_owner': 'upstream'})
     if mode == 'verifier-no-owner':
         return json.dumps({'pass': False, 'summary': 'something is wrong', 'defect_owner': 'none'})
-    passed = mode != 'rejected-review' and (mode != 'repairable-review' or Path(threads[tid]['cwd'], 'review-fix').exists())
+    fixed = Path(threads[tid]['cwd'], 'review-fix')
+    passed = mode != 'rejected-review' and (mode not in ['repairable-review', 'evaluation-repairable-review', 'repairable-review-twice'] or fixed.exists())
+    if mode == 'repairable-review-twice':
+        passed = fixed.exists() and fixed.read_text() == 'twice'
     return json.dumps({'pass': passed, 'summary': 'checked independently', 'defect_owner': 'assembly' if not passed else 'none'})
 
 
@@ -155,6 +191,21 @@ for line in sys.stdin:
             tid, final = pending.pop(msg['id'])
             log('reply', thread=tid, response=msg)
             ok = reply_ok(msg)
+            if final == '__prepared_runner__':
+                if not ok:
+                    finish(tid, 'runner callback failed', failed=True)
+                    continue
+                prepared = json.loads(msg['result']['contentItems'][0]['text'])
+                log('runner-result', status=prepared.get('status'))
+                if prepared.get('status') == 'ready':
+                    checks = [{'id': 'independent-output', 'program': prepared['program'],
+                               'args': ['{repo}', 'one.txt', 'one', 'two.txt', 'two'], 'env': [], 'timeout_s': 30}]
+                    finish(tid, json.dumps({'status': 'ready', 'summary': 'prepared',
+                                            'exposure': 'synthetic private acceptance', 'checks': checks}))
+                else:
+                    # Deliberate adversarial fallback: Rust must still block.
+                    finish(tid, preparation())
+                continue
             if tid in baseline:
                 baseline[tid]['codes'].append(check_exit_code(msg) if ok else None)
                 if ok and len(baseline[tid]['codes']) < len(baseline[tid]['ids']):
@@ -165,14 +216,22 @@ for line in sys.stdin:
             if verify_queue.get(tid) and ok:
                 call(tid, 'verify_run', {'check_id': verify_queue[tid].pop(0)}, final)
                 continue
+            if mode == 'verifier-history-null' and 'verify_run' in [t['name'] for t in threads[tid].get('dynamicTools', [])]:
+                log_path.with_suffix('.model-history').write_text(json.dumps({'thread': tid, 'final': final}), encoding='utf-8')
+                log('model-history-disconnect', thread=tid)
+                sys.exit(19)
             finish(tid, final, not ok)
         continue
     if method == 'initialize':
         result = {}
     elif method == 'model/list':
+        roles = ['terra', 'sol', 'astra', 'luna']
+        if mode == 'verifier-history-null' and log_path.with_suffix('.model-history').exists():
+            roles.remove('astra')  # Catalog changes after the verifier has run.
+        log('model-list', roles=roles)
         result = {'data': [{'id': 'gpt-6.1-' + role,
                   'supportedReasoningEfforts': [{'reasoningEffort': e} for e in ['medium', 'high', 'xhigh', 'max']]}
-                  for role in ['terra', 'sol', 'astra', 'luna']]}
+                  for role in roles]}
     elif method == 'plugin/installed':
         result = {'marketplaces': []}
     elif method == 'config/read':
@@ -181,20 +240,53 @@ for line in sys.stdin:
         tid = 't-' + str(os.getpid()) + '-' + str(len(threads) + 1)
         threads[tid] = p
         log('thread', thread=tid, params=p)
-        result = {'thread': {'id': tid}}
+        result = {'thread': {'id': tid}, 'model': p['model']}
+        if mode.startswith('engineer-config-') and p.get('sandbox') == 'workspace-write' and not log_path.with_suffix('.fixed-model').exists():
+            if mode == 'engineer-config-missing':
+                del result['model']
+            else:
+                result['model'] = 'different-configured-model'
     elif method == 'turn/start':
         tid = p['threadId']
         cfg = threads[tid]
         brief = p['input'][0]['text']
         log('turn', thread=tid, params=p)
-        send({'id': msg['id'], 'result': {'turn': {'id': tid + '-turn'}}})
         names = [t['name'] for t in cfg.get('dynamicTools', [])]
+        # Fault injection happens before acknowledging turn/start. Rust has
+        # already recorded BeforeTurn and cannot record TurnStarted until this
+        # response, so no live checkpoint mutation races this test fixture.
+        if 'run_plan' in names and mode in ['retry-missing', 'retry-tampered', 'retry-wrong-epoch'] and log_path.with_suffix('.failed-plan').exists():
+            run_dirs = list((log_path.parent / 'home' / 'orchestrate' / 'demo' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            checkpoint_path = run_dirs[0] / 'checkpoint.json'
+            checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+            receipt = checkpoint['receipts']['planning-retry-1']
+            receipt_path = Path(receipt['path'])
+            if mode == 'retry-missing':
+                del checkpoint['receipts']['planning-retry-1']
+            elif mode == 'retry-tampered':
+                receipt_path.write_text('tampered', encoding='utf-8')
+            else:
+                altered = json.loads(receipt_path.read_text(encoding='utf-8'))
+                altered['epoch'] = 2
+                data = json.dumps(altered).encode('utf-8')
+                receipt_path.write_bytes(data)
+                new_digest = hashlib.sha256(data).hexdigest()
+                for key, value in checkpoint['receipts'].items():
+                    if key == 'planning-retry-1' or key.startswith('planning-retired-'):
+                        value['digest'] = new_digest
+            # Atomic replacement prevents readers from seeing a partial file.
+            new_checkpoint = checkpoint_path.with_name('checkpoint-fixture.tmp')
+            new_checkpoint.write_text(json.dumps(checkpoint), encoding='utf-8')
+            os.replace(new_checkpoint, checkpoint_path)
+        send({'id': msg['id'], 'result': {'turn': {'id': tid + '-turn'}}})
         if 'run_research' in names:
             call(tid, 'run_research', {'caller_role': 'core'} if mode == 'spoof' else {})
         elif 'run_plan' in names:
             call(tid, 'run_plan', {})
         elif 'dispatch_batch' in names:
-            call(tid, 'dispatch_batch', {'unit_ids': ['u1', 'u2']})
+            ids = ['u1'] if mode in ['unknown-then-failed', 'unknown-partial', 'unready-peer-write', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn', 'writer-cancelled'] else ['u1', 'u2']
+            call(tid, 'dispatch_batch', {'unit_ids': ids})
         elif 'ROLE Research' in brief:
             log('research', thread=tid, effort=p.get('effort'), brief=brief)
             finish(tid, json.dumps({'summary': 'independent research', 'findings': ['freeze Python checks before writes']}))
@@ -202,24 +294,74 @@ for line in sys.stdin:
             check = PUBLIC_CHECK
             if mode == 'failed-check':
                 check = 'raise SystemExit(7)'
-            plan = {'independent_evaluation': 'Check the two outputs independently before release' if mode in ['evaluation', 'planning-retry', 'evaluation-recovered', 'evaluation-unprepared', 'evaluation-fake-ready', 'baseline-infrastructure'] else None, 'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
+            if mode == 'directory-peers':
+                check = PARENT_CHECK
+            plan = {'independent_evaluation': 'Check the two outputs independently before release' if mode in ['evaluation', 'evaluation-repairable-review', 'evaluation-reordered-env', 'evaluation-distinct-env', 'evaluation-case-variant', 'evaluation-unicode-case-variant', 'evaluation-lowercase-default', 'public-duplicate-case-env', 'public-duplicate-env', 'private-duplicate-env', 'planning-retry', 'retry-second-epoch', 'retry-missing', 'retry-tampered', 'retry-wrong-epoch', 'public-private-id', 'evaluation-recovered', 'evaluation-unprepared', 'evaluation-fake-ready', 'baseline-infrastructure', 'runner-ready', 'runner-fail-fallback', 'runner-forged', 'runner-unknown'] else None, 'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
                               {'kind':'engineer','id': 'u2', 'brief': 'write two', 'scope': ['two.txt'], 'depends_on': []}],
                     'checks': [{'id': 'frozen-python', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
                                 'args': ['-I', '-c', check, '{repo}'], 'env': [{'name':'CARGO_TARGET_DIR','value':'{scratch}/planned-target'}], 'timeout_s': 10}]}
+            if mode in ['unknown-then-failed', 'unknown-partial']:
+                plan['units'] = plan['units'][:1]
+            if mode == 'unready-peer-write':
+                plan['units'][1]['depends_on'] = ['u1']
+            if mode == 'directory-peers':
+                plan['units'][0]['scope'] = ['first/one.txt']
+                plan['units'][1]['scope'] = ['second/two.txt']
             if mode == 'content':
                 plan['units'][1].update(kind='content', scope=[])
                 plan['assembly_scope'] = ['one.txt', 'two.txt']
-            if mode == 'repairable-review':
+            if mode in ['repairable-review', 'evaluation-repairable-review', 'repairable-review-twice']:
                 plan['assembly_scope'] = ['one.txt', 'two.txt', 'review-fix']
-            if mode == 'planning-retry' and not log_path.with_suffix('.failed-plan').exists():
+            if mode in ['unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn', 'writer-cancelled']:
+                plan['units'][1]['depends_on'] = ['u1']
+            if mode == 'public-private-id':
+                plan['checks'][0]['id'] = 'independent-public'
+            if mode == 'runner-public-forged':
+                plan['checks'][0]['program'] = '@axiom:rust:v1:' + '0'*64 + ':' + '1'*64
+            if mode in ['evaluation-reordered-env', 'evaluation-distinct-env']:
+                plan['checks'][0]['args'][2] = ENV_CHECK
+                plan['checks'][0]['env'].append({'name': 'AXIOM_CASE', 'value': 'public'})
+            if mode in ['evaluation-case-variant', 'evaluation-unicode-case-variant']:
+                name = 'AXIOM_CASE' if mode == 'evaluation-case-variant' else 'AXIOM_ÉTAT'
+                plan['checks'][0]['args'][2] = CASE_CHECK if mode == 'evaluation-case-variant' else UNICODE_CASE_CHECK
+                plan['checks'][0]['env'].append({'name': name, 'value': 'same'})
+            if mode == 'evaluation-lowercase-default':
+                plan['checks'][0]['env'][0]['name'] = 'cargo_target_dir'
+            if mode == 'public-duplicate-case-env':
+                plan['checks'][0]['env'].extend([{'name': 'AXIOM_CASE', 'value': 'a'},
+                                                {'name': 'axiom_case', 'value': 'b'}])
+            if mode == 'public-duplicate-env':
+                plan['checks'][0]['env'].append({'name': 'CARGO_TARGET_DIR', 'value': 'different'})
+            if mode in ['planning-retry', 'retry-second-epoch', 'retry-missing', 'retry-tampered', 'retry-wrong-epoch'] and not log_path.with_suffix('.failed-plan').exists():
                 log_path.with_suffix('.failed-plan').write_text('preserve first failure')
+                plan['units'] = []
+            elif mode == 'planning-retry' and 'runtime now prepares independent evaluation' not in brief:
+                # This fake planner cannot repair the old plan without the
+                # actual recovery reason, rather than merely noticing a retry.
+                plan['units'] = []
+            elif mode == 'retry-second-epoch' and not all(reason in brief for reason in (FIRST_RECOVERY, SECOND_RECOVERY)):
                 plan['units'] = []
             finish(tid, json.dumps(plan))
         elif 'PREPARE INDEPENDENT EVALUATION' in brief:
             assert cfg['sandbox'] == 'read-only' and cfg['model'].endswith('-astra')
             assert p['effort'] == 'high'
-            log('evaluation-prepared', thread=tid)
-            finish(tid, preparation())
+            log('evaluation-prepared', thread=tid, brief=brief)
+            if mode in ['runner-ready', 'runner-fail-fallback', 'runner-unknown']:
+                source = 'fn main( {' if mode == 'runner-fail-fallback' else RUNNER_SOURCE
+                call(tid, 'prepare_rust_runner', {'source_utf8': source}, '__prepared_runner__')
+                continue
+            if mode == 'runner-forged':
+                checks = [{'id':'independent-output', 'program':'@axiom:rust:v1:' + '0'*64 + ':' + '1'*64,
+                           'args':['{repo}'], 'env':[], 'timeout_s':30}]
+                finish(tid, json.dumps({'status':'ready', 'summary':'forged', 'exposure':'synthetic', 'checks':checks}))
+                continue
+            required_reasons = (['runtime now prepares independent evaluation'] if mode == 'planning-retry'
+                                else [FIRST_RECOVERY, SECOND_RECOVERY] if mode == 'retry-second-epoch' else [])
+            if not all(reason in brief for reason in required_reasons):
+                finish(tid, json.dumps({'status': 'failed', 'summary': 'missing recovery reason',
+                                        'exposure': 'not prepared', 'checks': []}))
+            else:
+                finish(tid, preparation())
         elif 'ROLE Engineer' in brief:
             log('engineer-start', thread=tid)
             env = cfg['config']['shell_environment_policy']['set']
@@ -237,16 +379,22 @@ for line in sys.stdin:
                     finish(tid, 'injected engineering failure', failed=True)
                 # The sibling intentionally never completes without cancellation.
                 continue
-            if mode == 'unknown-write':
+            if mode in ['unknown-write', 'unknown-then-failed', 'unknown-partial', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn']:
                 Path(cfg['cwd'], 'one.txt').write_text('unknown')
+                if mode == 'unknown-completed-outside':
+                    Path(cfg['cwd'], 'outside-scope.txt').write_text('unauthorized')
                 sys.exit(9)
+            if mode == 'writer-cancelled':
+                Path(cfg['cwd'], 'one.txt').write_text('partial')
+                finish(tid, 'writer stopped after partial changes', cancelled=True)
+                continue
             if mode == 'writer-blocked' and 'write one' in brief:
                 # The dev.8 shape: the writer refuses and the turn ends normally.
                 finish(tid, writer('blocked', '未開始工程：獨立測試者尚未完成材料封存及 baseline 前置報告'))
                 continue
 
             def engineer(t=tid, b=brief, cwd=cfg['cwd']):
-                if mode not in ['content', 'writer-blocked']:
+                if mode not in ['content', 'writer-blocked', 'unready-peer-write']:
                     try:
                         barrier.wait()
                     except threading.BrokenBarrierError:
@@ -255,7 +403,13 @@ for line in sys.stdin:
                         log('barrier-timeout', thread=t)
                 time.sleep(0.15)
                 name, text = ('one.txt', 'one') if 'write one' in b else ('two.txt', 'two')
-                Path(cwd, name).write_text(text)
+                if mode == 'unready-peer-write':
+                    name, text = 'two.txt', 'outside-scope'
+                elif mode == 'directory-peers':
+                    name = ('first/' if 'write one' in b else 'second/') + name
+                target = Path(cwd, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
                 log('engineer-finish', thread=t)
                 finish(t, writer('completed', f'wrote {name}', None))
             threading.Thread(target=engineer, daemon=True).start()
@@ -264,8 +418,9 @@ for line in sys.stdin:
             finish(tid, writer('completed', 'requested artifact text', 'two'))
         elif 'ROLE Assembler' in brief:
             log('assembly', thread=tid)
-            if mode == 'repairable-review' and 'Repair the independently rejected result' in brief:
-                Path(cfg['cwd'], 'review-fix').write_text('fixed')
+            if mode in ['repairable-review', 'evaluation-repairable-review', 'repairable-review-twice'] and 'Repair the independently rejected result' in brief:
+                fix = Path(cfg['cwd'], 'review-fix')
+                fix.write_text('twice' if mode == 'repairable-review-twice' and fix.exists() else 'fixed')
             if mode == 'content':
                 Path(cfg['cwd'], 'two.txt').write_text('two')
             finish(tid, writer('completed', 'assembled the units', None))
@@ -286,16 +441,45 @@ for line in sys.stdin:
         elif 'record_memory' in names:
             schema = cfg['dynamicTools'][0]['inputSchema']
             evidence = schema['properties']['evidence_id']['enum'][0]
+            if mode == 'memory-forged':
+                evidence = 'not-a-review-digest'
+            if mode == 'memory-stale':
+                # Simulate an external source change after review, before the
+                # read-only memory role's callback is processed.
+                Path(cfg['cwd'], 'one.txt').write_text('changed after review')
             call(tid, 'record_memory', {'evidence_id': evidence, 'content': 'Verified two scoped units and mandatory assembly with frozen-python.'})
         else:
             finish(tid)
         continue
     elif method == 'command/exec':
         log('command', process_cwd=os.getcwd(), params=p)
-        proc = subprocess.run(p['command'], cwd=p['cwd'], env=dict(os.environ, **p.get('env', {})), capture_output=True, text=True, timeout=p['timeoutMs'] / 1000)
+        if mode == 'runner-unknown' and p['command'][1:] == ['-vV']:
+            os._exit(19)
+        proc = subprocess.run(p['command'], cwd=p['cwd'], env=dict(os.environ, **p.get('env', {})), capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=p['timeoutMs'] / 1000)
         result = {'exitCode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr, 'timedOut': False}
     elif method == 'thread/read':
-        result = {'thread': {'id': p['threadId'], 'turns': []}}
+        model_history = log_path.with_suffix('.model-history')
+        if mode == 'verifier-history-null' and model_history.exists():
+            saved = json.loads(model_history.read_text(encoding='utf-8'))
+            if p['threadId'] == saved['thread']:
+                log('model-history-read', thread=p['threadId'])
+                send({'id': msg['id'], 'result': {'thread': {'id': p['threadId'], 'model': None,
+                      'turns': [{'id': p['threadId'] + '-turn', 'status': 'completed',
+                                 'items': [{'type': 'agentMessage', 'id': 'history-verifier', 'text': saved['final']}]}]}}})
+                continue
+        history_marker = log_path.with_name(log_path.name + '.' + p['threadId'] + '.history-failed')
+        terminal = mode in ['unknown-then-failed', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn'] or (mode == 'unknown-partial' and not history_marker.exists())
+        if terminal:
+            history_marker.write_text('one terminal observation', encoding='utf-8')
+            log('history-failed', thread=p['threadId'])
+            status = ('completed' if mode in ['unknown-completed-inside', 'unknown-completed-outside', 'unknown-no-turn']
+                      else 'cancelled' if mode == 'unknown-history-cancelled' else 'failed')
+            turns = [{'id': p['threadId'] + '-turn', 'status': status,
+                      'items': [{'type': 'agentMessage', 'id': 'history-message', 'text': writer()}],
+                      'error': {'message': 'terminal observed from history'} if status == 'failed' else None}]
+        else:
+            turns = []
+        result = {'thread': {'id': p['threadId'], 'turns': turns}}
     elif method == 'turn/interrupt':
         if mode == 'failed-peer':
             log('interrupted', thread=p['threadId'])

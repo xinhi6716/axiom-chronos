@@ -70,6 +70,10 @@ pub struct RunEvent {
     pub attempt_id: String,
     pub sequence: u64,
     pub execution: ExecutionKey,
+    /// The request and the server's thread configuration, not per-turn telemetry.
+    pub requested_model: String,
+    pub configured_model: String,
+    pub requested_effort: Option<String>,
     pub kind: RunEventKind,
 }
 pub trait RunObserver: Send + Sync {
@@ -228,6 +232,20 @@ impl super::AppServer {
             .filter(|v| !v.is_empty())
             .ok_or_else(|| Failure::new("codex_rpc", "missing thread id"))?
             .to_owned();
+        let configured_model = started
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                Failure::new("model_identity", "thread response has no configured model")
+            })?
+            .to_owned();
+        if configured_model != req.model {
+            return Err(Failure::new(
+                "model_identity",
+                "thread configured model differs from the requested model",
+            ));
+        }
         let events = self.subscribe(&thread_id);
         struct Guard<'a> {
             server: &'a super::AppServer,
@@ -265,6 +283,9 @@ impl super::AppServer {
                     attempt_id: options.attempt_id.clone(),
                     sequence: *sequence,
                     execution: key.clone(),
+                    requested_model: req.model.clone(),
+                    configured_model: configured_model.clone(),
+                    requested_effort: req.effort.clone(),
                     kind,
                 })?;
             }
@@ -331,7 +352,7 @@ impl super::AppServer {
         let mut terminal: Option<TransportTerminal> = None;
         let mut handler_failed = false;
         let mut handler_errors = Vec::new();
-        let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
+        let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"model_source":"requested","requested_model":req.model,"configured_model":configured_model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
         loop {
             while let Ok(error) = done_rx.try_recv() {
                 active = active.saturating_sub(1);
@@ -550,15 +571,18 @@ impl super::AppServer {
         if thread_id.trim().is_empty() || turn_id.is_some_and(|id| id.trim().is_empty()) {
             return Err(Failure::new("invalid_argument", "empty thread or turn id"));
         }
+        let Some(turn_id) = turn_id else {
+            return Ok(AttemptRead::Unknown {
+                reason: "attempt has no bound turn id; history cannot establish its identity"
+                    .into(),
+            });
+        };
         let history = self.request(
             "thread/read",
             json!({"threadId":thread_id,"includeTurns":true}),
         )?;
         let turns = history.pointer("/thread/turns").and_then(Value::as_array);
-        let turn = turns.and_then(|turns| match turn_id {
-            Some(id) => turns.iter().find(|t| t["id"] == id),
-            None => turns.last(),
-        });
+        let turn = turns.and_then(|turns| turns.iter().find(|t| t["id"] == turn_id));
         let Some(turn) = turn else {
             return Ok(AttemptRead::Unknown {
                 reason: "turn absent from history".into(),
@@ -587,7 +611,7 @@ impl super::AppServer {
                 })
             }
         };
-        let mut report = json!({"status":turn["status"],"thread_id":thread_id,"turn_id":id,"model":history.pointer("/thread/model").cloned().unwrap_or(Value::Null),"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"error":turn["error"]});
+        let mut report = json!({"status":turn["status"],"thread_id":thread_id,"turn_id":id,"model":history.pointer("/thread/model").cloned().unwrap_or(Value::Null),"model_source":"thread/read","final_message":null,"structured_output":null,"commands":[],"file_changes":[],"error":turn["error"]});
         for item in turn["items"].as_array().into_iter().flatten() {
             super::run::record_item(&mut report, item);
         }

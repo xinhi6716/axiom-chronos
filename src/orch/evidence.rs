@@ -280,9 +280,31 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 pub fn snapshot(repo: &Path, scope: &[String]) -> String {
+    use sha2::{Digest, Sha256};
     if git(repo, &["rev-parse", "--is-inside-work-tree"]) != "true" {
         return String::new();
     }
+    // Git metadata is outside this input view. Reject a request for that path
+    // instead of returning an incomplete identity.
+    if scope.iter().any(|s| {
+        s.replace('\\', "/").split('/').any(|part| {
+            #[cfg(windows)]
+            {
+                part.eq_ignore_ascii_case(".git")
+            }
+            #[cfg(not(windows))]
+            {
+                part == ".git"
+            }
+        })
+    }) {
+        return String::new();
+    }
+    // Inspect links and hash the complete input view before invoking git add:
+    // an unsafe link must not cause Git to visit data outside the worktree.
+    let Ok(inputs) = super::lifecycle::input_contents(repo, Some(scope)) else {
+        return String::new();
+    };
     let index = std::env::temp_dir().join(format!(
         "orch-index-{}-{}",
         std::process::id(),
@@ -299,10 +321,31 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         if !run(&["read-tree", "--empty"]).ok()?.status.success() {
             return None;
         }
-        let present: Vec<_> = scope
+        let candidates: Vec<_> = scope
             .iter()
             .filter(|s| repo.join(s).exists() || s.contains(['*', '?', '[']))
             .collect();
+        let mut present = Vec::new();
+        for candidate in candidates {
+            // Explicitly named ignored files belong only in the SHA-256
+            // manifest; never force their bytes into Git objects.
+            if candidate != "."
+                && !candidate.contains(['*', '?', '['])
+                && !candidate.starts_with(':')
+            {
+                let ignored = Command::new("git")
+                    .current_dir(repo)
+                    .args(["check-ignore", "--no-index", "--quiet", "--", candidate])
+                    .output()
+                    .ok()?;
+                match ignored.status.code() {
+                    Some(0) => continue,
+                    Some(1) => {}
+                    _ => return None,
+                }
+            }
+            present.push(candidate);
+        }
         if !present.is_empty() {
             let mut args = vec!["add", "-A", "--"];
             args.extend(present.iter().map(|s| s.as_str()));
@@ -319,10 +362,17 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     .unwrap_or_default();
     let _ = std::fs::remove_file(index);
     if result.is_empty() {
-        result
-    } else {
-        format!("tree:{result}")
+        return result;
     }
+    let mut manifest = Sha256::new();
+    manifest.update(b"axiom-worktree-inputs-v2\0");
+    for (path, value) in inputs {
+        manifest.update((path.len() as u64).to_be_bytes());
+        manifest.update(path.as_bytes());
+        manifest.update((value.len() as u64).to_be_bytes());
+        manifest.update(value.as_bytes());
+    }
+    format!("tree-v2:{result}:{:x}", manifest.finalize())
 }
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;

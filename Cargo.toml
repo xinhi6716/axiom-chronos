@@ -1,6 +1,6 @@
 [package]
 name = "axiom-chronos"
-version = "0.3.0-codex.dev.9"
+version = "0.3.0-codex.dev.10"
 edition = "2021"
 
 [lib]
@@ -22,7 +22,7 @@ regex = "1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Time"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Time"] }
 
 [dev-dependencies]
 tempfile = "3"

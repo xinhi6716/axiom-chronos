@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -7,7 +7,7 @@ use std::{
 };
 pub mod proc;
 pub mod schema;
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Failure {
     pub kind: String,
     pub message: String,

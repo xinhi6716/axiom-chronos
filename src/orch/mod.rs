@@ -2,6 +2,7 @@ pub mod commands;
 pub mod evidence;
 pub mod lifecycle;
 pub mod parse;
+pub mod runner;
 pub mod store;
 
 pub use commands::*;

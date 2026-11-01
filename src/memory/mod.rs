@@ -81,6 +81,26 @@ impl Memory {
     /// Run-level memory has the checkpoint's independent verification as its
     /// authority, rather than a model's claim that a unit passed.
     pub fn record_run(&self, project: &str, run_id: &str, content: &str) -> Res<Value> {
+        self.record_run_inner(project, run_id, content, None)
+    }
+    /// Bind a managed memory callback to the same currently verified review
+    /// that was supplied to its role. Keep `record_run` for existing callers.
+    pub fn record_run_with_evidence(
+        &self,
+        project: &str,
+        run_id: &str,
+        content: &str,
+        evidence_id: &str,
+    ) -> Res<Value> {
+        self.record_run_inner(project, run_id, content, Some(evidence_id))
+    }
+    fn record_run_inner(
+        &self,
+        project: &str,
+        run_id: &str,
+        content: &str,
+        evidence_id: Option<&str>,
+    ) -> Res<Value> {
         base::require_slug("project", project)?;
         let store = store_for(&self.home, project)?;
         let c = crate::orch::checkpoint::load_run(&store, run_id)?;
@@ -89,6 +109,10 @@ impl Memory {
             crate::orch::checkpoint::Phase::Memory | crate::orch::checkpoint::Phase::ReadyToCommit
         ) || !crate::orch::checkpoint::verified_outcome(&c)
             || content.trim().is_empty()
+            || evidence_id.is_some_and(|expected| {
+                crate::orch::checkpoint::verified_review(&c)
+                    .is_none_or(|reference| reference.digest != expected)
+            })
         {
             return Err(Failure::new(
                 "not_verified",

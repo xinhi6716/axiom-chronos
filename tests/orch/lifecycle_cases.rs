@@ -40,7 +40,12 @@ fn begin(store: &Path, repo: &Path) -> Begin {
 fn legacy_bare_verify_identity_is_read_but_not_reused() {
     let (store, repo) = setup();
     let identity = snapshot(&repo, &["a.txt".into()]);
-    let hash = identity.strip_prefix("tree:").unwrap();
+    let hash = identity
+        .strip_prefix("tree-v2:")
+        .unwrap()
+        .split(':')
+        .next()
+        .unwrap();
     assert_eq!(hash.len(), 40);
     fs::write(
         store.join("reports/a.evidence.tsv"),
@@ -160,6 +165,184 @@ fn lifecycle_reuse_scope_and_limit() {
             .kind,
         "fix_limit"
     );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn ignored_changes_and_empty_directories_are_checked_without_file_events() {
+    let (store, repo) = setup();
+    fs::write(repo.join(".gitignore"), "ignored/\n").unwrap();
+    fs::create_dir(repo.join("ignored")).unwrap();
+    fs::write(repo.join("ignored/outside.txt"), "before").unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::write(repo.join("ignored/outside.txt"), "after").unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(result.outside_scope, ["ignored/outside.txt"]);
+    assert_eq!(result.state, "failed");
+    assert_eq!(result.verify_exit, None);
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+
+    let (store, repo) = setup();
+    fs::write(repo.join(".gitignore"), "ignored/\n").unwrap();
+    fs::create_dir(repo.join("ignored")).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::create_dir(repo.join("ignored/empty")).unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(result.outside_scope, ["ignored/empty/"]);
+    assert_eq!(result.state, "failed");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+
+    let (store, repo) = setup();
+    fs::write(repo.join(".gitignore"), "ignored/\n").unwrap();
+    fs::create_dir(repo.join("ignored")).unwrap();
+    fs::write(repo.join("ignored/deleted.txt"), "before").unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::remove_file(repo.join("ignored/deleted.txt")).unwrap();
+    fs::write(repo.join("ignored/added.txt"), "after").unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(
+        result.outside_scope,
+        ["ignored/added.txt", "ignored/deleted.txt"]
+    );
+    assert_eq!(result.state, "failed");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn creating_parents_of_a_scoped_file_does_not_allow_sibling_files() {
+    let (store, repo) = setup();
+    fs::write(
+        store.join("a.brief"),
+        "GOAL test\nSCOPE newdir/nested/a.txt\nVERIFY echo ok\n",
+    )
+    .unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::create_dir_all(repo.join("newdir/nested")).unwrap();
+    fs::write(repo.join("newdir/nested/a.txt"), "allowed").unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert!(
+        result.outside_scope.is_empty(),
+        "{:?}",
+        result.outside_scope
+    );
+    assert_eq!(result.verify_exit, Some(0));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+
+    let (store, repo) = setup();
+    fs::write(
+        store.join("a.brief"),
+        "GOAL test\nSCOPE newdir/nested/a.txt\nVERIFY echo ok\n",
+    )
+    .unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::create_dir_all(repo.join("newdir/nested")).unwrap();
+    fs::write(repo.join("newdir/nested/a.txt"), "allowed").unwrap();
+    fs::write(repo.join("newdir/nested/sibling.txt"), "outside").unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(result.outside_scope, ["newdir/nested/sibling.txt"]);
+    assert_eq!(result.state, "failed");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+
+    let (store, repo) = setup();
+    fs::write(
+        store.join("a.brief"),
+        "GOAL test\nSCOPE newdir/file.txt\nVERIFY echo ok\n",
+    )
+    .unwrap();
+    fs::create_dir(repo.join("newdir")).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::remove_dir(repo.join("newdir")).unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(result.outside_scope, ["newdir/"]);
+    assert_eq!(result.state, "failed");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn outside_directory_permission_change_is_detected_without_file_event() {
+    use std::os::unix::fs::PermissionsExt;
+    let (store, repo) = setup();
+    fs::create_dir(repo.join("outside-dir")).unwrap();
+    fs::set_permissions(repo.join("outside-dir"), fs::Permissions::from_mode(0o755)).unwrap();
+    let old_mode = fs::metadata(repo.join("outside-dir"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    fs::set_permissions(repo.join("outside-dir"), fs::Permissions::from_mode(0o700)).unwrap();
+    let new_mode = fs::metadata(repo.join("outside-dir"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    if old_mode == new_mode {
+        eprintln!("SKIPPED directory-mode assertion: filesystem did not retain chmod");
+        fs::remove_dir_all(store.parent().unwrap()).unwrap();
+        return;
+    }
+    fs::set_permissions(repo.join("outside-dir"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::set_permissions(repo.join("outside-dir"), fs::Permissions::from_mode(0o700)).unwrap();
+    let result = finish_unit(
+        &store,
+        "a",
+        &repo,
+        "worker",
+        "worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(result.outside_scope, ["outside-dir/"]);
+    assert_eq!(result.state, "failed");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 #[test]

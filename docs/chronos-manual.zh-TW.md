@@ -1,6 +1,6 @@
 # Chronos Codex 使用說明
 
-版本：`0.3.0-codex.dev.9`，從標準版 `e27de7a` 重建的開發候選。
+版本：`0.3.0-codex.dev.10`，從標準版 `e27de7a` 重建的開發候選。
 
 ## 核心與分工
 
@@ -96,9 +96,35 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 - 準備契約改成型別化 `{status, summary, exposure, checks}`。`failed` 直接返回具體前置失敗，不安裝任何檢查、不啟動工程；這仍屬規劃階段，可依 `retry_planning` 合法重試。`ready` 需有非空 exposure、每個檢查都實際讀取產品 `{repo}`，且不得是公開回歸命令的換名重複。
 - 寫入角色（Terra 工程、SOL 組裝、Luna 內容）改回 `{status, summary, artifact}`。`blocked` 不滿足依賴、不進入組裝與驗證；`completed` 允許「原本已符合要求」而無需改檔。回合正常結束不再等於工作完成。
 - 基線執行全部凍結檢查後，由驗證者對每個實際結果分類為 `passed`／`product_missing`／`product_defect`／`infrastructure_failure`，Rust 再與實際 exit code 交叉核對。設施失敗或無法判定即阻止工程；只有另存的 `gate-baseline` 收據才授權寫入。空產品的新功能仍可先記為 `product_missing` 再合法開工。
-- 工程／組裝 brief 取得非洩漏的前置證明（檢查數量、私有檢查數量、設施已就緒），不接觸私有案例；也不再被要求等待準備或基線報告。
+- 工程／組裝 brief 的設計是提供非洩漏的前置證明（檢查數量、私有檢查數量、設施已就緒），不附私有案例，也不再要求等待準備或基線報告。下方實測沒有保存完整執行期 brief，無法直接核實實際內容。
 - 驗證結果新增 `defect_owner`。`assembly` 才回到 SOL 返工；`upstream` 或 `none` 直接 blocked 並保留凍結計畫與報告，不再消耗無效返工。
-- 動態工具失敗保留型別，blocked 的 `short_reason` 直接顯示業務原因，而不是包裝訊息或「planner 未安裝基線」。
+- 動態工具 callback 保留具體失敗訊息，首次 blocked 的 `short_reason` 可顯示業務原因。實測仍有型別被泛化、後續狀態查詢遺失原因的缺口，見下方紀錄。
 
 限制：隔離仍是上下文層級，不是作業系統保證。型別與機器檢查無法證明私有案例在語意上一定有效；決心造假的準備者仍可能在 `ready` 下交出無實質覆蓋的檢查，只是固定 exit、佔位或抄公開檢查會被拒絕，最終仍由獨立驗證者與凍結檢查把關。dev.9 未處理長等待與斷線喚醒（dev.8 報告 F8），也沒有量測 token 或速度改善。正式三輪迭代仍未開始。
+
+#### dev.9 真實驗收紀錄（2026-11-01）
+
+- 原始 `sumints` run `run-3ec46c705c1083c78121a1e4` 在基線判定為 `infrastructure_failure` 並 blocked，沒有啟動工程。三項公開檢查因空倉庫而判為 `product_missing`；獨立檢查的控制樣本在 MSVC linker 發生 `LNK1104`，未進入產品驗證。[checkpoint](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints-acceptance-dev9-20261101/runs/run-3ec46c705c1083c78121a1e4/checkpoint.json)、[基線報告](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints-acceptance-dev9-20261101/runs/run-3ec46c705c1083c78121a1e4/reports/d8360f2dc4281fefc91271cc719cd632.json)。首次 blocked 訊息保留原因，但頂層錯誤型別被泛化為 `tool_failed`，後續 `status` 也沒有還原具體原因。
+- [長短路徑合成對照](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/diagnostic-windows-link-20261101/README.zh-TW.md)在同一工具鏈下重現 `linker-arguments` 的 `LNK1104`，支持長路徑是原因；原始程式與執行條件不同，不能排除其他因素。該對照已曝光，僅為診斷，不能當獨立驗收。
+- 原宿主沿用相同 fixture 的替代 run `run-a0d884a985d4023530a0ead5` 因計畫中的 `h` 與私有檢查必須以 `independent-` 開頭的契約衝突而 blocked；重試收據雖保存修正理由，新的規劃 brief 未收到它，準備再次失敗。[準備報告](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints9/runs/run-a0d884a985d4023530a0ead5/reports/5c18c058b7e8042eacb243c0e884091b.json)、[重試收據](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints9/runs/run-a0d884a985d4023530a0ead5/planning-retry-1.json)。另一個 run `run-8b66dc00a4d3c279fc4f8464` 的獨立 runner 有 Rust 語法與型別錯誤，在基線被判為設施故障並 blocked。[基線報告](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints9/runs/run-8b66dc00a4d3c279fc4f8464/reports/81ab52cbcd69fbc8793ad88c74565cb9.json)。這些替代 run 沿用 fixture，不能算全新未曝光驗收。
+- 另一次 `run-438317c61bda6f5ca0c52291` 在基線啟動檢查程序時，Windows `CreateProcessAsUserW` 拒絕存取；基礎設施未就緒而 blocked，沒有啟動工程。[基線報告](E:/codex/chronos-runtime/data/0.3/orchestrate/sumints9/runs/run-438317c61bda6f5ca0c52291/reports/552d077e563c929ac066659434a2e91a.json)。
+- 後續同一 fixture 的 `run-b83fab4591e0a2f2cca0409f` 到達 `ready_to_commit`，原宿主本地提交 `a821b8e726b5175f7d2efc033ee3e52211640bf4`。四份終驗收據的 exit 均為 0，驗證報告回報 `pass=true`、`defect_owner=none`；事後觀察者重新建置、執行回歸與六個 CLI 案例均通過。這是單一沿用 fixture 的已曝光診斷交付，整體新版驗收仍待新 fixture。[彙整與證據](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/acceptance-evaluation-dev9/consolidated/result.json)。
+- 準備報告回報 `status=ready` 並填有曝光說明；四項基線均回報 `product_missing`，此樣本未測到其他基線分類或負向返工路由。匯出紀錄稱 43 組案例中一組與已記錄開發輸入完全重疊，其餘 42 組未發現完整 argv 重疊；因缺少完整讀取稽核與實際送給 writer 的完整 brief，不能證明私有案例未曾暴露。
+- 原實測為單機 Windows 的 headless `codex exec` task，核准使用 `--approve-for-me` 自動審查，不是 GUI task。`f2eef18` 的 [Windows／Ubuntu CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41310739823) 通過；先前 Windows 曾出現 timing flake。沒有可比較的 token 或速度量測，不能據此宣稱改善。正式三輪迭代尚未開始。
+
+### dev.10：維護中（尚未發布）
+
+以下描述工作樹中已實作的行為，不代表新版已安裝或通過驗收。
+
+- 動態工具保留具體錯誤型別與原因，blocked／outcome unknown 的原因另存並綁定 checkpoint 版本；`status` 與相同 request 的重送會讀取可核對的紀錄。舊紀錄若沒有原因則回報未知，不補造原因；舊的成功結果重送時仍須符合目前的驗收門檻。
+- 新 scratch 路徑以完整 run／attempt／check 身分雜湊縮短，舊 run 的既有 scratch 經身分及連結檢查後可沿用。縮短路徑不保證所有工具鏈的長路徑問題均已排除。
+- 規劃重試依序帶入已核准的修復理由，不能藉此改變已凍結檢查。檢查環境變數依平台規則判斷重複名稱：Windows 不區分大小寫，其他平台區分；暫存預設不覆蓋明確指定的值。私有檢查保留 `independent-` 前綴，須包含 `{repo}`，且不能與公開檢查使用相同 program／args／env；這些形式檢查不能證明案例語意獨立或真的讀取產品。
+- store 使用 OS 鎖與完整 PID 標記；只有確認程序已結束才自動取代舊標記。明確 `force` 仍可繞過持有中的鎖並與寫入重疊；舊版本不遵守新 OS 鎖，混版不能保證互斥。PID 標記以 hardlink 發布，檔案系統不支援時會失敗。
+- `tree-v2` 對工作樹中的追蹤、未追蹤及被 Git 忽略檔案做內容雜湊，也納入目錄、空目錄與 Windows NTFS 命名資料串流；`.git` 中繼資料不在此範圍。無法安全讀取或遇到不支援的連結時停止，而不是忽略輸入。這需要完整磁碟讀取；使用者已接受讀取目前約 36.9 GB 的建置目錄，實際耗時與總讀取量仍待量測。這不是作業系統快照，也不涵蓋倉庫外的所有輸入。
+- 舊 `tree:` 快照保留為歷史證據，但不能在新門檻下授權繼續寫入或驗收；未決嘗試須先核對，再用新 run 建立完整基線。基線、終驗及審查重新核對目前有效的來源、固定命令、角色身分與收據；工程／組裝結果須有原始寫入範圍稽核。只有當前獨立審查明確歸因 `assembly` 的失敗可返工，最多兩次，不能改驗收命令。
+- 模型收據記錄請求模型與伺服器回報的 thread 設定模型，兩者須一致並綁定派工身分；這不是每回合實際使用模型的遙測。
+- 獨立驗收準備可選擇一次受管 Rust runner 編譯／連結，使用固定命令；準備時不執行 runner、產品或測試案例，也不是任意命令工具。編譯失敗時不自動改用其他檢查；編譯通過只證明該次編譯與連結，Rust 巨集仍可能讀取宿主檔案，不能視為 OS 讀取隔離或驗收通過。
+- 真實 Windows／Codex 0.159.3 協定診斷已驗證固定命令可在 scratch sandbox 編譯、連結及執行同 SHA-256 的 runner，指定的 scratch 外寫入遭拒；設定為 `service_tier=default`，零模型 thread／turn。這是受控能力診斷，未測網路阻斷或 OS 讀取隔離，也不代替完整工作流驗收。[原始證據](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/runner-os-sandbox-protocol-20261101/run-02/summary.json)。
+
+終態入口共同驗證 turn 與模型收據；未派送的 `Prepared` 可保存取消證據。設定修復後須明確 Resume，且只對可核對整批成員的失敗唯讀調度者開放重試；未知 writer 仍禁止重派。模型與事件證據採內容定址，孤立檔案不覆寫已引用證據，也不阻擋新的 thread。這些恢復路徑已通過定向回歸；完整測試套件、Windows／Linux CI、安裝與新 fixture 的未曝光驗收均待驗證，目前沒有可比較的效能或 token 量測。
 

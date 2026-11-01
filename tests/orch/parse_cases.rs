@@ -1,4 +1,4 @@
-use axiom::orch::{covers, overlaps, parse_brief, parse_map};
+use axiom::orch::{covers, covers_change, overlaps, parse_brief, parse_map};
 
 fn section(id: &str, paths: &str, deps: &str, accept: &str) -> String {
     format!("## {id}\nPURPOSE purpose\nPATHS {paths}\nDEPENDS {deps}\nCONTRACT\n  contract\nACCEPT {accept}\n")
@@ -101,4 +101,23 @@ fn path_coverage_and_overlap() {
     assert!(overlaps(&paths, &[r"src\a\nested\".into()]));
     assert!(overlaps(&["./tests/a.rs".into()], &[r"tests\a.rs".into()]));
     assert!(!overlaps(&paths, &["src/b/".into()]));
+    let exact = vec!["newdir/nested/file.rs".into()];
+    assert!(covers(&exact, "\0dir:newdir/"));
+    assert!(covers(&exact, "\0dir:newdir/nested/"));
+    assert!(!covers(&exact, "\0dir:newdir/sibling/"));
+    assert!(!covers(&exact, "newdir/sibling"));
+    assert!(!covers(&exact, "newdir/nested/other.rs"));
+    assert!(!covers(&exact, "\0dir:../escape/"));
+    assert!(!covers(&exact, "\0dir:/absolute/"));
+    assert!(covers_change(&exact, "\0dir:newdir/", false, true));
+    assert!(!covers_change(&exact, "\0dir:newdir/", true, false));
+    assert!(!covers_change(&exact, "\0dir:newdir/sibling/", false, true));
+    assert!(covers_change(
+        &["newdir/".into()],
+        "\0dir:newdir/",
+        true,
+        false
+    ));
+    #[cfg(unix)]
+    assert!(covers(&["a:/input".into()], "\0dir:a:/"));
 }

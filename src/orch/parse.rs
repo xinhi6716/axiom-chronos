@@ -88,7 +88,38 @@ fn normalized(s: &str) -> String {
     let s = s.replace('\\', "/");
     s.trim_start_matches("./").to_string()
 }
+fn invalid_directory_path(path: &str) -> bool {
+    let drive = {
+        #[cfg(windows)]
+        {
+            path.contains(':')
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    };
+    std::path::Path::new(path).has_root() || drive || path.split('/').any(|part| part == "..")
+}
 pub fn covers(patterns: &[String], path: &str) -> bool {
+    // NUL cannot occur in a filesystem name, so this distinguishes directory
+    // inventory records from ordinary paths and from declared directory scopes.
+    // Creating an ancestor needed for an explicitly scoped file is allowed;
+    // the same rule must never allow a sibling file or directory.
+    if let Some(directory) = path.strip_prefix("\0dir:") {
+        let directory = normalized(directory);
+        if directory.is_empty() || invalid_directory_path(&directory) {
+            return false;
+        }
+        let prefix = format!("{}/", directory.trim_end_matches('/'));
+        return patterns.iter().any(|pattern| {
+            let pattern = normalized(pattern);
+            pattern == "."
+                || pattern == directory
+                || (pattern.ends_with('/') && directory.starts_with(&pattern))
+                || (pattern.starts_with(&prefix) && !invalid_directory_path(&pattern))
+        });
+    }
     let p = normalized(path);
     patterns.iter().any(|x| {
         let x = normalized(x);
@@ -99,6 +130,24 @@ pub fn covers(patterns: &[String], path: &str) -> bool {
                 && !p.contains(':')
                 && !p.split('/').any(|part| part == ".."))
     })
+}
+
+/// The parent of a scoped file may be created to hold that file, but a
+/// previously existing parent directory cannot be removed or modified unless
+/// the directory itself is covered by the declared scope.
+pub fn covers_change(
+    patterns: &[String],
+    path: &str,
+    before_present: bool,
+    after_present: bool,
+) -> bool {
+    if let Some(directory) = path.strip_prefix("\0dir:") {
+        if !before_present && after_present {
+            return covers(patterns, path);
+        }
+        return covers(patterns, directory);
+    }
+    covers(patterns, path)
 }
 pub fn overlaps(a: &[String], b: &[String]) -> bool {
     a.iter().any(|x| covers(b, x)) || b.iter().any(|x| covers(a, x))

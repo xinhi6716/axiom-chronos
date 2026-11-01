@@ -7,6 +7,8 @@ use std::{
 
 use super::Bridge;
 use crate::base::{Failure, Res};
+#[cfg(test)]
+use crate::orch::checkpoint::scratch_change;
 use crate::orch::checkpoint::{self, AttemptState, CoreDecision};
 pub use crate::orch::checkpoint::{ArtifactRef, Phase, RecoveryDecision, RunStatus};
 use serde::{Deserialize, Serialize};
@@ -73,6 +75,8 @@ pub struct BoundaryResult {
     pub phase: Phase,
     pub status: RunStatus,
     pub short_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Failure>,
     #[serde(default)]
     pub research: Option<ArtifactRef>,
     pub artifact_refs: Vec<ArtifactRef>,
@@ -129,46 +133,97 @@ fn command_path(path: &Path) -> String {
         value
     }
 }
-fn relative_change(repo: &Path, name: &str) -> Option<String> {
-    let path = Path::new(name);
-    let relative = if path.is_absolute() {
-        // Codex can report ordinary Windows paths while canonical roots use
-        // the verbatim prefix. Normalize both, including deleted paths.
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let clean = |p: &Path| {
-            let text = p.to_string_lossy().replace('\\', "/");
-            PathBuf::from(text.strip_prefix("//?/").unwrap_or(&text))
-        };
-        clean(&path).strip_prefix(clean(repo)).ok()?.to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
-    if relative.components().any(|c| {
-        !matches!(
-            c,
-            std::path::Component::Normal(_) | std::path::Component::CurDir
-        )
-    }) {
-        return None;
-    }
-    Some(relative.to_string_lossy().replace('\\', "/"))
-}
-fn scratch_change(scratch: &Path, name: &str) -> bool {
-    let path = Path::new(name);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+fn same_scratch_path(actual: &Path, expected: &Path) -> bool {
+    #[cfg(windows)]
     {
-        return false;
+        use std::os::windows::ffi::OsStrExt;
+        // Scratch components are ASCII slugs or hexadecimal hashes. Compare
+        // UTF-16 units without lossy conversion.
+        let fold = |c: u16| {
+            if (u16::from(b'A')..=u16::from(b'Z')).contains(&c) {
+                c + u16::from(b'a' - b'A')
+            } else {
+                c
+            }
+        };
+        actual
+            .as_os_str()
+            .encode_wide()
+            .map(fold)
+            .eq(expected.as_os_str().encode_wide().map(fold))
     }
-    let Ok(root) = scratch.canonicalize() else {
-        return false;
+    #[cfg(not(windows))]
+    {
+        actual == expected
+    }
+}
+
+fn reject_scratch_link(path: &Path) -> Res<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(io)?;
+    let is_link = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    let is_link = {
+        use std::os::windows::fs::MetadataExt;
+        // Junctions and other reparse points need not report is_symlink().
+        is_link || metadata.file_attributes() & 0x400 != 0
     };
-    // Resolve links. For deleted artifacts, resolve the closest surviving parent.
-    path.ancestors()
-        .find_map(|p| p.canonicalize().ok())
-        .is_some_and(|p| p.starts_with(root))
+    if is_link {
+        return Err(fail("scratch path is a link or reparse point"));
+    }
+    Ok(())
+}
+
+/// Keep scratch and its output evidence in the project store. The complete
+/// SHA-256 of the run/attempt/check identity names each directory; no partial
+/// marker can block a retry or expose one attempt's files to another. Existing
+/// dev.9 paths are retained for resumed runs.
+fn scratch_path(store: &Path, run: &str, attempt: &str, check: Option<&str>) -> Res<PathBuf> {
+    crate::base::require_slug("run_id", run)?;
+    crate::base::require_slug("attempt_id", attempt)?;
+    if let Some(id) = check {
+        crate::base::require_slug("check_id", id)?;
+    }
+    let store_root = store.canonicalize().map_err(io)?;
+    let legacy = store
+        .join("runs")
+        .join(run)
+        .join("scratch")
+        .join(attempt)
+        .join(check.unwrap_or("work"));
+    if legacy.try_exists().map_err(io)? {
+        let resolved = legacy.canonicalize().map_err(io)?;
+        let mut expected = store_root.clone();
+        for component in ["runs", run, "scratch", attempt, check.unwrap_or("work")] {
+            expected.push(component);
+            reject_scratch_link(&expected)?;
+        }
+        if !same_scratch_path(&resolved, &expected) || !resolved.is_dir() {
+            return Err(fail("legacy scratch does not match its assigned identity"));
+        }
+        return Ok(legacy);
+    }
+
+    let root = store.join("s");
+    std::fs::create_dir_all(&root).map_err(io)?;
+    reject_scratch_link(&root)?;
+    let resolved_root = root.canonicalize().map_err(io)?;
+    if !same_scratch_path(&resolved_root, &store_root.join("s")) {
+        return Err(fail(
+            "scratch root is outside its expected project store location",
+        ));
+    }
+    let identity = serde_json::to_vec(&(run, attempt, check)).map_err(io)?;
+    let name = digest(&identity);
+    let path = root.join(&name);
+    std::fs::create_dir_all(&path).map_err(io)?;
+    reject_scratch_link(&path)?;
+    if !same_scratch_path(
+        &path.canonicalize().map_err(io)?,
+        &resolved_root.join(&name),
+    ) {
+        return Err(fail("scratch path does not match its assigned identity"));
+    }
+    Ok(path)
 }
 fn reference(path: &Path) -> Res<ArtifactRef> {
     Ok(ArtifactRef {
@@ -188,6 +243,90 @@ fn artifact(dir: &Path, bytes: &[u8]) -> Res<ArtifactRef> {
     }
     Ok(r)
 }
+
+/// Stored in an immutable artifact referenced by an existing receipt slot so
+/// dev.9 readers can still deserialize the unchanged checkpoint schema.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundaryFailure {
+    revision: u64,
+    phase: Phase,
+    status: RunStatus,
+    error: Failure,
+}
+
+fn saved_failure(store: &Path, c: &Checkpoint) -> Res<Option<Failure>> {
+    if !matches!(c.status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
+        return Ok(None);
+    }
+    let Some(receipt) = c.receipts.get(checkpoint::DISPATCH_FAILURE) else {
+        return Ok(None);
+    };
+    let root = store.join("runs").join(&c.run_id).join("artifacts");
+    if !receipt
+        .path
+        .canonicalize()
+        .map_err(io)?
+        .starts_with(root.canonicalize().map_err(io)?)
+    {
+        return Err(Failure::new(
+            "checkpoint",
+            "dispatch failure artifact outside its run",
+        ));
+    }
+    let bytes = std::fs::read(&receipt.path).map_err(io)?;
+    if digest(&bytes) != receipt.digest {
+        return Err(Failure::new(
+            "checkpoint",
+            "dispatch failure artifact digest mismatch",
+        ));
+    }
+    let saved: BoundaryFailure = serde_json::from_slice(&bytes).map_err(io)?;
+    if saved.revision != c.revision || saved.phase != c.phase || saved.status != c.status {
+        return Ok(None);
+    }
+    Ok(Some(saved.error))
+}
+
+fn unknown_failure() -> Failure {
+    Failure::new(
+        "unknown",
+        "The blocked boundary did not record its cause; inspect the saved reports and receipts.",
+    )
+}
+
+/// Project a historical checkpoint through the current acceptance policy
+/// without changing its stored phase, status or request receipts.
+fn historical_boundary(c: &Checkpoint, failure: Failure) -> BoundaryResult {
+    let active = c
+        .attempts
+        .values()
+        .any(|a| !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared));
+    let status = if active {
+        RunStatus::OutcomeUnknown
+    } else {
+        RunStatus::Blocked
+    };
+    let reason = format!(
+        "Historical checkpoint status was {:?}; it is not authorization under the current acceptance policy. {}{}",
+        c.status,
+        failure.message,
+        if active { " An existing attempt remains unresolved; reconcile it without redispatch." } else { "" }
+    );
+    let mut refs = vec![c.intent.clone()];
+    refs.extend(c.research.clone());
+    refs.extend(c.plan.clone());
+    BoundaryResult {
+        run_id: c.run_id.clone(),
+        phase: c.phase.clone(),
+        status,
+        short_reason: reason.clone(),
+        error: Some(Failure::new(if active { "outcome_unknown" } else { &failure.kind }, reason)),
+        research: c.research.clone(),
+        artifact_refs: refs,
+        next_action: Some("Preserve the historical evidence. Reconcile any unresolved attempt, then start a new run with a complete baseline and independent verification.".into()),
+    }
+}
 fn tool(name: &str, properties: Value) -> DynamicTool {
     let required = properties
         .as_object()
@@ -200,6 +339,25 @@ fn tool(name: &str, properties: Value) -> DynamicTool {
         ),
         input_schema: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
     }
+}
+fn runner_tool_reply(receipt: &crate::orch::runner::RunnerReceipt) -> Res<Value> {
+    use crate::orch::runner::{RunnerSentinel, RunnerStatus};
+    if receipt.status != RunnerStatus::Ready {
+        return Ok(
+            json!({"status":"failed","reason":"The single managed Rust compile/link did not succeed. Return preparation status failed; do not substitute another check.","failure":receipt.status}),
+        );
+    }
+    let binary = receipt
+        .binary
+        .as_ref()
+        .ok_or_else(|| fail("prepared runner binary missing"))?;
+    let sentinel = RunnerSentinel {
+        source_digest: receipt.source.digest.clone(),
+        binary_digest: binary.digest.clone(),
+    };
+    Ok(
+        json!({"status":"ready","program":sentinel.program()?,"meaning":"Source compiled and linked only; no runner or product cases were executed."}),
+    )
 }
 /// Typed business result of a writing leaf. A normally terminated turn is only
 /// transport evidence; dependencies follow this status.
@@ -264,12 +422,22 @@ struct Bound {
     execution: Mutex<Option<codex::ExecutionKey>>,
     tools: Vec<String>,
     model: String,
+    effort: String,
     operation: Mutex<()>,
 }
 impl RunObserver for Bound {
     fn on_event(&self, event: &RunEvent) -> Res<()> {
         if event.attempt_id != self.attempt {
             return Err(fail("observer attempt mismatch"));
+        }
+        if event.requested_model != self.model
+            || event.configured_model != self.model
+            || event.requested_effort.as_deref() != Some(self.effort.as_str())
+        {
+            return Err(Failure::new(
+                "model_identity",
+                "observer model request/configuration mismatch",
+            ));
         }
         if matches!(
             &event.kind,
@@ -329,18 +497,31 @@ impl RunObserver for Bound {
         };
         if let Some(kind) = kind {
             self.pipeline.edit(|c| {
-                checkpoint::record_attempt_event(
-                    &self.pipeline.store,
-                    &self.pipeline.run,
-                    c.revision,
-                    &AttemptEvent {
+                // A disconnected transport first reports ConnectionLost and
+                // then an unknown Terminal for the same attempt. The first
+                // event already persisted the unknown state and its reason.
+                // Still record a lone unknown Terminal (e.g. timeout).
+                if matches!(&event.kind, RunEventKind::Terminal { report } if matches!(report.terminal, TransportTerminal::OutcomeUnknown))
+                    && c.attempts.get(&self.attempt).is_some_and(|a| a.state == AttemptState::OutcomeUnknown)
+                {
+                    return Ok(());
+                }
+                let attempt_event = AttemptEvent {
                         event_id: format!("{}-{}", self.attempt, event.sequence),
                         attempt_id: self.attempt.clone(),
                         sequence: event.sequence,
                         kind,
-                    },
-                )
-                .map(|_| ())
+                    };
+                if matches!(event.kind, RunEventKind::BeforeTurn) {
+                    checkpoint::record_attempt_dispatch(
+                        &self.pipeline.store, &self.pipeline.run, c.revision, &attempt_event,
+                        &event.requested_model, &event.configured_model, event.requested_effort.as_deref(),
+                    ).map(|_| ())
+                } else {
+                    checkpoint::record_attempt_event(
+                        &self.pipeline.store, &self.pipeline.run, c.revision, &attempt_event,
+                    ).map(|_| ())
+                }
             })?;
         }
         Ok(())
@@ -415,6 +596,30 @@ impl ToolHandler for Bound {
                     },
                 )?
             }
+            (Purpose::Verifier, "prepare_rust_runner")
+                if c.phase == Phase::Planning
+                    && a.step_id
+                        == format!("evaluation-prep-{}", checkpoint::planning_epoch(&c)) =>
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Args {
+                    source_utf8: String,
+                }
+                let args: Args = serde_json::from_value(call.arguments).map_err(io)?;
+                let identity = crate::orch::runner::RunnerIdentity {
+                    run_id: p.run.clone(),
+                    epoch: checkpoint::planning_epoch(&c),
+                    attempt_id: self.attempt.clone(),
+                    generation: key.generation,
+                    thread_id: key.thread_id.clone(),
+                    turn_id: key
+                        .turn_id
+                        .clone()
+                        .ok_or_else(|| fail("runner callback missing turn"))?,
+                };
+                p.prepare_runner(&identity, args.source_utf8.as_bytes())?
+            }
             (Purpose::Memory, "record_memory") if c.phase == Phase::Memory => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -423,18 +628,17 @@ impl ToolHandler for Bound {
                     content: String,
                 }
                 let args: Args = serde_json::from_value(call.arguments).map_err(io)?;
-                if !c
-                    .receipts
-                    .iter()
-                    .any(|(k, r)| k.starts_with("review-") && r.digest == args.evidence_id)
-                {
-                    return Err(fail("memory evidence digest mismatch"));
+                if checkpoint::verified_review(&c).is_none_or(|r| r.digest != args.evidence_id) {
+                    return Err(fail("memory evidence is not the current verified review"));
                 }
-                let result = crate::memory::Memory::open(&p.home)?.record_run(
+                let mut result = crate::memory::Memory::open(&p.home)?.record_run_with_evidence(
                     &p.project,
                     &p.run,
                     &args.content,
+                    &args.evidence_id,
                 )?;
+                // Preserve the selected review alongside the memory receipt.
+                result["review_digest"] = json!(args.evidence_id);
                 let r = artifact(&p.artifacts(), &serde_json::to_vec(&result).map_err(io)?)?;
                 p.receipt("memory", &r)?;
                 result
@@ -492,7 +696,42 @@ impl Bridge {
                 return Err(fail("request_id reused with different input"));
             }
             if !old["result"].is_null() {
-                return serde_json::from_value(old["result"].clone()).map_err(io);
+                let mut result: BoundaryResult =
+                    serde_json::from_value(old["result"].clone()).map_err(io)?;
+                if !old["boundary_error"].is_null() {
+                    result.error =
+                        Some(serde_json::from_value(old["boundary_error"].clone()).map_err(io)?);
+                } else if result.error.is_none()
+                    && matches!(
+                        result.status,
+                        RunStatus::Blocked | RunStatus::OutcomeUnknown
+                    )
+                {
+                    result.error = Some(unknown_failure());
+                }
+                if matches!(
+                    result.status,
+                    RunStatus::ReadyToCommit | RunStatus::Released
+                ) {
+                    let historical = checkpoint::load_run(&store, &result.run_id)?;
+                    if historical.repo.canonical_root != repo {
+                        return Err(Failure::new(
+                            "invalid_argument",
+                            "repository does not match run",
+                        ));
+                    }
+                    if let Err(failure) = checkpoint::current_frozen_sources(&historical)
+                        .and_then(|_| checkpoint::baseline_authorized(&historical))
+                    {
+                        return Ok(historical_boundary(&historical, failure));
+                    }
+                    if !checkpoint::ready_evidence(&historical) {
+                        return Ok(historical_boundary(&historical, Failure::new(
+                            "unverified_review", "Stored acceptance evidence no longer satisfies the current independent verification requirements."
+                        )));
+                    }
+                }
+                return Ok(result);
             }
         }
         let run = match &request.action {
@@ -530,6 +769,58 @@ impl Bridge {
                 "repository does not match run",
             ));
         }
+        // A pre-v2 frozen run may still be inspected and reconciled, but no
+        // current runtime may treat its historical result as full acceptance
+        // or schedule another role under the old baseline.
+        let compatibility = if c.plan.is_some() && c.phase != Phase::Cancelled {
+            checkpoint::current_frozen_sources(&c).err()
+        } else {
+            None
+        };
+        if let Some(failure) = compatibility {
+            if !matches!(request.action, DispatchAction::Cancel { .. }) {
+                if let DispatchAction::Resume { recovery, .. } = &request.action {
+                    if let Some(decision) = recovery {
+                        if !matches!(decision, checkpoint::RecoveryDecision::RetryPlanning { .. }) {
+                            checkpoint::resolve_attempt(&store, &run, c.revision, decision)?;
+                            c = checkpoint::load_run(&store, &run)?;
+                        }
+                    }
+                    if c.attempts.values().any(|a| {
+                        !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared)
+                    }) {
+                        checkpoint::reconcile_run(&store, &run, c.revision, &[])?;
+                        c = checkpoint::load_run(&store, &run)?;
+                    }
+                }
+                return Ok(historical_boundary(&c, failure));
+            }
+        }
+        if !matches!(request.action, DispatchAction::Cancel { .. })
+            && matches!(c.phase, Phase::ReadyToCommit | Phase::Released)
+        {
+            if let Err(failure) = checkpoint::baseline_authorized(&c) {
+                return Ok(historical_boundary(&c, failure));
+            }
+            if !checkpoint::ready_evidence(&c) {
+                return Ok(historical_boundary(&c, Failure::new(
+                    "unverified_review", "Stored acceptance evidence no longer satisfies the current independent verification requirements."
+                )));
+            }
+        }
+        // Recovery itself changes the revision. Read its old diagnostic first
+        // so a no-op repair boundary does not lose the original cause.
+        let prior_failure = if matches!(request.action, DispatchAction::Resume { .. }) {
+            saved_failure(&store, &c)?
+        } else {
+            None
+        };
+        // Reconciliation can advance only some attempts. A previous diagnostic
+        // remains authoritative only if the phase and complete attempt state
+        // are unchanged, not merely because the final status is still blocked.
+        let prior_phase = c.phase.clone();
+        let prior_status = c.status.clone();
+        let prior_attempts = c.attempts.clone();
         match &request.action {
             DispatchAction::Decide {
                 research_digest,
@@ -587,23 +878,15 @@ impl Bridge {
                         "cancellation reason required",
                     ));
                 }
-                if c.attempts
-                    .values()
-                    .any(|a| a.state != AttemptState::Terminal)
-                {
-                    return Err(Failure::new(
-                        "outcome_unknown",
-                        "reconcile active attempts before cancellation",
-                    ));
-                }
-                checkpoint::advance_phase(&store, &run, c.revision, Phase::Cancelled)?;
+                checkpoint::cancel_run(&store, &run, c.revision, reason)?;
             }
             DispatchAction::Resume { recovery, .. } => {
                 if let Some(d) = recovery {
                     checkpoint::resolve_attempt(&store, &run, c.revision, d)?;
                     c = checkpoint::load_run(&store, &run)?;
                 }
-                checkpoint::reconcile_run(&store, &run, c.revision, &[])?;
+                let reconciled = checkpoint::reconcile_run(&store, &run, c.revision, &[])?;
+                checkpoint::retry_prepared_batches(&store, &run, reconciled.revision)?;
             }
             _ => {}
         }
@@ -626,6 +909,7 @@ impl Bridge {
             .map_err(io)?;
         }
         let mut reason = "checkpoint loaded".to_string();
+        let mut error = None;
         if execute {
             let p = Arc::new(Pipeline {
                 server: self.codex()?,
@@ -650,10 +934,33 @@ impl Bridge {
                     if a.state == AttemptState::Prepared {
                         continue;
                     }
-                    if let Some(thread) = &a.thread_id {
+                    if let Err(cause) =
+                        checkpoint::attempt_model(&p.store, &p.load()?, &a.attempt_id)
+                    {
+                        error = Some(cause);
+                        break;
+                    }
+                    if let (Some(thread), Some(turn)) = (&a.thread_id, &a.turn_id) {
                         if let Ok(codex::AttemptRead::Terminal(report)) =
-                            p.server.read_attempt(thread, a.turn_id.as_deref())
+                            p.server.read_attempt(thread, Some(turn))
                         {
+                            // History cannot reconstruct a lost in-memory before
+                            // snapshot. Only an already persisted original-role
+                            // audit (handled by reconcile_run) can close a writer.
+                            if p.load()?.steps.get(&a.step_id).is_some_and(|s| {
+                                matches!(s.purpose, Purpose::Engineer | Purpose::Assembler)
+                            }) {
+                                continue;
+                            }
+                            if let Err(cause) = checkpoint::validate_attempt_report(
+                                &p.store,
+                                &p.load()?,
+                                &a.attempt_id,
+                                &report.report,
+                            ) {
+                                error = Some(cause);
+                                break;
+                            }
                             let outcome = match report.terminal {
                                 TransportTerminal::Completed
                                     if p.load()?.steps.get(&a.step_id).is_some_and(|s| {
@@ -684,22 +991,85 @@ impl Bridge {
                 }
             }
             let c = p.load()?;
+            let unchanged_attempts = c.phase == prior_phase && c.attempts == prior_attempts;
             if c.attempts
                 .values()
                 .any(|a| a.state != AttemptState::Terminal && a.state != AttemptState::Prepared)
             {
-                reason = "unknown execution retained; no writing attempt redispatched".into();
+                let missing_writer_audit = c.attempts.values().any(|a| {
+                    !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared)
+                        && c.steps.get(&a.step_id).is_some_and(|s| {
+                            matches!(s.purpose, Purpose::Engineer | Purpose::Assembler)
+                        })
+                });
+                let previous = prior_failure.as_ref().filter(|failure| {
+                    prior_status == RunStatus::OutcomeUnknown
+                        && unchanged_attempts
+                        && failure.kind == "outcome_unknown"
+                        && !missing_writer_audit
+                });
+                if let Some(identity_error) = error.as_ref().filter(|e| e.kind == "model_identity")
+                {
+                    reason = identity_error.message.clone();
+                } else if let Some(previous) = previous {
+                    reason = previous.message.clone();
+                    error = Some(previous.clone());
+                } else {
+                    let unresolved = c
+                        .attempts
+                        .values()
+                        .filter(|a| {
+                            a.state != AttemptState::Terminal && a.state != AttemptState::Prepared
+                        })
+                        .map(|a| {
+                            format!(
+                                "step {} (attempt {}, thread {}, turn {}, state {:?})",
+                                a.step_id,
+                                a.attempt_id,
+                                a.thread_id.as_deref().unwrap_or("unknown"),
+                                a.turn_id.as_deref().unwrap_or("unknown"),
+                                a.state
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    reason = format!("unknown execution retained; no writing attempt redispatched; unresolved: {unresolved}. If the original writer scope audit is unavailable, provide explicit stop and repair evidence before retry.");
+                    error = Some(Failure::new("outcome_unknown", reason.clone()));
+                }
             } else if c
                 .attempts
                 .values()
                 .any(|a| checkpoint::failed_attempt_needs_repair(&c, a))
             {
-                reason = "saved failed execution requires repair before a new attempt".into();
+                let previous = prior_failure.as_ref().filter(|failure| {
+                    prior_status == RunStatus::Blocked
+                        && unchanged_attempts
+                        && failure.kind != "outcome_unknown"
+                });
+                if let Some(previous) = previous {
+                    reason = previous.message.clone();
+                    error = Some(previous.clone());
+                } else {
+                    let failed = c
+                        .attempts
+                        .values()
+                        .filter(|a| checkpoint::failed_attempt_needs_repair(&c, a))
+                        .map(|a| format!("step {} (attempt {})", a.step_id, a.attempt_id))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    reason = format!(
+                        "saved failed execution requires repair before a new attempt: {failed}"
+                    );
+                    error = Some(Failure::new("repair_required", reason.clone()));
+                }
             } else {
                 // Zero awaits Rust completion, not a 300s running-response loop.
                 match p.drive() {
                     Ok(()) => reason = "authority boundary reached".into(),
-                    Err(e) => reason = e.message,
+                    Err(e) => {
+                        reason = e.message.clone();
+                        error = Some(e);
+                    }
                 }
             }
         }
@@ -720,13 +1090,40 @@ impl Bridge {
         } else {
             c.status.clone()
         };
-        if execute && c.status != status {
-            checkpoint::record_dispatch_failure(
+        if execute && matches!(status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
+            let failure = error.unwrap_or_else(|| {
+                Failure::new(
+                    "incomplete_run",
+                    "The run stopped before an authority boundary; inspect its saved evidence.",
+                )
+            });
+            reason = failure.message.clone();
+            let saved = BoundaryFailure {
+                revision: c
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| fail("revision overflow"))?,
+                phase: c.phase.clone(),
+                status: status.clone(),
+                error: failure.clone(),
+            };
+            let receipt = artifact(
+                &store.join("runs").join(&run).join("artifacts"),
+                &serde_json::to_vec(&saved).map_err(io)?,
+            )?;
+            checkpoint::record_dispatch_failure_with_receipt(
                 &store,
                 &run,
                 c.revision,
                 status == RunStatus::OutcomeUnknown,
+                &receipt,
             )?;
+            c = checkpoint::load_run(&store, &run)?;
+            error = Some(failure);
+        } else if !execute && matches!(status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
+            let failure = saved_failure(&store, &c)?.unwrap_or_else(unknown_failure);
+            reason = failure.message.clone();
+            error = Some(failure);
         }
         if execute {
             crate::orch::project_checkpoint(&store, &checkpoint::load_run(&store, &run)?)?;
@@ -740,6 +1137,7 @@ impl Bridge {
             phase: c.phase,
             status,
             short_reason: reason,
+            error,
             research: c.research,
             artifact_refs: refs,
             next_action,
@@ -749,10 +1147,16 @@ impl Bridge {
             DispatchAction::Status { .. } | DispatchAction::Resume { .. }
         ) {
             std::fs::create_dir_all(request_path.parent().unwrap()).map_err(io)?;
+            // Older dev.9 readers reject unknown result fields. Store the new
+            // diagnostic alongside the result, not inside its legacy shape.
+            let mut compatible_result = serde_json::to_value(&result).map_err(io)?;
+            compatible_result
+                .as_object_mut()
+                .ok_or_else(|| fail("invalid boundary result"))?
+                .remove("error");
             crate::base::atomic_write(
                 &request_path,
-                &serde_json::to_vec(&json!({"input":digest(&input),"result":result}))
-                    .map_err(io)?,
+                &serde_json::to_vec(&json!({"input":digest(&input),"result":compatible_result,"boundary_error":result.error})).map_err(io)?,
             )
             .map_err(io)?;
         }
@@ -772,6 +1176,96 @@ struct Plan {
     assembly_scope: Option<Vec<String>>,
     units: Vec<Unit>,
     checks: Vec<Check>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanningRetryReceipt {
+    epoch: usize,
+    reason: String,
+    attempt_ids: Vec<String>,
+}
+
+/// Authenticate the recorded recovery decision before exposing it to roles.
+/// Retired attempt pointers bind the latest receipt to this checkpoint; older
+/// retry receipts remain immutable evidence when a second retry supersedes them.
+fn planning_recovery(store: &Path, c: &Checkpoint) -> Res<(usize, String)> {
+    let epoch = checkpoint::planning_epoch(c);
+    let retired: Vec<_> = c
+        .receipts
+        .iter()
+        .filter(|(key, _)| key.starts_with("planning-retired-"))
+        .collect();
+    if epoch == 0 {
+        if !retired.is_empty() {
+            return Err(fail("planning retry receipt missing for retired attempts"));
+        }
+        return Ok((0, String::new()));
+    }
+    if epoch > 2 {
+        return Err(fail("invalid planning retry epoch"));
+    }
+    let run_root = store
+        .join("runs")
+        .join(&c.run_id)
+        .canonicalize()
+        .map_err(io)?;
+    let mut latest = None;
+    let mut reasons = Vec::with_capacity(epoch);
+    for revision in 1..=epoch {
+        let reference = c
+            .receipts
+            .get(&format!("planning-retry-{revision}"))
+            .ok_or_else(|| fail("planning retry receipt missing"))?;
+        let expected = run_root.join(format!("planning-retry-{revision}.json"));
+        let resolved = reference.path.canonicalize().map_err(io)?;
+        if resolved.parent() != Some(run_root.as_path())
+            || resolved != expected.canonicalize().map_err(io)?
+        {
+            return Err(fail("planning retry receipt is outside its run"));
+        }
+        let bytes = std::fs::read(&resolved).map_err(io)?;
+        if digest(&bytes) != reference.digest {
+            return Err(fail("planning retry receipt digest mismatch"));
+        }
+        let receipt: PlanningRetryReceipt = serde_json::from_slice(&bytes).map_err(io)?;
+        if receipt.epoch != revision
+            || receipt.reason.trim().is_empty()
+            || receipt.attempt_ids.is_empty()
+        {
+            return Err(fail(
+                "planning retry receipt has an invalid epoch or reason",
+            ));
+        }
+        reasons.push(format!("Epoch {revision}: {}", receipt.reason));
+        if revision == epoch {
+            latest = Some((reference, receipt));
+        }
+    }
+    let (reference, receipt) = latest.ok_or_else(|| fail("planning retry receipt missing"))?;
+    let ids: std::collections::BTreeSet<_> = receipt.attempt_ids.iter().collect();
+    if ids.len() != receipt.attempt_ids.len()
+        || ids.iter().any(|id| {
+            !c.attempts.contains_key(*id)
+                || c.receipts.get(&format!("planning-retired-{id}")) != Some(reference)
+        })
+        || retired.len() != ids.len()
+        || retired.iter().any(|(key, r)| {
+            *r != reference
+                || !receipt
+                    .attempt_ids
+                    .iter()
+                    .any(|id| *key == &format!("planning-retired-{id}"))
+        })
+    {
+        return Err(fail(
+            "planning retry receipt does not match retired attempts",
+        ));
+    }
+    Ok((epoch, format!(
+        "\nCore-approved planning recoveries, in order:\n{}\nApply all corrections to the unfrozen prerequisites. Later reasons supplement earlier ones, or explicitly override them where stated. Preserve the approved user intent, behavior and evaluation standards; do not expose held-out cases or change frozen checks.",
+        reasons.join("\n")
+    )))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -797,6 +1291,160 @@ struct Check {
 struct EnvironmentValue {
     name: String,
     value: String,
+}
+
+#[cfg(windows)]
+fn same_environment_name(a: &str, b: &str) -> Res<bool> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CompareStringOrdinal(
+            first: *const u16,
+            first_length: i32,
+            second: *const u16,
+            second_length: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    let first: Vec<_> = a.encode_utf16().collect();
+    let second: Vec<_> = b.encode_utf16().collect();
+    let first_length = i32::try_from(first.len()).map_err(io)?;
+    let second_length = i32::try_from(second.len()).map_err(io)?;
+    // The Windows ordinal comparison uses the OS Unicode uppercase table,
+    // matching the case-insensitive names in a Windows process environment.
+    match unsafe {
+        CompareStringOrdinal(
+            first.as_ptr(),
+            first_length,
+            second.as_ptr(),
+            second_length,
+            1,
+        )
+    } {
+        2 => Ok(true),
+        1 | 3 => Ok(false),
+        _ => Err(io(std::io::Error::last_os_error())),
+    }
+}
+
+#[cfg(not(windows))]
+fn same_environment_name(a: &str, b: &str) -> Res<bool> {
+    Ok(a == b)
+}
+
+/// Frozen commands execute environment entries as a map, not an array.
+fn check_environment(entries: &[EnvironmentValue]) -> Res<BTreeMap<String, String>> {
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    for entry in entries {
+        if entry.name.is_empty() {
+            return Err(fail("empty or duplicate check environment name"));
+        }
+        for name in env.keys() {
+            if same_environment_name(name, &entry.name)? {
+                return Err(fail("empty or duplicate check environment name"));
+            }
+        }
+        env.insert(entry.name.clone(), entry.value.clone());
+    }
+    Ok(env)
+}
+
+fn same_environment(
+    first: &BTreeMap<String, String>,
+    second: &BTreeMap<String, String>,
+) -> Res<bool> {
+    if first.len() != second.len() {
+        return Ok(false);
+    }
+    for (name, value) in first {
+        let mut match_value = None;
+        for (other_name, other_value) in second {
+            if same_environment_name(name, other_name)? {
+                match_value = Some(other_value);
+                break;
+            }
+        }
+        if match_value != Some(value) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn add_environment_default(
+    env: &mut BTreeMap<String, String>,
+    name: &str,
+    value: String,
+) -> Res<()> {
+    for existing in env.keys() {
+        if same_environment_name(existing, name)? {
+            return Ok(());
+        }
+    }
+    env.insert(name.to_owned(), value);
+    Ok(())
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn environment_names_use_platform_case_rules() {
+        let entries = [
+            EnvironmentValue {
+                name: "AXIOM_CASE".into(),
+                value: "x".into(),
+            },
+            EnvironmentValue {
+                name: "axiom_case".into(),
+                value: "x".into(),
+            },
+        ];
+        let first = BTreeMap::from([("AXIOM_ÉTAT".into(), "x".into())]);
+        let second = BTreeMap::from([("axiom_état".into(), "x".into())]);
+        if cfg!(windows) {
+            assert!(check_environment(&entries).is_err());
+            assert!(same_environment(&first, &second).unwrap());
+        } else {
+            assert_eq!(check_environment(&entries).unwrap().len(), 2);
+            assert!(!same_environment(&first, &second).unwrap());
+        }
+        let different_value = BTreeMap::from([("AXIOM_ÉTAT".into(), "different".into())]);
+        assert!(!same_environment(&first, &different_value).unwrap());
+
+        let mut defaults = BTreeMap::from([("cargo_target_dir".into(), "frozen".into())]);
+        add_environment_default(&mut defaults, "CARGO_TARGET_DIR", "default".into()).unwrap();
+        if cfg!(windows) {
+            assert_eq!(defaults.len(), 1);
+            assert_eq!(defaults["cargo_target_dir"], "frozen");
+        } else {
+            assert_eq!(defaults.len(), 2);
+            assert_eq!(defaults["CARGO_TARGET_DIR"], "default");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unicode_case_comparison_agrees_with_windows_environment_lookup() {
+        let upper = "AXIOM_TEST_ÅNGSTRÖM_CB52";
+        let lower = "axiom_test_ångström_cb52";
+        assert!(same_environment_name(upper, lower).unwrap());
+        // Use a child process, avoiding any mutation of this test process's
+        // shared environment while other tests run.
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "if ([Environment]::GetEnvironmentVariable('axiom_test_ångström_cb52') -cne 'unicode-value') { exit 1 }",
+            ])
+            .env(upper, "unicode-value")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 // Callbacks never retain Bridge or root chat. AppServer unregisters each handler.
@@ -874,6 +1522,107 @@ impl Pipeline {
         )
         .map_err(io)
     }
+
+    fn prepare_runner(
+        &self,
+        identity: &crate::orch::runner::RunnerIdentity,
+        source: &[u8],
+    ) -> Res<Value> {
+        use super::prepared_runner::{self, PreflightOutcome};
+        use crate::orch::runner::{self, RunnerClaim, RunnerPhase, RunnerReceipt, RunnerStatus};
+        let disposition = self
+            .edit(|c| {
+                checkpoint::claim_runner(&self.store, &self.run, c.revision, identity, source)
+            })?
+            .value;
+        let claim_bytes = match disposition {
+            checkpoint::RunnerClaimDisposition::Replayed(evidence) => {
+                return runner_tool_reply(&evidence.receipt);
+            }
+            checkpoint::RunnerClaimDisposition::New(bytes) => bytes,
+        };
+        let claim: RunnerClaim = serde_json::from_slice(&claim_bytes).map_err(io)?;
+        let scratch = scratch_path(
+            &self.store,
+            &self.run,
+            &identity.attempt_id,
+            Some("runner-preflight"),
+        )?;
+        let outcome = prepared_runner::preflight(&self.server, &self.repo, &scratch, &claim_bytes, identity, source)
+            .map_err(|e| Failure::new("outcome_unknown", format!("runner preparation did not record a terminal outcome ({}); its claim is retained and cannot be automatically retried", e.kind)))?;
+        let mut receipt = RunnerReceipt {
+            version: runner::RUNNER_VERSION,
+            identity: identity.clone(),
+            claim_digest: digest(&claim_bytes),
+            source: claim.source,
+            binary: None,
+            compiler: None,
+            probe_stdout: None,
+            status: RunnerStatus::Unavailable,
+            phase: RunnerPhase::Resolve,
+            exit_code: None,
+            timed_out: false,
+            policy_applied: false,
+            stdout: None,
+            stderr: None,
+        };
+        match outcome {
+            PreflightOutcome::Unavailable => {}
+            PreflightOutcome::Terminal {
+                phase,
+                status,
+                compiler,
+                probe_command,
+                command,
+                binary,
+            } => {
+                receipt.phase = phase;
+                receipt.status = status;
+                receipt.exit_code = command.exit_code;
+                receipt.timed_out = command.timed_out;
+                receipt.policy_applied = command.policy_applied;
+                let save = |label: &str, bytes: &[u8]| {
+                    checkpoint::save_runner_bytes(
+                        &self.store,
+                        &self.run,
+                        identity.epoch,
+                        label,
+                        bytes,
+                    )
+                };
+                receipt.stdout = Some(save(
+                    "stdout",
+                    &std::fs::read(&command.stdout_path).map_err(io)?,
+                )?);
+                receipt.stderr = Some(save(
+                    "stderr",
+                    &std::fs::read(&command.stderr_path).map_err(io)?,
+                )?);
+                if let (Some(compiler), Some(probe)) = (&compiler, probe_command) {
+                    let probe_stdout = std::fs::read(&probe.stdout_path).map_err(io)?;
+                    if probe_stdout != compiler.version_verbose.as_bytes() {
+                        return Err(Failure::new(
+                            "outcome_unknown",
+                            "compiler probe output changed before evidence was stored",
+                        ));
+                    }
+                    receipt.probe_stdout = Some(save("probe-stdout", &probe_stdout)?);
+                    save(
+                        "probe-stderr",
+                        &std::fs::read(probe.stderr_path).map_err(io)?,
+                    )?;
+                }
+                receipt.compiler = compiler;
+                if let Some(binary) = binary {
+                    receipt.binary = Some(save("binary", &binary)?);
+                }
+            }
+        }
+        self.edit(|c| {
+            checkpoint::complete_runner(&self.store, &self.run, c.revision, &receipt).map(|_| ())
+        })?;
+        runner_tool_reply(&receipt)
+    }
     fn research(self: &Arc<Self>) -> Res<()> {
         let c = self.load()?;
         if c.research.is_some() {
@@ -894,14 +1643,23 @@ impl Pipeline {
         self.receipt("research", &r)
     }
     fn plan(self: &Arc<Self>) -> Res<()> {
-        if self.load()?.plan.is_some() {
+        let checkpoint = self.load()?;
+        if checkpoint.plan.is_some() {
             return Ok(());
         }
-        let research = self
-            .load()?
+        let (epoch, recovery) = planning_recovery(&self.store, &checkpoint)?;
+        let research = checkpoint
             .research
             .ok_or_else(|| fail("research missing"))?;
-        let spec=self.spec(&self.planning_step("planner")?,Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required. Also return independent_evaluation: a concise brief of WHAT behavior held-out/independent acceptance must cover when the intent requires it, otherwise null. Actual runtime capability, do not promise more: Rust then invokes a separate read-only ASTRA HIGH tester that only returns inline check commands with a typed ready/failed status; it cannot write files, run commands, trial-run or seal anything itself. Rust persists and SHA-256-freezes accepted commands, executes every frozen check in the baseline before engineering (product read-only, per-check scratch cwd), and starts writers only after a typed baseline classification says the acceptance infrastructure is ready. Isolation is contextual: writer and assembler briefs never receive private checks or the tester report, but there is no OS-level guarantee that writers cannot read the run store. Therefore never require OS-unreadable private areas, tester-run sealing or trial runs, and never make units wait for, request or verify evaluation-preparation or baseline reports: Rust enforces that ordering before any unit starts. Missing independent runner/sample files are not a blocker. Keep public regression checks and private evaluation preparation distinct.",self.intent()?,research.path),vec![],vec![])?;
+        let planner_brief=format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. Rust separately assigns every writing unit an absolute AXIOM_SCRATCH and CARGO_TARGET_DIR through its environment. Unit briefs must use those assigned paths; never request a relative scratch/ directory in the repository. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required. Also return independent_evaluation: a concise brief of WHAT behavior held-out/independent acceptance must cover when the intent requires it, otherwise null. Actual runtime capability, do not promise more: Rust then invokes a separate read-only ASTRA HIGH tester that returns checks with a typed ready/failed status. Its only execution tool optionally compiles and links one parameterized Rust runner in managed scratch without running it; it cannot run arbitrary shell commands, product tests or seal cases. Rust persists and SHA-256-freezes accepted commands, executes every frozen check in the baseline before engineering (product read-only, per-check scratch cwd), and starts writers only after a typed baseline classification says the acceptance infrastructure is ready. Isolation is contextual: writer and assembler briefs never receive private checks or the tester report, but there is no OS-level guarantee that writers cannot read the run store. Therefore never require OS-unreadable private areas, tester-run sealing or trial runs, and never make units wait for, request or verify evaluation-preparation or baseline reports: Rust enforces that ordering before any unit starts. Missing independent runner/sample files are not a blocker. Keep public regression checks and private evaluation preparation distinct.",self.intent()?,research.path);
+        let planner_brief = format!("{planner_brief}\nPublic check IDs must not begin independent-; this prefix is reserved for independently prepared private checks (for example independent-h). The independent_evaluation brief specifies the behavior to cover, not incompatible private IDs. If an explicit user requirement truly conflicts with this contract, return no implementable units instead of silently changing the requirement.{recovery}");
+        let spec = self.spec(
+            &self.planning_step("planner")?,
+            Purpose::Planner,
+            &planner_brief,
+            vec![],
+            vec![],
+        )?;
         let schema = json!({"type":"object","required":["assembly_scope","units","checks"],"additionalProperties":false,"properties":{"assembly_scope":{"type":["array","null"],"minItems":1,"items":{"type":"string"}},"units":{"type":"array","items":{"type":"object","required":["kind","id","brief","scope","depends_on"],"additionalProperties":false,"properties":{"kind":{"type":["string","null"],"enum":["engineer","content",null]},"id":{"type":"string"},"brief":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}},"depends_on":{"type":"array","items":{"type":"string"}}}}},"checks":{"type":"array","minItems":1,"items":{"type":"object","required":["id","program","args","env","timeout_s"],"additionalProperties":false,"properties":{"id":{"type":"string"},"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}},"timeout_s":{"type":"integer","minimum":1,"maximum":1800}}}}}});
         let mut schema = schema;
         schema["required"]
@@ -917,6 +1675,22 @@ impl Pipeline {
             return Err(fail(
                 "plan must provide implementable units and public regression checks",
             ));
+        }
+        if plan
+            .checks
+            .iter()
+            .any(|check| check.id.starts_with("independent-"))
+        {
+            return Err(fail("public check ID uses reserved independent- prefix"));
+        }
+        for check in &plan.checks {
+            check_environment(&check.env)?;
+            if crate::orch::runner::parse_sentinel(&check.program)?.is_some() {
+                return Err(Failure::new(
+                    "evaluation_unprepared",
+                    "prepared runner programs are reserved for independent private checks",
+                ));
+            }
         }
         let r = artifact(&self.artifacts(), &serde_json::to_vec(&value).map_err(io)?)?;
         let mut steps = vec![];
@@ -1010,12 +1784,33 @@ impl Pipeline {
             if brief.trim().is_empty() {
                 return Err(fail("independent evaluation brief is empty"));
             }
-            let epoch = checkpoint::planning_epoch(&self.load()?);
-            let prep = self.spec(&format!("evaluation-prep-{epoch}"), Purpose::Verifier,
-                &format!("PREPARE INDEPENDENT EVALUATION before engineering. You are a separate ASTRA HIGH tester, not a planner or engineer. Approved public plan: {:?}. Evaluation requirements: {}. Intent: {}. Your real capability: you are read-only and return check definitions only; you do not write, run, trial-run or seal anything. Rust persists and SHA-256-freezes accepted commands, runs each in the baseline before engineering with the product read-only and a fresh per-check scratch cwd, and withholds your report and commands from writer briefs (contextual isolation, not an OS guarantee). Create compact, self-contained executable checks with NEW held-out cases from the approved behavior and evaluation method. Existing runners or sample files are NOT prerequisites: return inline scripts/arguments that construct fixtures in {{scratch}} and inspect the product at {{repo}}. Every check must reference {{repo}} and decide pass/fail from actual product behavior. Do not modify product or run development. Do not merely invoke existing public tests or pretend a fake role is live acceptance. Each check id must start independent-. Return JSON {{status,summary,exposure,checks}}: status=ready only when the checks are genuine held-out acceptance of the product; status=failed with the concrete reason and checks=[] when you cannot produce them. Never return placeholder, fixed-exit or self-declared-failure checks. exposure states which cases stay private and the limits of this isolation. Use the same program/args/env/timeout_s check format and actual available local executables; commands may write only scratch. Do not depend on any uncreated runner, later writer-owned test or mutable external data. Keep each inline command compact. Missing product behavior may fail the baseline; missing evaluation infrastructure must not be assumed away.",r.path,brief,self.intent()?),vec![],vec![])?;
+            let (prep_epoch, prep_recovery) = planning_recovery(&self.store, &self.load()?)?;
+            if prep_epoch != epoch || prep_recovery != recovery {
+                return Err(fail("planning recovery changed during preparation"));
+            }
+            let prep_brief = format!("PREPARE INDEPENDENT EVALUATION before engineering. You are a separate ASTRA HIGH tester, not a planner or engineer. Approved public plan: {:?}. Evaluation requirements: {}. Intent: {}. Your real capability: you are read-only and return check definitions. Optionally call prepare_rust_runner once with source_utf8 for a parameterized Rust program before selecting held-out cases. The managed tool only compiles and links source in scratch with fixed rustc flags and no network; it does not execute the runner, product, diagnostic cases or held-out cases. It is not an arbitrary command tool. On success use its exact program sentinel as the private check program and pass {{repo}} and the later held-out cases as arguments; on failure return status=failed, not an alternate check. Source is limited to 256 KiB and the compiled binary to 64 MiB. Rust compiler macros may read host files: this is not OS read isolation. Compilation does not prove functional correctness or that cases are semantically independent. Rust persists and SHA-256-freezes accepted commands, runs each in the baseline before engineering with the product read-only and a fresh per-check scratch cwd, and withholds your report and commands from writer briefs (contextual isolation, not an OS guarantee). Create compact, self-contained executable checks with NEW held-out cases from the approved behavior and evaluation method. Existing runners or sample files are NOT prerequisites: return inline scripts/arguments that construct fixtures in {{scratch}} and inspect the product at {{repo}}. Every check must reference {{repo}} and decide pass/fail from actual product behavior. Do not modify product or run development. Do not merely invoke existing public tests or pretend a fake role is live acceptance. Each check id must start independent-. Return JSON {{status,summary,exposure,checks}}: status=ready only when the checks are genuine held-out acceptance of the product; status=failed with the concrete reason and checks=[] when you cannot produce them. Never return placeholder, fixed-exit or self-declared-failure checks. exposure states which cases stay private and the limits of this isolation. Use the same program/args/env/timeout_s check format and actual available local executables; commands may write only scratch. Do not depend on any uncreated runner, later writer-owned test or mutable external data. Keep each inline command compact. Missing product behavior may fail the baseline; missing evaluation infrastructure must not be assumed away.",r.path,brief,self.intent()?);
+            let prep_brief = format!("{prep_brief}{prep_recovery}");
+            let prep = self.spec(
+                &format!("evaluation-prep-{epoch}"),
+                Purpose::Verifier,
+                &prep_brief,
+                vec![],
+                vec![],
+            )?;
             let mut prep_checks = check_schema.clone();
             prep_checks["minItems"] = json!(0);
-            let (report, receipt, _) = self.role(&prep, vec![], Some(json!({"type":"object","required":["status","summary","exposure","checks"],"additionalProperties":false,"properties":{"status":{"type":"string","enum":["ready","failed"]},"summary":{"type":"string"},"exposure":{"type":"string"},"checks":prep_checks}})))?;
+            let (report, receipt, _) = self.role(&prep, vec![tool("prepare_rust_runner", json!({"source_utf8":{"type":"string","maxLength":262144}}))], Some(json!({"type":"object","required":["status","summary","exposure","checks"],"additionalProperties":false,"properties":{"status":{"type":"string","enum":["ready","failed"]},"summary":{"type":"string"},"exposure":{"type":"string"},"checks":prep_checks}})))?;
+            let prep_checkpoint = self.load()?;
+            if prep_checkpoint
+                .receipts
+                .contains_key(&format!("runner-claim-{epoch}"))
+            {
+                let evidence =
+                    checkpoint::runner_evidence(&self.store, &prep_checkpoint, epoch, false)?;
+                if evidence.receipt.status != crate::orch::runner::RunnerStatus::Ready {
+                    return Err(Failure::new("evaluation_unprepared", "The managed runner did not compile and link; no fallback checks or writers may run. Its evidence was retained."));
+                }
+            }
             let value = Self::output(&report)?;
             if value["status"] != "ready" {
                 return Err(Failure::new(
@@ -1060,24 +1855,19 @@ impl Pipeline {
                 ));
             }
             // Relabelling a public regression check is not held-out acceptance.
-            if let Some(c) = independent.iter().find(|i| {
-                check_specs.iter().any(|p| {
-                    p.program == i.program
-                        && p.args == i.args
-                        && p.env
-                            .iter()
-                            .map(|e| (&e.name, &e.value))
-                            .collect::<Vec<_>>()
-                            == i.env
-                                .iter()
-                                .map(|e| (&e.name, &e.value))
-                                .collect::<Vec<_>>()
-                })
-            }) {
-                return Err(Failure::new(
-                    "evaluation_unprepared",
-                    format!("independent check {} repeats a public regression command; public checks cannot be relabelled as held-out acceptance. No checks were installed and no writer started.", c.id),
-                ));
+            for private in &independent {
+                let private_env = check_environment(&private.env)?;
+                for public in &check_specs {
+                    if public.program == private.program
+                        && public.args == private.args
+                        && same_environment(&check_environment(&public.env)?, &private_env)?
+                    {
+                        return Err(Failure::new(
+                            "evaluation_unprepared",
+                            format!("independent check {} repeats a public regression command; public checks cannot be relabelled as held-out acceptance. No checks were installed and no writer started.", private.id),
+                        ));
+                    }
+                }
             }
             if independent
                 .iter()
@@ -1095,12 +1885,7 @@ impl Pipeline {
                 if c.timeout_s == 0 || c.timeout_s > 1800 {
                     return Err(fail("check budget must be finite and <=1800s"));
                 }
-                let mut env = BTreeMap::new();
-                for entry in c.env {
-                    if entry.name.is_empty() || env.insert(entry.name, entry.value).is_some() {
-                        return Err(fail("empty or duplicate check environment name"));
-                    }
-                }
+                let env = check_environment(&c.env)?;
                 let mut f = FrozenCheck {
                     check_id: c.id,
                     program: c.program,
@@ -1178,13 +1963,36 @@ impl Pipeline {
         {
             return Err(fail("unknown, unready or duplicate batch unit"));
         }
+        let batch: Vec<_> = ready
+            .into_iter()
+            .filter(|s| ids.contains(&s.step_id))
+            .collect();
+        let members = batch
+            .iter()
+            .map(|s| {
+                let claim = self.edit(|c| {
+                    checkpoint::claim_step(&self.store, c.revision, s, &s.brief_ref.digest)
+                })?;
+                if claim.attempt.state != AttemptState::Prepared {
+                    return Err(fail("batch attempt requires reconciliation"));
+                }
+                Ok((s.step_id.clone(), claim.attempt.attempt_id))
+            })
+            .collect::<Res<Vec<_>>>()?;
+        let batch_ref = self
+            .edit(|c| {
+                checkpoint::register_scope_batch(&self.store, &self.run, c.revision, &members)
+            })?
+            .value;
         std::thread::scope(|scope| {
-            let tasks = ready
-                .into_iter()
-                .filter(|s| ids.contains(&s.step_id))
+            let tasks = batch
+                .iter()
                 .map(|s| {
+                    let batch_ref = &batch_ref;
                     scope.spawn(move || {
-                        let result = self.role(&s, vec![], Some(writer_schema())).map(|_| ());
+                        let result = self
+                            .role_with_peers(s, vec![], Some(writer_schema()), Some(batch_ref))
+                            .map(|_| ());
                         match result {
                             // A typed refusal is a known business result: record it,
                             // let peers finish, and let drive stop dependents.
@@ -1237,23 +2045,23 @@ impl Pipeline {
             }
             return serde_json::to_value(result).map_err(io);
         }
-        let scratch = self
-            .store
-            .join("runs")
-            .join(&self.run)
-            .join("scratch")
-            .join(&executor.attempt_id)
-            .join(id);
-        std::fs::create_dir_all(&scratch).map_err(io)?;
+        let scratch = scratch_path(&self.store, &self.run, &executor.attempt_id, Some(id))?;
         let expand = |s: &str| {
             s.replace("{repo}", &command_path(&self.repo))
                 .replace("{scratch}", &command_path(&scratch))
         };
-        let mut env = f
+        // Existing checkpoints can contain a pair of names that were treated
+        // as distinct by an older Windows version; do not run such an
+        // ambiguous frozen command or silently let the OS choose a value.
+        let frozen_env = f
             .env
             .iter()
-            .map(|(k, v)| (k.clone(), expand(v)))
-            .collect::<BTreeMap<_, _>>();
+            .map(|(name, value)| EnvironmentValue {
+                name: name.clone(),
+                value: expand(value),
+            })
+            .collect::<Vec<_>>();
+        let mut env = check_environment(&frozen_env)?;
         for (key, dir) in [
             ("CARGO_TARGET_DIR", "target"),
             ("TMP", "tmp"),
@@ -1263,11 +2071,51 @@ impl Pipeline {
             let p = scratch.join(dir);
             std::fs::create_dir_all(&p).map_err(io)?;
             // Defaults must not silently change the frozen command contract.
-            env.entry(key.into())
-                .or_insert_with(|| p.to_string_lossy().into_owned());
+            add_environment_default(&mut env, key, p.to_string_lossy().into_owned())?;
         }
+        let program = if let Some(sentinel) = crate::orch::runner::parse_sentinel(&f.program)? {
+            let plan = c.plan.as_ref().ok_or_else(|| fail("runner plan missing"))?;
+            checkpoint::validate_runner_checks(&self.store, &c, plan, &c.checks)?;
+            let evidence = checkpoint::runner_evidence(
+                &self.store,
+                &c,
+                checkpoint::planning_epoch(&c),
+                false,
+            )?;
+            let probe =
+                match super::prepared_runner::probe_host(&self.server, &self.repo, &scratch)? {
+                    super::prepared_runner::ProbeOutcome::Ready(probe) => probe,
+                    _ => {
+                        return Err(Failure::new(
+                            "evaluation_unprepared",
+                            "the prepared runner host probe failed",
+                        ))
+                    }
+                };
+            let executable = super::prepared_runner::materialize(
+                &self.repo,
+                &scratch,
+                &evidence.claim_bytes,
+                &evidence.receipt,
+                &evidence.receipt.identity,
+                &sentinel,
+                &evidence.source,
+                evidence
+                    .binary
+                    .as_deref()
+                    .ok_or_else(|| fail("prepared runner binary missing"))?,
+                evidence
+                    .probe_stdout
+                    .as_deref()
+                    .ok_or_else(|| fail("prepared runner probe missing"))?,
+                &probe,
+            )?;
+            command_path(&executable)
+        } else {
+            expand(&f.program)
+        };
         let result = self.server.exec_check(&codex::CommandSpec {
-            program: expand(&f.program),
+            program,
             args: f.args.iter().map(|s| expand(s)).collect(),
             cwd: scratch.clone(),
             env,
@@ -1294,11 +2142,10 @@ impl Pipeline {
             },
         };
         if baseline {
-            if !result.policy_applied {
-                return Err(fail("baseline execution policy missing"));
-            }
-            let r = artifact(&self.artifacts(), &serde_json::to_vec(&result).map_err(io)?)?;
-            self.receipt(&format!("baseline-{id}"), &r)?;
+            self.edit(|c| {
+                checkpoint::record_baseline_check(&self.store, &self.run, c.revision, &result)
+                    .map(|_| ())
+            })?;
         } else {
             self.edit(|c| {
                 checkpoint::record_check(&self.store, &self.run, c.revision, &result).map(|_| ())
@@ -1335,63 +2182,10 @@ impl Pipeline {
     }
     /// Separate acceptance-infrastructure readiness from expected pre-change
     /// product failures, cross-checked against the executed baseline receipts.
-    fn baseline_gate(&self, report: &Value, r: &ArtifactRef) -> Res<()> {
-        let c = self.load()?;
-        let out = Self::output(report)?;
-        let mut seen = BTreeMap::new();
-        for o in out["observations"].as_array().into_iter().flatten() {
-            if let (Some(id), Some(class)) = (o["check_id"].as_str(), o["classification"].as_str())
-            {
-                if seen.insert(id.to_owned(), class.to_owned()).is_some() {
-                    return Err(fail("baseline classified a check twice"));
-                }
-            }
-        }
-        let mut problems = vec![];
-        if seen.keys().any(|id| !c.checks.contains_key(id)) {
-            problems.push("classification names an unknown check".to_owned());
-        }
-        for id in c.checks.keys() {
-            let receipt = c
-                .receipts
-                .get(&format!("baseline-{id}"))
-                .ok_or_else(|| fail("baseline omitted frozen checks"))?;
-            let result: CheckResult =
-                serde_json::from_slice(&std::fs::read(&receipt.path).map_err(io)?).map_err(io)?;
-            match (seen.get(id).map(String::as_str), result.exit_code) {
-                (None, _) => problems.push(format!("{id} unclassified")),
-                (_, None) => {
-                    problems.push(format!("{id} did not exit (timeout or launch failure)"))
-                }
-                (_, _) if !result.policy_applied => {
-                    problems.push(format!("{id} ran without the check policy"))
-                }
-                (Some("infrastructure_failure"), _) => {
-                    problems.push(format!("{id} classified infrastructure_failure"))
-                }
-                (Some(class), Some(code)) if (code == 0) != (class == "passed") => problems.push(
-                    format!("{id} classification {class} contradicts exit {code}"),
-                ),
-                (Some("passed" | "product_missing" | "product_defect"), _) => {}
-                (Some(class), _) => {
-                    problems.push(format!("{id} has unknown classification {class}"))
-                }
-            }
-        }
-        if out["infrastructure_ready"] != true && problems.is_empty() {
-            problems.push("verifier reported infrastructure not ready".into());
-        }
-        if !problems.is_empty() {
-            return Err(Failure::new(
-                "evaluation_infrastructure",
-                format!(
-                    "acceptance infrastructure not ready before engineering ({}): {}. No writer started; the frozen plan and checks stay as evidence, and this run cannot unfreeze them. Fix the check, command or environment cause and start a new run. Classification also has to match the executed baseline receipts.",
-                    problems.join("; "),
-                    out["summary"].as_str().unwrap_or("")
-                ),
-            ));
-        }
-        self.receipt(checkpoint::BASELINE_GATE, r)
+    fn baseline_gate(&self, _report: &Value, r: &ArtifactRef) -> Res<()> {
+        self.edit(|c| {
+            checkpoint::record_baseline_gate(&self.store, &self.run, c.revision, r).map(|_| ())
+        })
     }
     fn drive(self: &Arc<Self>) -> Res<()> {
         loop {
@@ -1579,12 +2373,8 @@ impl Pipeline {
                     self.phase(Phase::Memory)?;
                 }
                 Phase::Memory => {
-                    let review = c
-                        .receipts
-                        .iter()
-                        .find(|(k, _)| k.starts_with("review-"))
-                        .ok_or_else(|| fail("verified evidence missing"))?
-                        .1;
+                    let review = checkpoint::verified_review(&c)
+                        .ok_or_else(|| fail("current verified review missing"))?;
                     self.role(c.steps.get("memory").ok_or_else(||fail("missing memory step"))?,vec![tool("record_memory",json!({"evidence_id":{"type":"string","enum":[review.digest]},"content":{"type":"string"}}))],None)?;
                     self.phase(Phase::ReadyToCommit)?;
                 }
@@ -1597,6 +2387,15 @@ impl Pipeline {
         spec: &StepSpec,
         tools: Vec<DynamicTool>,
         schema: Option<Value>,
+    ) -> Res<(Value, ArtifactRef, ExecutorIdentity)> {
+        self.role_with_peers(spec, tools, schema, None)
+    }
+    fn role_with_peers(
+        self: &Arc<Self>,
+        spec: &StepSpec,
+        tools: Vec<DynamicTool>,
+        schema: Option<Value>,
+        batch: Option<&ArtifactRef>,
     ) -> Res<(Value, ArtifactRef, ExecutorIdentity)> {
         if self.cancel.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
             return Err(Failure::new("cancelled", "dispatch cancelled"));
@@ -1620,6 +2419,25 @@ impl Pipeline {
             Purpose::Content => ("luna", "medium"),
             _ => ("terra", "medium"),
         };
+        let identity = |thread_id: String, model: String| ExecutorIdentity {
+            attempt_id: claim.attempt.attempt_id.clone(),
+            thread_id,
+            model,
+            purpose: spec.purpose.clone(),
+            policy: if writing {
+                ExecutionPolicy::WorkspaceWrite
+            } else {
+                ExecutionPolicy::ProductReadOnly
+            },
+        };
+        if claim.disposition == ClaimDisposition::ExistingTerminal {
+            let (report, r, model) = checkpoint::terminal_attempt_report(
+                &self.store,
+                &self.load()?,
+                &claim.attempt.attempt_id,
+            )?;
+            return Ok((report, r, identity(model.thread_id, model.configured_model)));
+        }
         let model = self.server.resolve_model(model_role)?;
         let generation = self.server.generation();
         let expected = self
@@ -1631,31 +2449,6 @@ impl Pipeline {
             return Err(Failure::new(
                 "outcome_unknown",
                 "run connection generation changed; reconcile before further work",
-            ));
-        }
-        let identity = |thread_id: String| ExecutorIdentity {
-            attempt_id: claim.attempt.attempt_id.clone(),
-            thread_id,
-            model: model.clone(),
-            purpose: spec.purpose.clone(),
-            policy: if writing {
-                ExecutionPolicy::WorkspaceWrite
-            } else {
-                ExecutionPolicy::ProductReadOnly
-            },
-        };
-        if claim.disposition == ClaimDisposition::ExistingTerminal {
-            let r = claim
-                .attempt
-                .raw_result
-                .clone()
-                .ok_or_else(|| fail("terminal attempt lacks saved result"))?;
-            let report =
-                serde_json::from_slice(&std::fs::read(&r.path).map_err(io)?).map_err(io)?;
-            return Ok((
-                report,
-                r,
-                identity(claim.attempt.thread_id.clone().unwrap_or_default()),
             ));
         }
         let before = if writing {
@@ -1670,19 +2463,13 @@ impl Pipeline {
             execution: Mutex::new(None),
             tools: tools.iter().map(|t| t.name.clone()).collect(),
             model: model.clone(),
+            effort: effort.into(),
             operation: Mutex::new(()),
         });
         let brief = std::fs::read_to_string(&spec.brief_ref.path).map_err(io)?;
         let c = self.load()?;
         let scratch = if writing {
-            let path = self
-                .store
-                .join("runs")
-                .join(&self.run)
-                .join("scratch")
-                .join(&claim.attempt.attempt_id)
-                .join("work");
-            std::fs::create_dir_all(&path).map_err(io)?;
+            let path = scratch_path(&self.store, &self.run, &claim.attempt.attempt_id, None)?;
             Some(PathBuf::from(command_path(&path)))
         } else {
             None
@@ -1700,7 +2487,7 @@ impl Pipeline {
             })
             .filter_map(|a| a.raw_result.clone())
             .collect::<Vec<_>>();
-        let context = if matches!(spec.purpose, Purpose::Verifier | Purpose::Memory) {
+        let context = if spec.purpose == Purpose::Verifier {
             format!(
                 "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nReview evidence: {:?}\nPrivate evaluation (verifier only): {:?}",
                 self.intent()?,
@@ -1710,15 +2497,22 @@ impl Pipeline {
                     .iter()
                     .filter(|(k, _)| k.starts_with("review-"))
                     .collect::<Vec<_>>(),
-                if spec.purpose == Purpose::Verifier { c.receipts.get(&format!("evaluation-{}", checkpoint::planning_epoch(&c))) } else { None }
+                c.receipts.get(&format!("evaluation-{}", checkpoint::planning_epoch(&c)))
+            )
+        } else if spec.purpose == Purpose::Memory {
+            let review = checkpoint::verified_review(&c)
+                .ok_or_else(|| fail("current verified review missing"))?;
+            format!(
+                "\nIntent: {}\nResearch: {:?}\nPlan: {:?}\nVerified review evidence: {:?}",
+                self.intent()?,
+                c.research,
+                c.plan,
+                review
             )
         } else if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler) {
             // Non-leaking prerequisite proof: counts and Rust-enforced facts only.
-            let private = c
-                .checks
-                .keys()
-                .filter(|id| id.starts_with("independent-"))
-                .count();
+            let public = checkpoint::public_check_ids(&self.store, &c)?;
+            let private = c.checks.len() - public.len();
             let gate = if c.receipts.contains_key(checkpoint::BASELINE_GATE) {
                 format!("Rust already verified the prerequisites before any writer started: {} frozen checks (of which {private} are private held-out checks whose contents are withheld from writers by design) executed in the baseline and the acceptance infrastructure was classified ready; pre-change product failures are expected. Engineering is authorized; do not wait for, request or search for evaluation-preparation or baseline reports.", c.checks.len())
             } else {
@@ -1757,129 +2551,398 @@ impl Pipeline {
             },
         );
         let mut report = match result {
-            Ok(r) if matches!(r.terminal, TransportTerminal::Completed) => r,
-            Ok(r) => {
-                if matches!(r.terminal, TransportTerminal::OutcomeUnknown) {
-                    // Keep the step, thread and last status so reconciliation
-                    // starts from evidence instead of a bare unknown terminal.
-                    let detail = r.report["error"]
-                        .as_object()
-                        .and_then(|e| e["message"].as_str().map(|m| format!(": {m}")))
-                        .or_else(|| {
-                            r.report["status"]
-                                .as_str()
-                                .map(|s| format!(" after status {s}"))
-                        })
-                        .unwrap_or_default();
-                    return Err(Failure::new(
-                        "outcome_unknown",
-                        format!(
-                            "execution terminal could not be established for step {} on thread {}{detail}",
-                            spec.step_id,
-                            r.execution.thread_id
-                        ),
-                    ));
-                }
-                // Surface the handler's typed failure instead of the transport
-                // wrapper, so the blocked reason names the real cause.
-                let failure = cause_failure(&r.report).unwrap_or_else(|| {
-                    fail(format!("{:?} failed: {}", spec.purpose, r.report["error"]))
-                });
-                self.edit(|c| {
-                    checkpoint::commit_result(
-                        &self.store,
-                        &self.run,
-                        c.revision,
-                        &claim.attempt.attempt_id,
-                        if matches!(r.terminal, TransportTerminal::Cancelled) {
-                            AttemptOutcome::Cancelled
-                        } else {
-                            AttemptOutcome::Failed
-                        },
-                        &r.report,
-                    )
-                })?;
-                return Err(failure);
+            Ok(r) if matches!(r.terminal, TransportTerminal::OutcomeUnknown) => {
+                let last_status = r.report["status"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("unavailable");
+                let detail = r.report["error"]
+                    .as_object()
+                    .and_then(|e| e["message"].as_str().map(|m| format!(": {m}")))
+                    .unwrap_or_default();
+                return Err(Failure::new("outcome_unknown", format!(
+                    "execution terminal could not be established for step {} on thread {} (last status {last_status}){detail}",
+                    spec.step_id, r.execution.thread_id)));
             }
+            Ok(r) => r,
             Err(e) => return Err(e),
         };
-        if let Some(before) = before {
-            let after = crate::orch::lifecycle::contents(&self.repo)?;
-            let c = self.load()?;
-            let peers: Vec<String> = if spec.purpose == Purpose::Engineer {
-                c.steps
-                    .values()
-                    .filter(|s| s.purpose == Purpose::Engineer && s.step_id != spec.step_id)
-                    .flat_map(|s| s.scope.clone())
-                    .collect()
-            } else {
-                vec![]
-            };
-            let outside = before.keys().chain(after.keys()).any(|p| {
-                before.get(p) != after.get(p)
-                    && !crate::orch::covers(&spec.scope, p)
-                    && !crate::orch::covers(&peers, p)
-            });
-            let reported_outside = report.report["file_changes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v["path"].as_str())
-                .any(|p| {
-                    !scratch.as_ref().is_some_and(|root| scratch_change(root, p))
-                        && relative_change(&self.repo, p)
-                            .is_none_or(|p| !crate::orch::covers(&spec.scope, &p))
-                });
-            if outside || reported_outside {
-                report.report["error"] = json!({"kind":"scope_violation","message":"worker changed paths outside assigned product scope; use the assigned external scratch directory for build output"});
-                self.edit(|c| {
-                    checkpoint::commit_result(
-                        &self.store,
-                        &self.run,
-                        c.revision,
-                        &claim.attempt.attempt_id,
-                        AttemptOutcome::Failed,
-                        &report.report,
-                    )
-                })?;
-                return Err(fail("worker changed paths outside assigned scope"));
-            }
-            report.report["scope_checked"] = json!(true);
-            report.report["scope_snapshot"] = json!(crate::orch::snapshot(&self.repo, &spec.scope));
-        }
-        // Transport completion is not work success: writers must return a
-        // typed completed status before they can satisfy any dependency.
-        let blocked = if writes_work(&spec.purpose) {
+        let failure = if matches!(report.terminal, TransportTerminal::Completed) {
+            None
+        } else {
+            Some(cause_failure(&report.report).unwrap_or_else(|| {
+                fail(format!(
+                    "{:?} failed: {}",
+                    spec.purpose, report.report["error"]
+                ))
+            }))
+        };
+        let blocked = if failure.is_none() && writes_work(&spec.purpose) {
             work_blocked(&report.report)
         } else {
             None
         };
-        let saved = self
-            .edit(|c| {
+        let outcome = match report.terminal {
+            TransportTerminal::Completed if blocked.is_some() => AttemptOutcome::Blocked,
+            TransportTerminal::Completed => AttemptOutcome::Completed,
+            TransportTerminal::Failed => AttemptOutcome::Failed,
+            TransportTerminal::Cancelled => AttemptOutcome::Cancelled,
+            TransportTerminal::OutcomeUnknown => unreachable!(),
+        };
+        let saved = if let Some(before) = before {
+            // The original role alone holds the pre-dispatch map. Persist the
+            // complete before/after audit before making any writer terminal,
+            // including known failure or cancellation.
+            let after = crate::orch::lifecycle::contents(&self.repo)?;
+            report.report["scope_checked"] = json!(true);
+            report.report["scope_snapshot"] = json!(crate::orch::snapshot(&self.repo, &spec.scope));
+            let (saved, payload, outside) = self.edit(|c| {
+                checkpoint::commit_scoped_result(
+                    &self.store,
+                    &self.run,
+                    c.revision,
+                    &claim.attempt.attempt_id,
+                    outcome.clone(),
+                    &report.report,
+                    batch,
+                    scratch
+                        .as_ref()
+                        .ok_or_else(|| fail("writer scratch missing"))?,
+                    &before,
+                    &after,
+                )
+            })?;
+            report.report = payload;
+            if outside {
+                return Err(fail("worker changed paths outside assigned scope"));
+            }
+            saved.value
+        } else {
+            self.edit(|c| {
                 checkpoint::commit_result(
                     &self.store,
                     &self.run,
                     c.revision,
                     &claim.attempt.attempt_id,
-                    if blocked.is_some() {
-                        AttemptOutcome::Blocked
-                    } else {
-                        AttemptOutcome::Completed
-                    },
+                    outcome.clone(),
                     &report.report,
                 )
             })?
-            .value;
+            .value
+        };
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
         if let Some(reason) = blocked {
             return Err(blocked_failure(&spec.step_id, &reason));
         }
-        Ok((report.report, saved, identity(report.execution.thread_id)))
+        let evidence =
+            checkpoint::attempt_model(&self.store, &self.load()?, &claim.attempt.attempt_id)?;
+        Ok((
+            report.report,
+            saved,
+            identity(evidence.thread_id, evidence.configured_model),
+        ))
     }
 }
 
 #[cfg(test)]
 mod scratch_scope_tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link.to_string_lossy().replace('/', "\\"))
+            .arg(target.to_string_lossy().replace('/', "\\"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn scratch_paths_are_short_and_isolated_by_full_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp
+            .path()
+            .join("orchestrate")
+            .join("sumints-acceptance-dev9-20261101");
+        std::fs::create_dir_all(&store).unwrap();
+        let run = "run-3ec46c705c1083c78121a1e4";
+        let attempt = "d8360f2dc4281fefc91271cc719cd632";
+        let id = "independent-sumints-contract-debug-release";
+        let assigned = scratch_path(&store, run, attempt, Some(id)).unwrap();
+        assert_eq!(
+            scratch_path(&store, run, attempt, Some(id)).unwrap(),
+            assigned
+        );
+        assert_eq!(assigned.parent().unwrap(), store.join("s"));
+        let other_run = scratch_path(&store, "run-other", attempt, Some(id)).unwrap();
+        let other_attempt = scratch_path(&store, run, "other-attempt", Some(id)).unwrap();
+        let other_check = scratch_path(&store, run, attempt, Some("another-check")).unwrap();
+        let writer = scratch_path(&store, run, attempt, None).unwrap();
+        let distinct = [&assigned, &other_run, &other_attempt, &other_check, &writer]
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(distinct.len(), 5);
+        assert!(!scratch_change(
+            &assigned,
+            &other_check.join("out").to_string_lossy()
+        ));
+        let legacy = store
+            .join("runs")
+            .join(run)
+            .join("scratch")
+            .join(attempt)
+            .join(id);
+        assert!(assigned.to_string_lossy().len() + 40 <= legacy.to_string_lossy().len());
+        assert_eq!(assigned.file_name().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn scratch_creation_survives_interruption_and_concurrent_retries() {
+        use std::sync::{Arc, Barrier};
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(tmp.path().join("store"));
+        std::fs::create_dir_all(store.join("s")).unwrap();
+        // An interruption before allocating the identity leaves only the root.
+        let expected = scratch_path(&store, "run", "attempt", Some("check")).unwrap();
+        std::fs::write(expected.join("preserved"), b"before interruption").unwrap();
+        // An interruption after allocating it retains its existing contents.
+        assert_eq!(
+            scratch_path(&store, "run", "attempt", Some("check")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read(expected.join("preserved")).unwrap(),
+            b"before interruption"
+        );
+
+        let count = 16;
+        let barrier = Arc::new(Barrier::new(count));
+        let tasks = (0..count)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    scratch_path(&store, "run", "new-attempt", Some("concurrent-check"))
+                })
+            })
+            .collect::<Vec<_>>();
+        let assigned = tasks
+            .into_iter()
+            .map(|t| t.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert!(assigned.iter().all(|p| p == &assigned[0]));
+    }
+
+    #[test]
+    fn legacy_scratch_is_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let legacy = store.join("runs/run-old/scratch/attempt-old/work");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("existing"), "preserved").unwrap();
+        assert_eq!(
+            scratch_path(&store, "run-old", "attempt-old", None).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("existing")).unwrap(),
+            "preserved"
+        );
+        let check = store.join("runs/run-old/scratch/attempt-old/public-check");
+        std::fs::create_dir_all(&check).unwrap();
+        assert_eq!(
+            scratch_path(&store, "run-old", "attempt-old", Some("public-check")).unwrap(),
+            check
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_uppercase_legacy_names_are_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let legacy = store.join("RUNS/RUN-OLD/SCRATCH/ATTEMPT-OLD/PUBLIC-CHECK");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("preserved"), "yes").unwrap();
+        let assigned =
+            scratch_path(&store, "run-old", "attempt-old", Some("public-check")).unwrap();
+        assert_eq!(
+            assigned.canonicalize().unwrap(),
+            legacy.canonicalize().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(assigned.join("preserved")).unwrap(),
+            "yes"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn legacy_scratch_rejects_links_to_another_attempt_in_the_same_store() {
+        fn link(link: &Path, target: &Path) {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, link).unwrap();
+            #[cfg(windows)]
+            junction(link, target);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let other_attempt = store.join("runs/run-b/scratch/attempt-b");
+        let other_check = other_attempt.join("check");
+        std::fs::create_dir_all(&other_check).unwrap();
+        std::fs::write(other_check.join("preserved"), "yes").unwrap();
+
+        let leaf_parent = store.join("runs/run-a/scratch/attempt-a");
+        std::fs::create_dir_all(&leaf_parent).unwrap();
+        link(&leaf_parent.join("check"), &other_check);
+        assert!(scratch_path(&store, "run-a", "attempt-a", Some("check")).is_err());
+
+        let ancestor_parent = store.join("runs/run-c/scratch");
+        std::fs::create_dir_all(&ancestor_parent).unwrap();
+        link(&ancestor_parent.join("attempt-c"), &other_attempt);
+        assert!(scratch_path(&store, "run-c", "attempt-c", Some("check")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(other_check.join("preserved")).unwrap(),
+            "yes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_uppercase_scratch_names_are_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let identity = serde_json::to_vec(&("run", "attempt", Some("check"))).unwrap();
+        let existing = store.join("S").join(digest(&identity).to_ascii_uppercase());
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("preserved"), "yes").unwrap();
+        let assigned = scratch_path(&store, "run", "attempt", Some("check")).unwrap();
+        assert_eq!(
+            assigned.canonicalize().unwrap(),
+            existing.canonicalize().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(assigned.join("preserved")).unwrap(),
+            "yes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_cannot_escape_store_via_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&store).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, store.join("s")).unwrap();
+        assert!(scratch_path(&store, "run", "attempt", Some("check")).is_err());
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scratch_junctions_cannot_escape_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let root_store = tmp.path().join("root-store");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(&root_store).unwrap();
+        junction(&root_store.join("s"), &outside);
+        assert!(scratch_path(&root_store, "run", "attempt", Some("check")).is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+
+        let slot_store = tmp.path().join("slot-store");
+        std::fs::create_dir_all(slot_store.join("s")).unwrap();
+        let identity = serde_json::to_vec(&("run", "attempt", Some("check"))).unwrap();
+        junction(&slot_store.join("s").join(digest(&identity)), &outside);
+        assert!(scratch_path(&slot_store, "run", "attempt", Some("check")).is_err());
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn assigned_scratch_supports_an_actual_msvc_cargo_link() {
+        let rustc = std::process::Command::new("rustc")
+            .arg("-vV")
+            .output()
+            .unwrap();
+        assert!(rustc.status.success());
+        if !String::from_utf8_lossy(&rustc.stdout).contains("-pc-windows-msvc") {
+            eprintln!("MSVC linker regression skipped: Rust host is not MSVC");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp
+            .path()
+            .join("orchestrate")
+            .join("sumints-acceptance-dev9-20261101");
+        std::fs::create_dir_all(&store).unwrap();
+        let scratch = scratch_path(
+            &store,
+            "run-3ec46c705c1083c78121a1e4",
+            "d8360f2dc4281fefc91271cc719cd632",
+            Some("independent-sumints-contract-debug-release"),
+        )
+        .unwrap();
+        let harness = scratch.join("independent-sumints");
+        let source = harness.join("control/src");
+        let target = harness.join("control-target");
+        std::fs::create_dir_all(&source).unwrap();
+        let manifest = source.parent().unwrap().join("Cargo.toml");
+        std::fs::write(
+            &manifest,
+            "[package]\nname='independent_control'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        let mut code = String::new();
+        for n in 0..64 {
+            code.push_str(&format!(
+                "mod m{n} {{ #[inline(never)] pub fn f(x:i64)->i64 {{ x.wrapping_add({n}) }} }}\n"
+            ));
+        }
+        code.push_str("fn main() { let mut x=std::env::args().count() as i64;\n");
+        for n in 0..64 {
+            code.push_str(&format!("x=m{n}::f(x);\n"));
+        }
+        code.push_str("println!(\"{}\",x); }\n");
+        std::fs::write(source.join("main.rs"), code).unwrap();
+        let cargo = option_env!("CARGO").unwrap_or("cargo");
+        let lock = std::process::Command::new(cargo)
+            .args(["generate-lockfile", "--offline", "--manifest-path"])
+            .arg(&manifest)
+            .output()
+            .unwrap();
+        assert!(
+            lock.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let build = std::process::Command::new(cargo)
+            .args(["build", "--frozen", "--offline", "--manifest-path"])
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "target {}: {}",
+            target.display(),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(target.join("debug/independent_control.exe").is_file());
+    }
 
     #[test]
     fn only_the_assigned_absolute_scratch_tree_is_allowed() {
@@ -1951,6 +3014,105 @@ mod work_result_tests {
         assert_eq!(failure.message, "preparation failed");
         assert!(cause_failure(&json!({"error":null})).is_none());
         assert!(cause_failure(&json!({})).is_none());
+    }
+
+    #[test]
+    fn terminal_role_replay_uses_original_receipt_with_transport_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let store = tmp.path().join("store");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        let brief = artifact(&store, b"research request").unwrap();
+        let c = checkpoint::create_run(
+            &store,
+            &checkpoint::RunSeed {
+                run_id: "run".into(),
+                repo: checkpoint::RepoIdentity {
+                    canonical_root: repo.canonicalize().unwrap(),
+                    identity_digest: "repo".into(),
+                },
+                intent: brief.clone(),
+            },
+        )
+        .unwrap();
+        let spec = StepSpec {
+            run_id: "run".into(),
+            step_id: "research".into(),
+            purpose: Purpose::Research,
+            brief_ref: brief,
+            scope: vec![],
+            dependency_ids: vec![],
+            check_ids: vec![],
+        };
+        let claim =
+            checkpoint::claim_step(&store, c.revision, &spec, &spec.brief_ref.digest).unwrap();
+        let rev = checkpoint::record_attempt_dispatch(
+            &store,
+            "run",
+            claim.revision,
+            &AttemptEvent {
+                event_id: "dispatch".into(),
+                attempt_id: claim.attempt.attempt_id.clone(),
+                sequence: 1,
+                kind: AttemptEventKind::Dispatching {
+                    generation: 17,
+                    thread_id: "original-thread".into(),
+                },
+            },
+            "original-astra",
+            "original-astra",
+            Some("max"),
+        )
+        .unwrap();
+        let rev = checkpoint::record_attempt_event(
+            &store,
+            "run",
+            rev,
+            &AttemptEvent {
+                event_id: "running".into(),
+                attempt_id: claim.attempt.attempt_id.clone(),
+                sequence: 2,
+                kind: AttemptEventKind::Running {
+                    turn_id: "original-turn".into(),
+                },
+            },
+        )
+        .unwrap();
+        let report = json!({"status":"completed","thread_id":"original-thread","turn_id":"original-turn",
+            "model":null,"model_source":"thread/read","final_message":"saved result"});
+        let saved = checkpoint::commit_result(
+            &store,
+            "run",
+            rev,
+            &claim.attempt.attempt_id,
+            AttemptOutcome::Completed,
+            &report,
+        )
+        .unwrap();
+        let pipeline = Arc::new(Pipeline {
+            server: Arc::new(AppServer::new(vec![
+                "axiom-model-server-intentionally-unavailable".into(),
+            ])),
+            store: store.clone(),
+            home: tmp.path().into(),
+            repo,
+            project: "project".into(),
+            run: "run".into(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            grace: 10,
+            mutations: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        });
+        let (replay, reference, executor) = pipeline.role(&spec, vec![], None).unwrap();
+        assert_eq!(replay, report);
+        assert_eq!(reference, saved.value);
+        assert_eq!(executor.model, "original-astra");
+        assert_eq!(executor.thread_id, "original-thread");
+        assert_eq!(pipeline.generation.load(Ordering::Acquire), 0);
+        std::fs::write(&reference.path, b"report changed").unwrap();
+        assert!(pipeline.role(&spec, vec![], None).is_err());
     }
 }
 
