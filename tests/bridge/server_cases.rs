@@ -57,7 +57,7 @@ fn fixture(home: &std::path::Path) {
         .success());
     fs::create_dir_all(store.join("reports")).unwrap();
     let snap = axiom::orch::snapshot(home, &["file.txt".into()]);
-    fs::write(store.join("reports/u1.evidence.tsv"),format!("kind\tcommand\texit_code\tcommit\tts\nrun\tworker\t0\t{snap}\t1\nscope\tcheck\t0\t{snap}\t2\nverify\ttest\t0\t{snap}\t3\n")).unwrap();
+    fs::write(store.join("reports/u1.evidence.tsv"),format!("kind\tcommand\texit_code\tcommit\tts\nrun\tworker\t0\t{snap}\t1\nscope\tcheck\t0\t{snap}\t2\nverify\ttest\t0\t{snap}\t3\nreview\tindependent-review\t0\t{snap}\t4\n")).unwrap();
     fs::write(
         store.join("reports/u1.repo.json"),
         serde_json::to_vec(

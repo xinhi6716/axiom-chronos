@@ -36,6 +36,8 @@ wire_struct!(Checkpoint { schema_version: u32, revision: u64, run_id: String, re
 wire_struct!(RunSeed { run_id: String, repo: RepoIdentity, intent: ArtifactRef });
 wire_struct!(RecoveryObservation { attempt_id: String, live_in_process: bool, terminal_report: Option<ArtifactRef>, stopped_evidence: Option<ArtifactRef> });
 wire_struct!(ScopeBatch { members: BTreeMap<String, String> });
+wire_struct!(ScopeBatchCaller { attempt_id: String, generation: u64, thread_id: String, turn_id: String, call_id: String });
+wire_struct!(ScopeBatchDispatch { run_id: String, input_digest: String, caller: ScopeBatchCaller, batch: ArtifactRef });
 wire_struct!(ScopeAudit { attempt_id: String, step_id: String, generation: Option<u64>, thread_id: Option<String>, turn_id: Option<String>, scope: Vec<String>, batch: Option<ArtifactRef>, peer_attempts: Vec<String>, scratch: PathBuf, before: BTreeMap<String, String>, after: BTreeMap<String, String>, report_digest: String, outcome: AttemptOutcome });
 }
 #[derive(Debug, Clone)]
@@ -1579,11 +1581,32 @@ pub(crate) fn register_scope_batch(
     id: &str,
     rev: u64,
     members: &[(String, String)],
+    caller: &ScopeBatchCaller,
 ) -> Res<Mutation<ArtifactRef>> {
     mutate(store, id, rev, |c| {
         if c.phase != Phase::Engineering || members.is_empty() {
             return Err(fail("invalid scope audit batch"));
         }
+        let coordinator = c
+            .attempts
+            .get(&caller.attempt_id)
+            .ok_or_else(|| fail("scope batch caller missing"))?;
+        if coordinator.state != AttemptState::Running
+            || c.steps
+                .get(&coordinator.step_id)
+                .is_none_or(|s| s.purpose != Purpose::Dispatcher)
+            || coordinator.generation != Some(caller.generation)
+            || coordinator.thread_id.as_deref() != Some(caller.thread_id.as_str())
+            || coordinator.turn_id.as_deref() != Some(caller.turn_id.as_str())
+            || caller.turn_id.trim().is_empty()
+            || caller.call_id.trim().is_empty()
+        {
+            return Err(fail(
+                "scope batch is not a callback of the running dispatcher",
+            ));
+        }
+        attempt_model(store, c, &caller.attempt_id)?;
+        let input_digest = coordinator.input_digest.clone();
         let mut batch = ScopeBatch {
             members: BTreeMap::new(),
         };
@@ -1613,6 +1636,16 @@ pub(crate) fn register_scope_batch(
         let receipt = save_evidence(store, id, "scope-batch", &key, &batch)?;
         c.receipts
             .insert(format!("scope-batch-{key}"), receipt.clone());
+        // ScopeBatch's old shape remains valid for scope audits. Only this
+        // additional receipt can prove which actual callback registered it.
+        let dispatch = ScopeBatchDispatch {
+            run_id: id.into(),
+            input_digest,
+            caller: caller.clone(),
+            batch: receipt.clone(),
+        };
+        let binding = save_evidence(store, id, "scope-dispatch", &key, &dispatch)?;
+        c.receipts.insert(format!("scope-dispatch-{key}"), binding);
         Ok(receipt)
     })
 }
@@ -3099,6 +3132,35 @@ fn batch_retry_matches(
         return Err(fail("retry is not a known failed read-only dispatcher"));
     }
     terminal_attempt_report(store, c, &a.attempt_id)?;
+    let dispatched_by_this_attempt = c
+        .receipts
+        .iter()
+        .filter(|(key, _)| key.starts_with("scope-dispatch-"))
+        .any(|(_, reference)| {
+            if check_evidence_store(c, reference).is_none() {
+                return false;
+            }
+            let Ok(bytes) = bounded_artifact_bytes(store, &c.repo.canonical_root, reference) else {
+                return false;
+            };
+            let Ok(dispatch) = serde_json::from_slice::<ScopeBatchDispatch>(&bytes) else {
+                return false;
+            };
+            dispatch.run_id == c.run_id
+                && dispatch.input_digest == a.input_digest
+                && dispatch.batch == retry.batch
+                && dispatch.caller.attempt_id == a.attempt_id
+                && Some(dispatch.caller.generation) == a.generation
+                && Some(dispatch.caller.thread_id.as_str()) == a.thread_id.as_deref()
+                && Some(dispatch.caller.turn_id.as_str()) == a.turn_id.as_deref()
+                && !dispatch.caller.turn_id.trim().is_empty()
+                && !dispatch.caller.call_id.trim().is_empty()
+        });
+    if !dispatched_by_this_attempt {
+        return Err(fail(
+            "retry batch lacks its actual dispatcher callback binding",
+        ));
+    }
     let batch: ScopeBatch = serde_json::from_slice(&bounded_artifact_bytes(
         store,
         &c.repo.canonical_root,
@@ -3649,7 +3711,26 @@ mod verified_artifact_tests {
                 };
                 let batch_ref =
                     save_evidence(&store, "run", "scope-batch", "fixture", &batch).unwrap();
-                c.receipts.insert("scope-batch-fixture".into(), batch_ref);
+                c.receipts
+                    .insert("scope-batch-fixture".into(), batch_ref.clone());
+                // This fixture represents a callback recorded while the
+                // coordinator was Running, before the observed child state.
+                let dispatch = ScopeBatchDispatch {
+                    run_id: "run".into(),
+                    input_digest: c.attempts["attempt"].input_digest.clone(),
+                    caller: ScopeBatchCaller {
+                        attempt_id: "attempt".into(),
+                        generation: 1,
+                        thread_id: "thread".into(),
+                        turn_id: "turn".into(),
+                        call_id: "batch-call".into(),
+                    },
+                    batch: batch_ref,
+                };
+                let dispatch_ref =
+                    save_evidence(&store, "run", "scope-dispatch", "fixture", &dispatch).unwrap();
+                c.receipts
+                    .insert("scope-dispatch-fixture".into(), dispatch_ref);
                 c.reservations.push(ScopeReservation {
                     attempt_id: "child".into(),
                     paths: vec!["src".into()],
@@ -3692,6 +3773,182 @@ mod verified_artifact_tests {
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn prepared_retry_requires_the_failed_coordinators_own_batch_callback() {
+        let (_temp, store, mut c) = setup();
+        c.phase = Phase::Engineering;
+        let step_id = format!(
+            "coord-batch-{}",
+            &digest(&serde_json::to_vec(&vec!["unit"]).unwrap())[..16]
+        );
+        let spec = StepSpec {
+            run_id: "run".into(),
+            step_id: step_id.clone(),
+            purpose: Purpose::Dispatcher,
+            brief_ref: c.intent.clone(),
+            scope: vec![],
+            dependency_ids: vec![],
+            check_ids: vec![],
+        };
+        c.steps.insert(step_id.clone(), spec.clone());
+        let mut a = unknown_attempt();
+        a.step_id = step_id.clone();
+        a.state = AttemptState::Running;
+        c.attempts.insert(a.attempt_id.clone(), a);
+        fixture_model(&store, &mut c, "attempt", "test");
+        c.steps.insert(
+            "unit".into(),
+            StepSpec {
+                run_id: "run".into(),
+                step_id: "unit".into(),
+                purpose: Purpose::Engineer,
+                brief_ref: c.intent.clone(),
+                scope: vec!["src".into()],
+                dependency_ids: vec![],
+                check_ids: vec![],
+            },
+        );
+        let child = Attempt {
+            attempt_id: "child".into(),
+            step_id: "unit".into(),
+            input_digest: "child-input".into(),
+            state: AttemptState::Prepared,
+            generation: None,
+            thread_id: None,
+            turn_id: None,
+            raw_result: None,
+            outcome: None,
+            last_event_sequence: 0,
+        };
+        c.attempts.insert("child".into(), child.clone());
+        c.reservations.push(ScopeReservation {
+            attempt_id: "child".into(),
+            paths: vec!["src".into()],
+        });
+        save(&store, &c).unwrap();
+        let caller = ScopeBatchCaller {
+            attempt_id: "attempt".into(),
+            generation: 1,
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: "call-a".into(),
+        };
+        let members = [("unit".into(), "child".into())];
+        for field in ["attempt", "generation", "thread", "turn", "call"] {
+            let mut wrong = caller.clone();
+            match field {
+                "attempt" => wrong.attempt_id = "child".into(),
+                "generation" => wrong.generation = 2,
+                "thread" => wrong.thread_id = "wrong-thread".into(),
+                "turn" => wrong.turn_id = "wrong-turn".into(),
+                _ => wrong.call_id.clear(),
+            }
+            assert!(
+                register_scope_batch(&store, "run", c.revision, &members, &wrong).is_err(),
+                "{field}"
+            );
+            assert_eq!(load_run(&store, "run").unwrap(), c);
+        }
+        let registered =
+            register_scope_batch(&store, "run", c.revision, &members, &caller).unwrap();
+        let report = serde_json::json!({"status":"failed","thread_id":"thread","turn_id":"turn","model":"test"});
+        commit_result(
+            &store,
+            "run",
+            registered.revision,
+            "attempt",
+            AttemptOutcome::Failed,
+            &report,
+        )
+        .unwrap();
+        let saved_a = load_run(&store, "run").unwrap();
+        let mut legacy = saved_a.clone();
+        legacy
+            .receipts
+            .retain(|key, _| !key.starts_with("scope-dispatch-"));
+        save(&store, &legacy).unwrap();
+        retry_prepared_batches(&store, "run", legacy.revision).unwrap();
+        let blocked_legacy = load_run(&store, "run").unwrap();
+        assert!(!blocked_legacy
+            .receipts
+            .contains_key("retry-prepared-attempt"));
+        assert!(failed_attempt_needs_repair(
+            &blocked_legacy,
+            &blocked_legacy.attempts["attempt"]
+        ));
+        assert!(
+            serde_json::from_slice::<ScopeBatch>(&artifact_bytes(&registered.value).unwrap())
+                .is_ok(),
+            "legacy batches still serve scope audits"
+        );
+        save(&store, &saved_a).unwrap();
+        retry_prepared_batches(&store, "run", saved_a.revision).unwrap();
+        let retired_a = load_run(&store, "run").unwrap();
+        assert!(retired_a.receipts.contains_key("retry-prepared-attempt"));
+        assert!(!failed_attempt_needs_repair(
+            &retired_a,
+            &retired_a.attempts["attempt"]
+        ));
+        let b = claim_step(&store, retired_a.revision, &spec, "input").unwrap();
+        let revision = record_attempt_dispatch(
+            &store,
+            "run",
+            b.revision,
+            &AttemptEvent {
+                event_id: "b-dispatch".into(),
+                attempt_id: b.attempt.attempt_id.clone(),
+                sequence: 1,
+                kind: AttemptEventKind::Dispatching {
+                    generation: 2,
+                    thread_id: "thread-b".into(),
+                },
+            },
+            "test",
+            "test",
+            Some("high"),
+        )
+        .unwrap();
+        let revision = record_attempt_event(
+            &store,
+            "run",
+            revision,
+            &AttemptEvent {
+                event_id: "b-running".into(),
+                attempt_id: b.attempt.attempt_id.clone(),
+                sequence: 2,
+                kind: AttemptEventKind::Running {
+                    turn_id: "turn-b".into(),
+                },
+            },
+        )
+        .unwrap();
+        // B has the same StepSpec but failed before any dispatch_batch callback.
+        commit_result(&store,"run",revision,&b.attempt.attempt_id,AttemptOutcome::Failed,
+            &serde_json::json!({"status":"failed","thread_id":"thread-b","turn_id":"turn-b","model":"test"})).unwrap();
+        for _ in 0..3 {
+            let before = load_run(&store, "run").unwrap();
+            retry_prepared_batches(&store, "run", before.revision).unwrap();
+            let after = load_run(&store, "run").unwrap();
+            assert_eq!(after, before);
+            assert!(!after
+                .receipts
+                .contains_key(&format!("retry-prepared-{}", b.attempt.attempt_id)));
+            assert!(failed_attempt_needs_repair(
+                &after,
+                &after.attempts[&b.attempt.attempt_id]
+            ));
+            assert_eq!(after.attempts["child"], child);
+            assert_eq!(
+                after
+                    .receipts
+                    .keys()
+                    .filter(|k| k.starts_with("scope-dispatch-"))
+                    .count(),
+                1
+            );
         }
     }
 

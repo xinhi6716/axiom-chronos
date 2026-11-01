@@ -64,6 +64,10 @@ fn run_flow(mode: &str, approve: bool) {
         .success());
     let home = tmp.path().join("home");
     std::fs::create_dir(&home).unwrap();
+    if mode == "memory-no-query" {
+        // A valid non-searchable brief must work when a memory DB exists.
+        axiom::memory::Memory::open(&home).unwrap();
+    }
     let log = tmp.path().join("rpc.jsonl");
     let config = || Config {
         data_home: Some(home.clone()),
@@ -239,6 +243,69 @@ fn run_flow(mode: &str, approve: bool) {
         }
         assert_eq!(before.reservations.len(), 2);
         assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+        if mode == "engineer-config-retry-parent-failure" {
+            std::fs::write(
+                log.with_extension("fixed-model"),
+                "writer configuration repaired",
+            )
+            .unwrap();
+            let b_failed = invoke(
+                "resume-coordinator-b",
+                json!({"type":"resume","run_id":run}),
+            );
+            assert_eq!(b_failed["status"], "blocked", "{b_failed}\n{}", trail());
+            for request in ["resume-must-not-retire-b", "resume-must-not-create-c"] {
+                let repeated = invoke(request, json!({"type":"resume","run_id":run}));
+                assert_eq!(repeated["status"], "blocked", "{repeated}\n{}", trail());
+            }
+            let saved = checkpoint::load_run(&store, run).unwrap();
+            let coordinators = saved
+                .attempts
+                .values()
+                .filter(|a| a.step_id.starts_with("coord-batch-"))
+                .collect::<Vec<_>>();
+            assert_eq!(coordinators.len(), 2, "only A and B may run");
+            assert_eq!(
+                coordinators
+                    .iter()
+                    .filter(|a| saved
+                        .receipts
+                        .contains_key(&format!("retry-prepared-{}", a.attempt_id)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                saved
+                    .receipts
+                    .keys()
+                    .filter(|k| k.starts_with("scope-dispatch-"))
+                    .count(),
+                1,
+                "only A invoked the batch callback"
+            );
+            assert_eq!(
+                coordinators
+                    .iter()
+                    .filter(|a| checkpoint::failed_attempt_needs_repair(&saved, a))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                rows()
+                    .iter()
+                    .filter(|r| r["kind"] == "coordinator-failed-before-batch")
+                    .count(),
+                1
+            );
+            for id in prepared {
+                assert_eq!(
+                    saved.attempts[&id].state,
+                    checkpoint::AttemptState::Prepared
+                );
+            }
+            assert!(!rows().iter().any(|r| r["kind"] == "engineer-start"));
+            return;
+        }
         if mode == "engineer-config-cancel" {
             let cancelled = invoke(
                 "cancel-prepared",
@@ -1018,6 +1085,8 @@ fn run_flow(mode: &str, approve: bool) {
         "normal",
         "directory-peers",
         "content",
+        "memory-reuse",
+        "memory-no-query",
         "repairable-review",
         "repairable-review-twice",
         "evaluation-repairable-review",
@@ -1562,6 +1631,93 @@ fn run_flow(mode: &str, approve: bool) {
             "not_verified"
         );
     }
+    if mode == "memory-no-query" {
+        let brief = std::fs::read_to_string(&c.steps["u2"].brief_ref.path).unwrap();
+        assert!(brief.contains("REUSE (current repository summaries only): []"));
+    }
+    if mode == "memory-reuse" {
+        let first_id = memory_receipt["id"].as_i64().unwrap();
+        let first_entry = memory.get(first_id).unwrap();
+        assert_eq!(first_entry["entry"]["stale"], false);
+        assert_eq!(
+            first_entry["entry"]["files"]["version"],
+            "axiom-run-inputs-v2"
+        );
+        assert_eq!(
+            first_entry["entry"]["files"]["review_digest"],
+            selected.digest
+        );
+
+        // Newer synthetic distractors are ordinary test data, not held-out
+        // acceptance: one wrong repository and one stale entry per index.
+        let other = tmp.path().join("other-repo");
+        std::fs::create_dir(&other).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&other)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(other.join("one.txt"), "one").unwrap();
+        let other_files =
+            json!([{"path":"one.txt", "sha256":format!("{:x}", Sha256::digest(b"one"))}])
+                .to_string();
+        let stale_files = json!([{"path":"one.txt", "sha256":"0".repeat(64)}]).to_string();
+        let root = repo.canonicalize().unwrap().to_string_lossy().into_owned();
+        let other_root = other.canonicalize().unwrap().to_string_lossy().into_owned();
+        let db = rusqlite::Connection::open(home.join("memory/memory.db")).unwrap();
+        for index in 0..4 {
+            for (name, summary, files, dir) in [
+                (
+                    format!("other-{index}"),
+                    "write one OTHER_REPO_SECRET",
+                    &other_files,
+                    &other_root,
+                ),
+                (
+                    format!("stale-{index}"),
+                    "write one STALE_MEMORY_CANARY",
+                    &stale_files,
+                    &root,
+                ),
+            ] {
+                db.execute("INSERT INTO entries(project,unit,title,summary,body,symbols,wish,files,project_dir,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    rusqlite::params!["demo", name, "write one", summary, "", "", "write one", files, dir, 9_000_000_000_i64 + index]).unwrap();
+            }
+        }
+        drop(db);
+
+        let start_next = |request: &str, intent: &str| {
+            let start = invoke(request, json!({"type":"start","intent":intent}));
+            assert_eq!(start["status"], "needs_intent_review", "{start}");
+            let id = start["run_id"].as_str().unwrap().to_owned();
+            let digest = start["research"]["digest"].as_str().unwrap();
+            let done = invoke(
+                &format!("{request}-decide"),
+                json!({"type":"decide","run_id":&id,"research_digest":digest,"pass":true,"reason":"core intent decision"}),
+            );
+            assert_eq!(done["status"], "ready_to_commit", "{done}");
+            checkpoint::load_run(&home.join("orchestrate/demo"), &id).unwrap()
+        };
+        let next = start_next("reuse-start", "second verified iteration");
+        let brief = std::fs::read_to_string(&next.steps["u1"].brief_ref.path).unwrap();
+        assert!(brief.contains("VERIFIED_MEMORY_CANARY"), "{brief}");
+        assert!(brief.contains(&format!("\"id\":{first_id}")), "{brief}");
+        assert!(!brief.contains("OTHER_REPO_SECRET"));
+        assert!(!brief.contains("STALE_MEMORY_CANARY"));
+        assert!(rows().iter().any(|r| r["kind"] == "turn"
+            && r["params"]["input"][0]["text"].as_str().is_some_and(|s| s
+                .starts_with("ROLE Engineer")
+                && s.contains("VERIFIED_MEMORY_CANARY"))));
+
+        std::fs::write(repo.join("one.txt"), "changed after review").unwrap();
+        assert_eq!(memory.get(first_id).unwrap()["entry"]["stale"], true);
+        let after_change = start_next("stale-reuse-start", "third iteration after input change");
+        let brief = std::fs::read_to_string(&after_change.steps["u1"].brief_ref.path).unwrap();
+        assert!(!brief.contains("VERIFIED_MEMORY_CANARY"), "{brief}");
+        assert!(!brief.contains("OTHER_REPO_SECRET"));
+        assert!(!brief.contains("STALE_MEMORY_CANARY"));
+    }
     use std::path::Path;
 }
 
@@ -1619,6 +1775,14 @@ fn two_reworks_require_each_current_assembly_and_verifier() {
 fn memory_callback_rejects_forged_and_stale_review_evidence() {
     flow("memory-forged", true);
     flow("memory-stale", true);
+}
+#[test]
+fn next_run_reuses_only_fresh_memory_from_the_same_repository() {
+    flow("memory-reuse", true);
+}
+#[test]
+fn a_unit_brief_without_search_terms_does_not_block_planning() {
+    flow("memory-no-query", true);
 }
 
 #[test]
@@ -2030,6 +2194,11 @@ fn pre_turn_model_failure_can_resume_original_prepared_writers_after_config_repa
 #[test]
 fn pre_turn_model_failure_can_cancel_without_fabricating_writer_completion() {
     flow("engineer-config-cancel", true);
+}
+
+#[test]
+fn prepared_batch_retry_cannot_borrow_an_older_coordinator_callback() {
+    flow("engineer-config-retry-parent-failure", true);
 }
 
 #[test]

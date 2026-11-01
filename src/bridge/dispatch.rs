@@ -575,7 +575,17 @@ impl ToolHandler for Bound {
                     unit_ids: Vec<String>,
                 }
                 let args: Args = serde_json::from_value(call.arguments).map_err(io)?;
-                p.batch(&args.unit_ids)?;
+                let caller = checkpoint::ScopeBatchCaller {
+                    attempt_id: self.attempt.clone(),
+                    generation: key.generation,
+                    thread_id: key.thread_id.clone(),
+                    turn_id: key
+                        .turn_id
+                        .clone()
+                        .ok_or_else(|| fail("batch callback missing turn"))?,
+                    call_id: call.call_id.clone(),
+                };
+                p.batch(&args.unit_ids, &caller)?;
                 json!({"terminal":args.unit_ids,"note":"Rust recorded each unit's typed work outcome; blocked units do not satisfy dependents."})
             }
             (Purpose::Verifier, "verify_run") => {
@@ -1730,19 +1740,15 @@ impl Pipeline {
             }
             let memory = if self.home.join("memory/memory.db").exists() {
                 let db = crate::memory::Memory::open(&self.home)?;
-                let found = db.search(&unit.brief, Some(&self.project), 3)?;
-                let mut selected = vec![];
-                for row in found["entries"].as_array().into_iter().flatten() {
-                    if row["stale"] == false {
-                        if let Some(id) = row["id"].as_i64() {
-                            let entry = db.get(id)?;
-                            if entry["entry"]["project_dir"].as_str() == self.repo.to_str() {
-                                selected
-                                    .push(json!({"title":row["title"],"summary":row["summary"]}));
-                            }
-                        }
-                    }
-                }
+                let found = db.search_reusable(&unit.brief, &self.project, &self.repo, 3)?;
+                let selected: Vec<_> = found["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(
+                        |row| json!({"id":row["id"],"title":row["title"],"summary":row["summary"]}),
+                    )
+                    .collect();
                 serde_json::to_string(&selected).map_err(io)?
             } else {
                 "[]".into()
@@ -1952,7 +1958,7 @@ impl Pipeline {
             .cloned()
             .collect())
     }
-    fn batch(self: &Arc<Self>, ids: &[String]) -> Res<()> {
+    fn batch(self: &Arc<Self>, ids: &[String], caller: &checkpoint::ScopeBatchCaller) -> Res<()> {
         if self.load()?.phase != Phase::Engineering {
             return Err(fail("batch outside engineering phase"));
         }
@@ -1981,7 +1987,13 @@ impl Pipeline {
             .collect::<Res<Vec<_>>>()?;
         let batch_ref = self
             .edit(|c| {
-                checkpoint::register_scope_batch(&self.store, &self.run, c.revision, &members)
+                checkpoint::register_scope_batch(
+                    &self.store,
+                    &self.run,
+                    c.revision,
+                    &members,
+                    caller,
+                )
             })?
             .value;
         std::thread::scope(|scope| {

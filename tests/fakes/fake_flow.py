@@ -285,6 +285,13 @@ for line in sys.stdin:
         elif 'run_plan' in names:
             call(tid, 'run_plan', {})
         elif 'dispatch_batch' in names:
+            if mode == 'engineer-config-retry-parent-failure':
+                marker = log_path.with_suffix('.batch-coordinator-a')
+                if marker.exists():
+                    log('coordinator-failed-before-batch', thread=tid)
+                    finish(tid, 'coordinator failed before invoking dispatch_batch', failed=True)
+                    continue
+                marker.write_text(tid, encoding='utf-8')
             ids = ['u1'] if mode in ['unknown-then-failed', 'unknown-partial', 'unready-peer-write', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn', 'writer-cancelled'] else ['u1', 'u2']
             call(tid, 'dispatch_batch', {'unit_ids': ids})
         elif 'ROLE Research' in brief:
@@ -300,6 +307,9 @@ for line in sys.stdin:
                               {'kind':'engineer','id': 'u2', 'brief': 'write two', 'scope': ['two.txt'], 'depends_on': []}],
                     'checks': [{'id': 'frozen-python', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
                                 'args': ['-I', '-c', check, '{repo}'], 'env': [{'name':'CARGO_TARGET_DIR','value':'{scratch}/planned-target'}], 'timeout_s': 10}]}
+            if mode == 'memory-no-query':
+                # This is a valid nonempty unit brief but has no search terms.
+                plan['units'][1]['brief'] = '+'
             if mode in ['unknown-then-failed', 'unknown-partial']:
                 plan['units'] = plan['units'][:1]
             if mode == 'unready-peer-write':
@@ -447,7 +457,9 @@ for line in sys.stdin:
                 # Simulate an external source change after review, before the
                 # read-only memory role's callback is processed.
                 Path(cfg['cwd'], 'one.txt').write_text('changed after review')
-            call(tid, 'record_memory', {'evidence_id': evidence, 'content': 'Verified two scoped units and mandatory assembly with frozen-python.'})
+            content = ('write one VERIFIED_MEMORY_CANARY' if mode == 'memory-reuse'
+                       else 'Verified two scoped units and mandatory assembly with frozen-python.')
+            call(tid, 'record_memory', {'evidence_id': evidence, 'content': content})
         else:
             finish(tid)
         continue

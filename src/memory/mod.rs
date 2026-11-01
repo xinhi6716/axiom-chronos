@@ -2,14 +2,36 @@ use crate::base::{self, Failure, Res};
 use crate::orch::{covers, evidence, read_units, snapshot, store_for, unit_brief};
 use regex::Regex;
 use rusqlite::{params, params_from_iter, Connection, Row};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     io::Write,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const RUN_MANIFEST_VERSION: &str = "axiom-run-inputs-v2";
+
+/// Run-level memory covers the complete verified worktree, including ignored
+/// files, directories and platform-specific input streams. Legacy unit memory
+/// remains a list of explicitly selected files and plain SHA-256 values.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunManifest {
+    version: String,
+    source_digest: String,
+    review_digest: String,
+    entries: BTreeMap<String, String>,
+}
+
+fn source_matches_manifest(source: &str, entries: &BTreeMap<String, String>) -> bool {
+    crate::orch::checkpoint::current_source_digest(source)
+        && source.rsplit_once(':').is_some_and(|(_, expected)| {
+            crate::orch::evidence::input_manifest_digest(entries) == expected
+        })
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -119,10 +141,33 @@ impl Memory {
                 "memory requires current independently verified outcomes",
             ));
         }
-        let files = crate::orch::lifecycle::contents(&c.repo.canonical_root)?
-            .into_iter()
-            .map(|(path, sha256)| json!({"path":path,"sha256":sha256}))
-            .collect::<Vec<_>>();
+        let entries = crate::orch::lifecycle::contents(&c.repo.canonical_root)?;
+        let source = c
+            .checks
+            .values()
+            .next()
+            .map(|check| check.snapshot.source_digest.as_str())
+            .ok_or_else(|| Failure::new("not_verified", "verified source snapshot missing"))?;
+        if !source_matches_manifest(source, &entries) {
+            return Err(Failure::new(
+                "not_verified",
+                "worktree changed between verification and memory capture",
+            ));
+        }
+        let review = crate::orch::checkpoint::verified_review(&c)
+            .ok_or_else(|| Failure::new("not_verified", "verified review missing"))?;
+        if evidence_id.is_some_and(|expected| expected != review.digest) {
+            return Err(Failure::new(
+                "not_verified",
+                "verified review changed during memory capture",
+            ));
+        }
+        let files = RunManifest {
+            version: RUN_MANIFEST_VERSION.into(),
+            source_digest: source.into(),
+            review_digest: review.digest.clone(),
+            entries,
+        };
         let wish = std::fs::read_to_string(&c.intent.path).map_err(err)?;
         let files = serde_json::to_string(&files).map_err(err)?;
         let root = c.repo.canonical_root.to_string_lossy().into_owned();
@@ -236,6 +281,13 @@ impl Memory {
         .map_err(err)?;
         let expected = snapshot(&root, &brief.scope);
         let rows = evidence(&store, &args.unit)?;
+        let needs_accept = crate::orch::needs_accept(&store, &args.unit)?;
+        if crate::orch::derive_state(&rows, needs_accept) != "verified" {
+            return Err(Failure::new(
+                "not_verified",
+                "current unit evidence has not passed independent review and required acceptance",
+            ));
+        }
         let valid = rows.iter().rposition(|r| r.kind == "run").is_some_and(|i| {
             let run = &rows[i];
             !expected.is_empty()
@@ -246,6 +298,12 @@ impl Memory {
                         .iter()
                         .any(|r| r.kind == *kind && r.exit_code == 0 && r.commit == expected)
                 })
+                && (!needs_accept
+                    || rows[i + 1..]
+                        .iter()
+                        .rev()
+                        .find(|r| r.kind == "accept")
+                        .is_some_and(|r| r.exit_code == 0 && r.commit == expected))
         });
         if provenance.get("repo").and_then(Value::as_str) != root.to_str()
             || provenance.get("unit").and_then(Value::as_str) != Some(args.unit.as_str())
@@ -286,17 +344,64 @@ impl Memory {
         Ok(json!({"status":"completed", "id":id, "files":files, "error":null}))
     }
     pub fn search(&self, query: &str, project: Option<&str>, limit: i64) -> Res<Value> {
+        self.search_inner(query, project, None, limit, false)
+    }
+
+    /// Return only usable summaries from this exact canonical repository.
+    /// Project, repository and freshness are applied before the result limit.
+    pub fn search_reusable(
+        &self,
+        query: &str,
+        project: &str,
+        repo: &Path,
+        limit: i64,
+    ) -> Res<Value> {
+        base::require_slug("project", project)?;
+        if !repo.is_absolute() || !repo.is_dir() {
+            return Err(Failure::new(
+                "invalid_argument",
+                "reusable memory requires an existing absolute repository",
+            ));
+        }
+        let root = repo.canonicalize().map_err(err)?;
+        let root = root
+            .to_str()
+            .ok_or_else(|| Failure::new("invalid_argument", "repository path is not Unicode"))?;
+        self.search_inner(query, Some(project), Some(root), limit, true)
+    }
+
+    fn search_inner(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        repo: Option<&str>,
+        limit: i64,
+        fresh_only: bool,
+    ) -> Res<Value> {
         let terms = query_terms(query);
         if terms.is_empty() {
+            if fresh_only {
+                return Ok(
+                    json!({"status":"completed", "terms":terms, "entries":[], "error":null}),
+                );
+            }
             return Err(Failure::new(
                 "invalid_argument",
                 "query has no searchable terms",
             ));
         }
+        if fresh_only && limit <= 0 {
+            return Ok(json!({"status":"completed", "terms":terms, "entries":[], "error":null}));
+        }
         let hit = "(f.title LIKE ? OR f.summary LIKE ? OR f.body LIKE ? OR f.symbols LIKE ? OR f.wish LIKE ?)";
         let hits = vec![hit; terms.len()].join(" + ");
         let filter = project.filter(|p| !p.is_empty());
-        let sql = format!("SELECT * FROM (SELECT e.*, {hits} AS matched FROM entries e JOIN entries_fts f ON f.rowid = e.id) WHERE matched > 0{} ORDER BY matched DESC, created DESC LIMIT ?", if filter.is_some() { " AND project = ?" } else { "" });
+        let sql = format!(
+            "SELECT * FROM (SELECT e.*, {hits} AS matched FROM entries e JOIN entries_fts f ON f.rowid = e.id) WHERE matched > 0{}{} ORDER BY matched DESC, created DESC{}",
+            if filter.is_some() { " AND project = ?" } else { "" },
+            if repo.is_some() { " AND project_dir = ?" } else { "" },
+            if fresh_only { "" } else { " LIMIT ?" },
+        );
         let mut values: Vec<rusqlite::types::Value> = terms
             .iter()
             .flat_map(|t| (0..5).map(move |_| format!("%{t}%").into()))
@@ -304,13 +409,31 @@ impl Memory {
         if let Some(p) = filter {
             values.push(p.to_string().into());
         }
-        values.push(limit.into());
+        if let Some(root) = repo {
+            values.push(root.to_string().into());
+        }
+        if !fresh_only {
+            values.push(limit.into());
+        }
         let db = self.connect()?;
         let mut stmt = db.prepare(&sql).map_err(err)?;
         let mut rows = stmt.query(params_from_iter(values)).map_err(err)?;
         let mut entries = Vec::new();
         while let Some(row) = rows.next().map_err(err)? {
-            entries.push(json!({"id":row.get::<_, i64>("id").map_err(err)?, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "matched_terms":row.get::<_, i64>("matched").map_err(err)?, "stale":stale(row)?}));
+            let staleness = match stale(row) {
+                Ok(value) => value,
+                // One malformed or unreadable legacy entry cannot block the
+                // optional reuse of other entries, and is never marked fresh.
+                Err(_) if fresh_only => None,
+                Err(error) => return Err(error),
+            };
+            if fresh_only && staleness != Some(false) {
+                continue;
+            }
+            entries.push(json!({"id":row.get::<_, i64>("id").map_err(err)?, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "matched_terms":row.get::<_, i64>("matched").map_err(err)?, "stale":staleness}));
+            if fresh_only && entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                break;
+            }
         }
         Ok(json!({"status":"completed", "terms":terms, "entries":entries, "error":null}))
     }
@@ -355,6 +478,14 @@ fn hash(path: &Path) -> Res<String> {
         Sha256::digest(std::fs::read(path).map_err(err)?)
     ))
 }
+
+fn sha256_text(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn stale(row: &Row<'_>) -> Res<Option<bool>> {
     let root: String = row.get("project_dir").map_err(err)?;
     let root = Path::new(&root);
@@ -362,7 +493,32 @@ fn stale(row: &Row<'_>) -> Res<Option<bool>> {
         return Ok(None);
     }
     let files: String = row.get("files").map_err(err)?;
-    let files: Vec<Value> = serde_json::from_str(&files).map_err(err)?;
+    let files: Value = serde_json::from_str(&files).map_err(err)?;
+    if files.is_object() {
+        let Ok(manifest) = serde_json::from_value::<RunManifest>(files) else {
+            return Ok(None);
+        };
+        if manifest.version != RUN_MANIFEST_VERSION
+            || !sha256_text(&manifest.review_digest)
+            || !source_matches_manifest(&manifest.source_digest, &manifest.entries)
+        {
+            return Ok(None);
+        }
+        // Unreadable or unsafe input cannot be treated as fresh.
+        return match crate::orch::lifecycle::contents(root) {
+            Ok(current) => Ok(Some(current != manifest.entries)),
+            Err(_) => Ok(None),
+        };
+    }
+    let Some(files) = files.as_array() else {
+        return Ok(None);
+    };
+    let unit: String = row.get("unit").map_err(err)?;
+    // Old run-level entries lack a versioned complete manifest. Empty legacy
+    // unit lists similarly cannot establish freshness after a source change.
+    if files.is_empty() || unit.starts_with("run-") {
+        return Ok(None);
+    }
     for item in files {
         let path = item
             .get("path")
@@ -372,6 +528,9 @@ fn stale(row: &Row<'_>) -> Res<Option<bool>> {
             .get("sha256")
             .and_then(Value::as_str)
             .ok_or_else(|| err("invalid file hash"))?;
+        if !sha256_text(expected) {
+            return Ok(None);
+        }
         let path = root.join(path);
         if !path.is_file()
             || !std::fs::canonicalize(&path).is_ok_and(|p| p.starts_with(root))
@@ -381,4 +540,200 @@ fn stale(row: &Row<'_>) -> Res<Option<bool>> {
         }
     }
     Ok(Some(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, process::Command};
+
+    fn repository(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(path.join("a.txt"), "before").unwrap();
+    }
+
+    // Synthetic database rows exercise compatibility and ranking; these are
+    // not a substitute for a verified run's memory-writing gate.
+    fn insert(
+        memory: &Memory,
+        project: &str,
+        unit: &str,
+        repo: &Path,
+        summary: &str,
+        files: &Value,
+        created: i64,
+    ) -> i64 {
+        let root = repo.canonicalize().unwrap();
+        let db = memory.connect().unwrap();
+        db.execute(
+            "INSERT INTO entries(project,unit,title,summary,body,symbols,wish,files,project_dir,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            params![project, unit, "needle", summary, "", "", "needle", files.to_string(), root.to_str().unwrap(), created],
+        ).unwrap();
+        db.last_insert_rowid()
+    }
+
+    #[test]
+    fn run_manifest_is_bound_to_verified_inputs_and_detects_complete_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        repository(&repo);
+        fs::write(repo.join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir(repo.join("ignored")).unwrap();
+        fs::write(repo.join("ignored/input"), "before").unwrap();
+        fs::create_dir(repo.join("empty")).unwrap();
+
+        let entries = crate::orch::lifecycle::contents(&repo).unwrap();
+        let source = crate::orch::snapshot(&repo, &[".".into()]);
+        assert!(source_matches_manifest(&source, &entries));
+        let mut different = entries.clone();
+        different.insert("unreviewed".into(), "different input".into());
+        assert!(!source_matches_manifest(&source, &different));
+        assert!(!source_matches_manifest("tree:legacy", &entries));
+
+        let manifest = RunManifest {
+            version: RUN_MANIFEST_VERSION.into(),
+            source_digest: source,
+            review_digest: "a".repeat(64),
+            entries,
+        };
+        let memory = Memory::open(&dir.path().join("home")).unwrap();
+        let id = insert(
+            &memory,
+            "p",
+            "run-fixture",
+            &repo,
+            "usable",
+            &serde_json::to_value(&manifest).unwrap(),
+            1,
+        );
+        let mut corrupt = serde_json::to_value(&manifest).unwrap();
+        corrupt["entries"]["unreviewed"] = json!("different input");
+        let corrupt_id = insert(&memory, "p", "run-corrupt", &repo, "invalid", &corrupt, 2);
+        assert!(memory.get(corrupt_id).unwrap()["entry"]["stale"].is_null());
+        assert_eq!(memory.get(id).unwrap()["entry"]["stale"], false);
+        assert_eq!(
+            memory.get(id).unwrap()["entry"]["files"]["version"],
+            RUN_MANIFEST_VERSION
+        );
+        assert_eq!(
+            memory.search_reusable("needle", "p", &repo, 3).unwrap()["entries"][0]["id"],
+            id
+        );
+
+        // Same-length ignored content changes must invalidate, without mtime shortcuts.
+        fs::write(repo.join("ignored/input"), "AFTER!").unwrap();
+        assert_eq!(memory.get(id).unwrap()["entry"]["stale"], true);
+        assert_eq!(
+            memory.search_reusable("needle", "p", &repo, 3).unwrap()["entries"],
+            json!([])
+        );
+        fs::write(repo.join("ignored/input"), "before").unwrap();
+        fs::write(repo.join("ignored/added"), "new").unwrap();
+        assert_eq!(memory.get(id).unwrap()["entry"]["stale"], true);
+        fs::remove_file(repo.join("ignored/added")).unwrap();
+        fs::remove_dir(repo.join("empty")).unwrap();
+        assert_eq!(memory.get(id).unwrap()["entry"]["stale"], true);
+        fs::create_dir(repo.join("empty")).unwrap();
+        assert_eq!(memory.get(id).unwrap()["entry"]["stale"], false);
+
+        #[cfg(windows)]
+        {
+            let stream = repo.join("a.txt:axiom-memory-test");
+            fs::write(&stream, "stream").unwrap();
+            assert_eq!(memory.get(id).unwrap()["entry"]["stale"], true);
+            fs::remove_file(stream).unwrap();
+        }
+    }
+
+    #[test]
+    fn reusable_search_filters_repository_and_unknown_or_stale_before_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let other = dir.path().join("other");
+        repository(&first);
+        repository(&other);
+        let memory = Memory::open(&dir.path().join("home")).unwrap();
+        let good = json!([{"path":"a.txt","sha256":hash(&first.join("a.txt")).unwrap()}]);
+        let bad = json!([{"path":"a.txt","sha256":"0".repeat(64)}]);
+        let expected = insert(&memory, "p", "unit-good", &first, "right repo", &good, 1);
+        for i in 0..3 {
+            insert(
+                &memory,
+                "p",
+                &format!("unit-stale-{i}"),
+                &first,
+                "stale",
+                &bad,
+                10 + i,
+            );
+            insert(
+                &memory,
+                "p",
+                &format!("unit-other-{i}"),
+                &other,
+                "other repo secret",
+                &good,
+                20 + i,
+            );
+        }
+        insert(
+            &memory,
+            "other-project",
+            "unit-x",
+            &first,
+            "other project",
+            &good,
+            30,
+        );
+        insert(
+            &memory,
+            "p",
+            "unit-empty",
+            &first,
+            "no file provenance",
+            &json!([]),
+            40,
+        );
+        insert(
+            &memory,
+            "p",
+            "run-old",
+            &first,
+            "old run provenance unknown",
+            &good,
+            50,
+        );
+        let db = memory.connect().unwrap();
+        db.execute(
+            "INSERT INTO entries(project,unit,title,summary,body,symbols,wish,files,project_dir,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            params!["p", "bad-json", "needle", "corrupt", "", "", "needle", "not-json", first.canonicalize().unwrap().to_str().unwrap(), 100_i64],
+        ).unwrap();
+        drop(db);
+
+        let result = memory.search_reusable("needle", "p", &first, 3).unwrap();
+        let entries = result["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["id"], expected);
+        assert_eq!(entries[0]["summary"], "right repo");
+        assert!(!result.to_string().contains("other repo secret"));
+        assert_eq!(
+            memory.search_reusable("+", "p", &first, 3).unwrap()["entries"],
+            json!([])
+        );
+        assert_eq!(
+            memory.search_reusable("x", "p", &first, 3).unwrap()["entries"],
+            json!([])
+        );
+        assert_eq!(
+            memory.search("+", Some("p"), 3).unwrap_err().kind,
+            "invalid_argument"
+        );
+        assert!(memory.search("needle", Some("p"), 20).is_err());
+    }
 }

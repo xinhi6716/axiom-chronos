@@ -33,7 +33,7 @@ fn fixture() -> (tempfile::TempDir, Record) {
     fs::create_dir_all(store.join("reports")).unwrap();
     let snap = axiom::orch::snapshot(&project, &["a.py".into(), "missing.py".into()]);
     assert!(!snap.is_empty());
-    fs::write(store.join("reports/u.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tworker\t0\t{snap}\t1\nscope\t\t0\t{snap}\t2\nverify\ttest\t0\t{snap}\t3\n")).unwrap();
+    fs::write(store.join("reports/u.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tworker\t0\t{snap}\t1\nscope\t\t0\t{snap}\t2\nverify\ttest\t0\t{snap}\t3\nreview\tindependent-review\t0\t{snap}\t4\n")).unwrap();
     fs::write(
         store.join("reports/u.repo.json"),
         serde_json::to_vec(
@@ -76,6 +76,56 @@ fn provenance_rejects_other_worktree_and_replay_deduplicates() {
         .success());
     record.project_dir = other.to_string_lossy().into_owned();
     assert_eq!(memory.record(&record).unwrap_err().kind, "missing_evidence");
+}
+#[test]
+fn legacy_record_rechecks_review_and_required_acceptance() {
+    let (temp, memory, r) = setup();
+    let store = temp.path().join("home/orchestrate/p");
+    let evidence_path = store.join("reports/u.evidence.tsv");
+    let baseline = fs::read_to_string(&evidence_path).unwrap();
+    let snapshot = axiom::orch::snapshot(
+        std::path::Path::new(&r.project_dir),
+        &["a.py".into(), "missing.py".into()],
+    );
+    // Crash between persisting a failed review and updating units.tsv: the
+    // stale cached "verified" state must not authorize a memory write.
+    fs::write(
+        &evidence_path,
+        format!("{baseline}review\tindependent-review-2\t1\t{snapshot}\t5\n"),
+    )
+    .unwrap();
+    assert!(fs::read_to_string(store.join("units.tsv"))
+        .unwrap()
+        .contains("u\tx\tverified"));
+    assert_eq!(memory.record(&r).unwrap_err().kind, "not_verified");
+    let db = Connection::open(temp.path().join("home/memory/memory.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM entries", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    // A module requiring acceptance is not verified by a review alone.
+    fs::write(&evidence_path, &baseline).unwrap();
+    fs::write(
+        store.join("modules.md"),
+        "## x\nPURPOSE x\nPATHS a.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
+    )
+    .unwrap();
+    assert_eq!(memory.record(&r).unwrap_err().kind, "not_verified");
+    fs::write(
+        &evidence_path,
+        format!("{baseline}accept\ttest\t0\told-snapshot\t5\nreview\tindependent-review-2\t0\t{snapshot}\t6\n"),
+    )
+    .unwrap();
+    assert_eq!(memory.record(&r).unwrap_err().kind, "missing_evidence");
+    fs::write(
+        &evidence_path,
+        format!("{baseline}accept\ttest\t0\t{snapshot}\t5\nreview\tindependent-review-2\t0\t{snapshot}\t6\n"),
+    )
+    .unwrap();
+    assert_eq!(memory.record(&r).unwrap()["status"], "completed");
 }
 #[test]
 fn record_search_stale_digest_and_validation() {
@@ -194,11 +244,12 @@ fn existing_database_is_not_changed() {
         vec![
             (3, serde_json::json!(true), 1),
             (2, serde_json::Value::Null, 1),
-            (1, serde_json::json!(false), 1)
+            // A legacy record with no file evidence cannot prove freshness.
+            (1, serde_json::Value::Null, 1)
         ]
     );
     for (id, stale, dir, stored_files) in [
-        (1, serde_json::json!(false), &r.project_dir, "[]"),
+        (1, serde_json::Value::Null, &r.project_dir, "[]"),
         (2, serde_json::Value::Null, &gone, files),
         (3, serde_json::json!(true), &r.project_dir, files),
     ] {

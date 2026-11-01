@@ -279,8 +279,21 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
 }
-pub fn snapshot(repo: &Path, scope: &[String]) -> String {
+/// Hash the exact ordered input manifest used by `tree-v2` snapshots.
+pub(crate) fn input_manifest_digest(inputs: &std::collections::BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
+    let mut manifest = Sha256::new();
+    manifest.update(b"axiom-worktree-inputs-v2\0");
+    for (path, value) in inputs {
+        manifest.update((path.len() as u64).to_be_bytes());
+        manifest.update(path.as_bytes());
+        manifest.update((value.len() as u64).to_be_bytes());
+        manifest.update(value.as_bytes());
+    }
+    format!("{:x}", manifest.finalize())
+}
+
+pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     if git(repo, &["rev-parse", "--is-inside-work-tree"]) != "true" {
         return String::new();
     }
@@ -364,15 +377,7 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     if result.is_empty() {
         return result;
     }
-    let mut manifest = Sha256::new();
-    manifest.update(b"axiom-worktree-inputs-v2\0");
-    for (path, value) in inputs {
-        manifest.update((path.len() as u64).to_be_bytes());
-        manifest.update(path.as_bytes());
-        manifest.update((value.len() as u64).to_be_bytes());
-        manifest.update(value.as_bytes());
-    }
-    format!("tree-v2:{result}:{:x}", manifest.finalize())
+    format!("tree-v2:{result}:{}", input_manifest_digest(&inputs))
 }
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
