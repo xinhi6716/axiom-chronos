@@ -126,6 +126,9 @@ impl Memory {
         base::require_slug("project", project)?;
         let store = store_for(&self.home, project)?;
         let c = crate::orch::checkpoint::load_run(&store, run_id)?;
+        // Historical private evaluation used for rework cannot authorize a
+        // new memory record, even when the source bytes are unchanged.
+        crate::orch::checkpoint::ensure_rework_history_safe(&store, &c)?;
         if !matches!(
             c.phase,
             crate::orch::checkpoint::Phase::Memory | crate::orch::checkpoint::Phase::ReadyToCommit
@@ -420,6 +423,19 @@ impl Memory {
         let mut rows = stmt.query(params_from_iter(values)).map_err(err)?;
         let mut entries = Vec::new();
         while let Some(row) = rows.next().map_err(err)? {
+            let eligibility = match self.rework_eligibility(row) {
+                Ok(value) => value,
+                // A single unreadable entry cannot block optional reuse.
+                Err(_) if fresh_only => continue,
+                Err(error) => return Err(error),
+            };
+            if fresh_only
+                && eligibility
+                    .as_ref()
+                    .is_some_and(|v| v["rework_policy_eligible"] != true)
+            {
+                continue;
+            }
             let staleness = match stale(row) {
                 Ok(value) => value,
                 // One malformed or unreadable legacy entry cannot block the
@@ -430,7 +446,12 @@ impl Memory {
             if fresh_only && staleness != Some(false) {
                 continue;
             }
-            entries.push(json!({"id":row.get::<_, i64>("id").map_err(err)?, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "matched_terms":row.get::<_, i64>("matched").map_err(err)?, "stale":staleness}));
+            let mut entry = json!({"id":row.get::<_, i64>("id").map_err(err)?, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "matched_terms":row.get::<_, i64>("matched").map_err(err)?, "stale":staleness});
+            if let Some(policy) = eligibility {
+                entry["rework_policy_eligible"] = policy["rework_policy_eligible"].clone();
+                entry["rework_policy_reason"] = policy["rework_policy_reason"].clone();
+            }
+            entries.push(entry);
             if fresh_only && entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
                 break;
             }
@@ -449,8 +470,64 @@ impl Memory {
             .ok_or_else(|| Failure::new("not_found", format!("no memory entry {id}")))?;
         let files: String = row.get("files").map_err(err)?;
         let symbols: String = row.get("symbols").map_err(err)?;
-        let entry = json!({"id":id, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "body":row.get::<_, String>("body").map_err(err)?, "symbols":symbols.split_whitespace().collect::<Vec<_>>(), "wish":row.get::<_, String>("wish").map_err(err)?, "files":serde_json::from_str::<Value>(&files).map_err(err)?, "project_dir":row.get::<_, String>("project_dir").map_err(err)?, "created":row.get::<_, f64>("created").map_err(err)?, "stale":stale(row)?});
+        let mut entry = json!({"id":id, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "body":row.get::<_, String>("body").map_err(err)?, "symbols":symbols.split_whitespace().collect::<Vec<_>>(), "wish":row.get::<_, String>("wish").map_err(err)?, "files":serde_json::from_str::<Value>(&files).map_err(err)?, "project_dir":row.get::<_, String>("project_dir").map_err(err)?, "created":row.get::<_, f64>("created").map_err(err)?, "stale":stale(row)?});
+        if let Some(policy) = self.rework_eligibility(row)? {
+            entry["rework_policy_eligible"] = policy["rework_policy_eligible"].clone();
+            entry["rework_policy_reason"] = policy["rework_policy_reason"].clone();
+        }
         Ok(json!({"status":"completed", "entry":entry, "error":null}))
+    }
+
+    /// Check only run identity, stored source/review metadata and the rework
+    /// policy. This does not rehash the current worktree or rerun verification.
+    fn rework_eligibility(&self, row: &Row<'_>) -> Res<Option<Value>> {
+        let files: String = row.get("files").map_err(err)?;
+        let value: Value = match serde_json::from_str(&files) {
+            Ok(value) => value,
+            Err(_) => return Ok(None), // stale() handles malformed legacy rows
+        };
+        let run_id: String = row.get("unit").map_err(err)?;
+        if value.is_array() {
+            return Ok(run_id
+                .starts_with("run-")
+                .then(|| rework_policy(None, "legacy_run_provenance_unavailable")));
+        }
+        let Ok(manifest) = serde_json::from_value::<RunManifest>(value) else {
+            return Ok(Some(rework_policy(None, "memory_manifest_unavailable")));
+        };
+        if manifest.version != RUN_MANIFEST_VERSION
+            || !sha256_text(&manifest.review_digest)
+            || !source_matches_manifest(&manifest.source_digest, &manifest.entries)
+        {
+            return Ok(Some(rework_policy(None, "memory_manifest_invalid")));
+        }
+        let project: String = row.get("project").map_err(err)?;
+        let root: String = row.get("project_dir").map_err(err)?;
+        let checkpoint = store_for(&self.home, &project).and_then(|store| {
+            crate::orch::checkpoint::load_run(&store, &run_id).map(|c| (store, c))
+        });
+        let Ok((store, c)) = checkpoint else {
+            return Ok(Some(rework_policy(None, "source_run_unavailable")));
+        };
+        if c.repo.canonical_root.as_path() != Path::new(&root)
+            || c.checks.is_empty()
+            || c.checks
+                .values()
+                .any(|f| f.snapshot.source_digest != manifest.source_digest)
+            || !c
+                .receipts
+                .iter()
+                .any(|(key, r)| key.starts_with("review-") && r.digest == manifest.review_digest)
+        {
+            return Ok(Some(rework_policy(None, "source_identity_mismatch")));
+        }
+        match crate::orch::checkpoint::ensure_rework_history_safe(&store, &c) {
+            Ok(()) => Ok(Some(rework_policy(Some(true), "rework_history_allowed"))),
+            Err(failure) if failure.kind == "independent_evaluation_used" => Ok(Some(
+                rework_policy(Some(false), "independent_evaluation_used"),
+            )),
+            Err(_) => Ok(Some(rework_policy(None, "rework_provenance_unavailable"))),
+        }
     }
     pub fn digest(&self, project: &str, add: Option<&str>) -> Res<Value> {
         base::require_slug("project", project)?;
@@ -484,6 +561,10 @@ fn sha256_text(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn rework_policy(eligible: Option<bool>, reason: &str) -> Value {
+    json!({"rework_policy_eligible":eligible,"rework_policy_reason":reason})
 }
 
 fn stale(row: &Row<'_>) -> Res<Option<bool>> {
@@ -578,6 +659,103 @@ mod tests {
         db.last_insert_rowid()
     }
 
+    // Synthetic checkpoint metadata only: no private cases or complete
+    // verifier evidence are required to exercise rework policy classification.
+    fn seed_policy_checkpoint(
+        memory: &Memory,
+        repo: &Path,
+        run_id: &str,
+        manifest: &RunManifest,
+        private: bool,
+        reworked: bool,
+    ) {
+        use crate::orch::checkpoint::{
+            self, ArtifactRef, Attempt, AttemptOutcome, AttemptState, FrozenCheck, RepoIdentity,
+            RunSeed, Snapshot,
+        };
+        let store = store_for(&memory.home, "p").unwrap();
+        fs::create_dir_all(&store).unwrap();
+        let reference = |name: &str, bytes: &[u8]| {
+            let path = store.join(format!("{run_id}-{name}"));
+            fs::write(&path, bytes).unwrap();
+            ArtifactRef {
+                path,
+                digest: format!("{:x}", Sha256::digest(bytes)),
+            }
+        };
+        let intent = reference("intent", b"synthetic intent");
+        let mut c = checkpoint::create_run(
+            &store,
+            &RunSeed {
+                run_id: run_id.into(),
+                repo: RepoIdentity {
+                    canonical_root: repo.canonicalize().unwrap(),
+                    identity_digest: "fixture".into(),
+                },
+                intent,
+            },
+        )
+        .unwrap();
+        let plan = reference("plan", br#"{"checks":[{"id":"public"}]}"#);
+        let snapshot = Snapshot {
+            source_digest: manifest.source_digest.clone(),
+            plan_digest: plan.digest.clone(),
+            checks_digest: "fixture".into(),
+        };
+        c.plan = Some(plan.clone());
+        for id in if private {
+            vec!["public", "independent-private"]
+        } else {
+            vec!["public"]
+        } {
+            c.checks.insert(
+                id.into(),
+                FrozenCheck {
+                    check_id: id.into(),
+                    program: "fixture".into(),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    timeout_s: 1,
+                    snapshot: snapshot.clone(),
+                    spec_digest: "fixture".into(),
+                },
+            );
+        }
+        let review = reference("review", b"synthetic review");
+        assert_eq!(review.digest, manifest.review_digest);
+        c.receipts.insert("review-fixture".into(), review);
+        if private {
+            let prep = reference(
+                "prep",
+                br#"{"structured_output":{"status":"ready","exposure":"private","checks":[{"id":"independent-private"}]}}"#,
+            );
+            c.receipts.insert("evaluation-0".into(), prep.clone());
+            c.attempts.insert(
+                "prep-attempt".into(),
+                Attempt {
+                    attempt_id: "prep-attempt".into(),
+                    step_id: "evaluation-prep-0".into(),
+                    input_digest: "fixture".into(),
+                    state: AttemptState::Terminal,
+                    generation: None,
+                    thread_id: None,
+                    turn_id: None,
+                    raw_result: Some(prep),
+                    outcome: Some(AttemptOutcome::Completed),
+                    last_event_sequence: 0,
+                },
+            );
+        }
+        if reworked {
+            c.receipts.insert("rework-1".into(), plan);
+        }
+        fs::write(
+            store.join("runs").join(run_id).join("checkpoint.json"),
+            serde_json::to_vec(&c).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn run_manifest_is_bound_to_verified_inputs_and_detects_complete_changes() {
         let dir = tempfile::tempdir().unwrap();
@@ -599,10 +777,11 @@ mod tests {
         let manifest = RunManifest {
             version: RUN_MANIFEST_VERSION.into(),
             source_digest: source,
-            review_digest: "a".repeat(64),
+            review_digest: format!("{:x}", Sha256::digest(b"synthetic review")),
             entries,
         };
         let memory = Memory::open(&dir.path().join("home")).unwrap();
+        seed_policy_checkpoint(&memory, &repo, "run-fixture", &manifest, false, false);
         let id = insert(
             &memory,
             "p",
@@ -649,6 +828,144 @@ mod tests {
             assert_eq!(memory.get(id).unwrap()["entry"]["stale"], true);
             fs::remove_file(stream).unwrap();
         }
+    }
+
+    #[test]
+    fn reusable_run_history_respects_private_rework_without_relabeling_source_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        repository(&repo);
+        let memory = Memory::open(&dir.path().join("home")).unwrap();
+        let manifest = RunManifest {
+            version: RUN_MANIFEST_VERSION.into(),
+            source_digest: crate::orch::snapshot(&repo, &[".".into()]),
+            review_digest: format!("{:x}", Sha256::digest(b"synthetic review")),
+            entries: crate::orch::lifecycle::contents(&repo).unwrap(),
+        };
+        let files = serde_json::to_value(&manifest).unwrap();
+        for (run, private, reworked) in [
+            ("run-private-first", true, false),
+            ("run-private-rework", true, true),
+            ("run-public-rework", false, true),
+            ("run-unknown-rework", true, true),
+        ] {
+            seed_policy_checkpoint(&memory, &repo, run, &manifest, private, reworked);
+        }
+        let store = store_for(&memory.home, "p").unwrap();
+        let unknown_path = store.join("runs/run-unknown-rework/checkpoint.json");
+        let mut unknown: crate::orch::checkpoint::Checkpoint =
+            serde_json::from_slice(&fs::read(&unknown_path).unwrap()).unwrap();
+        unknown.receipts.remove("evaluation-0");
+        fs::write(&unknown_path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+
+        let first = insert(
+            &memory,
+            "p",
+            "run-private-first",
+            &repo,
+            "private first pass",
+            &files,
+            1,
+        );
+        let blocked = insert(
+            &memory,
+            "p",
+            "run-private-rework",
+            &repo,
+            "private rework history",
+            &files,
+            2,
+        );
+        let public = insert(
+            &memory,
+            "p",
+            "run-public-rework",
+            &repo,
+            "public rework",
+            &files,
+            3,
+        );
+        let missing = insert(
+            &memory,
+            "p",
+            "run-unknown-rework",
+            &repo,
+            "unknown provenance",
+            &files,
+            4,
+        );
+        let legacy = insert(
+            &memory,
+            "p",
+            "legacy-unit",
+            &repo,
+            "valid legacy",
+            &json!([{"path":"a.txt","sha256":hash(&repo.join("a.txt")).unwrap()}]),
+            5,
+        );
+
+        let saved = memory.get(blocked).unwrap();
+        assert_eq!(
+            saved["entry"]["stale"], false,
+            "source freshness is separate"
+        );
+        assert_eq!(saved["entry"]["rework_policy_eligible"], false);
+        assert_eq!(
+            saved["entry"]["rework_policy_reason"],
+            "independent_evaluation_used"
+        );
+        assert_eq!(saved["entry"]["body"], "", "history is preserved");
+        let unknown_entry = memory.get(missing).unwrap();
+        assert_eq!(unknown_entry["entry"]["stale"], false);
+        assert!(unknown_entry["entry"]["rework_policy_eligible"].is_null());
+        assert_eq!(
+            unknown_entry["entry"]["rework_policy_reason"],
+            "rework_provenance_unavailable"
+        );
+        assert_eq!(
+            memory.get(first).unwrap()["entry"]["rework_policy_eligible"],
+            true
+        );
+        assert_eq!(
+            memory.get(public).unwrap()["entry"]["rework_policy_eligible"],
+            true
+        );
+
+        let hits = memory.search_reusable("needle", "p", &repo, 10).unwrap();
+        let ids: Vec<i64> = hits["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_i64().unwrap())
+            .collect();
+        assert!(ids.contains(&first));
+        assert!(ids.contains(&public));
+        assert!(ids.contains(&legacy));
+        assert!(!ids.contains(&blocked));
+        assert!(!ids.contains(&missing));
+
+        let before: i64 = memory
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            memory
+                .record_run("p", "run-private-rework", "must not be recorded")
+                .unwrap_err()
+                .kind,
+            "independent_evaluation_used"
+        );
+        let after: i64 = memory
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            memory.get(blocked).unwrap()["entry"]["summary"],
+            "private rework history"
+        );
     }
 
     #[test]
@@ -713,6 +1030,10 @@ mod tests {
         db.execute(
             "INSERT INTO entries(project,unit,title,summary,body,symbols,wish,files,project_dir,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
             params!["p", "bad-json", "needle", "corrupt", "", "", "needle", "not-json", first.canonicalize().unwrap().to_str().unwrap(), 100_i64],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO entries(project,unit,title,summary,body,symbols,wish,files,project_dir,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            params!["p", "bad-blob", "needle", "unreadable", "", "", "needle", rusqlite::types::Value::Blob(vec![0xff]), first.canonicalize().unwrap().to_str().unwrap(), 101_i64],
         ).unwrap();
         drop(db);
 

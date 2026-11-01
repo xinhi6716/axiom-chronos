@@ -1,6 +1,7 @@
 """RPC regression fixture, not live acceptance or a production execution path."""
 import json
 import hashlib
+import ntpath
 import os
 import subprocess
 import sys
@@ -17,6 +18,7 @@ lock = threading.Lock()
 threads = {}
 pending = {}
 verify_queue = {}
+verification_codes = {}
 baseline = {}
 call_counts = {}
 barrier = threading.Barrier(2, timeout=10)
@@ -72,6 +74,116 @@ sys.excepthook = fatal
 threading.excepthook = thread_fatal
 
 
+def scenario_path(value):
+    """Relative names only; interpret drive and separator rules per host."""
+    if not isinstance(value, str) or not value or '\x00' in value:
+        raise ValueError('invalid scenario path')
+    normalized = value.replace('\\', '/') if os.name == 'nt' else value
+    if normalized.startswith('/') or (os.name == 'nt' and (ntpath.splitdrive(value)[0] or ':' in normalized)):
+        raise ValueError('absolute or drive-qualified scenario path')
+    parts = normalized.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise ValueError('invalid scenario path component')
+    return '/'.join(parts)
+
+
+def scenario_covers(scope, path):
+    if os.name == 'nt':
+        scope, path = scope.casefold(), path.casefold()
+    return path == scope or path.startswith(scope + '/')
+
+
+def exact_object(value, names, label):
+    if not isinstance(value, dict) or set(value) != set(names):
+        raise ValueError('invalid ' + label + ' fields')
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate scenario key')
+        result[key] = value
+    return result
+
+
+def check_definition(value):
+    exact_object(value, ['id', 'program', 'args', 'env', 'timeout_s'], 'check')
+    if not isinstance(value['id'], str) or not isinstance(value['program'], str):
+        raise ValueError('invalid check identity')
+    if not isinstance(value['args'], list) or not all(isinstance(a, str) for a in value['args']):
+        raise ValueError('invalid check arguments')
+    if not isinstance(value['env'], list) or type(value['timeout_s']) is not int:
+        raise ValueError('invalid check environment or timeout')
+    for entry in value['env']:
+        exact_object(entry, ['name', 'value'], 'environment')
+        if not all(isinstance(entry[k], str) for k in ('name', 'value')):
+            raise ValueError('invalid environment value')
+
+
+def load_scenario():
+    path = os.environ.get('AXIOM_TEST_FLOW_SCENARIO')
+    if path is None:
+        return None
+    if not Path(path).is_absolute():
+        raise ValueError('scenario path must be absolute')
+    scenario = json.loads(Path(path).read_text(encoding='utf-8'), object_pairs_hook=unique_object)
+    exact_object(scenario, ['schema_version', 'plan', 'preparation', 'writer_files', 'verifier'], 'scenario')
+    if type(scenario['schema_version']) is not int or scenario['schema_version'] != 1:
+        raise ValueError('unsupported scenario version')
+    plan = scenario['plan']
+    exact_object(plan, ['units', 'checks', 'assembly_scope', 'independent_evaluation'], 'plan')
+    if not isinstance(plan['units'], list) or not isinstance(plan['checks'], list):
+        raise ValueError('invalid scenario plan')
+    if plan['assembly_scope'] is not None and (not isinstance(plan['assembly_scope'], list) or
+                                                not all(isinstance(s, str) for s in plan['assembly_scope'])):
+        raise ValueError('invalid assembly scope')
+    if plan['independent_evaluation'] is not None and not isinstance(plan['independent_evaluation'], str):
+        raise ValueError('invalid independent evaluation')
+    scopes = {}
+    for unit in plan['units']:
+        exact_object(unit, ['kind', 'id', 'brief', 'scope', 'depends_on'], 'unit')
+        if (unit['kind'] not in (None, 'engineer', 'content') or
+                not isinstance(unit['id'], str) or not isinstance(unit['brief'], str) or
+                not isinstance(unit['scope'], list) or not isinstance(unit['depends_on'], list) or
+                not all(isinstance(d, str) for d in unit['depends_on']) or unit['id'] in scopes):
+            raise ValueError('invalid scenario unit')
+        scopes[unit['id']] = [scenario_path(s) for s in unit['scope']]
+    for check in plan['checks']:
+        check_definition(check)
+    prep = scenario['preparation']
+    exact_object(prep, ['status', 'summary', 'exposure', 'checks'], 'preparation')
+    if (prep['status'] not in ('ready', 'failed') or not isinstance(prep['summary'], str) or
+            not isinstance(prep['exposure'], str) or not isinstance(prep['checks'], list)):
+        raise ValueError('invalid preparation')
+    for check in prep['checks']:
+        check_definition(check)
+    verifier = scenario['verifier']
+    exact_object(verifier, ['pass', 'summary', 'defect_owner'], 'verifier')
+    if (type(verifier['pass']) is not bool or not isinstance(verifier['summary'], str) or
+            verifier['defect_owner'] not in ('none', 'assembly', 'upstream')):
+        raise ValueError('invalid verifier')
+    if not isinstance(scenario['writer_files'], list):
+        raise ValueError('invalid writer files')
+    for entry in scenario['writer_files']:
+        exact_object(entry, ['unit_id', 'relative_path', 'content_utf8'], 'writer file')
+        unit_id = entry['unit_id']
+        if not isinstance(unit_id, str) or unit_id not in scopes or not isinstance(entry['content_utf8'], str):
+            raise ValueError('invalid writer file owner or content')
+        entry['content_utf8'].encode('utf-8')
+        name = scenario_path(entry['relative_path'])
+        if not any(scenario_covers(scope, name) for scope in scopes[unit_id]):
+            raise ValueError('writer file outside assigned unit scope')
+        if any(other != unit_id and any(scenario_covers(scope, name) for scope in other_scope)
+               for other, other_scope in scopes.items()):
+            raise ValueError('writer file belongs to another unit')
+        entry['relative_path'] = name
+    return scenario
+
+
+scenario = load_scenario()
+
+
 def finish(tid, text='done', failed=False, cancelled=False):
     turn = tid + '-turn'
     send({'method': 'item/completed', 'params': {'threadId': tid, 'turnId': turn,
@@ -113,15 +225,34 @@ def baseline_classification(exit_code):
 
 def baseline_result(tid):
     state = baseline[tid]
-    observations = [{'check_id': cid, 'classification': baseline_classification(code)}
-                    for cid, code in zip(state['ids'], state['codes'])]
-    return json.dumps({'infrastructure_ready': mode != 'baseline-infrastructure',
+    classes = (state['classes'] if scenario is not None
+               else [baseline_classification(code) for code in state['codes']])
+    observations = [{'check_id': cid, 'classification': classification}
+                    for cid, classification in zip(state['ids'], classes)]
+    return json.dumps({'infrastructure_ready': all(c != 'infrastructure_failure' for c in classes),
                        'summary': 'baseline executed every frozen check',
                        'observations': observations})
 
 
+def scenario_baseline_classification(msg, code):
+    if code is None:
+        return 'infrastructure_failure'
+    if code == 0:
+        return 'passed'
+    items = msg.get('result', {}).get('contentItems') or []
+    result = json.loads(items[0]['text']) if items else {}
+    stderr = result.get('stderr', {}).get('path')
+    if stderr and 'FileNotFoundError' in Path(stderr).read_text(encoding='utf-8', errors='replace'):
+        return 'product_missing'
+    return 'product_defect'
+
+
 def independent_checks():
     """Private acceptance checks: fresh cases, product-inspecting commands."""
+    if mode == 'evaluation-check-failed-declared-pass':
+        check = PRIVATE_CHECK.replace("=='one|two'", "=='unexpected|value'")
+        return [{'id': 'independent-output', 'program': sys.executable,
+                 'args': ['-I', '-c', check, '{repo}'], 'env': [], 'timeout_s': 10}]
     if mode == 'evaluation-fake-ready':
         # A public regression command relabelled as held-out acceptance.
         return [{'id': 'independent-copy', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
@@ -207,11 +338,25 @@ for line in sys.stdin:
                     finish(tid, preparation())
                 continue
             if tid in baseline:
-                baseline[tid]['codes'].append(check_exit_code(msg) if ok else None)
+                code = check_exit_code(msg) if ok else None
+                baseline[tid]['codes'].append(code)
+                if scenario is not None:
+                    baseline[tid]['classes'].append(scenario_baseline_classification(msg, code))
                 if ok and len(baseline[tid]['codes']) < len(baseline[tid]['ids']):
                     call(tid, 'verify_run', {'check_id': baseline[tid]['ids'][len(baseline[tid]['codes'])]})
                     continue
                 finish(tid, baseline_result(tid), not ok)
+                continue
+            if tid in verification_codes:
+                verification_codes[tid].append(check_exit_code(msg) if ok else None)
+                if ok and verify_queue[tid]:
+                    call(tid, 'verify_run', {'check_id': verify_queue[tid].pop(0)})
+                    continue
+                verdict = dict(scenario['verifier'])
+                if any(code != 0 for code in verification_codes.pop(tid)):
+                    verdict.update({'pass': False, 'summary': 'a frozen check failed', 'defect_owner': 'assembly'})
+                verify_queue.pop(tid, None)
+                finish(tid, json.dumps(verdict), not ok)
                 continue
             if verify_queue.get(tid) and ok:
                 call(tid, 'verify_run', {'check_id': verify_queue[tid].pop(0)}, final)
@@ -292,18 +437,27 @@ for line in sys.stdin:
                     finish(tid, 'coordinator failed before invoking dispatch_batch', failed=True)
                     continue
                 marker.write_text(tid, encoding='utf-8')
-            ids = ['u1'] if mode in ['unknown-then-failed', 'unknown-partial', 'unready-peer-write', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn', 'writer-cancelled'] else ['u1', 'u2']
+            if scenario is not None:
+                marker = 'independent ready unit_ids in one call so Rust executes concurrently:'
+                ids, _ = json.JSONDecoder().raw_decode(brief.split(marker, 1)[1].lstrip())
+                if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                    raise ValueError('invalid ready-unit list')
+            else:
+                ids = ['u1'] if mode in ['unknown-then-failed', 'unknown-partial', 'unready-peer-write', 'unknown-completed-inside', 'unknown-completed-outside', 'unknown-history-cancelled', 'unknown-history-failed', 'unknown-no-turn', 'writer-cancelled'] else ['u1', 'u2']
             call(tid, 'dispatch_batch', {'unit_ids': ids})
         elif 'ROLE Research' in brief:
             log('research', thread=tid, effort=p.get('effort'), brief=brief)
             finish(tid, json.dumps({'summary': 'independent research', 'findings': ['freeze Python checks before writes']}))
         elif 'ROLE Planner' in brief:
+            if scenario is not None:
+                finish(tid, json.dumps(scenario['plan']))
+                continue
             check = PUBLIC_CHECK
             if mode == 'failed-check':
                 check = 'raise SystemExit(7)'
             if mode == 'directory-peers':
                 check = PARENT_CHECK
-            plan = {'independent_evaluation': 'Check the two outputs independently before release' if mode in ['evaluation', 'evaluation-repairable-review', 'evaluation-reordered-env', 'evaluation-distinct-env', 'evaluation-case-variant', 'evaluation-unicode-case-variant', 'evaluation-lowercase-default', 'public-duplicate-case-env', 'public-duplicate-env', 'private-duplicate-env', 'planning-retry', 'retry-second-epoch', 'retry-missing', 'retry-tampered', 'retry-wrong-epoch', 'public-private-id', 'evaluation-recovered', 'evaluation-unprepared', 'evaluation-fake-ready', 'baseline-infrastructure', 'runner-ready', 'runner-fail-fallback', 'runner-forged', 'runner-unknown'] else None, 'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
+            plan = {'independent_evaluation': 'Check the two outputs independently before release' if mode in ['evaluation', 'evaluation-repairable-review', 'evaluation-check-failed-declared-pass', 'evaluation-reordered-env', 'evaluation-distinct-env', 'evaluation-case-variant', 'evaluation-unicode-case-variant', 'evaluation-lowercase-default', 'public-duplicate-case-env', 'public-duplicate-env', 'private-duplicate-env', 'planning-retry', 'retry-second-epoch', 'retry-missing', 'retry-tampered', 'retry-wrong-epoch', 'public-private-id', 'evaluation-recovered', 'evaluation-unprepared', 'evaluation-fake-ready', 'baseline-infrastructure', 'runner-ready', 'runner-fail-fallback', 'runner-forged', 'runner-unknown'] else None, 'assembly_scope': None, 'units': [{'kind':'engineer','id': 'u1', 'brief': 'write one', 'scope': ['one.txt'], 'depends_on': []},
                               {'kind':'engineer','id': 'u2', 'brief': 'write two', 'scope': ['two.txt'], 'depends_on': []}],
                     'checks': [{'id': 'frozen-python', 'program': os.environ.get('AXIOM_TEST_PYTHON', sys.executable),
                                 'args': ['-I', '-c', check, '{repo}'], 'env': [{'name':'CARGO_TARGET_DIR','value':'{scratch}/planned-target'}], 'timeout_s': 10}]}
@@ -356,6 +510,9 @@ for line in sys.stdin:
             assert cfg['sandbox'] == 'read-only' and cfg['model'].endswith('-astra')
             assert p['effort'] == 'high'
             log('evaluation-prepared', thread=tid, brief=brief)
+            if scenario is not None:
+                finish(tid, json.dumps(scenario['preparation']))
+                continue
             if mode in ['runner-ready', 'runner-fail-fallback', 'runner-unknown']:
                 source = 'fn main( {' if mode == 'runner-fail-fallback' else RUNNER_SOURCE
                 call(tid, 'prepare_rust_runner', {'source_utf8': source}, '__prepared_runner__')
@@ -384,6 +541,35 @@ for line in sys.stdin:
             send({'method': 'item/completed', 'params': {'threadId': tid, 'turnId': tid + '-turn',
                   'item': {'type': 'fileChange', 'id': 'scratch-write', 'status': 'completed',
                            'changes': [{'path': str(work/'development-output'), 'kind': {'type': 'add'}, 'diff': ''}]}}})
+            if scenario is not None:
+                actual_scope = json.loads(brief.split('\nSCOPE\n', 1)[1].split('\nVERIFY\n', 1)[0])
+                def scope_key(items):
+                    names = [scenario_path(item) for item in items]
+                    return sorted(name.casefold() if os.name == 'nt' else name for name in names)
+                matches = [u for u in scenario['plan']['units'] if scope_key(u['scope']) == scope_key(actual_scope)]
+                if len(matches) != 1:
+                    raise ValueError('engineer scope does not identify exactly one unit')
+                unit = matches[0]
+                root = Path(cfg['cwd']).resolve()
+                normalized_scope = [scenario_path(s) for s in unit['scope']]
+                writes = []
+                for entry in scenario['writer_files']:
+                    if entry['unit_id'] != unit['id']:
+                        continue
+                    target = root.joinpath(*entry['relative_path'].split('/'))
+                    resolved = target.resolve()
+                    if not resolved.is_relative_to(root):
+                        raise ValueError('writer target escapes repository through a link')
+                    relative = resolved.relative_to(root).as_posix()
+                    if not any(scenario_covers(scope, relative) for scope in normalized_scope):
+                        raise ValueError('writer target resolves outside its unit scope')
+                    writes.append((target, entry['content_utf8']))
+                for target, contents in writes:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(contents, encoding='utf-8')
+                log('engineer-finish', thread=tid, unit_id=unit['id'])
+                finish(tid, writer('completed', 'scenario unit completed', None))
+                continue
             if mode == 'failed-peer':
                 if 'write one' in brief:
                     finish(tid, 'injected engineering failure', failed=True)
@@ -425,7 +611,8 @@ for line in sys.stdin:
             threading.Thread(target=engineer, daemon=True).start()
         elif 'ROLE Content' in brief:
             log('content', thread=tid)
-            finish(tid, writer('completed', 'requested artifact text', 'two'))
+            finish(tid, writer('completed', 'requested artifact text',
+                               'scenario content' if scenario is not None else 'two'))
         elif 'ROLE Assembler' in brief:
             log('assembly', thread=tid)
             if mode in ['repairable-review', 'evaluation-repairable-review', 'repairable-review-twice'] and 'Repair the independently rejected result' in brief:
@@ -437,10 +624,15 @@ for line in sys.stdin:
         elif 'verify_run' in names:
             if 'Execute frozen baseline checks' in brief:
                 ids = json.loads(brief.rsplit('VERIFY\n', 1)[1])
-                baseline[tid] = {'ids': ids, 'codes': []}
+                baseline[tid] = {'ids': ids, 'codes': [], 'classes': []}
                 call(tid, 'verify_run', {'check_id': ids[0]})
             else:
                 ids = json.loads(brief.rsplit('VERIFY\n', 1)[1])
+                if scenario is not None:
+                    verification_codes[tid] = []
+                    verify_queue[tid] = ids[1:]
+                    call(tid, 'verify_run', {'check_id': ids[0]})
+                    continue
                 if mode == 'no-check':
                     # Claims a pass without invoking any frozen check.
                     finish(tid, verifier_result(tid, brief))
@@ -457,7 +649,8 @@ for line in sys.stdin:
                 # Simulate an external source change after review, before the
                 # read-only memory role's callback is processed.
                 Path(cfg['cwd'], 'one.txt').write_text('changed after review')
-            content = ('write one VERIFIED_MEMORY_CANARY' if mode == 'memory-reuse'
+            content = ('Verified scenario units with frozen checks.' if scenario is not None
+                       else 'write one VERIFIED_MEMORY_CANARY' if mode == 'memory-reuse'
                        else 'Verified two scoped units and mandatory assembly with frozen-python.')
             call(tid, 'record_memory', {'evidence_id': evidence, 'content': content})
         else:
@@ -467,8 +660,14 @@ for line in sys.stdin:
         log('command', process_cwd=os.getcwd(), params=p)
         if mode == 'runner-unknown' and p['command'][1:] == ['-vV']:
             os._exit(19)
-        proc = subprocess.run(p['command'], cwd=p['cwd'], env=dict(os.environ, **p.get('env', {})), capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=p['timeoutMs'] / 1000)
-        result = {'exitCode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr, 'timedOut': False}
+        try:
+            proc = subprocess.run(p['command'], cwd=p['cwd'], env=dict(os.environ, **p.get('env', {})), capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=p['timeoutMs'] / 1000)
+            result = {'exitCode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr, 'timedOut': False}
+        except (OSError, subprocess.TimeoutExpired) as error:
+            if scenario is None:
+                raise
+            result = {'exitCode': None, 'stdout': '', 'stderr': str(error),
+                      'timedOut': isinstance(error, subprocess.TimeoutExpired)}
     elif method == 'thread/read':
         model_history = log_path.with_suffix('.model-history')
         if mode == 'verifier-history-null' and model_history.exists():

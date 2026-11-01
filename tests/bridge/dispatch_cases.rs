@@ -189,6 +189,107 @@ fn run_flow(mode: &str, approve: bool) {
         assert_eq!(approved["status"], "ready_to_commit", "{approved}");
         return;
     }
+    if [
+        "evaluation-repairable-review",
+        "evaluation-check-failed-declared-pass",
+    ]
+    .contains(&mode)
+    {
+        assert_eq!(result["status"], "blocked", "{result}\n{}", trail());
+        assert_eq!(
+            result["error"]["kind"], "independent_evaluation_used",
+            "{result}"
+        );
+        let store = home.join("orchestrate/demo");
+        let saved = checkpoint::load_run(&store, run).unwrap();
+        assert!(saved.receipts.contains_key("check-independent-output"));
+        assert!(!saved.receipts.keys().any(|key| key.starts_with("rework-")));
+        let review_ref = saved
+            .receipts
+            .iter()
+            .find(|(key, _)| key.starts_with("review-"))
+            .expect("negative review remains durable")
+            .1;
+        let review: checkpoint::IndependentReview =
+            serde_json::from_slice(&std::fs::read(&review_ref.path).unwrap()).unwrap();
+        assert!(!review.pass);
+        for attempt in saved.attempts.values().filter(|attempt| {
+            matches!(
+                &saved.steps[&attempt.step_id].purpose,
+                checkpoint::Purpose::Engineer | checkpoint::Purpose::Assembler
+            )
+        }) {
+            let (report, _, _) =
+                checkpoint::terminal_attempt_report(&store, &saved, &attempt.attempt_id).unwrap();
+            let audit: ArtifactRef = serde_json::from_value(report["scope_audit"].clone()).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(std::fs::read(&audit.path).unwrap())),
+                audit.digest
+            );
+        }
+        let counts = |records: &[Value]| {
+            let verifier_turns = records
+                .iter()
+                .filter(|row| {
+                    row["kind"] == "turn"
+                        && row["params"]["input"][0]["text"]
+                            .as_str()
+                            .is_some_and(|text| {
+                                text.starts_with("ROLE Verifier")
+                                    && text
+                                        .contains("Independently inspect assembled implementation")
+                            })
+                })
+                .count();
+            (
+                records
+                    .iter()
+                    .filter(|row| row["kind"] == "engineer-start")
+                    .count(),
+                records
+                    .iter()
+                    .filter(|row| row["kind"] == "assembly")
+                    .count(),
+                verifier_turns,
+                records
+                    .iter()
+                    .filter(|row| row["kind"] == "command")
+                    .count(),
+            )
+        };
+        let before = counts(&rows());
+        assert_eq!((before.0, before.1, before.2), (2, 1, 1));
+        assert_eq!(
+            before.3, 4,
+            "both checks run once for baseline and once for candidate"
+        );
+        let replay = invoke("decide", decide.clone());
+        assert_ne!(replay["status"], "ready_to_commit", "{replay}");
+        let resumed = invoke(
+            "resume-private-rejection",
+            json!({"type":"resume","run_id":run}),
+        );
+        assert_ne!(resumed["status"], "ready_to_commit", "{resumed}");
+        assert_eq!(
+            counts(&rows()),
+            before,
+            "no writer, verifier, or frozen check may rerun"
+        );
+        let after = checkpoint::load_run(&store, run).unwrap();
+        assert!(after.receipts.contains_key("check-independent-output"));
+        assert_eq!(
+            after
+                .receipts
+                .iter()
+                .find(|(key, _)| key.starts_with("review-"))
+                .unwrap()
+                .1
+                .digest,
+            review_ref.digest
+        );
+        assert!(!after.receipts.keys().any(|key| key.starts_with("rework-")));
+        return;
+    }
     if mode == "verifier-history-null" {
         assert_eq!(result["status"], "outcome_unknown", "{result}\n{}", trail());
         result = invoke(
@@ -1182,7 +1283,6 @@ fn run_flow(mode: &str, approve: bool) {
         "memory-no-query",
         "repairable-review",
         "repairable-review-twice",
-        "evaluation-repairable-review",
         "evaluation",
         "evaluation-distinct-env",
         "evaluation-case-variant",
@@ -1346,7 +1446,6 @@ fn run_flow(mode: &str, approve: bool) {
     }
     if [
         "evaluation",
-        "evaluation-repairable-review",
         "evaluation-distinct-env",
         "evaluation-case-variant",
         "evaluation-unicode-case-variant",
@@ -1462,13 +1561,6 @@ fn run_flow(mode: &str, approve: bool) {
             }
         )
         .is_err());
-        if mode == "evaluation-repairable-review" {
-            let feedback: Value =
-                serde_json::from_slice(&std::fs::read(&c.receipts["rework-1"].path).unwrap())
-                    .unwrap();
-            assert!(!feedback["check-frozen-python"].is_null());
-            assert!(feedback["check-independent-output"].is_null());
-        }
     }
     assert!(records
         .iter()
@@ -1506,7 +1598,7 @@ fn run_flow(mode: &str, approve: bool) {
         records.iter().filter(|r| r["kind"] == "assembly").count(),
         if mode == "repairable-review-twice" {
             3
-        } else if ["repairable-review", "evaluation-repairable-review"].contains(&mode) {
+        } else if mode == "repairable-review" {
             2
         } else {
             1
@@ -1879,8 +1971,214 @@ fn a_unit_brief_without_search_terms_does_not_block_planning() {
 }
 
 #[test]
-fn rework_keeps_public_evidence_and_withholds_private_check_evidence() {
+fn private_negative_preserves_evidence_and_stops_before_rework() {
     flow("evaluation-repairable-review", true);
+    flow("evaluation-check-failed-declared-pass", true);
+}
+
+fn test_scenario(private_passes: bool) -> serde_json::Value {
+    use serde_json::json;
+    let check = |id: &str, script: &str| {
+        json!({
+            "id":id,"program":common::python(),"args":["-I","-c",script,"{repo}"],"env":[],"timeout_s":20
+        })
+    };
+    let private_script = if private_passes {
+        "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert (p/'beta.txt').read_text(encoding='utf-8')=='kite'; assert (p/'gamma.txt').read_text(encoding='utf-8')=='青🍊'"
+    } else {
+        "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert (p/'beta.txt').read_text(encoding='utf-8')=='incorrect-value'"
+    };
+    json!({
+        "schema_version":1,
+        "plan":{
+            "units":[
+                {"kind":"engineer","id":"alpha","brief":"write orchard","scope":["alpha.txt"],"depends_on":[]},
+                {"kind":"engineer","id":"beta","brief":"write kite","scope":["beta.txt"],"depends_on":["alpha"]},
+                {"kind":"engineer","id":"gamma","brief":"write meadow","scope":["gamma.txt"],"depends_on":[]}
+            ],
+            "checks":[check("public-orchard", "from pathlib import Path; import sys; assert (Path(sys.argv[1])/'alpha.txt').read_text(encoding='utf-8')=='orchard'")],
+            "assembly_scope":null,"independent_evaluation":"Inspect the independently chosen outputs."
+        },
+        "preparation":{"status":"ready","summary":"prepared","exposure":"synthetic fixtures",
+            "checks":[check("independent-kite",private_script)]},
+        "writer_files":[
+            {"unit_id":"alpha","relative_path":"alpha.txt","content_utf8":"orchard"},
+            {"unit_id":"beta","relative_path":"beta.txt","content_utf8":"kite"},
+            {"unit_id":"gamma","relative_path":"gamma.txt","content_utf8":"青🍊"}
+        ],
+        "verifier":{"pass":true,"summary":"all checks passed","defect_owner":"none"}
+    })
+}
+
+fn scenario_flow(private_passes: bool) {
+    use serde_json::{json, Value};
+    let _serial = FLOW.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = common::temp();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("isolated-home");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let scenario = temp.path().join("scenario.json");
+    std::fs::write(
+        &scenario,
+        serde_json::to_vec(&test_scenario(private_passes)).unwrap(),
+    )
+    .unwrap();
+    let log = temp.path().join("rpc.jsonl");
+    let wrapper = temp.path().join("scenario-wrapper.py");
+    std::fs::write(
+        &wrapper,
+        concat!(
+        "import os,runpy,sys\n",
+        "scenario,home,fixture=sys.argv[1:4]\n",
+        "os.environ['AXIOM_TEST_FLOW_SCENARIO']=scenario\n",
+        "for key in ('AXIOM_HOME','AXIOM_DATA_HOME','CLAUDE_PLUGIN_DATA'): os.environ[key]=home\n",
+        "sys.argv=[fixture]+sys.argv[4:]\n",
+        "runpy.run_path(fixture,run_name='__main__')\n"
+    ),
+    )
+    .unwrap();
+    let config = || Config {
+        data_home: Some(home.clone()),
+        codex: Ok(vec![
+            common::python(),
+            "-I".into(),
+            wrapper.to_string_lossy().into_owned(),
+            scenario.to_string_lossy().into_owned(),
+            home.to_string_lossy().into_owned(),
+            common::repo_root()
+                .join("tests/fakes/fake_flow.py")
+                .to_string_lossy()
+                .into_owned(),
+            log.to_string_lossy().into_owned(),
+            "scenario".into(),
+        ]),
+        agy: Err(axiom::base::Failure::new("forbidden", "no agy")),
+        wsl: None,
+        on_windows: false,
+    };
+    let invoke = |request_id: &str, action: Value| {
+        let capture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":request_id,"method":"tools/call",
+            "params":{"name":"dispatch","arguments":{"project":"scenario-demo","repo_root":repo,
+                "request_id":request_id,"action":action}}})
+        );
+        assert_eq!(
+            axiom::bridge::serve(config(), std::io::Cursor::new(input), Wire(capture.clone())),
+            0
+        );
+        let response: Value = serde_json::from_slice(&capture.lock().unwrap()).unwrap();
+        response["result"]["structuredContent"].clone()
+    };
+    let start = invoke(
+        "start",
+        json!({"type":"start","intent":"exercise three scoped units"}),
+    );
+    assert_eq!(start["status"], "needs_intent_review", "{start}");
+    let run = start["run_id"].as_str().unwrap();
+    let result = invoke(
+        "decide",
+        json!({"type":"decide","run_id":run,"research_digest":start["research"]["digest"],"pass":true,"reason":"approved"}),
+    );
+    let store = home.join("orchestrate/scenario-demo");
+    let checkpoint = checkpoint::load_run(&store, run).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(repo.join("alpha.txt")).unwrap(),
+        "orchard"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("beta.txt")).unwrap(),
+        "kite"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("gamma.txt")).unwrap(),
+        "青🍊"
+    );
+    let rows: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let completed: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "engineer-finish")
+        .map(|row| row["unit_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(completed.len(), 3);
+    assert!(
+        completed.iter().position(|id| *id == "alpha").unwrap()
+            < completed.iter().position(|id| *id == "beta").unwrap()
+    );
+    assert!(checkpoint.receipts.contains_key("check-independent-kite"));
+    if private_passes {
+        assert_eq!(result["status"], "ready_to_commit", "{result}");
+        assert!(checkpoint::verified_review(&checkpoint).is_some());
+        assert!(checkpoint.receipts.contains_key("memory"));
+    } else {
+        assert_eq!(result["status"], "blocked", "{result}");
+        assert_eq!(
+            result["error"]["kind"], "independent_evaluation_used",
+            "{result}"
+        );
+        assert!(checkpoint::verified_review(&checkpoint).is_none());
+        assert!(!checkpoint
+            .receipts
+            .keys()
+            .any(|key| key.starts_with("rework-")));
+    }
+}
+
+#[test]
+fn parameterized_flow_uses_real_ready_and_does_not_override_failed_checks() {
+    scenario_flow(true);
+    scenario_flow(false);
+}
+
+#[test]
+fn malformed_scenarios_exit_instead_of_falling_back_to_default() {
+    let temp = common::temp();
+    let fixture = common::repo_root().join("tests/fakes/fake_flow.py");
+    let log = temp.path().join("fixture.log");
+    let mut values = Vec::new();
+    let mut missing = test_scenario(true);
+    missing.as_object_mut().unwrap().remove("preparation");
+    values.push(missing);
+    for path in ["../outside.txt", "C:\\outside.txt", "beta.txt"] {
+        let mut value = test_scenario(true);
+        value["writer_files"][0]["relative_path"] = serde_json::json!(path);
+        values.push(value);
+    }
+    let mut unsupported = test_scenario(true);
+    unsupported["schema_version"] = serde_json::json!(2);
+    values.push(unsupported);
+    for (index, value) in values.into_iter().enumerate() {
+        let path = temp.path().join(format!("invalid-{index}.json"));
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let result = std::process::Command::new(common::python())
+            .arg("-I")
+            .arg(&fixture)
+            .arg(&log)
+            .env("AXIOM_TEST_FLOW_SCENARIO", &path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success(),
+            "invalid scenario must not use default: {index}"
+        );
+    }
+    let events = std::fs::read_to_string(log).unwrap();
+    assert!(
+        events.lines().count() >= 5 && events.lines().all(|line| line.contains("fixture-error"))
+    );
 }
 #[test]
 fn rpc_approve_parallel_units_assembly_real_check_memory_boundary() {

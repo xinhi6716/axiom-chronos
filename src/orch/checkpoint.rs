@@ -932,6 +932,11 @@ pub fn claim_step(store: &Path, rev: u64, spec: &StepSpec, input_digest: &str) -
                 return Err(fail("work claim is outside its authorized phase"));
             }
             baseline_authorized(c)?;
+            // Older runtimes could already have installed a rework step after
+            // held-out evaluation. Do not dispatch it after an upgrade.
+            if spec.purpose == Purpose::Assembler {
+                ensure_rework_history_safe(store, c)?;
+            }
             if matches!(spec.purpose, Purpose::Engineer | Purpose::Assembler)
                 && c.attempts
                     .values()
@@ -965,6 +970,7 @@ pub fn claim_step(store: &Path, rev: u64, spec: &StepSpec, input_digest: &str) -
                 if c.phase != Phase::Verifying || spec.step_id != verification_step_id(c) {
                     return Err(fail("verifier is outside the current verification"));
                 }
+                ensure_rework_history_safe(store, c)?;
             }
         }
         if !c.steps.contains_key(&spec.step_id) {
@@ -2597,6 +2603,11 @@ pub fn verified_review(c: &Checkpoint) -> Option<&ArtifactRef> {
         .filter(|(k, _)| k.starts_with("review-"))
         .find_map(|(key, r)| {
             let store = check_evidence_store(c, r)?;
+            // A historical review is retained, but an evaluation already used
+            // for rework cannot authorize current independent acceptance.
+            if ensure_rework_history_safe(&store, c).is_err() {
+                return None;
+            }
             let Ok(bytes) = bounded_artifact_bytes(&store, &c.repo.canonical_root, r) else {
                 return None;
             };
@@ -2659,6 +2670,7 @@ pub fn freeze_verification(store: &Path, id: &str, rev: u64) -> Res<u64> {
         // A new verification snapshot cannot retrospectively upgrade a v1
         // baseline that never captured the ignored input files.
         baseline_authorized(c)?;
+        ensure_rework_history_safe(store, c)?;
         let checks: Vec<_> = c.checks.values().cloned().collect();
         let snapshot = frozen_snapshot(
             &c.repo.canonical_root,
@@ -2691,6 +2703,7 @@ pub fn record_check(store: &Path, id: &str, rev: u64, result: &CheckResult) -> R
     snapshot_ok(&result.snapshot)?;
     Ok(mutate(store, id, rev, |c| {
         baseline_authorized(c)?;
+        ensure_rework_history_safe(store, c)?;
         if c.phase != Phase::Verifying {
             return Err(fail("check is outside verification"));
         }
@@ -2747,6 +2760,7 @@ pub fn record_independent_review(
     snapshot_ok(&review.snapshot)?;
     Ok(mutate(store, id, rev, |c| {
         baseline_authorized(c)?;
+        ensure_rework_history_safe(store, c)?;
         if c.phase != Phase::Verifying {
             return Err(fail("review is outside verification"));
         }
@@ -2850,6 +2864,35 @@ pub fn public_check_ids(store: &Path, c: &Checkpoint) -> Res<BTreeSet<String>> {
     }
     Ok(public)
 }
+
+/// A verifier given held-out cases cannot authorize another writer against the
+/// same data. Classify from verified provenance rather than the ID prefix:
+/// older public plans could legitimately use that prefix.
+pub(crate) fn public_rework_checks(store: &Path, c: &Checkpoint) -> Res<BTreeSet<String>> {
+    let public = public_check_ids(store, c)?;
+    // The verifier receives this receipt as context even if an older or
+    // inconsistent checkpoint has no privately classified frozen check.
+    let exposed_context = c
+        .receipts
+        .contains_key(&format!("evaluation-{}", planning_epoch(c)));
+    if exposed_context || public.len() != c.checks.len() {
+        return Err(Failure::new(
+            "independent_evaluation_used",
+            "Independent evaluation has been used; preserve its evidence and start a new run with fresh held-out data before further engineering.",
+        ));
+    }
+    Ok(public)
+}
+
+/// Validate historical rework eligibility without rerunning checks or hashing
+/// the entire source tree. Callers still perform their own evidence checks.
+pub(crate) fn ensure_rework_history_safe(store: &Path, c: &Checkpoint) -> Res<()> {
+    if c.receipts.keys().any(|key| key.starts_with("rework-")) {
+        public_rework_checks(store, c)?;
+    }
+    Ok(())
+}
+
 /// Return a known, independently rejected assembly to SOL without changing
 /// scope or frozen commands. Prior failures remain immutable evidence.
 pub fn prepare_rework(store: &Path, id: &str, rev: u64) -> Res<u64> {
@@ -2867,7 +2910,7 @@ pub fn prepare_rework(store: &Path, id: &str, rev: u64) -> Res<u64> {
         {
             return Err(fail("rework requires a known rejected review; at most two repairs"));
         }
-        let public = public_check_ids(store, c)?;
+        let public = public_rework_checks(store, c)?;
         let evidence: BTreeMap<_, _> = c.receipts.iter()
             .filter(|(k, _)| k.strip_prefix("check-").is_some_and(|id| public.contains(id)) || k.starts_with("review-"))
             .map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -4331,6 +4374,47 @@ mod verified_artifact_tests {
         attempt.outcome = Some(AttemptOutcome::Completed);
         attempt.raw_result = Some(prep);
         c.attempts.insert(attempt.attempt_id.clone(), attempt);
+
+        assert_eq!(
+            public_rework_checks(&store, &c).unwrap_err().kind,
+            "independent_evaluation_used"
+        );
+        assert!(ensure_rework_history_safe(&store, &c).is_ok());
+        c.receipts.insert("rework-1".into(), plan.clone());
+        assert_eq!(
+            ensure_rework_history_safe(&store, &c).unwrap_err().kind,
+            "independent_evaluation_used"
+        );
+        let mut missing_provenance = c.clone();
+        missing_provenance.receipts.remove("evaluation-0");
+        assert!(ensure_rework_history_safe(&store, &missing_provenance).is_err());
+
+        // Old public plans may use the reserved prefix. They remain eligible
+        // for public-only rework when the verified plan actually lists them.
+        let mut legacy = c.clone();
+        let legacy_plan = reference(
+            &store.join("legacy-plan.json"),
+            br#"{"checks":[{"id":"independent-private"}]}"#,
+        );
+        legacy.plan = Some(legacy_plan.clone());
+        legacy.checks.remove("public");
+        legacy
+            .checks
+            .get_mut("independent-private")
+            .unwrap()
+            .snapshot
+            .plan_digest = legacy_plan.digest;
+        assert_eq!(
+            public_rework_checks(&store, &legacy).unwrap_err().kind,
+            "independent_evaluation_used",
+            "an evaluation receipt is private context even with only public IDs"
+        );
+        legacy.receipts.remove("evaluation-0");
+        assert_eq!(
+            public_rework_checks(&store, &legacy).unwrap(),
+            BTreeSet::from(["independent-private".to_string()])
+        );
+        assert!(ensure_rework_history_safe(&store, &legacy).is_ok());
 
         let target = plan.path.canonicalize().unwrap();
         AFTER_ARTIFACT_VERIFICATION.with(|hook| {

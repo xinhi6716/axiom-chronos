@@ -1,6 +1,6 @@
 # Chronos Codex 使用說明
 
-版本：`0.3.0-codex.dev.10`，從標準版 `e27de7a` 重建的開發候選。
+版本：`0.3.0-codex.dev.10.1`，從標準版 `e27de7a` 重建的維護候選；此版本仍待整合驗證與安裝。
 
 ## 核心與分工
 
@@ -25,7 +25,7 @@ Rust 保存階段、工作單、範圍占用、嘗試身分與證據。子代理
 
 wish 在研究完成後返回 `needs_intent_review`。核心核對是否符合意圖，以研究 digest 明確決定。否決會把保留的草稿及理由送回研究，停在新的複核邊界；通過才進入規劃與工程。research 到研究邊界即交付，不自動啟動工程。
 
-規劃先固定驗證命令與範圍，基線在工程前可合法執行。組裝後，由新驗證者要求 Rust 執行固定 check ID，驗證程序只可寫隔離暫存目錄。已知驗證失敗可返回 SOL，最多重修兩次，每次重新獨立驗證；不更換驗收命令，不重派未知寫入。
+規劃先固定驗證命令與範圍，基線在工程前可合法執行。組裝後，由新驗證者要求 Rust 執行固定 check ID，驗證程序只可寫隔離暫存目錄。公開檢查的已知組裝失敗可返回 SOL，最多重修兩次，每次重新獨立驗證；不更換驗收命令，不重派未知寫入。若本輪驗證含由準備階段封存的私有檢查，首次驗證失敗須保留證據並停在 blocked，不自動返回 SOL，也不得用重修 API 繞過。
 
 通過並保存記憶後返回 `ready_to_commit`，由核心提交。一般專案不必有遠端或 Rust 發版流程。一個 run 只接收目前一輪的交付要求；其餘輪次留在簡短 TODO。若任務要求多輪，核心完成該輪指定的提交、推送、套件更新與版本確認後，再提出下一輪意圖。本次重建不算先前要求的五輪迭代。
 
@@ -112,7 +112,7 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 - 準備報告回報 `status=ready` 並填有曝光說明；四項基線均回報 `product_missing`，此樣本未測到其他基線分類或負向返工路由。匯出紀錄稱 43 組案例中一組與已記錄開發輸入完全重疊，其餘 42 組未發現完整 argv 重疊；因缺少完整讀取稽核與實際送給 writer 的完整 brief，不能證明私有案例未曾暴露。
 - 原實測為單機 Windows 的 headless `codex exec` task，核准使用 `--approve-for-me` 自動審查，不是 GUI task。`f2eef18` 的 [Windows／Ubuntu CI](https://github.com/xinhi6716/axiom-chronos/actions/runs/41310739823) 通過；先前 Windows 曾出現 timing flake。沒有可比較的 token 或速度量測，不能據此宣稱改善。正式三輪迭代尚未開始。
 
-### dev.10：維護中（尚未發布）
+### dev.10：維護紀錄
 
 以下為 dev.10 修復與局部比較結果；完整版本安裝、獨立任務及正式 RSI 功能仍依各階段證據確認。
 
@@ -135,3 +135,10 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 
 相容投影改為單次讀取 checks／reviews，完整 source snapshot 在批次前後各算一次，各 unit scope 仍獨立計算；source 改變即撤銷整批通過判定。權威 gate 沿用完整 review 校驗，移除其中已被覆蓋的重複 check 校驗，未快取跨 callback 的來源。兩組固定負載的投影中位時間分別少 59.96%／76.71%，驗證少 33.48%／37.53%，均符合事先固定的 10% 與樣本區間不重疊門檻；原契約及舊非法狀態拒絕均通過。這是單機分時局部函式比較，背景負載不同，不能當作完整 Chronos／模型延遲改善。[逐筆計時](E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/optimization-evaluation-v2-20261101/results/candidate-observation-summary.json)。
 
+### dev.10.1：維護候選（整合驗證中）
+
+此候選處理準備階段與私有驗收的兩個邊界。規劃及準備者的指示允許在任務相關範圍做唯讀檔案與 API 檢視；Windows 非 ASCII 文字需經可核對的 UTF-8 讀取與 ASCII JSON 傳輸（例如 `Get-Content -Encoding UTF8` 配合 `ConvertTo-Json -EscapeHandling EscapeNonAscii`）。這是傳輸做法，並不保證模型已正確遵循，也不授權在準備階段執行產品或驗收案例。
+
+私有檢查以已封存的規劃／準備來源辨識。驗證一旦包含真正的私有檢查，首次負向結果應保存完整證據並停在 `blocked`；恢復或直接重修入口不得重跑私有檢查或派出寫入者。僅有公開檢查時，原有最多兩次的組裝返工規則仍適用。
+
+MCP 對外維持 `start`、`decide`、`resume`、`status`、`cancel` 五種 action，候選補全各 action 與恢復決策的輸入 schema。測試夾具可選擇以 `AXIOM_TEST_FLOW_SCENARIO` 指向絕對路徑的 UTF-8 JSON，設定規劃、準備、寫入內容與驗證結論；未設定時沿用原行為，無效設定應明確失敗。夾具僅供功能回歸，內部子程序不能證明實際 Codex 沙箱、提供者身分或獨立驗收。此候選尚未完成整合測試、CI、安裝或新的真實工作流驗收；正式 RSI 與跨任務專案記憶的目標仍待後續交付。

@@ -142,6 +142,105 @@ fn descriptor_names_policy() {
     );
 }
 
+// Deliberately independent of base::schema, which does not implement anyOf.
+fn matches_dispatch_schema(schema: &Value, value: &Value) -> bool {
+    if let Some(alternatives) = schema.get("anyOf").and_then(Value::as_array) {
+        return alternatives
+            .iter()
+            .any(|s| matches_dispatch_schema(s, value));
+    }
+    let matches_type = match schema["type"].as_str() {
+        Some("object") => value.is_object(),
+        Some("string") => value.is_string(),
+        Some("boolean") => value.is_boolean(),
+        Some("null") => value.is_null(),
+        other => panic!("unexpected schema type: {other:?}"),
+    };
+    if !matches_type {
+        return false;
+    }
+    if let Some(choices) = schema.get("enum").and_then(Value::as_array) {
+        if !choices.contains(value) {
+            return false;
+        }
+    }
+    if let Some(map) = value.as_object() {
+        let properties = schema["properties"].as_object().unwrap();
+        if schema.get("additionalProperties") != Some(&json!(false)) {
+            panic!("object schema must be closed: {schema}");
+        }
+        if schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| !map.contains_key(key.as_str().unwrap()))
+        {
+            return false;
+        }
+        return map.iter().all(|(key, v)| {
+            properties
+                .get(key)
+                .is_some_and(|s| matches_dispatch_schema(s, v))
+        });
+    }
+    true
+}
+
+#[test]
+fn dispatch_action_schema_agrees_with_serde_for_all_variants() {
+    use axiom::bridge::dispatch::DispatchAction;
+    let descriptors = tools();
+    let schema = &descriptors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "dispatch")
+        .unwrap()["inputSchema"]["properties"]["action"];
+    let artifact = json!({"path":"/tmp/report.json","digest":"abc"});
+    let good = vec![
+        json!({"type":"start","intent":"build"}),
+        json!({"type":"decide","run_id":"r","research_digest":"d","pass":true,"reason":"ok"}),
+        json!({"type":"resume","run_id":"r"}),
+        json!({"type":"resume","run_id":"r","recovery":null}),
+        json!({"type":"resume","run_id":"r","recovery":{"retry_planning":{"reason":"fixed"}}}),
+        json!({"type":"resume","run_id":"r","recovery":{"accept_terminal":{"attempt_id":"a","report":artifact,"reason":"ok"}}}),
+        json!({"type":"resume","run_id":"r","recovery":{"retry_after_repair":{"attempt_id":"a","stopped_evidence":artifact,"repair_evidence":artifact,"reason":"ok"}}}),
+        json!({"type":"status","run_id":"r"}),
+        json!({"type":"cancel","run_id":"r","reason":"stop"}),
+    ];
+    let bad = vec![
+        json!({"type":"cancel","run_id":"r"}),
+        json!({"type":"start","intent":"x","extra":1}),
+        json!({"type":"decide","run_id":"r","research_digest":"d","pass":"true","reason":"ok"}),
+        json!({"type":"resume","run_id":"r","recovery":{"retry_planning":{}}}),
+        json!({"type":"resume","run_id":"r","recovery":{"accept_terminal":{"attempt_id":"a","report":{"path":"x"},"reason":"ok"}}}),
+        json!({"type":"resume","run_id":"r","recovery":{"retry_after_repair":{"attempt_id":"a","stopped_evidence":artifact,"repair_evidence":artifact,"reason":"ok","extra":1}}}),
+        json!({"type":"resume","run_id":"r","recovery":{"other":{}}}),
+        json!({"type":"status","run_id":"r","reason":"unrecognised"}),
+        json!({"type":"unknown","run_id":"r"}),
+    ];
+    for value in good {
+        assert!(
+            matches_dispatch_schema(schema, &value),
+            "schema rejects {value}"
+        );
+        assert!(
+            serde_json::from_value::<DispatchAction>(value.clone()).is_ok(),
+            "serde rejects {value}"
+        );
+    }
+    for value in bad {
+        assert!(
+            !matches_dispatch_schema(schema, &value),
+            "schema accepts {value}"
+        );
+        assert!(
+            serde_json::from_value::<DispatchAction>(value.clone()).is_err(),
+            "serde accepts {value}"
+        );
+    }
+}
+
 #[test]
 fn compatibility_aliases_refuse_unadvertised_effort_without_agy() {
     let temp = common::temp();
