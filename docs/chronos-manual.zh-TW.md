@@ -1,6 +1,6 @@
 # Chronos Codex 使用說明
 
-版本：`0.3.0-codex.dev.6`，從標準版 `e27de7a` 重建的開發候選。
+版本：`0.3.0-codex.dev.7`，從標準版 `e27de7a` 重建的開發候選。
 
 ## 核心與分工
 
@@ -66,3 +66,5 @@ dev.4 的實際 PowerShell 驗證暴露 Windows verbatim 根路徑混用斜線�
 dev.5 的工程單元依規劃中的相對 scratch 路徑寫出範圍而被拒絕。dev.6 改由 Rust 為每個寫入 attempt 分配倉庫外暫存根、注入建置／暫存環境並授予該根寫入；產品 scope 不擴大，違反時保留明確 scope_violation。設定依據：[OpenAI 設定參考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 同版移除 Windows 的 PID-only taskkill /T 清理，改以父子建立時間、快照時間上限與持有的 handle 驗證後終止子程序。dev.5 CI 曾異常退出，兩者因果尚未證實；不得把該次 CI 寫成成功。實際 Terra 暫存環境短測通過，產品目錄保持空白；證據保存於重建資料目錄。
+
+dev.6 通過 179 項本地測試及 Windows／Ubuntu CI，但新 task 僅完成第一輪；第二輪將指定 scratch 內的測試腳本誤判為產品越界，尚未完成三輪。dev.7 對寫入回報允許該 attempt 的絕對 scratch 路徑，解析連結與已刪除檔案的存活父目錄，仍拒絕其他 attempt、相對路徑及上層跳脫。回歸模型現在也回報暫存檔案事件，避免僅測 shell 寫入而漏掉 apply_patch 回報。新 task 驗收結果另行記錄，不預先宣告通過。

@@ -153,6 +153,23 @@ fn relative_change(repo: &Path, name: &str) -> Option<String> {
     }
     Some(relative.to_string_lossy().replace('\\', "/"))
 }
+fn scratch_change(scratch: &Path, name: &str) -> bool {
+    let path = Path::new(name);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Ok(root) = scratch.canonicalize() else {
+        return false;
+    };
+    // Resolve links. For deleted artifacts, resolve the closest surviving parent.
+    path.ancestors()
+        .find_map(|p| p.canonicalize().ok())
+        .is_some_and(|p| p.starts_with(root))
+}
 fn reference(path: &Path) -> Res<ArtifactRef> {
     Ok(ArtifactRef {
         path: path.into(),
@@ -1408,7 +1425,7 @@ impl Pipeline {
                 cancel: self.cancel.clone(),
                 cancel_grace_ms: self.grace,
                 skill_paths: vec![],
-                scratch,
+                scratch: scratch.clone(),
             },
         );
         let mut report = match result {
@@ -1464,8 +1481,9 @@ impl Pipeline {
                 .flatten()
                 .filter_map(|v| v["path"].as_str())
                 .any(|p| {
-                    relative_change(&self.repo, p)
-                        .is_none_or(|p| !crate::orch::covers(&spec.scope, &p))
+                    !scratch.as_ref().is_some_and(|root| scratch_change(root, p))
+                        && relative_change(&self.repo, p)
+                            .is_none_or(|p| !crate::orch::covers(&spec.scope, &p))
                 });
             if outside || reported_outside {
                 report.report["error"] = json!({"kind":"scope_violation","message":"worker changed paths outside assigned product scope; use the assigned external scratch directory for build output"});
@@ -1497,6 +1515,44 @@ impl Pipeline {
             })?
             .value;
         Ok((report.report, saved, identity(report.execution.thread_id)))
+    }
+}
+
+#[cfg(test)]
+mod scratch_scope_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_assigned_absolute_scratch_tree_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scratch = tmp.path().join("assigned");
+        let other = tmp.path().join("another-attempt");
+        std::fs::create_dir(&scratch).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let file = scratch.join("checks.py");
+        std::fs::write(&file, "pass").unwrap();
+        assert!(scratch_change(&scratch, &file.to_string_lossy()));
+        std::fs::remove_file(&file).unwrap();
+        assert!(scratch_change(&scratch, &file.to_string_lossy()));
+        assert!(!scratch_change(
+            &scratch,
+            &other.join("checks.py").to_string_lossy()
+        ));
+        assert!(!scratch_change(
+            &scratch,
+            &scratch
+                .join("../another-attempt/checks.py")
+                .to_string_lossy()
+        ));
+        assert!(!scratch_change(&scratch, "checks.py"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&other, scratch.join("escape")).unwrap();
+            assert!(!scratch_change(
+                &scratch,
+                &scratch.join("escape/checks.py").to_string_lossy()
+            ));
+        }
     }
 }
 

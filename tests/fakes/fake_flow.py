@@ -107,6 +107,9 @@ for line in sys.stdin:
             assert Path(env['CARGO_TARGET_DIR']).parent.samefile(work)
             assert len(cfg['config']['sandbox_workspace_write']['writable_roots']) == 1
             (work/'development-output').write_text('scratch-only')
+            send({'method': 'item/completed', 'params': {'threadId': tid, 'turnId': tid + '-turn',
+                  'item': {'type': 'fileChange', 'id': 'scratch-write', 'status': 'completed',
+                           'changes': [{'path': str(work/'development-output'), 'kind': {'type': 'add'}, 'diff': ''}]}}})
             if mode == 'failed-peer':
                 if 'write one' in brief:
                     finish(tid, 'injected engineering failure', failed=True)
