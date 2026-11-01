@@ -118,6 +118,7 @@ dev.9 把「回合終結」與「工作成功」分開，並讓失敗回到能�
 
 - `review_code` 的內建 strict 輸出 schema 明確列出封閉 object 與必填欄位，修復 Codex API 拒絕不完整 schema 的問題；自訂 schema 仍由呼叫者提供。
 - 動態工具保留具體錯誤型別與原因，blocked／outcome unknown 的原因另存並綁定 checkpoint 版本；`status` 與相同 request 的重送會讀取可核對的紀錄。舊紀錄若沒有原因則回報未知，不補造原因；舊的成功結果重送時仍須符合目前的驗收門檻。
+- 派工邊界在 store 鎖內根據最新 checkpoint 原子結算，僅將本輪持有且身分仍相符的在途執行標為 unknown；保留 reservation、新 Bridge 的進度與既有 stop／repair 入口。
 - 新 scratch 路徑以完整 run／attempt／check 身分雜湊縮短，舊 run 的既有 scratch 經身分及連結檢查後可沿用。縮短路徑不保證所有工具鏈的長路徑問題均已排除。
 - 規劃重試依序帶入已核准的修復理由，不能藉此改變已凍結檢查。檢查環境變數依平台規則判斷重複名稱：Windows 不區分大小寫，其他平台區分；暫存預設不覆蓋明確指定的值。私有檢查保留 `independent-` 前綴，須包含 `{repo}`，且不能與公開檢查使用相同 program／args／env；這些形式檢查不能證明案例語意獨立或真的讀取產品。
 - store 使用 OS 鎖與完整 PID 標記；只有確認程序已結束才自動取代舊標記。明確 `force` 仍可繞過持有中的鎖並與寫入重疊；舊版本不遵守新 OS 鎖，混版不能保證互斥。PID 標記以 hardlink 發布，檔案系統不支援時會失敗。

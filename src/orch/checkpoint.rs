@@ -454,6 +454,208 @@ pub fn record_dispatch_failure_with_receipt(
     })?
     .revision)
 }
+
+#[derive(Default)]
+pub(crate) struct DispatchBoundaryAuthority {
+    pub phase: Option<Phase>,
+    pub original_attempts: BTreeMap<String, Attempt>,
+    pub claimed_prepared: BTreeSet<String>,
+    pub executions: BTreeMap<String, Attempt>,
+}
+
+fn same_execution(left: &Attempt, right: &Attempt) -> bool {
+    left.attempt_id == right.attempt_id
+        && left.step_id == right.step_id
+        && left.input_digest == right.input_digest
+        && left.generation == right.generation
+        && left.thread_id == right.thread_id
+        && left.turn_id == right.turn_id
+}
+
+/// Resolve and persist a dispatch boundary from the latest checkpoint while
+/// holding the store lock. Only this pipeline's bound executions may acquire
+/// synthetic unknown events; newer foreign work is never relabelled.
+pub(crate) fn finish_dispatch_boundary(
+    store: &Path,
+    id: &str,
+    observed: &Checkpoint,
+    failure: Option<Failure>,
+    authority: &DispatchBoundaryAuthority,
+) -> Res<(Checkpoint, Option<Failure>)> {
+    if observed.run_id != id {
+        return Err(fail("invalid dispatch boundary identity"));
+    }
+    super::with_lock(store, false, || {
+        let mut c = load_run(store, id)?;
+        let owned_pending: Vec<_> = c
+            .attempts
+            .values()
+            .filter(|a| {
+                matches!(a.state, AttemptState::Dispatching | AttemptState::Running)
+                    && authority
+                        .executions
+                        .get(&a.attempt_id)
+                        .is_some_and(|owner| same_execution(owner, a))
+            })
+            .map(|a| a.attempt_id.clone())
+            .collect();
+        let foreign_progress = c.attempts.values().any(|a| {
+            !authority
+                .executions
+                .get(&a.attempt_id)
+                .is_some_and(|owner| same_execution(owner, a))
+                && !(a.state == AttemptState::Prepared
+                    && authority.claimed_prepared.contains(&a.attempt_id))
+                && authority.original_attempts.get(&a.attempt_id) != Some(a)
+        });
+        let foreign_live = c.attempts.values().any(|a| {
+            matches!(a.state, AttemptState::Dispatching | AttemptState::Running)
+                && !authority
+                    .executions
+                    .get(&a.attempt_id)
+                    .is_some_and(|owner| same_execution(owner, a))
+        });
+        let phase_changed = authority
+            .phase
+            .as_ref()
+            .is_some_and(|phase| *phase != c.phase);
+        let changed = c.revision != observed.revision || phase_changed || foreign_progress;
+        let owned_failed = c.attempts.values().any(|a| {
+            failed_attempt_needs_repair(&c, a)
+                && authority
+                    .executions
+                    .get(&a.attempt_id)
+                    .is_some_and(|owner| same_execution(owner, a))
+        });
+        // A different execution or a later phase has advanced without any
+        // still-running execution owned by us. Do not publish an obsolete
+        // failure or change the newer pipeline's status.
+        if owned_pending.is_empty()
+            && (foreign_live || (changed && !(owned_failed && !foreign_progress && !phase_changed)))
+        {
+            return Ok((c, None));
+        }
+        let active = c
+            .attempts
+            .values()
+            .any(|a| !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared));
+        let status = if active {
+            RunStatus::OutcomeUnknown
+        } else if !matches!(
+            c.phase,
+            Phase::IntentReview | Phase::ReadyToCommit | Phase::Released | Phase::Cancelled
+        ) {
+            RunStatus::Blocked
+        } else {
+            c.status.clone()
+        };
+        if !matches!(status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
+            return Ok((c, None));
+        }
+
+        let next_revision = c
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| fail("revision overflow"))?;
+        // Closing the dispatcher also closes its callback lease. Record an
+        // explicit unknown event for every still-dispatched attempt in this
+        // same checkpoint commit, so a late callback cannot leave it stuck in
+        // Running and the normal stop/repair path remains available.
+        let pending = c
+            .attempts
+            .values()
+            .filter(|a| owned_pending.contains(&a.attempt_id))
+            .map(|a| {
+                let sequence = a
+                    .last_event_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| fail("attempt event sequence overflow"))?;
+                Ok(AttemptEvent {
+                    event_id: format!("boundary-{}-{next_revision}", a.attempt_id),
+                    attempt_id: a.attempt_id.clone(),
+                    sequence,
+                    kind: AttemptEventKind::OutcomeUnknown {
+                        reason: "dispatcher boundary closed before terminal evidence was recorded"
+                            .into(),
+                    },
+                })
+            })
+            .collect::<Res<Vec<_>>>()?;
+        for event in &pending {
+            apply_attempt_event(store, id, &mut c, event)?;
+        }
+        let no_longer_unknown = !active
+            && failure
+                .as_ref()
+                .is_some_and(|error| error.kind == "outcome_unknown");
+        let failure = if changed || no_longer_unknown {
+            if active {
+                let pending = c
+                    .attempts
+                    .values()
+                    .filter(|a| !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared))
+                    .map(|a| {
+                        format!(
+                            "step {} (attempt {}, thread {}, turn {}, status {:?})",
+                            a.step_id,
+                            a.attempt_id,
+                            a.thread_id.as_deref().unwrap_or("unknown"),
+                            a.turn_id.as_deref().unwrap_or("unknown"),
+                            a.state
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Failure::new(
+                    "outcome_unknown",
+                    format!(
+                        "checkpoint advanced before the dispatch boundary; unresolved: {pending}."
+                    ),
+                )
+            } else if c
+                .attempts
+                .values()
+                .any(|a| failed_attempt_needs_repair(&c, a))
+            {
+                let failed = c
+                    .attempts
+                    .values()
+                    .filter(|a| failed_attempt_needs_repair(&c, a))
+                    .map(|a| format!("step {} (attempt {})", a.step_id, a.attempt_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Failure::new(
+                    "repair_required",
+                    format!(
+                        "saved failed execution requires repair before a new attempt: {failed}"
+                    ),
+                )
+            } else {
+                Failure::new("unknown", "Checkpoint state changed before the dispatch boundary; inspect the current reports and receipts.")
+            }
+        } else {
+            failure.unwrap_or_else(|| {
+                Failure::new(
+                    "incomplete_run",
+                    "The run stopped before an authority boundary; inspect its saved evidence.",
+                )
+            })
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "revision":next_revision,"phase":c.phase,"status":status,"error":failure
+        }))
+        .map_err(io)?;
+        let path = run_dir(store, id)?
+            .join("artifacts")
+            .join(format!("{}.json", digest(&bytes)));
+        let receipt = immutable(&path, &bytes)?;
+        c.status = status;
+        c.receipts.insert(DISPATCH_FAILURE.into(), receipt);
+        c.revision = next_revision;
+        save(store, &c)?;
+        Ok((c, Some(failure)))
+    })
+}
 pub fn install_plan(
     store: &Path,
     id: &str,

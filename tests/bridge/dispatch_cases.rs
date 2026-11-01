@@ -897,7 +897,35 @@ fn run_flow(mode: &str, approve: bool) {
     ]
     .contains(&mode)
     {
-        assert_eq!(result["status"], "outcome_unknown", "{result}\n{}", trail());
+        let checkpoint_diagnostic =
+            || match checkpoint::load_run(&home.join("orchestrate/demo"), run) {
+                Ok(c) => {
+                    let events = c
+                        .receipts
+                        .iter()
+                        .filter(|(k, _)| k.starts_with("event-"))
+                        .map(|(k, r)| {
+                            (
+                                k.clone(),
+                                std::fs::read_to_string(&r.path)
+                                    .unwrap_or_else(|e| format!("unavailable: {e}")),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "revision={} phase={:?} status={:?} attempts={:?} events={events:?}",
+                        c.revision, c.phase, c.status, c.attempts
+                    )
+                }
+                Err(e) => format!("checkpoint unavailable: {e}"),
+            };
+        assert_eq!(
+            result["status"],
+            "outcome_unknown",
+            "mode={mode} {result}\n{}\n{}",
+            checkpoint_diagnostic(),
+            trail()
+        );
         assert_eq!(result["error"]["kind"], "outcome_unknown", "{result}");
         let original_reason = result["short_reason"].as_str().unwrap();
         assert!(original_reason.contains("step "), "{result}");
@@ -1033,6 +1061,71 @@ fn run_flow(mode: &str, approve: bool) {
                 .count(),
             writes_before
         );
+        if mode == "unknown-write" {
+            let writer = after
+                .attempts
+                .values()
+                .find(|a| {
+                    a.state == checkpoint::AttemptState::OutcomeUnknown
+                        && after
+                            .steps
+                            .get(&a.step_id)
+                            .is_some_and(|s| s.purpose == checkpoint::Purpose::Engineer)
+                })
+                .expect("an unresolved writer must be explicitly recoverable");
+            assert!(after
+                .reservations
+                .iter()
+                .any(|r| r.attempt_id == writer.attempt_id));
+            let store = home.join("orchestrate/demo");
+            let stop = artifact(
+                &store.join("explicit-stop.json"),
+                &serde_json::to_vec(&json!({
+                    "attempt_id":writer.attempt_id,"terminal":true,"thread_id":writer.thread_id,
+                    "turn_id":writer.turn_id,"generation":writer.generation
+                }))
+                .unwrap(),
+            );
+            let repair = artifact(
+                &store.join("explicit-repair.json"),
+                &serde_json::to_vec(&json!({
+                    "attempt_id":writer.attempt_id,"repaired":true
+                }))
+                .unwrap(),
+            );
+            checkpoint::resolve_attempt(
+                &store,
+                run,
+                after.revision,
+                &checkpoint::RecoveryDecision::RetryAfterRepair {
+                    attempt_id: writer.attempt_id.clone(),
+                    stopped_evidence: stop,
+                    repair_evidence: repair,
+                    reason: "reviewed explicit stop and repair evidence".into(),
+                },
+            )
+            .unwrap();
+            let recovered = checkpoint::load_run(&store, run).unwrap();
+            assert_eq!(
+                recovered.attempts[&writer.attempt_id].state,
+                checkpoint::AttemptState::Terminal
+            );
+            assert_eq!(
+                recovered.attempts[&writer.attempt_id].outcome,
+                Some(checkpoint::AttemptOutcome::Cancelled)
+            );
+            assert!(!recovered
+                .reservations
+                .iter()
+                .any(|r| r.attempt_id == writer.attempt_id));
+            assert_eq!(
+                rows()
+                    .iter()
+                    .filter(|r| r["kind"] == "engineer-start")
+                    .count(),
+                writes_before
+            );
+        }
         return;
     }
     if ["memory-forged", "memory-stale"].contains(&mode) {

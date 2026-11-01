@@ -513,10 +513,25 @@ impl RunObserver for Bound {
                         kind,
                     };
                 if matches!(event.kind, RunEventKind::BeforeTurn) {
+                    let mut authority = self.pipeline.authority.lock().map_err(io)?;
+                    let mut owned = c.attempts.get(&self.attempt).cloned().ok_or_else(|| fail("unknown dispatched attempt"))?;
                     checkpoint::record_attempt_dispatch(
                         &self.pipeline.store, &self.pipeline.run, c.revision, &attempt_event,
                         &event.requested_model, &event.configured_model, event.requested_effort.as_deref(),
-                    ).map(|_| ())
+                    )?;
+                    owned.generation = Some(event.execution.generation);
+                    owned.thread_id = Some(event.execution.thread_id.clone());
+                    owned.turn_id = event.execution.turn_id.clone();
+                    authority.executions.insert(self.attempt.clone(), owned);
+                    Ok(())
+                } else if matches!(event.kind, RunEventKind::TurnStarted) {
+                    let mut authority = self.pipeline.authority.lock().map_err(io)?;
+                    let owned = authority.executions.get_mut(&self.attempt).ok_or_else(|| fail("turn started without owned dispatch"))?;
+                    checkpoint::record_attempt_event(
+                        &self.pipeline.store, &self.pipeline.run, c.revision, &attempt_event,
+                    )?;
+                    owned.turn_id = event.execution.turn_id.clone();
+                    Ok(())
                 } else {
                     checkpoint::record_attempt_event(
                         &self.pipeline.store, &self.pipeline.run, c.revision, &attempt_event,
@@ -920,7 +935,9 @@ impl Bridge {
         }
         let mut reason = "checkpoint loaded".to_string();
         let mut error = None;
+        let mut boundary_pipeline = None;
         if execute {
+            let origin = checkpoint::load_run(&store, &run)?;
             let p = Arc::new(Pipeline {
                 server: self.codex()?,
                 store: store.clone(),
@@ -931,6 +948,12 @@ impl Bridge {
                 cancel: options.cancel.clone(),
                 grace: options.cancel_grace_ms,
                 mutations: Mutex::new(()),
+                authority: Mutex::new(checkpoint::DispatchBoundaryAuthority {
+                    phase: Some(origin.phase),
+                    original_attempts: origin.attempts,
+                    ..Default::default()
+                }),
+                sealed: AtomicBool::new(false),
                 stopped: AtomicBool::new(false),
                 generation: AtomicU64::new(0),
             });
@@ -986,6 +1009,12 @@ impl Bridge {
                                 _ => continue,
                             };
                             p.edit(|c| {
+                                let mut authority = p.authority.lock().map_err(io)?;
+                                let reconciled = c
+                                    .attempts
+                                    .get(&a.attempt_id)
+                                    .cloned()
+                                    .ok_or_else(|| fail("unknown reconciled attempt"))?;
                                 checkpoint::commit_result(
                                     &p.store,
                                     &p.run,
@@ -993,8 +1022,11 @@ impl Bridge {
                                     &a.attempt_id,
                                     outcome,
                                     &report.report,
-                                )
-                                .map(|_| ())
+                                )?;
+                                authority
+                                    .executions
+                                    .insert(a.attempt_id.clone(), reconciled);
+                                Ok(())
                             })?;
                         }
                     }
@@ -1082,59 +1114,34 @@ impl Bridge {
                     }
                 }
             }
+            boundary_pipeline = Some(p);
         }
-        c = checkpoint::load_run(&store, &run)?;
-        let active = c
-            .attempts
-            .values()
-            .any(|a| !matches!(a.state, AttemptState::Terminal | AttemptState::Prepared));
-        let status = if execute && active {
-            RunStatus::OutcomeUnknown
-        } else if execute
-            && !matches!(
-                c.phase,
-                Phase::IntentReview | Phase::ReadyToCommit | Phase::Released | Phase::Cancelled
-            )
-        {
-            RunStatus::Blocked
-        } else {
-            c.status.clone()
-        };
-        if execute && matches!(status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
-            let failure = error.unwrap_or_else(|| {
-                Failure::new(
-                    "incomplete_run",
-                    "The run stopped before an authority boundary; inspect its saved evidence.",
-                )
-            });
-            reason = failure.message.clone();
-            let saved = BoundaryFailure {
-                revision: c
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| fail("revision overflow"))?,
-                phase: c.phase.clone(),
-                status: status.clone(),
-                error: failure.clone(),
+        if let Some(p) = boundary_pipeline {
+            let had_error = error.is_some();
+            let (current, current_failure) = p.finish_boundary(error)?;
+            c = current;
+            let current_failure = if current_failure.is_none()
+                && matches!(c.status, RunStatus::Blocked | RunStatus::OutcomeUnknown)
+            {
+                Some(saved_failure(&store, &c)?.unwrap_or_else(unknown_failure))
+            } else {
+                current_failure
             };
-            let receipt = artifact(
-                &store.join("runs").join(&run).join("artifacts"),
-                &serde_json::to_vec(&saved).map_err(io)?,
-            )?;
-            checkpoint::record_dispatch_failure_with_receipt(
-                &store,
-                &run,
-                c.revision,
-                status == RunStatus::OutcomeUnknown,
-                &receipt,
-            )?;
+            if let Some(failure) = &current_failure {
+                reason = failure.message.clone();
+            } else if had_error {
+                reason = "checkpoint advanced before the boundary; current state loaded".into();
+            }
+            error = current_failure;
+        } else {
             c = checkpoint::load_run(&store, &run)?;
-            error = Some(failure);
-        } else if !execute && matches!(status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
-            let failure = saved_failure(&store, &c)?.unwrap_or_else(unknown_failure);
-            reason = failure.message.clone();
-            error = Some(failure);
+            if matches!(c.status, RunStatus::Blocked | RunStatus::OutcomeUnknown) {
+                let failure = saved_failure(&store, &c)?.unwrap_or_else(unknown_failure);
+                reason = failure.message.clone();
+                error = Some(failure);
+            }
         }
+        let status = c.status.clone();
         if execute {
             crate::orch::project_checkpoint(&store, &checkpoint::load_run(&store, &run)?)?;
         }
@@ -1468,6 +1475,8 @@ struct Pipeline {
     cancel: Arc<AtomicBool>,
     grace: u64,
     mutations: Mutex<()>,
+    authority: Mutex<checkpoint::DispatchBoundaryAuthority>,
+    sealed: AtomicBool,
     stopped: AtomicBool,
     generation: AtomicU64,
 }
@@ -1485,7 +1494,34 @@ impl Pipeline {
     }
     fn edit<T>(&self, f: impl FnOnce(&Checkpoint) -> Res<T>) -> Res<T> {
         let _guard = self.mutations.lock().map_err(io)?;
+        if self.sealed.load(Ordering::Acquire) {
+            return Err(Failure::new(
+                "outcome_unknown",
+                "the dispatch boundary closed before this callback completed; no late checkpoint mutation was made",
+            ));
+        }
         f(&self.load()?)
+    }
+    fn finish_boundary(&self, failure: Option<Failure>) -> Res<(Checkpoint, Option<Failure>)> {
+        let _guard = self.mutations.lock().map_err(io)?;
+        // A disconnected callback may still be running. Once the boundary is
+        // published it must not mutate the checkpoint behind a new bridge.
+        self.sealed.store(true, Ordering::Release);
+        self.stopped.store(true, Ordering::Release);
+        let observed = self.load()?;
+        let authority = self.authority.lock().map_err(io)?;
+        checkpoint::finish_dispatch_boundary(&self.store, &self.run, &observed, failure, &authority)
+    }
+    fn claim(&self, spec: &StepSpec) -> Res<checkpoint::ClaimResult> {
+        self.edit(|c| {
+            let mut authority = self.authority.lock().map_err(io)?;
+            let claim =
+                checkpoint::claim_step(&self.store, c.revision, spec, &spec.brief_ref.digest)?;
+            authority
+                .claimed_prepared
+                .insert(claim.attempt.attempt_id.clone());
+            Ok(claim)
+        })
     }
     fn artifacts(&self) -> PathBuf {
         self.store.join("runs").join(&self.run).join("artifacts")
@@ -1976,9 +2012,7 @@ impl Pipeline {
         let members = batch
             .iter()
             .map(|s| {
-                let claim = self.edit(|c| {
-                    checkpoint::claim_step(&self.store, c.revision, s, &s.brief_ref.digest)
-                })?;
+                let claim = self.claim(s)?;
                 if claim.attempt.state != AttemptState::Prepared {
                     return Err(fail("batch attempt requires reconciliation"));
                 }
@@ -2202,6 +2236,7 @@ impl Pipeline {
     fn drive(self: &Arc<Self>) -> Res<()> {
         loop {
             let c = self.load()?;
+            self.authority.lock().map_err(io)?.phase = Some(c.phase.clone());
             match c.phase {
                 Phase::Research => {
                     let revision = c
@@ -2412,9 +2447,7 @@ impl Pipeline {
         if self.cancel.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
             return Err(Failure::new("cancelled", "dispatch cancelled"));
         }
-        let claim = self.edit(|c| {
-            checkpoint::claim_step(&self.store, c.revision, spec, &spec.brief_ref.digest)
-        })?;
+        let claim = self.claim(spec)?;
         if claim.disposition == ClaimDisposition::ExistingActive
             && claim.attempt.state != AttemptState::Prepared
         {
@@ -3118,6 +3151,8 @@ mod work_result_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             grace: 10,
             mutations: Mutex::new(()),
+            authority: Mutex::new(checkpoint::DispatchBoundaryAuthority::default()),
+            sealed: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         });
@@ -3129,6 +3164,641 @@ mod work_result_tests {
         assert_eq!(pipeline.generation.load(Ordering::Acquire), 0);
         std::fs::write(&reference.path, b"report changed").unwrap();
         assert!(pipeline.role(&spec, vec![], None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod boundary_concurrency_tests {
+    use super::*;
+    use std::sync::{mpsc, Barrier};
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        home: PathBuf,
+        repo: PathBuf,
+        store: PathBuf,
+        pipeline: Arc<Pipeline>,
+        attempt: String,
+    }
+
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let store = home.join("orchestrate/demo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        let intent = artifact(&store.join("runs/run/artifacts"), b"intent").unwrap();
+        let c = checkpoint::create_run(
+            &store,
+            &checkpoint::RunSeed {
+                run_id: "run".into(),
+                repo: checkpoint::RepoIdentity {
+                    canonical_root: repo.canonicalize().unwrap(),
+                    identity_digest: "repo".into(),
+                },
+                intent: intent.clone(),
+            },
+        )
+        .unwrap();
+        let spec = StepSpec {
+            run_id: "run".into(),
+            step_id: "research-0".into(),
+            purpose: Purpose::Research,
+            brief_ref: intent,
+            scope: vec![],
+            dependency_ids: vec![],
+            check_ids: vec![],
+        };
+        let claim =
+            checkpoint::claim_step(&store, c.revision, &spec, &spec.brief_ref.digest).unwrap();
+        let attempt = claim.attempt.attempt_id;
+        let rev = checkpoint::record_attempt_dispatch(
+            &store,
+            "run",
+            claim.revision,
+            &AttemptEvent {
+                event_id: "dispatch-test".into(),
+                attempt_id: attempt.clone(),
+                sequence: 1,
+                kind: AttemptEventKind::Dispatching {
+                    generation: 17,
+                    thread_id: "original-thread".into(),
+                },
+            },
+            "test-model",
+            "test-model",
+            Some("high"),
+        )
+        .unwrap();
+        checkpoint::record_attempt_event(
+            &store,
+            "run",
+            rev,
+            &AttemptEvent {
+                event_id: "running-test".into(),
+                attempt_id: attempt.clone(),
+                sequence: 2,
+                kind: AttemptEventKind::Running {
+                    turn_id: "original-turn".into(),
+                },
+            },
+        )
+        .unwrap();
+        let current = checkpoint::load_run(&store, "run").unwrap();
+        let mut authority = checkpoint::DispatchBoundaryAuthority {
+            phase: Some(Phase::Research),
+            original_attempts: current.attempts.clone(),
+            ..Default::default()
+        };
+        authority
+            .executions
+            .insert(attempt.clone(), current.attempts[&attempt].clone());
+        let pipeline = Arc::new(Pipeline {
+            server: Arc::new(AppServer::new(vec!["axiom-unavailable-test-server".into()])),
+            store: store.clone(),
+            home: home.clone(),
+            repo: repo.clone(),
+            project: "demo".into(),
+            run: "run".into(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            grace: 10,
+            mutations: Mutex::new(()),
+            authority: Mutex::new(authority),
+            sealed: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            generation: AtomicU64::new(17),
+        });
+        Fixture {
+            _tmp: tmp,
+            home,
+            repo,
+            store,
+            pipeline,
+            attempt,
+        }
+    }
+
+    fn lost_event(attempt: &str) -> AttemptEvent {
+        AttemptEvent {
+            event_id: format!("{attempt}-3"),
+            attempt_id: attempt.into(),
+            sequence: 3,
+            kind: AttemptEventKind::OutcomeUnknown {
+                reason: "connection lost".into(),
+            },
+        }
+    }
+
+    fn start_foreign_attempt(f: &Fixture) -> String {
+        let c = checkpoint::load_run(&f.store, "run").unwrap();
+        let spec = StepSpec {
+            run_id: "run".into(),
+            step_id: "research-foreign".into(),
+            purpose: Purpose::Research,
+            brief_ref: c.intent.clone(),
+            scope: vec![],
+            dependency_ids: vec![],
+            check_ids: vec![],
+        };
+        let claim =
+            checkpoint::claim_step(&f.store, c.revision, &spec, &spec.brief_ref.digest).unwrap();
+        let id = claim.attempt.attempt_id;
+        let rev = checkpoint::record_attempt_dispatch(
+            &f.store,
+            "run",
+            claim.revision,
+            &AttemptEvent {
+                event_id: "foreign-dispatch".into(),
+                attempt_id: id.clone(),
+                sequence: 1,
+                kind: AttemptEventKind::Dispatching {
+                    generation: 19,
+                    thread_id: "foreign-thread".into(),
+                },
+            },
+            "foreign-model",
+            "foreign-model",
+            Some("high"),
+        )
+        .unwrap();
+        checkpoint::record_attempt_event(
+            &f.store,
+            "run",
+            rev,
+            &AttemptEvent {
+                event_id: "foreign-running".into(),
+                attempt_id: id.clone(),
+                sequence: 2,
+                kind: AttemptEventKind::Running {
+                    turn_id: "foreign-turn".into(),
+                },
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn stale_snapshot_is_reclassified_under_store_lock() {
+        let f = fixture();
+        let observed = checkpoint::load_run(&f.store, "run").unwrap();
+        let gate = Arc::new(Barrier::new(2));
+        let event_gate = gate.clone();
+        let event_store = f.store.clone();
+        let event = lost_event(&f.attempt);
+        let expected_revision = observed.revision;
+        let worker = std::thread::spawn(move || {
+            event_gate.wait();
+            checkpoint::record_attempt_event(&event_store, "run", expected_revision, &event)
+                .unwrap()
+        });
+        gate.wait();
+        let event_revision = worker.join().unwrap();
+        // Reproduce the original interleaving deterministically: publishing an
+        // artifact based on the old snapshot must conflict after the event.
+        let stale = artifact(
+            &f.store.join("runs/run/artifacts"),
+            &serde_json::to_vec(&json!({"revision":observed.revision + 1,"phase":observed.phase,
+                "status":"outcome_unknown","error":{"kind":"old_error","message":"obsolete result"}})).unwrap(),
+        ).unwrap();
+        let conflict = checkpoint::record_dispatch_failure_with_receipt(
+            &f.store,
+            "run",
+            observed.revision,
+            true,
+            &stale,
+        )
+        .unwrap_err();
+        assert_eq!(conflict.kind, "revision_conflict");
+        assert_eq!(
+            checkpoint::load_run(&f.store, "run").unwrap().revision,
+            event_revision
+        );
+        let (current, failure) = checkpoint::finish_dispatch_boundary(
+            &f.store,
+            "run",
+            &observed,
+            Some(Failure::new("old_error", "obsolete result")),
+            &f.pipeline.authority.lock().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current.revision, event_revision);
+        assert_eq!(current.status, RunStatus::OutcomeUnknown);
+        assert_eq!(
+            current.attempts[&f.attempt].state,
+            AttemptState::OutcomeUnknown
+        );
+        assert!(failure.is_none());
+        assert!(current.receipts.get(checkpoint::DISPATCH_FAILURE).is_none());
+    }
+
+    #[test]
+    fn in_flight_event_finishes_before_the_same_pipeline_boundary() {
+        let f = fixture();
+        let initial = checkpoint::load_run(&f.store, "run").unwrap();
+        let p = f.pipeline.clone();
+        let event = lost_event(&f.attempt);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let callback = std::thread::spawn(move || {
+            p.edit(|c| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                checkpoint::record_attempt_event(&p.store, "run", c.revision, &event)
+            })
+        });
+        entered_rx.recv().unwrap();
+        assert!(f.pipeline.mutations.try_lock().is_err());
+        let boundary_pipeline = f.pipeline.clone();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let boundary = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            boundary_pipeline
+                .finish_boundary(Some(Failure::new("outcome_unknown", "connection lost")))
+        });
+        started_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
+        let event_revision = callback.join().unwrap().unwrap();
+        let (current, failure) = boundary.join().unwrap().unwrap();
+        assert_eq!(event_revision, initial.revision + 1);
+        assert_eq!(current.revision, event_revision + 1);
+        assert_eq!(
+            current.attempts[&f.attempt].state,
+            AttemptState::OutcomeUnknown
+        );
+        assert_eq!(failure.unwrap().kind, "outcome_unknown");
+        assert!(current
+            .receipts
+            .contains_key(&format!("event-{}-3", f.attempt)));
+        assert_eq!(checkpoint::load_run(&f.store, "run").unwrap(), current);
+    }
+
+    #[test]
+    fn old_callback_cannot_mutate_after_a_new_bridge_resumes() {
+        let f = fixture();
+        let key = codex::ExecutionKey {
+            generation: 17,
+            thread_id: "original-thread".into(),
+            turn_id: Some("original-turn".into()),
+        };
+        let bound = Bound {
+            pipeline: f.pipeline.clone(),
+            purpose: Purpose::Research,
+            attempt: f.attempt.clone(),
+            execution: Mutex::new(Some(key.clone())),
+            tools: vec![],
+            model: "test-model".into(),
+            effort: "high".into(),
+            operation: Mutex::new(()),
+        };
+        let event = RunEvent {
+            attempt_id: f.attempt.clone(),
+            sequence: 3,
+            execution: key,
+            requested_model: "test-model".into(),
+            configured_model: "test-model".into(),
+            requested_effort: Some("high".into()),
+            kind: RunEventKind::ConnectionLost {
+                reason: "connection lost".into(),
+            },
+        };
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let old_callback = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            bound.on_event(&event)
+        });
+        started_rx.recv().unwrap();
+        let (first, _) = f
+            .pipeline
+            .finish_boundary(Some(Failure::new(
+                "outcome_unknown",
+                "original unresolved attempt",
+            )))
+            .unwrap();
+        assert_eq!(first.status, RunStatus::OutcomeUnknown);
+        assert_eq!(
+            first.attempts[&f.attempt].state,
+            AttemptState::OutcomeUnknown
+        );
+        assert_eq!(first.attempts[&f.attempt].last_event_sequence, 3);
+        let event_key = format!("event-boundary-{}-{}", f.attempt, first.revision);
+        let recorded: AttemptEvent =
+            serde_json::from_slice(&std::fs::read(&first.receipts[&event_key].path).unwrap())
+                .unwrap();
+        assert_eq!(recorded.attempt_id, f.attempt);
+        assert_eq!(recorded.sequence, 3);
+        assert!(matches!(
+            recorded.kind,
+            AttemptEventKind::OutcomeUnknown { .. }
+        ));
+
+        let new_bridge = Bridge::new(crate::bridge::Config {
+            data_home: Some(f.home.clone()),
+            codex: Ok(vec!["axiom-unavailable-test-server".into()]),
+            agy: Err(Failure::new("missing", "unused")),
+            wsl: None,
+            on_windows: cfg!(windows),
+        });
+        let resumed = new_bridge
+            .dispatch(
+                &RootContext {
+                    repo_root: f.repo.clone(),
+                    project: "demo".into(),
+                },
+                &DispatchRequest {
+                    request_id: "resume-new-bridge".into(),
+                    action: DispatchAction::Resume {
+                        run_id: "run".into(),
+                        recovery: None,
+                    },
+                },
+                &DispatchOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(resumed.status, RunStatus::OutcomeUnknown);
+        let before_release = checkpoint::load_run(&f.store, "run").unwrap();
+        release_tx.send(()).unwrap();
+        let late = old_callback.join().unwrap().unwrap_err();
+        assert_eq!(late.kind, "outcome_unknown");
+        assert!(late.message.contains("boundary closed"));
+        let after_release = checkpoint::load_run(&f.store, "run").unwrap();
+        assert_eq!(after_release, before_release);
+        assert_eq!(
+            after_release.attempts[&f.attempt].state,
+            AttemptState::OutcomeUnknown
+        );
+        assert!(!after_release
+            .receipts
+            .contains_key(&format!("event-{}-3", f.attempt)));
+        // Explicit stop and repair evidence can still resolve this unknown
+        // attempt; sealing did not leave it permanently Running.
+        let stop = artifact(
+            &f.store.join("runs/run/artifacts"),
+            &serde_json::to_vec(&json!({"attempt_id":f.attempt,"terminal":true,
+                "thread_id":"original-thread","turn_id":"original-turn","generation":17}))
+            .unwrap(),
+        )
+        .unwrap();
+        let repair = artifact(
+            &f.store.join("runs/run/artifacts"),
+            &serde_json::to_vec(&json!({"attempt_id":f.attempt,"repaired":true})).unwrap(),
+        )
+        .unwrap();
+        checkpoint::resolve_attempt(
+            &f.store,
+            "run",
+            after_release.revision,
+            &checkpoint::RecoveryDecision::RetryAfterRepair {
+                attempt_id: f.attempt.clone(),
+                stopped_evidence: stop,
+                repair_evidence: repair,
+                reason: "explicit stop and repair evidence".into(),
+            },
+        )
+        .unwrap();
+        let repaired = checkpoint::load_run(&f.store, "run").unwrap();
+        assert_eq!(repaired.attempts[&f.attempt].state, AttemptState::Terminal);
+        assert_eq!(
+            repaired.attempts[&f.attempt].outcome,
+            Some(AttemptOutcome::Cancelled)
+        );
+    }
+
+    #[test]
+    fn terminal_progress_is_not_overwritten_by_a_stale_failure() {
+        let f = fixture();
+        let observed = checkpoint::load_run(&f.store, "run").unwrap();
+        let report = json!({"status":"completed","thread_id":"original-thread","turn_id":"original-turn","model":"test-model"});
+        let rev = checkpoint::commit_result(
+            &f.store,
+            "run",
+            observed.revision,
+            &f.attempt,
+            AttemptOutcome::Completed,
+            &report,
+        )
+        .unwrap()
+        .revision;
+        let cancelled =
+            checkpoint::cancel_run(&f.store, "run", rev, "cancel after completion").unwrap();
+        let (current, failure) = checkpoint::finish_dispatch_boundary(
+            &f.store,
+            "run",
+            &observed,
+            Some(Failure::new("outcome_unknown", "obsolete")),
+            &f.pipeline.authority.lock().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current.status, RunStatus::Cancelled);
+        assert_eq!(current.revision, cancelled);
+        assert!(failure.is_none());
+    }
+
+    #[test]
+    fn newer_nonterminal_phase_is_not_overwritten_by_a_stale_failure() {
+        let f = fixture();
+        let observed = checkpoint::load_run(&f.store, "run").unwrap();
+        let report = json!({"status":"completed","thread_id":"original-thread","turn_id":"original-turn","model":"test-model"});
+        let result = checkpoint::commit_result(
+            &f.store,
+            "run",
+            observed.revision,
+            &f.attempt,
+            AttemptOutcome::Completed,
+            &report,
+        )
+        .unwrap();
+        let rev =
+            checkpoint::record_receipt(&f.store, "run", result.revision, "research", &result.value)
+                .unwrap();
+        let rev = checkpoint::advance_phase(&f.store, "run", rev, Phase::IntentReview).unwrap();
+        let rev = checkpoint::record_core_decision(
+            &f.store,
+            "run",
+            rev,
+            &CoreDecision {
+                research_digest: result.value.digest,
+                pass: true,
+                reason: "approved".into(),
+            },
+        )
+        .unwrap();
+        checkpoint::advance_phase(&f.store, "run", rev, Phase::Planning).unwrap();
+        let newer = checkpoint::load_run(&f.store, "run").unwrap();
+        let (current, failure) = f
+            .pipeline
+            .finish_boundary(Some(Failure::new(
+                "outcome_unknown",
+                "old research failure",
+            )))
+            .unwrap();
+        assert_eq!(current, newer);
+        assert_eq!(current.phase, Phase::Planning);
+        assert_eq!(current.status, RunStatus::Running);
+        assert!(failure.is_none());
+    }
+
+    #[test]
+    fn confirmed_failure_replaces_stale_unknown_diagnostic() {
+        let f = fixture();
+        let observed = checkpoint::load_run(&f.store, "run").unwrap();
+        let report = json!({"status":"failed","thread_id":"original-thread","turn_id":"original-turn","model":"test-model"});
+        let failed = checkpoint::commit_result(
+            &f.store,
+            "run",
+            observed.revision,
+            &f.attempt,
+            AttemptOutcome::Failed,
+            &report,
+        )
+        .unwrap()
+        .revision;
+        let (current, failure) = checkpoint::finish_dispatch_boundary(
+            &f.store,
+            "run",
+            &observed,
+            Some(Failure::new("outcome_unknown", "obsolete")),
+            &f.pipeline.authority.lock().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current.revision, failed + 1);
+        assert_eq!(current.status, RunStatus::Blocked);
+        let failure = failure.unwrap();
+        assert_eq!(failure.kind, "repair_required");
+        assert!(failure.message.contains(&f.attempt));
+        assert!(!failure.message.contains("obsolete"));
+    }
+
+    #[test]
+    fn newer_bridge_running_attempt_is_not_downgraded() {
+        let f = fixture();
+        let old = checkpoint::load_run(&f.store, "run").unwrap();
+        let report = json!({"status":"completed","thread_id":"original-thread","turn_id":"original-turn","model":"test-model"});
+        checkpoint::commit_result(
+            &f.store,
+            "run",
+            old.revision,
+            &f.attempt,
+            AttemptOutcome::Completed,
+            &report,
+        )
+        .unwrap();
+        let foreign = start_foreign_attempt(&f);
+        let newer = checkpoint::load_run(&f.store, "run").unwrap();
+        let (current, failure) = f
+            .pipeline
+            .finish_boundary(Some(Failure::new(
+                "outcome_unknown",
+                "obsolete old pipeline",
+            )))
+            .unwrap();
+        assert_eq!(current, newer);
+        assert_eq!(current.status, RunStatus::Running);
+        assert_eq!(current.attempts[&foreign].state, AttemptState::Running);
+        assert!(failure.is_none());
+    }
+
+    #[test]
+    fn completed_foreign_progress_in_same_phase_is_not_downgraded() {
+        let f = fixture();
+        let old = checkpoint::load_run(&f.store, "run").unwrap();
+        let report = json!({"status":"completed","thread_id":"original-thread","turn_id":"original-turn","model":"test-model"});
+        checkpoint::commit_result(
+            &f.store,
+            "run",
+            old.revision,
+            &f.attempt,
+            AttemptOutcome::Completed,
+            &report,
+        )
+        .unwrap();
+        let foreign = start_foreign_attempt(&f);
+        let live = checkpoint::load_run(&f.store, "run").unwrap();
+        let foreign_report = json!({"status":"completed","thread_id":"foreign-thread","turn_id":"foreign-turn","model":"foreign-model"});
+        checkpoint::commit_result(
+            &f.store,
+            "run",
+            live.revision,
+            &foreign,
+            AttemptOutcome::Completed,
+            &foreign_report,
+        )
+        .unwrap();
+        let newer = checkpoint::load_run(&f.store, "run").unwrap();
+        let (current, failure) = f
+            .pipeline
+            .finish_boundary(Some(Failure::new(
+                "outcome_unknown",
+                "obsolete old pipeline",
+            )))
+            .unwrap();
+        assert_eq!(current, newer);
+        assert_eq!(current.phase, Phase::Research);
+        assert_eq!(current.status, RunStatus::Running);
+        assert_eq!(current.attempts[&foreign].state, AttemptState::Terminal);
+        assert!(failure.is_none());
+    }
+
+    #[test]
+    fn changed_checkpoint_marks_only_the_owned_execution_unknown() {
+        let f = fixture();
+        let observed = checkpoint::load_run(&f.store, "run").unwrap();
+        let foreign = start_foreign_attempt(&f);
+        let newer = checkpoint::load_run(&f.store, "run").unwrap();
+        let (current, failure) = checkpoint::finish_dispatch_boundary(
+            &f.store,
+            "run",
+            &observed,
+            Some(Failure::new("outcome_unknown", "obsolete snapshot")),
+            &f.pipeline.authority.lock().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current.revision, newer.revision + 1);
+        assert_eq!(
+            current.attempts[&f.attempt].state,
+            AttemptState::OutcomeUnknown
+        );
+        assert_eq!(current.attempts[&foreign], newer.attempts[&foreign]);
+        assert_eq!(current.attempts[&foreign].state, AttemptState::Running);
+        assert_eq!(failure.unwrap().kind, "outcome_unknown");
+        assert!(!current
+            .receipts
+            .keys()
+            .any(|k| k.starts_with(&format!("event-boundary-{foreign}-"))));
+    }
+
+    #[test]
+    fn stale_or_different_execution_identity_cannot_be_closed() {
+        for field in ["attempt", "step", "input", "generation", "thread", "turn"] {
+            let f = fixture();
+            let before = checkpoint::load_run(&f.store, "run").unwrap();
+            {
+                let mut authority = f.pipeline.authority.lock().unwrap();
+                let owner = authority.executions.get_mut(&f.attempt).unwrap();
+                match field {
+                    "attempt" => owner.attempt_id.push('x'),
+                    "step" => owner.step_id.push('x'),
+                    "input" => owner.input_digest.push('x'),
+                    "generation" => owner.generation = Some(99),
+                    "thread" => owner.thread_id = Some("other-thread".into()),
+                    "turn" => owner.turn_id = Some("other-turn".into()),
+                    _ => unreachable!(),
+                }
+            }
+            let (after, failure) = f
+                .pipeline
+                .finish_boundary(Some(Failure::new("outcome_unknown", "old")))
+                .unwrap();
+            assert_eq!(
+                after, before,
+                "mismatched {field} must not be marked unknown"
+            );
+            assert!(failure.is_none(), "mismatched {field}");
+        }
     }
 }
 
