@@ -73,6 +73,8 @@ pub struct BoundaryResult {
     pub phase: Phase,
     pub status: RunStatus,
     pub short_reason: String,
+    #[serde(default)]
+    pub research: Option<ArtifactRef>,
     pub artifact_refs: Vec<ArtifactRef>,
     pub next_action: Option<String>,
 }
@@ -382,7 +384,7 @@ impl Bridge {
         let _guard = if matches!(request.action, DispatchAction::Status { .. }) {
             None
         } else {
-            Some(self.dispatch_lock.lock().map_err(io)?)
+            Some(self.dispatch_lock.write().map_err(io)?)
         };
         let input = serde_json::to_vec(&(root, request)).map_err(io)?;
         let request_path = store
@@ -632,13 +634,14 @@ impl Bridge {
         }
         let next_action=match status {RunStatus::NeedsIntentReview=>Some("Core pass/reject using exact research digest.".into()),RunStatus::ReadyToCommit=>Some("Core may review and submit/complete locally. Commit, remote push and installation are external authority, not mandatory release gates.".into()),RunStatus::OutcomeUnknown|RunStatus::Blocked=>Some("Inspect saved artifacts and reconcile terminal/repair evidence. No automatic host wake or blind write retry.".into()),_=>None};
         let mut refs = vec![c.intent];
-        refs.extend(c.research);
+        refs.extend(c.research.clone());
         refs.extend(c.plan);
         let result = BoundaryResult {
             run_id: run,
             phase: c.phase,
             status,
             short_reason: reason,
+            research: c.research,
             artifact_refs: refs,
             next_action,
         };
@@ -789,7 +792,7 @@ impl Pipeline {
             .load()?
             .research
             .ok_or_else(|| fail("research missing"))?;
-        let spec=self.spec("planner",Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. No remote/package release required.",self.intent()?,research.path),vec![],vec![])?;
+        let spec=self.spec("planner",Purpose::Planner,&format!("Fresh independent plan of approved intent: {}\nRead research {:?}. Return JSON units:[{{id,brief,scope:[relative paths],depends_on:[unit IDs]}}], checks:[{{id,program,args,env:[{{name,value}}],timeout_s}}]. Checks freeze before engineering; use {{repo}} for product paths and {{scratch}} for writable artifacts. Commands have scratch cwd and cannot write product. No later model-supplied commands. Include substantive project checks. Units have nonempty disjoint scopes and acyclic dependencies. Rust adds mandatory SOL assembly. Optional assembly_scope lists exact integration/delivery paths; otherwise SOL uses the engineering scope union. It is required when content artifacts need additional product delivery paths. Optional unit kind=content uses Luna for non-engineering text/bulk artifacts with empty scope, saved as a report for assembly; otherwise kind=engineer uses Terra with nonempty scope. This run is one current iteration. Freeze only checks of its deliverable. Git commits, push, installation and later rounds are post-verification core duties: do not require them in checks or acceptance. No remote/package release required.",self.intent()?,research.path),vec![],vec![])?;
         let schema = json!({"type":"object","required":["assembly_scope","units","checks"],"additionalProperties":false,"properties":{"assembly_scope":{"type":["array","null"],"minItems":1,"items":{"type":"string"}},"units":{"type":"array","items":{"type":"object","required":["kind","id","brief","scope","depends_on"],"additionalProperties":false,"properties":{"kind":{"type":["string","null"],"enum":["engineer","content",null]},"id":{"type":"string"},"brief":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}},"depends_on":{"type":"array","items":{"type":"string"}}}}},"checks":{"type":"array","minItems":1,"items":{"type":"object","required":["id","program","args","env","timeout_s"],"additionalProperties":false,"properties":{"id":{"type":"string"},"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}},"timeout_s":{"type":"integer","minimum":1,"maximum":1800}}}}}});
         let (report, _, _) = self.role(&spec, vec![], Some(schema))?;
         let value = Self::output(&report)?;
@@ -934,7 +937,7 @@ impl Pipeline {
         }
         steps.push(self.spec("assembly",Purpose::Assembler,&format!("Integrate all units for approved intent: {}. Read scoped result artifacts in {:?}. Preserve other owners. Run appropriate checks; reports alone are not success. No commit, push or install.",self.intent()?,self.store.join("runs").join(&self.run).join("reports")),assembly_scope,ids.clone())?);
         steps.push(self.spec("baseline",Purpose::Verifier,"Execute frozen baseline checks before engineering. Invoke verify_run for EVERY ID in VERIFY. Failures are baseline observations, not permission to change acceptance criteria. Return observations.",vec![],ids.clone())?);
-        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string}. Reject real defects. Completion alone is not a pass.",vec![],ids)?);
+        steps.push(self.spec("verification",Purpose::Verifier,"Independently inspect assembled implementation against approved intent/plan. Invoke verify_run for EVERY frozen check ID in VERIFY. Rust executes these commands; do not become a second core. Return JSON {pass:boolean,summary:string}. Reject real defects in this run's current deliverable. Commit, push, installation and subsequent rounds happen after ready_to_commit; do not reject their absence before that boundary. Completion alone is not a pass.",vec![],ids)?);
         steps.push(self.spec("memory",Purpose::Memory,"Record only independently verified outcomes. Invoke record_memory with the provided review evidence digest and concise reusable summary. Do not claim installation, release, push or independent live acceptance.",vec![],vec![])?);
         self.edit(|c| {
             checkpoint::install_plan(&self.store, &self.run, c.revision, &r, &steps, &checks)
@@ -974,7 +977,15 @@ impl Pipeline {
             let tasks = ready
                 .into_iter()
                 .filter(|s| ids.contains(&s.step_id))
-                .map(|s| scope.spawn(move || self.role(&s, vec![], None).map(|_| ())))
+                .map(|s| {
+                    scope.spawn(move || {
+                        let result = self.role(&s, vec![], None).map(|_| ());
+                        if result.is_err() {
+                            self.cancel.store(true, Ordering::Release);
+                        }
+                        result
+                    })
+                })
                 .collect::<Vec<_>>();
             let results = tasks
                 .into_iter()

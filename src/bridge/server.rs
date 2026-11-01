@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread,
 };
 
@@ -30,7 +30,7 @@ pub struct Bridge {
     pub config: Config,
     codex: Mutex<Option<Arc<AppServer>>>,
     pub(crate) children: crate::agy::Children,
-    pub(crate) dispatch_lock: Mutex<()>,
+    pub(crate) dispatch_lock: RwLock<()>,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
@@ -38,7 +38,7 @@ impl Bridge {
             config,
             codex: Mutex::new(None),
             children: crate::agy::Children::new(),
-            dispatch_lock: Mutex::new(()),
+            dispatch_lock: RwLock::new(()),
         }
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {

@@ -84,6 +84,10 @@ fn flow(mode: &str, approve: bool) {
     );
     let run = start["run_id"].as_str().unwrap();
     let c = checkpoint::load_run(&home.join("orchestrate/demo"), run).unwrap();
+    assert_eq!(
+        start["research"]["digest"],
+        c.research.as_ref().unwrap().digest
+    );
     assert_eq!(c.attempts.len(), 2);
     assert!(c
         .attempts
@@ -125,6 +129,16 @@ fn flow(mode: &str, approve: bool) {
     }
     if !["normal", "content", "repairable-review"].contains(&mode) {
         assert_ne!(result["status"], "ready_to_commit", "{result}");
+        if mode == "failed-peer" {
+            assert!(
+                rows().iter().any(|r| r["kind"] == "interrupted")
+                    || rows()
+                        .iter()
+                        .filter(|r| r["kind"] == "engineer-start")
+                        .count()
+                        == 1
+            );
+        }
         if mode == "rejected-review" {
             assert!(axiom::orch::read_units(&home.join("orchestrate/demo"))
                 .unwrap()
@@ -234,6 +248,16 @@ fn flow(mode: &str, approve: bool) {
     );
     use std::path::Path;
 }
+
+#[test]
+fn batch_failure_cancels_pending_peer_instead_of_waiting_for_its_execution_budget() {
+    let started = std::time::Instant::now();
+    flow("failed-peer", true);
+    assert!(
+        started.elapsed().as_secs() < 60,
+        "must not consume the 1800-second leaf budget"
+    );
+}
 #[test]
 fn rpc_research_reject_has_zero_engineering() {
     flow("normal", false);
@@ -266,6 +290,69 @@ fn artifact(path: &std::path::Path, bytes: &[u8]) -> ArtifactRef {
         path: path.into(),
         digest: format!("{:x}", Sha256::digest(bytes)),
     }
+}
+
+#[test]
+fn blocked_managed_run_rejects_legacy_writes_even_with_a_different_project() {
+    use serde_json::json;
+    let tmp = common::temp();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = repo.join("orchestrate/demo");
+    std::fs::create_dir_all(&store).unwrap();
+    let c = checkpoint::create_run(
+        &store,
+        &RunSeed {
+            run_id: "run".into(),
+            repo: RepoIdentity {
+                canonical_root: repo.clone(),
+                identity_digest: "repo".into(),
+            },
+            intent: artifact(&store.join("intent"), b"intent"),
+        },
+    )
+    .unwrap();
+    checkpoint::record_dispatch_failure(&store, "run", c.revision, false).unwrap();
+    let b = Bridge::new(Config {
+        data_home: Some(repo.clone()),
+        codex: Err(axiom::base::Failure::new("missing", "must not launch")),
+        agy: Err(axiom::base::Failure::new("missing", "must not launch")),
+        wsl: None,
+        on_windows: false,
+    });
+    for project in ["demo", "different-slug"] {
+        let error = axiom::bridge::tools::dispatch(
+            &b,
+            "codex_run",
+            &json!({"project":project,"unit":"bypass","role":"terra","cwd":repo}),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "managed_run_owned");
+    }
+    let error = axiom::bridge::tools::dispatch(
+        &b,
+        "orch",
+        &json!({"project":"demo","args":["unit","add","bypass"]}),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "managed_run_owned");
+    assert!(axiom::bridge::tools::dispatch(
+        &b,
+        "orch",
+        &json!({"project":"demo","args":["status"]})
+    )
+    .is_ok());
+    let c = checkpoint::load_run(&store, "run").unwrap();
+    checkpoint::advance_phase(&store, "run", c.revision, Phase::Cancelled).unwrap();
+    let result = axiom::bridge::tools::dispatch(
+        &b,
+        "codex_run",
+        &json!({"cwd":repo,"role":"terra","brief":"unbound write"}),
+    )
+    .unwrap();
+    assert_eq!(
+        result["error"]["kind"], "unbound_write",
+        "legacy standalone validation is restored after cancellation"
+    );
 }
 
 #[test]

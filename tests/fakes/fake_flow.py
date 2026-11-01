@@ -100,6 +100,11 @@ for line in sys.stdin:
             finish(tid, json.dumps(plan))
         elif 'ROLE Engineer' in brief:
             log('engineer-start', thread=tid)
+            if mode == 'failed-peer':
+                if 'write one' in brief:
+                    finish(tid, 'injected engineering failure', failed=True)
+                # The sibling intentionally never completes without cancellation.
+                continue
             if mode == 'unknown-write':
                 Path(cfg['cwd'], 'one.txt').write_text('unknown')
                 sys.exit(9)
@@ -142,6 +147,9 @@ for line in sys.stdin:
     elif method == 'thread/read':
         result = {'thread': {'id': p['threadId'], 'turns': []}}
     elif method == 'turn/interrupt':
+        if mode == 'failed-peer':
+            log('interrupted', thread=p['threadId'])
+            finish(p['threadId'], 'cancelled after peer failure', failed=True)
         result = {}
     else:
         continue

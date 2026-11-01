@@ -155,7 +155,76 @@ fn timeout(a: &Value, d: u64) -> u64 {
 fn store(b: &Bridge, project: &str) -> Res<std::path::PathBuf> {
     orch::store_for(b.home()?, project)
 }
+// Legacy entrypoints remain usable for standalone work, but cannot take over a
+// managed run merely by changing its project slug after a rejected boundary.
+fn guard_legacy_write(b: &Bridge, project: &str, repo: Option<&str>) -> Res<()> {
+    use crate::orch::checkpoint::{self, RunStatus};
+    let repo = repo
+        .map(std::fs::canonicalize)
+        .transpose()
+        .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+    let root = b.home()?.join("orchestrate");
+    if !root.exists() {
+        return Ok(());
+    }
+    let io = |e: std::io::Error| Failure::new("io", e.to_string());
+    for project_entry in std::fs::read_dir(root).map_err(io)? {
+        let project_entry = project_entry.map_err(io)?;
+        let runs = project_entry.path().join("runs");
+        if !runs.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&runs).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            if !entry.path().join("checkpoint.json").is_file() {
+                continue;
+            }
+            let id = entry.file_name();
+            let c = checkpoint::load_run(&project_entry.path(), &id.to_string_lossy())?;
+            if (project_entry.file_name() == project
+                || repo.as_ref() == Some(&c.repo.canonical_root))
+                && !matches!(
+                    c.status,
+                    RunStatus::ReadyToCommit | RunStatus::Released | RunStatus::Cancelled
+                )
+            {
+                return Err(Failure::new("managed_run_owned", format!("run {} owns this project/repository; use dispatch recovery, not legacy writes", c.run_id)));
+            }
+        }
+    }
+    Ok(())
+}
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
+    let legacy_write = match n {
+        "codex_run" => a.get("unit").is_some() || opt(a, "sandbox") != Some("read-only"),
+        "orch" => {
+            let args = arr(a, "args")?;
+            let op = args
+                .iter()
+                .find(|s| s.as_str() != "--json")
+                .map(String::as_str);
+            !matches!(op, Some("status" | "brief" | "list" | "help"))
+        }
+        "run_on_linux" => true,
+        "review_code" => a.get("units").is_some(),
+        _ => false,
+    };
+    let _legacy_guard = if legacy_write {
+        let guard = b.dispatch_lock.try_read().map_err(|_| {
+            Failure::new(
+                "managed_run_owned",
+                "dispatch is active; legacy writes are unavailable",
+            )
+        })?;
+        guard_legacy_write(
+            b,
+            s(a, "project"),
+            opt(a, "cwd").or_else(|| opt(a, "project_dir")),
+        )?;
+        Some(guard)
+    } else {
+        None
+    };
     match n {
         "dispatch" => {
             #[derive(serde::Deserialize)]
