@@ -6,13 +6,9 @@
 
 <p align="center"><a href="#begin">開始</a> · <a href="#the-work">使用</a> · <a href="#status">狀態</a></p>
 
-用 Claude Code 與 Codex 協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
+對你的程式碼許一個願望。Chronos 會先規劃、切成模組、交給 Codex 施工、由 Claude 審查，一直做到修改驗證完成或確定卡住為止。
 
 **正式版 · 1.0.0。** 每次 commit 前請檢查 diff。
-
-| 01 · 準備 | 02 · 描述 | 03 · 檢查 |
-| --- | --- | --- |
-| 用 `axiom doctor` 檢查環境。 | 交給 `axiom wish` 一項具體修改。 | 檢查 diff 與實際驗證紀錄。 |
 
 <a id="begin"></a>
 <a id="install"></a>
@@ -20,7 +16,7 @@
 
 ## 開始
 
-需要 [Claude Code](https://claude.com/claude-code) 與 Codex CLI；請先登入 `claude` 和 `codex`。下載單一 `axiom` 執行檔，或使用 Rust 建置安裝：
+需要 [Claude Code](https://claude.com/claude-code) 與 Codex CLI，兩者都要先登入。從 [Releases](https://github.com/xinhi6716/axiom-chronos/releases) 下載 `axiom`，或用 Rust 建置：
 
 ```sh
 cargo install --git https://github.com/xinhi6716/axiom-chronos --locked
@@ -33,16 +29,9 @@ axiom doctor
 axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 ```
 
-**先保留版本檢查點。** 願望可能修改檔案並呼叫已登入的模型服務。請只使用允許提供給這些服務的專案資料。
+在 Claude Code 裡，用 `/chronos:wish` 加上同樣的文字。
 
-<details>
-<summary><strong>環境與安裝補充</strong></summary>
-
-`axiom doctor` 檢查工具、SQLite 功能與狀態目錄，不會執行願望。SQLite 需支援 FTS5 與 JSON。
-
-Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 Codex 無法用它執行 worker 指令。請依 [bridge 說明](docs/bridge.md)改用 MSI 版。
-
-</details>
+**先保留版本檢查點。** 願望會修改檔案，並把專案資料送到你已登入的模型服務。
 
 <a id="the-work"></a>
 <a id="how-a-wish-runs"></a>
@@ -50,40 +39,7 @@ Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 C
 <a id="use"></a>
 <a id="使用"></a>
 
-## 使用方式
-
-描述一項具體修改。調度代理編寫 `GOAL · SCOPE · VERIFY` brief，交給 Codex worker，再檢查指令紀錄或執行 VERIFY。其指示要求遇到未定的介面或資料選擇時先提問。
-
-每次 wish 都先由 Astra 規劃，`chronos:critic` 審查計畫，核心裁決後才開始建置。
-
-審查由 Claude（`chronos:reviewer`、`chronos:critic`）負責審 Codex 的成果；最後報告由核心直接以白話撰寫。
-
-CLI 選項放在願望**前面**。後面的文字都是願望內容，包括參數名稱。
-
-Interjection（插話）：互動模式按 Esc；使用 `axiom wish` 時輸入一行並按 Enter，即可送入執行中的 session，用於修改指示、回答問題或停止。也可用 `axiom research` 進行研究。
-
-```sh
-axiom wish --project ../other 把 calc 全部改名成 compute_total
-```
-
-`axiom wish --resume <session-id>` 繼續 session；`axiom wish --creative` 啟動創意探索。
-
-<details>
-<summary><strong>選項與角色分工</strong></summary>
-
-| 選項 | 預設 | 用途 |
-|---|---|---|
-| `--project PATH` | 目前目錄 | 指定專案。 |
-| `--max-turns N` | — | 限制核心 session 回合數。 |
-| `--resume <session-id>` | — | 繼續先前的願望 session。 |
-| `--creative` | — | 探索並選擇有證據支持的小幅改進。 |
-
-- **Claude Code 核心：**讀取專案歷史、交付願望，以回報事實核對最後說明。
-- **Sonnet 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
-- **Codex `terra` worker：**在用完即丟的 thread 工作。只有多個 unit 改檔且全專案測試失敗時，才派 `sol` 整合。
-- **Haiku 記憶代理：**保存已驗證 unit 中可重用的工作。
-
-Claude session 載入引擎與 local settings。Codex worker 預設使用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context。詳見 [bridge contracts](docs/bridge.md#contracts)。
+## 一個願望怎麼跑
 
 <p align="center"><picture>
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
@@ -92,33 +48,32 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
   <img src="assets/chronos-process.svg" width="1200" alt="流程：Astra 先規劃、critic 第二審、architect 切模組、Codex 施工（terra 實作、sol 整合）、Claude 審查程式，最後由完整測試、CI 與記憶收尾。接受結果前仍需檢查修改。" />
 </picture></p>
 
-圖中是預期流程，不是執行環境強制保證的正確性。
+每次 wish 都先由 Astra 規劃，`chronos:critic` 審查計畫，核心裁決後才開始建置。
 
-</details>
+architect 把工作切成模組，每個模組有介面規格與驗收測試。調度代理把每個單元交給 Codex `terra` 實作；只有多個單元改檔後完整測試失敗時，才由 `sol` 整合。
+
+審查由 Claude（`chronos:reviewer`、`chronos:critic`）負責審 Codex 的成果；最後報告由核心直接以白話撰寫。
+
+關卡由執行檔強制：沒有占用單元不能寫檔、審查沒通過那份檔案的單元不算驗收、沒有最新的完整測試不能結案。
+
+只在開頭提問。執行中你保有插話權（interjection）：在 `axiom wish` 輸入一行並按 Enter，就能追加指示、提問或喊停。
+
+| 選項 | 用途 |
+|---|---|
+| `--project PATH` | 處理另一個專案。 |
+| `--resume <session-id>` | 接續中斷或卡住的願望。 |
+| `--creative` | 讓 Chronos 自己找一個有證據支持的小改進。 |
+| `--max-turns N` | 限制核心 session 回合數。 |
+
+選項放在願望**前面**，後面的文字都是願望內容。`axiom research` 會把問題變成審查過的研究計畫。
 
 <a id="record-review"></a>
 <a id="state--review"></a>
 <a id="狀態與檢查"></a>
 
-## 檢查並保留紀錄
+## 紀錄
 
-閱讀 diff、確認 VERIFY 實際執行的內容，處理失敗 unit 與未回答的問題。模型 session 結束不代表修改正確。
-
-狀態預設位於 `~/.axiom`；可用 `AXIOM_HOME` 指定其他位置。
-
-<details>
-<summary><strong>保存內容與隱私</strong></summary>
-
-```text
-~/.axiom/
-├── orchestrate/   工作紀錄、brief 與原始報告
-├── memory/        可搜尋記憶與專案歷史摘要
-└── logs/          每次執行的原始 session 事件
-```
-
-記憶保留願望與相關檔案雜湊，讓後續查詢能標示過期內容。日誌、記憶與報告可能含有專案資料，分享前請先檢查。
-
-</details>
+狀態存在 `~/.axiom`（可用 `AXIOM_HOME` 改位置）：`orchestrate/` 放工作紀錄與 brief，`memory/` 放可搜尋的記憶，`logs/` 放原始 session 事件。這些可能含有專案資料，分享前請先檢查。
 
 <a id="horizon"></a>
 <a id="status"></a>
@@ -126,16 +81,12 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 
 ## 狀態
 
-**目前提供：**`axiom wish`、`axiom research` 與 `axiom doctor`。測試期間指令、狀態與代理行為仍可能改變。
+目前提供：`axiom wish`、`axiom research`、`axiom doctor`。測試用腳本替身模擬 Claude 與 Codex 來檢查協定；真實模型的表現依專案而異。
 
-**仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的功能。
-
-測試以腳本替身模擬 Claude 與 Codex，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
-
-[Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [測試](tests/)
+[Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [版本說明](docs/releases/1.0.0.md)
 
 ---
 
 [MIT 授權](LICENSE) · [來源與授權](licenses/) · [素材聲明](assets/ASSET_NOTICES.txt)
 
-工作追蹤以 Rust 在程序內重新實作 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) `orch`。視覺識別為原創 Axiom Celestial Order 圖像。
+Chronos 由 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) 經 [Axiom Atropos](https://github.com/xinhi6716/axiom-atropos) 發展而來。視覺識別為原創 Axiom Celestial Order 圖像。
