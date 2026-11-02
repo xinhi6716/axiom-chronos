@@ -2936,21 +2936,19 @@ mod scratch_scope_tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let store = tmp
-            .path()
-            .join("orchestrate")
-            .join("sumints-acceptance-dev9-20261101");
-        std::fs::create_dir_all(&store).unwrap();
         let scratch = scratch_path(
-            &store,
+            tmp.path(),
             "run-3ec46c705c1083c78121a1e4",
             "d8360f2dc4281fefc91271cc719cd632",
             Some("independent-sumints-contract-debug-release"),
         )
         .unwrap();
-        let harness = scratch.join("independent-sumints");
-        let source = harness.join("control/src");
-        let target = harness.join("control-target");
+        assert_eq!(scratch.file_name().unwrap().to_str().unwrap().len(), 64);
+        let harness = scratch.join("h");
+        let source = harness.join("c/src");
+        let target = tmp.path().join("t");
+        assert!(scratch.starts_with(tmp.path()));
+        assert!(source.starts_with(tmp.path()) && target.starts_with(tmp.path()));
         std::fs::create_dir_all(&source).unwrap();
         let manifest = source.parent().unwrap().join("Cargo.toml");
         std::fs::write(
@@ -2994,7 +2992,14 @@ mod scratch_scope_tests {
             target.display(),
             String::from_utf8_lossy(&build.stderr)
         );
-        assert!(target.join("debug/independent_control.exe").is_file());
+        let binary = target.join("debug/independent_control.exe");
+        assert!(binary.is_file());
+        let bytes = std::fs::read(&binary).unwrap();
+        assert!(
+            bytes.starts_with(b"MZ"),
+            "invalid PE binary: {}",
+            binary.display()
+        );
     }
 
     #[test]
