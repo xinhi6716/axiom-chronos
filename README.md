@@ -1,14 +1,18 @@
-<p align="center"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png" width="360" alt="Axiom Chronos — approved Flagship identity artwork"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png" width="280" alt="Axiom Chronos: an hourglass beneath a celestial timewheel"></p>
 
-<h1 align="center">Axiom Chronos</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/xinhi6716/xinhi6716/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-dark.svg"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-light.svg" width="40" height="40" alt=""></picture> Axiom Chronos</h1>
 
-<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a></p>
+<p align="center"><strong>Plan, build and review code changes with Claude and Codex.</strong></p>
 
-<p align="center"><a href="#begin">Start</a> · <a href="#the-work">Use</a> · <a href="#status">Status</a></p>
+<p align="center"><strong>English</strong> · <a href="README.zh-TW.md">繁體中文</a></p>
+
+<p align="center"><a href="docs/releases/1.0.0.md">Release 1.0.0</a></p>
+
+<p align="center"><a href="#begin">Quick start</a> · <a href="#the-work">Workflow</a> · <a href="#record-review">Records</a> · <a href="#status">Status</a></p>
 
 Make a wish on your codebase. Chronos plans it, splits it into modules, has Codex build them, has Claude review them, and keeps working until the change is verified or blocked.
 
-**Release · 1.0.0.** Review each diff before committing.
+**Review each diff before committing.**
 
 <a id="begin"></a>
 <a id="install"></a>

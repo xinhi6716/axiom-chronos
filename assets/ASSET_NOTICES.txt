@@ -1,3 +1,38 @@
+CURRENT README IDENTITY — 2026-11-02
+
+The README language editions display the square chronos.png artwork from the
+public xinhi6716/xinhi6716 profile repository, pinned to commit:
+95b148368534587e5393bc9ef610b99c01ca8e92
+
+Source: https://github.com/xinhi6716/xinhi6716/blob/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png
+Format: 1254 x 1254 PNG. Role: Axiom flagship identity artwork.
+The image is presented directly alongside a native-text title and navigation.
+It is symbolic branding, not a workflow diagram or a performance claim.
+
+This entry records the source used by the current README. It does not assert
+a new artwork license, creator attribution or trademark clearance. Existing
+license and font notices remain unchanged.
+
+COMPACT LOGO COMPANION
+
+The native README title includes light/dark compact chronos marks from the
+public profile repository, pinned to commit:
+443d48c713f27d52656ad8ea3cb4c5bb9c7dd440
+
+Light: https://github.com/xinhi6716/xinhi6716/blob/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-light.svg
+Dark: https://github.com/xinhi6716/xinhi6716/blob/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-dark.svg
+Companion notices: https://github.com/xinhi6716/xinhi6716/blob/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/ASSET_NOTICES.txt
+Font notices: https://github.com/xinhi6716/xinhi6716/blob/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/FONT_LICENSE.txt
+
+These small vector companions do not replace or alter the identity-v8 portrait.
+Their provenance is documented separately from the historical SVG revisions.
+
+HISTORICAL SVG REVISIONS
+
+The dated entries below describe earlier local vector assets. Statements about
+no remote images or raster dependencies apply to those revisions, not to the
+current PNG README artwork. The historical assets and notices are retained.
+
 Axiom Chronos — shared celestial field refinement, 2026-10-28
 
 The four current README cover variants preserve the exact first-party Chronos

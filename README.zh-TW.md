@@ -1,14 +1,18 @@
-<p align="center"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png" width="360" alt="Axiom Chronos — approved Flagship identity artwork"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/95b148368534587e5393bc9ef610b99c01ca8e92/assets/identity-v8/chronos.png" width="280" alt="Axiom Chronos: an hourglass beneath a celestial timewheel"></p>
 
-<h1 align="center">Axiom Chronos</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/xinhi6716/xinhi6716/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-dark.svg"><img src="https://raw.githubusercontent.com/xinhi6716/xinhi6716/443d48c713f27d52656ad8ea3cb4c5bb9c7dd440/assets/brand-marks/v1/chronos-icon-light.svg" width="40" height="40" alt=""></picture> Axiom Chronos</h1>
 
-<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a></p>
+<p align="center"><strong>讓 Claude 與 Codex 一起規劃、實作與審查程式修改。</strong></p>
 
-<p align="center"><a href="#begin">開始</a> · <a href="#the-work">使用</a> · <a href="#status">狀態</a></p>
+<p align="center"><a href="README.md">English</a> · <strong>繁體中文</strong></p>
+
+<p align="center"><a href="docs/releases/1.0.0.md">正式版 1.0.0</a></p>
+
+<p align="center"><a href="#begin">開始</a> · <a href="#the-work">工作流程</a> · <a href="#record-review">紀錄</a> · <a href="#status">狀態</a></p>
 
 對你的程式碼許一個願望。Chronos 會先規劃、切成模組、交給 Codex 施工、由 Claude 審查，一直做到修改驗證完成或確定卡住為止。
 
-**正式版 · 1.0.0。** 每次 commit 前請檢查 diff。
+**每次 commit 前請檢查 diff。**
 
 <a id="begin"></a>
 <a id="install"></a>
