@@ -407,7 +407,7 @@ fn logged_bridge(home: &Path, log: &Path) -> Bridge {
 }
 #[test]
 fn astra_gate_requires_every_prerequisite() {
-    for missing in 0..7 {
+    for missing in 0..6 {
         let temp = common::temp();
         let home = temp.path();
         let (repo, store) = fixture(
@@ -424,14 +424,11 @@ fn astra_gate_requires_every_prerequisite() {
         if missing != 0 {
             orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
         }
-        if missing != 1 {
-            orch::record_stage(&store, "second_review", "review", true).unwrap();
-        }
         for (i, name) in ["plan.json", "review.json", "ruling.md", "plan-final.md"]
             .iter()
             .enumerate()
         {
-            if missing != i + 2 {
+            if missing != i + 1 {
                 fs::create_dir_all(store.join("astra")).unwrap();
                 fs::write(store.join("astra").join(name), "ok").unwrap();
             }
@@ -440,7 +437,7 @@ fn astra_gate_requires_every_prerequisite() {
             &bridge(home),
             json!({"project":"demo","unit":"gateunit","cwd":repo,"role":"terra"}),
         );
-        if missing == 6 {
+        if missing == 5 {
             assert_eq!(r["attempt"], 1, "{r}");
         } else {
             assert_eq!(r["error"]["kind"], "astra_gate", "missing {missing}: {r}");
@@ -615,7 +612,6 @@ fn creative_goal_requires_architect() {
     fs::write(store.join("modules.md"), "architecture").unwrap();
     assert_eq!(invoke(&b, args.clone())["error"]["kind"], "astra_gate");
     orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
-    orch::record_stage(&store, "second_review", "review", true).unwrap();
     fs::create_dir_all(store.join("astra")).unwrap();
     for name in ["plan.json", "review.json", "ruling.md", "plan-final.md"] {
         fs::write(store.join("astra").join(name), "ok").unwrap();

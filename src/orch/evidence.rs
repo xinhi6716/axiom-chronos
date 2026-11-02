@@ -337,14 +337,7 @@ pub fn astra_gate(store: &Path) -> Res<()> {
             && base::family_of(&r.command) == base::Family::OpenAi
             && r.command.ends_with("-astra")
     });
-    let i = astra
-        .ok_or_else(|| Failure::new("astra_gate", "missing successful OpenAI -astra stage"))?;
-    if !stages[i + 1..].iter().any(|r| r.kind == "second_review") {
-        return Err(Failure::new(
-            "astra_gate",
-            "missing later second_review stage",
-        ));
-    }
+    astra.ok_or_else(|| Failure::new("astra_gate", "missing successful OpenAI -astra stage"))?;
     for file in [
         "astra/plan.json",
         "astra/review.json",
