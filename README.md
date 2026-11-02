@@ -83,5 +83,3 @@ Available: `axiom wish`, `axiom research`, `axiom doctor`. Tests run the protoco
 ---
 
 [MIT License](LICENSE) · [Credits and licenses](licenses/) · [Asset notices](assets/ASSET_NOTICES.txt)
-
-Chronos grew from poteto’s [Pstack](https://github.com/cursor/plugins/tree/main/pstack) through [Axiom Atropos](https://github.com/xinhi6716/axiom-atropos). The visual identity is original Axiom Celestial Order artwork.

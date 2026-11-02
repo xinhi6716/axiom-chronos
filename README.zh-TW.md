@@ -88,5 +88,3 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 ---
 
 [MIT 授權](LICENSE) · [來源與授權](licenses/) · [素材聲明](assets/ASSET_NOTICES.txt)
-
-Chronos 由 poteto 的 [Pstack](https://github.com/cursor/plugins/tree/main/pstack) 經 [Axiom Atropos](https://github.com/xinhi6716/axiom-atropos) 發展而來。視覺識別為原創 Axiom Celestial Order 圖像。
