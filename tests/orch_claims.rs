@@ -300,9 +300,13 @@ fn legacy_stores_and_handoff_fields() {
             .join("tests/fixtures/orch/stores")
             .join(name);
         assert!(!orch::read_units(&store).unwrap().is_empty());
-        orch::ready_units(&store).unwrap();
         assert!(!store.join("claims.tsv").exists());
     }
+    let f = Fixture::new();
+    assert!(!f.store.join("claims.tsv").exists());
+    assert_eq!(orch::ready_units(&f.store).unwrap(), vec!["a"]);
+    assert!(orch::waiting_units(&f.store).unwrap().is_empty());
+    assert!(!f.store.join("claims.tsv").exists());
     let dispatch = include_str!("../engine/DISPATCH.md");
     let block = dispatch
         .split("## HANDOFF")
