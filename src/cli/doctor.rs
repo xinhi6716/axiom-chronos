@@ -170,14 +170,6 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
             "terra and sol workers",
             "Install the Codex CLI and sign in.",
         ),
-        tool(
-            "agy",
-            "AXIOM_AGY_CMD",
-            "agy",
-            false,
-            "plain-language reports",
-            "Install Antigravity; without it reports are shown as written.",
-        ),
         sqlite(),
         state(),
     ];

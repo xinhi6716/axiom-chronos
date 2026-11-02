@@ -18,7 +18,6 @@ fn command_and_message() {
         "Write",
         "Bash",
         "mcp__plugin_chronos_bridge__codex_run",
-        "mcp__plugin_chronos_bridge__gemini_preview",
         "mcp__plugin_chronos_bridge__run_on_linux",
         "mcp__plugin_chronos_bridge__orch",
         "mcp__plugin_chronos_bridge__memory_record",

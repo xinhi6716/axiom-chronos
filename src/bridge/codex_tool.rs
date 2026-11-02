@@ -136,7 +136,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 "creative goal requires modules.md",
             ));
         }
-        let required = active.is_some_and(|(_, g)| goal::astra_requested(&g));
+        let required = active.is_some();
         match orch::begin_unit(root, u, r, Path::new(cwd), required)? {
             orch::Begin::Reused => {
                 return Ok(

@@ -1,5 +1,7 @@
 # 第四輪參考資料採納
 
+Gemini 已於第五輪收尾移除。
+
 Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證。舊七項的 manifest 本輪已讀，來源程式碼本輪未重審。
 
 ## DeepSeek

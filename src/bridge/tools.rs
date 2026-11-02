@@ -1,13 +1,12 @@
 use super::server::Bridge;
 use crate::{
-    agy,
     base::{Failure, Res},
     goal, linux,
     memory::{Memory, Record},
     orch,
 };
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio};
+use std::process::Stdio;
 fn s<'a>(a: &'a Value, k: &str) -> &'a str {
     a.get(k).and_then(Value::as_str).unwrap_or("")
 }
@@ -43,73 +42,6 @@ fn store(b: &Bridge, project: &str) -> Res<std::path::PathBuf> {
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
-        "gemini_preview" => {
-            let model = opt(a, "model")
-                .filter(|x| !x.is_empty())
-                .unwrap_or("gemini-4-argon-medium");
-            let project = opt(a, "project");
-            let stage = opt(a, "stage");
-            if let Some(t) = stage {
-                if t != "rewrite" {
-                    return Err(Failure::new("invalid_argument", "invalid stage"));
-                }
-            }
-            let root = project.map(|p| store(b, p)).transpose()?;
-            if let Some(root) = &root {
-                std::fs::create_dir_all(root).map_err(|e| Failure::new("io", e.to_string()))?;
-            }
-            let dest = match opt(a, "save_to") {
-                Some(path) => Some(super::codex_tool::destination(
-                    root.as_deref().ok_or_else(|| {
-                        Failure::new("invalid_argument", "save_to requires project")
-                    })?,
-                    path,
-                )?),
-                None => None,
-            };
-            let result = b.config.agy.clone().and_then(|command| {
-                agy::run(
-                    &command,
-                    s(a, "prompt"),
-                    opt(a, "cwd").map(Path::new),
-                    model,
-                    a.get("json_schema"),
-                    timeout(a, 600),
-                    &b.children,
-                )
-            });
-            let mut result = match result {
-                Ok(result) => result,
-                Err(e) => {
-                    if let (Some(root), Some(t)) = (&root, stage) {
-                        let _ = orch::record_stage(root, t, model, false);
-                    }
-                    return Err(e);
-                }
-            };
-            let mut completed = result["status"] == "completed";
-            if completed {
-                if let Some(dest) = dest {
-                    if let Some(v) = result.get("structured_output").filter(|v| !v.is_null()) {
-                        let text = if let Some(s) = v.as_str() {
-                            s.to_owned()
-                        } else {
-                            serde_json::to_string_pretty(v).unwrap()
-                        };
-                        crate::base::atomic_write(&dest, text.as_bytes())
-                            .map_err(|e| Failure::new("io", e.to_string()))?;
-                    } else {
-                        completed = false;
-                        result["status"] = json!("failed");
-                        result["error"] = json!({"kind":"invalid_structured_output","message":"structured output is required"});
-                    }
-                }
-            }
-            if let (Some(root), Some(t)) = (&root, stage) {
-                orch::record_stage(root, t, model, completed)?;
-            }
-            Ok(result)
-        }
         "orch" => {
             let path = store(b, s(a, "project"))?;
             std::fs::create_dir_all(path.parent().unwrap())
@@ -192,7 +124,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
         }
         "bridge_status" => {
             let mut result = json!({"status":"completed","codex_app_server_running":b.running()});
-            for (key, cmd) in [("codex", &b.config.codex), ("agy", &b.config.agy)] {
+            for (key, cmd) in [("codex", &b.config.codex)] {
                 result[key] = match cmd {
                     Err(e) => json!({"error":e.to_json()}),
                     Ok(c) => match crate::base::proc::command(c)

@@ -68,7 +68,7 @@ fn modes_status_and_project_gate() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     goal::open(home, "session-1", "[astra] 願望", Some("project")).unwrap();
-    assert!(goal::astra_requested(
+    assert!(!goal::creative_requested(
         &goal::load(home, "session-1").unwrap().unwrap()
     ));
     goal::set_mode(home, "session-1", "change").unwrap();
@@ -247,15 +247,14 @@ fn find_active_selects_newest_matching_project() {
 #[test]
 fn interrupt_reopen_and_markers() {
     let t = tempfile::tempdir().unwrap();
-    for (wish, creative, astra) in [
-        ("[creative] x", true, true),
-        ("[no-architect] [creative] x", true, true),
-        ("[astra] x", false, true),
-        ("x", false, false),
+    for (wish, creative) in [
+        ("[creative] x", true),
+        ("[no-architect] [creative] x", true),
+        ("[astra] x", false),
+        ("x", false),
     ] {
         let g = axiom::goal::open(t.path(), "markers", wish, None).unwrap();
         assert_eq!(axiom::goal::creative_requested(&g), creative);
-        assert_eq!(axiom::goal::astra_requested(&g), astra);
     }
     axiom::goal::interject(t.path(), "markers", "amend").unwrap();
     let file = t.path().join("goals/markers.json");

@@ -11,7 +11,6 @@ fn bridge(home: &Path) -> Bridge {
     Bridge::new(Config {
         data_home: Some(home.into()),
         codex: Ok(common::fake("fake_codex")),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     })
@@ -337,7 +336,6 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
                 .to_string_lossy()
                 .into_owned(),
         ]),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     });
@@ -400,7 +398,6 @@ fn logged_bridge(home: &Path, log: &Path) -> Bridge {
                 .to_string_lossy()
                 .into_owned(),
         ]),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     })
@@ -525,7 +522,6 @@ fn astra_preserves_coverage() {
                 .to_string_lossy()
                 .into_owned(),
         ]),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     };
@@ -555,7 +551,6 @@ fn unbound_writing_run_is_refused_before_codex_starts() {
                 .to_string_lossy()
                 .into_owned(),
         ]),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     });

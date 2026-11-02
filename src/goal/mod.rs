@@ -337,6 +337,3 @@ fn marker(goal: &Goal, wanted: &str) -> bool {
 pub fn creative_requested(goal: &Goal) -> bool {
     marker(goal, "[creative]")
 }
-pub fn astra_requested(goal: &Goal) -> bool {
-    marker(goal, "[astra]") || creative_requested(goal)
-}

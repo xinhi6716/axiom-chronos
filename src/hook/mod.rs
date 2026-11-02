@@ -190,7 +190,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     .and_then(|h| goal::load(h, session).ok().flatten())
                     .is_some_and(|g| g.status == "active")
             {
-                return deny("Run the chronos:memory-keeper in the foreground; it may share a batch with the rewrite.");
+                return deny("Run the chronos:memory-keeper in the foreground.");
             }
             if agent
                 && matches!(tool, "Agent" | "Task")

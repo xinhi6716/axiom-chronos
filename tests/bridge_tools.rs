@@ -11,7 +11,6 @@ fn config(home: &std::path::Path) -> Config {
     Config {
         data_home: Some(home.into()),
         codex: Ok(common::fake("fake_codex")),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     }
@@ -20,20 +19,17 @@ fn config(home: &std::path::Path) -> Config {
 #[test]
 fn tool_contract_and_rewrite_evidence() {
     let temp = common::temp();
-    let count = temp.path().join("agy-count");
-    let wrapper = temp.path().join("agy_wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_COUNT']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let mut config = config(temp.path());
-    config.agy = Ok(vec![
+    let marker = temp.path().join("started");
+    let wrapper = temp.path().join("marker.py");
+    fs::write(&wrapper, "import pathlib,runpy,sys\npathlib.Path(sys.argv[1]).write_text('started')\nsys.argv=sys.argv[2:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
+    let mut cfg = config(temp.path());
+    cfg.codex = Ok(vec![
         common::python(),
         wrapper.to_string_lossy().into_owned(),
-        count.to_string_lossy().into_owned(),
-        common::repo_root()
-            .join("tests/fakes/fake_agy.py")
-            .to_string_lossy()
-            .into_owned(),
+        marker.to_string_lossy().into_owned(),
+        common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy().into_owned(),
     ]);
-    let b = Bridge::new(config);
+    let b = Bridge::new(cfg);
     let descriptors = tools();
     let list = descriptors.as_array().unwrap();
     let names: Vec<_> = list.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -41,7 +37,6 @@ fn tool_contract_and_rewrite_evidence() {
         names,
         [
             "codex_run",
-            "gemini_preview",
             "orch",
             "run_on_linux",
             "memory_record",
@@ -53,6 +48,11 @@ fn tool_contract_and_rewrite_evidence() {
         ]
     );
     assert!(!names.contains(&"review_code"));
+    assert!(!names.contains(&"gemini_preview"));
+    assert_eq!(
+        list.iter().find(|t| t["name"] == "bridge_status").unwrap()["description"],
+        "Report the Codex executable and app-server status."
+    );
     let description = list.iter().find(|t| t["name"] == "codex_run").unwrap()["description"]
         .as_str()
         .unwrap();
@@ -60,46 +60,30 @@ fn tool_contract_and_rewrite_evidence() {
     assert!(description.contains(phrase));
     let stripped = description.replace(phrase, "");
     assert!(!stripped.contains(phrase));
-    let preview = list.iter().find(|t| t["name"] == "gemini_preview").unwrap();
-    assert_eq!(
-        preview["inputSchema"]["properties"]["stage"]["enum"],
-        json!(["rewrite"])
-    );
-    let removed = call(&b, "review_code", &json!({}));
-    assert_eq!(removed["structuredContent"]["status"], "bridge_error");
-    assert_eq!(
-        removed["structuredContent"]["error"]["kind"],
-        "unknown_tool"
-    );
-    let invalid = call(
-        &b,
-        "gemini_preview",
-        &json!({"prompt":"hello","project":"demo","stage":"second_review"}),
-    );
-    assert_eq!(invalid["structuredContent"]["status"], "bridge_error");
-    assert_eq!(
-        invalid["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
-    assert_eq!(
-        invalid["structuredContent"]["error"]["message"],
-        "invalid stage"
-    );
-    let path = temp
-        .path()
-        .join("orchestrate/demo/reports/_stages.evidence.tsv");
-    assert!(!path.exists());
-    assert!(!count.exists());
-    let ok = call(
-        &b,
-        "gemini_preview",
-        &json!({"prompt":"hello","project":"demo","stage":"rewrite"}),
-    );
-    assert_eq!(ok["structuredContent"]["status"], "completed");
-    let rows = fs::read_to_string(path).unwrap();
-    assert!(rows
-        .lines()
-        .any(|line| line.starts_with("rewrite\t") && line.split('\t').nth(2) == Some("0")));
+    let clean = |text: &str| {
+        let lower = text.to_lowercase();
+        !lower.contains("gemini") && !lower.contains("rewrite")
+            && !lower.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|word| word == "agy")
+    };
+    let serialized = descriptors.to_string();
+    assert!(clean(&serialized));
+    assert!(!clean(&(serialized + "gemini")));
+    let path = temp.path().join("orchestrate/demo/reports/_stages.evidence.tsv");
+    for (name, args) in [
+        ("gemini_preview", json!({"prompt":"hello","project":"demo","stage":"rewrite"})),
+        ("review_code", json!({})),
+    ] {
+        let removed = call(&b, name, &args);
+        assert_eq!(removed["structuredContent"]["status"], "bridge_error");
+        assert_eq!(removed["structuredContent"]["error"]["kind"], "unknown_tool");
+        assert!(!path.exists());
+        assert!(!marker.exists());
+    }
+    let status = call(&b, "bridge_status", &json!({}));
+    assert_eq!(status["structuredContent"]["status"], "completed");
+    assert!(status["structuredContent"].get("codex").is_some());
+    assert!(status["structuredContent"].get("agy").is_none());
+    assert!(marker.exists());
 }
 
 #[test]

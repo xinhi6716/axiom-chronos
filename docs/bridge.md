@@ -4,7 +4,7 @@
 
 <p><a href="#tools">Tools</a> · <a href="#contracts">Contracts</a> · <a href="#configuration">Configuration</a> · <a href="#tests">Tests</a></p>
 
-`axiom bridge` runs an MCP stdio server that lets Claude Code drive Codex and Antigravity (agy) through typed tools instead of ad-hoc shell calls. The engine's plugin manifest registers it as `bridge`, so its tools appear as `mcp__plugin_chronos_bridge__<tool>`. Source: [engine/bridge](../engine/bridge).
+`axiom bridge` runs an MCP stdio server that lets Claude Code drive Codex through typed tools instead of ad-hoc shell calls. The engine's plugin manifest registers it as `bridge`, so its tools appear as `mcp__plugin_chronos_bridge__<tool>`. Source: [engine/bridge](../engine/bridge).
 
 <a id="tools"></a>
 
@@ -13,16 +13,17 @@
 | Tool | Backend | Use |
 | --- | --- | --- |
 | `codex_run` | one long-lived `codex app-server` (JSON-RPC over stdio), one ephemeral thread per call | Send a brief to a `terra` worker or a `sol` integrator; the role resolves to a model the signed-in account lists |
-| `gemini_preview` | `agy` print mode, NDJSON in and out | Rewrite worker reports into plain language: what was done, how it turned out, what the user must decide. Runs in an empty directory unless given `cwd`; plan mode is avoided because it answers with a plan document and a question |
 | `orch` | in process | Units, inbox, gates and status for one program; the store lives under `CLAUDE_PLUGIN_DATA` (or `AXIOM_DATA_HOME`) so it survives plugin updates |
 | `memory_record`, `memory_search`, `memory_get`, `memory_digest` | SQLite FTS5 (trigram) in the same data directory | Long-run memory: verified units distilled for later briefs, and a one-line-per-wish history per project. Original-wish text remains searchable even when summaries are English. CJK query runs become bigrams; matching uses stored terms, not translation. Each entry hashes its files and reports `stale` once they change |
-| `bridge_status` | `--version` probes | Resolved Codex and agy executables and whether the app-server is up |
+| `bridge_status` | `--version` probes | Resolved Codex executable and whether the app-server is up |
 
 `axiom wish` runs the [wish skill](../engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../engine/agents/dispatcher.md) (`chronos:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../engine/agents/memory-keeper.md) (`chronos:memory-keeper`, Haiku) then records what later units can reuse.
 
-Reviews go to the `chronos:reviewer` agent, one whole unit per call; Gemini only rewrites reports (`gemini_preview` with `stage: "rewrite"`).
+Every wish runs Astra first; no option or marker skips it.
 
-Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`, `agy_error`). agy exits 0 on failed turns, so the bridge reads the result event rather than the exit code.
+Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; the core writes the final report itself.
+
+Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`).
 
 <a id="contracts"></a>
 
@@ -56,7 +57,7 @@ Measured with `gpt-5.6-terra` at low effort:
 
 ## III · Configuration
 
-The bridge resolves `codex` and `agy` from `PATH`. Override either with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. Memory needs SQLite with FTS5 trigram support, which `axiom doctor` checks.
+The bridge resolves `codex` from `PATH`. Override it with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. Memory needs SQLite with FTS5 trigram support, which `axiom doctor` checks.
 
 ### Windows · PowerShell
 

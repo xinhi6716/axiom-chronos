@@ -40,8 +40,6 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 
 `axiom doctor` 檢查工具、SQLite 功能與狀態目錄，不會執行願望。SQLite 需支援 FTS5 與 JSON。
 
-Antigravity（`agy`）是選配。Gemini 預覽失敗時，核心可改顯示調度報告。
-
 Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 Codex 無法用它執行 worker 指令。請依 [bridge 說明](docs/bridge.md)改用 MSI 版。
 
 </details>
@@ -56,7 +54,9 @@ Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 C
 
 描述一項具體修改。調度代理編寫 `GOAL · SCOPE · VERIFY` brief，交給 Codex worker，再檢查指令紀錄或執行 VERIFY。其指示要求遇到未定的介面或資料選擇時先提問。
 
-審查由 Claude（`chronos:reviewer`）負責；Gemini 只把報告改寫成白話。
+每次 wish 都先由 Astra 規劃，`chronos:critic` 審查計畫，核心裁決後才開始建置。
+
+審查由 Claude（`chronos:reviewer`、`chronos:critic`）負責審 Codex 的成果；最後報告由核心直接以白話撰寫。
 
 CLI 選項放在願望**前面**。後面的文字都是願望內容，包括參數名稱。
 
@@ -81,7 +81,6 @@ axiom wish --project ../other 把 calc 全部改名成 compute_total
 - **Claude Code 核心：**讀取專案歷史、交付願望，以回報事實核對最後說明。
 - **Sonnet 調度代理：**劃定 unit 範圍、提供相關記憶、核對驗證指令紀錄。
 - **Codex `terra` worker：**在用完即丟的 thread 工作。只有多個 unit 改檔且全專案測試失敗時，才派 `sol` 整合。
-- **選配 `agy` 的 Gemini：**將報告改寫成白話。
 - **Haiku 記憶代理：**保存已驗證 unit 中可重用的工作。
 
 Claude session 載入引擎與 local settings。Codex worker 預設使用 lean mode，要求在該 thread 停用不相關的插件、MCP server、apps 與 skills context。詳見 [bridge contracts](docs/bridge.md#contracts)。
@@ -131,7 +130,7 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 
 **仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的測試版功能。
 
-測試以腳本替身模擬 Claude、Codex 與 `agy`，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
+測試以腳本替身模擬 Claude 與 Codex，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
 
 [Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [測試](tests/)
 

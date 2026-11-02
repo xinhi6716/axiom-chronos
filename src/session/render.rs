@@ -7,7 +7,7 @@ use std::{
 };
 
 pub const BRIDGE: &str = "mcp__plugin_chronos_bridge__";
-pub const TOOLS: [&str; 15] = [
+pub const TOOLS: [&str; 14] = [
     "Agent",
     "Read",
     "Glob",
@@ -15,7 +15,6 @@ pub const TOOLS: [&str; 15] = [
     "Write",
     "Bash",
     "mcp__plugin_chronos_bridge__codex_run",
-    "mcp__plugin_chronos_bridge__gemini_preview",
     "mcp__plugin_chronos_bridge__run_on_linux",
     "mcp__plugin_chronos_bridge__orch",
     "mcp__plugin_chronos_bridge__memory_record",

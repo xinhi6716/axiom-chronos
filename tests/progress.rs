@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use std::{
     io::{self, Cursor, Write},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -27,7 +26,6 @@ fn config(path: &std::path::Path) -> Config {
     Config {
         data_home: Some(path.into()),
         codex: Ok(common::fake("fake_codex")),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     }
@@ -97,36 +95,6 @@ fn codex_and_agy_events_and_invalid_tokens() {
             "turn/completed",
         ],
     );
-    let msgs = run(
-        vec![request(
-            2,
-            "gemini_preview",
-            json!({"prompt":"hello"}),
-            Some(json!(42)),
-        )],
-        temp.path(),
-    );
-    check(&msgs, 2, json!(42), &["event", "event"]);
-    let msgs = run(
-        vec![request(
-            4,
-            "gemini_preview",
-            json!({"prompt":"AGY_TYPED"}),
-            Some(json!("typed")),
-        )],
-        temp.path(),
-    );
-    check(&msgs, 4, json!("typed"), &["init", "event"]);
-    let msgs = run(
-        vec![request(
-            5,
-            "gemini_preview",
-            json!({"prompt":"hello"}),
-            None,
-        )],
-        temp.path(),
-    );
-    assert_eq!(msgs.len(), 1);
     for token in [None, Some(json!(true)), Some(json!(1.5)), Some(json!({}))] {
         let msgs = run(
             vec![request(3, "codex_run", codex.clone(), token)],
@@ -156,31 +124,7 @@ fn concurrent_calls_do_not_cross() {
     check(&msgs, 2, json!("b"), &["item/completed", "turn/completed"]);
     assert_eq!(msgs.len(), 7);
 }
-#[test]
-fn agy_streams_before_process_exits() {
-    let temp = common::temp();
-    let release = temp.path().join("release");
-    let request = request(
-        1,
-        "gemini_preview",
-        json!({"prompt":format!("AGY_WAIT:{}",release.display())}),
-        Some(json!("live")),
-    );
-    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
-    let out = sink.clone();
-    let cfg = config(temp.path());
-    let job = std::thread::spawn(move || serve(cfg, Cursor::new(format!("{request}\n")), out));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while lines(&sink).is_empty() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let before = lines(&sink);
-    std::fs::write(release, "go").unwrap();
-    assert_eq!(job.join().unwrap(), 0);
-    assert_eq!(before.len(), 1);
-    assert_eq!(before[0]["method"], "notifications/progress");
-    check(&lines(&sink), 1, json!("live"), &["event", "event"]);
-}
+
 #[test]
 fn scope_restores_and_closes_on_unwind() {
     let values = Arc::new(Mutex::new(Vec::new()));

@@ -12,7 +12,6 @@ fn config(home: &std::path::Path) -> Config {
     Config {
         data_home: Some(home.into()),
         codex: Ok(common::fake("fake_codex")),
-        agy: Ok(common::fake("fake_agy")),
         wsl: None,
         on_windows: false,
     }
@@ -84,7 +83,6 @@ fn full_protocol_session() {
             .collect::<Vec<_>>(),
         [
             "codex_run",
-            "gemini_preview",
             "orch",
             "run_on_linux",
             "memory_record",
@@ -107,19 +105,12 @@ fn descriptor_names_policy() {
         .iter()
         .find(|v| v["name"] == "codex_run")
         .unwrap();
-    let preview = descriptors
-        .iter()
-        .find(|v| v["name"] == "gemini_preview")
-        .unwrap();
     let description = codex["description"].as_str().unwrap();
     let phrase = "${CLAUDE_PLUGIN_ROOT}/DISPATCH.md";
     assert!(description.contains(phrase));
     let stripped = description.replace(phrase, "");
     assert!(!stripped.contains(phrase));
-    assert!(!preview["description"]
-        .as_str()
-        .unwrap()
-        .contains("DISPATCH.md"));
+    assert!(!descriptors.iter().any(|v| v["name"] == "gemini_preview"));
 }
 #[test]
 fn memory_verified_round_trip_and_refusal() {
@@ -165,22 +156,7 @@ fn orch_status_and_failure() {
     check(&bad, "failed");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "orch_failed");
 }
-#[test]
-fn preview_echo_and_bad_cwd() {
-    let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
-    let ok = invoke(&b, "gemini_preview", json!({"prompt":"hi"}));
-    check(&ok, "completed");
-    assert_eq!(ok["structuredContent"]["response"], "echo: hi");
-    let bad = invoke(&b, "gemini_preview", json!({"prompt":"hi","cwd":"nope"}));
-    check(&bad, "bridge_error");
-    assert_eq!(
-        bad["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
-    let failed = invoke(&b, "gemini_preview", json!({"prompt":"AGY_EMPTY"}));
-    check(&failed, "failed");
-}
+
 #[test]
 fn bridge_status_and_missing_command() {
     let temp = common::temp();
@@ -188,16 +164,18 @@ fn bridge_status_and_missing_command() {
     let ok = invoke(&b, "bridge_status", json!({}));
     check(&ok, "completed");
     assert_eq!(
-        ok["structuredContent"]["agy"]["version"],
-        json!(["1.4.7-fake"])
+        ok["structuredContent"]["codex"]["version"],
+        json!(["codex-cli fake"])
     );
     assert_eq!(ok["structuredContent"]["codex_app_server_running"], false);
+    assert!(ok["structuredContent"].get("agy").is_none());
     let mut c = config(temp.path());
-    c.agy = Err(axiom::base::Failure::new("missing", "missing"));
+    c.codex = Err(axiom::base::Failure::new("missing", "missing"));
     let missing = invoke(&Bridge::new(c), "bridge_status", json!({}));
     check(&missing, "completed");
+    assert!(missing["structuredContent"].get("agy").is_none());
     assert_eq!(
-        missing["structuredContent"]["agy"]["error"]["kind"],
+        missing["structuredContent"]["codex"]["error"]["kind"],
         "missing"
     );
 }
@@ -300,7 +278,10 @@ fn serve_dispatches_tool_calls() {
     let temp = common::temp();
     let out = Sink(Arc::new(Mutex::new(vec![])));
     let capture = out.0.clone();
-    let requests=concat!("{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"gemini_preview\",\"arguments\":{\"prompt\":\"hi\"}}}\n", "{\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\",\"arguments\":{}}}\n", "{\"method\":\"tools/call\",\"params\":{\"name\":\"bridge_status\"}}\n");
+    let requests = format!("{}\n{}\n{}\n",
+        json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}}),
+        json!({"id":2,"method":"tools/call","params":{"name":"unknown","arguments":{}}}),
+        json!({"method":"tools/call","params":{"name":"bridge_status"}}));
     assert_eq!(serve(config(temp.path()), Cursor::new(requests), out), 0);
     let output = capture.lock().unwrap();
     let lines: Vec<Value> = std::str::from_utf8(&output)
@@ -311,10 +292,6 @@ fn serve_dispatches_tool_calls() {
     assert_eq!(lines.len(), 2);
     let success = lines.iter().find(|v| v["id"] == 1).unwrap();
     check(&success["result"], "completed");
-    assert_eq!(
-        success["result"]["structuredContent"]["response"],
-        "echo: hi"
-    );
     let failure = lines.iter().find(|v| v["id"] == 2).unwrap();
     check(&failure["result"], "bridge_error");
     assert_eq!(
@@ -348,115 +325,9 @@ fn descriptors_expose_codex_unit_inputs() {
         assert!(!stripped.contains(phrase));
     }
 }
-#[test]
-fn preview_stage_and_absolute_save() {
-    let temp = common::temp();
-    let marker = temp.path().join("agy-marker");
-    let wrapper = temp.path().join("agy_wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let mut c = config(temp.path());
-    c.agy = Ok(vec![
-        common::python(),
-        wrapper.to_string_lossy().into_owned(),
-        marker.to_string_lossy().into_owned(),
-        common::repo_root()
-            .join("tests/fakes/fake_agy.py")
-            .to_string_lossy()
-            .into_owned(),
-    ]);
-    let b = Bridge::new(c);
-    let store = temp.path().join("orchestrate/demo");
-    let dest = store.join("astra/review.json");
-    let ok = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","project":"demo","stage":"rewrite","save_to":dest,"json_schema":{"type":"object"}}),
-    );
-    check(&ok, "completed");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(dest).unwrap()).unwrap()["answer"],
-        "hi"
-    );
-    let failed = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"AGY_EMPTY","project":"demo","stage":"rewrite"}),
-    );
-    check(&failed, "failed");
-    let rows = fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap();
-    assert!(rows
-        .lines()
-        .any(|r| r.starts_with("rewrite\t") && r.contains("\t0\t")));
-    assert!(rows
-        .lines()
-        .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
-    fs::remove_file(&marker).unwrap();
-    let bad = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","project":"demo","stage":"rewrite","save_to":temp.path().join("outside")}),
-    );
-    check(&bad, "bridge_error");
-    assert!(!marker.exists());
-    assert_eq!(
-        bad["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
-    assert_eq!(
-        fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap(),
-        rows
-    );
-}
-#[test]
-fn preview_stage_schema_and_independent_inputs() {
-    let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
-    let descriptors = tools();
-    let preview = descriptors
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|v| v["name"] == "gemini_preview")
-        .unwrap();
-    assert_eq!(
-        preview["inputSchema"]["properties"]["stage"]["enum"],
-        json!(["rewrite"])
-    );
-    for args in [
-        json!({"prompt":"hi","project":"demo"}),
-        json!({"prompt":"hi","stage":"rewrite"}),
-    ] {
-        check(&invoke(&b, "gemini_preview", args), "completed");
-    }
-    assert!(!temp
-        .path()
-        .join("orchestrate/demo/reports/_stages.evidence.tsv")
-        .exists());
-    let bad = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","stage":"invalid"}),
-    );
-    assert_eq!(
-        bad["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
-}
-#[test]
-fn preview_save_requires_structured_output() {
-    let temp = common::temp();
-    let b = Bridge::new(config(temp.path()));
-    let r = invoke(
-        &b,
-        "gemini_preview",
-        json!({"prompt":"hi","project":"demo","stage":"rewrite","save_to":temp.path().join("orchestrate/demo/out.json")}),
-    );
-    check(&r, "failed");
-    assert_eq!(
-        r["structuredContent"]["error"]["kind"],
-        "invalid_structured_output"
-    );
-}
+
+
+
 #[test]
 fn ping_precedes_slow_call_reply() {
     let temp = common::temp();
@@ -518,26 +389,6 @@ fn serve_stops_codex_process() {
     };
     assert!(!alive, "codex process {id} still running");
 }
-#[test]
-fn preview_run_error_records_failure() {
-    let temp = common::temp();
-    let mut c = config(temp.path());
-    c.agy = Err(axiom::base::Failure::new("missing", "missing"));
-    let r = invoke(
-        &Bridge::new(c),
-        "gemini_preview",
-        json!({"prompt":"hi","project":"demo","stage":"rewrite"}),
-    );
-    assert_eq!(r["structuredContent"]["error"]["kind"], "missing");
-    let rows = fs::read_to_string(
-        temp.path()
-            .join("orchestrate/demo/reports/_stages.evidence.tsv"),
-    )
-    .unwrap();
-    assert!(rows
-        .lines()
-        .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
-}
 
 #[test]
 fn goal_classify_amend_and_answer() {
@@ -568,115 +419,4 @@ fn panic_in_tool_body_is_bridge_error() {
     let bad = axiom::bridge::call_body(|| panic!("test tool panic"));
     check(&bad, "bridge_error");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "panic");
-}
-#[test]
-fn classify_stop_cancels_hanging_agy() {
-    use std::time::{Duration, Instant};
-    let temp = common::temp();
-    let pid = temp.path().join("pid");
-    let wrapper = temp.path().join("agy_wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let mut c = config(temp.path());
-    c.agy = Ok(vec![
-        common::python(),
-        wrapper.to_string_lossy().into_owned(),
-        pid.to_string_lossy().into_owned(),
-        common::repo_root()
-            .join("tests/fakes/fake_agy.py")
-            .to_string_lossy()
-            .into_owned(),
-    ]);
-    let b = Arc::new(Bridge::new(c));
-    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
-    let worker = b.clone();
-    let handle = std::thread::spawn(move || {
-        invoke(
-            &worker,
-            "gemini_preview",
-            json!({"prompt":"AGY_HANG","timeout_s":60}),
-        )
-    });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !pid.exists() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
-    let stopped = invoke(&b, "goal", json!({"session":"s","classify":"stop"}));
-    check(&stopped, "completed");
-    let result = handle.join().unwrap();
-    assert_ne!(
-        result["structuredContent"]["status"], "completed",
-        "{result}"
-    );
-    assert!(Instant::now() < deadline);
-}
-#[test]
-fn agy_stop_is_scoped_to_its_bridge() {
-    use std::time::{Duration, Instant};
-    let temp = common::temp();
-    let wrapper = temp.path().join("wrapper.py");
-    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_AGY_PID']=sys.argv[1]\nrunpy.run_path(sys.argv[2],run_name='__main__')\n").unwrap();
-    let make_bridge = |name: &str| {
-        let mut c = config(temp.path());
-        c.agy = Ok(vec![
-            common::python(),
-            wrapper.to_string_lossy().into_owned(),
-            temp.path().join(name).to_string_lossy().into_owned(),
-            common::repo_root()
-                .join("tests/fakes/fake_agy.py")
-                .to_string_lossy()
-                .into_owned(),
-        ]);
-        Arc::new(Bridge::new(c))
-    };
-    let a = make_bridge("a.pid");
-    let b = make_bridge("b.pid");
-    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
-    let release = temp.path().join("release");
-    let start = |bridge: Arc<Bridge>| {
-        let prompt = format!("AGY_WAIT:{}", release.display());
-        std::thread::spawn(move || {
-            invoke(
-                &bridge,
-                "gemini_preview",
-                json!({
-                    "prompt":prompt,"json_schema":{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}
-                }),
-            )
-        })
-    };
-    let one = start(a.clone());
-    let two = start(b);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut pids = Vec::new();
-    for name in ["a.pid", "b.pid"] {
-        loop {
-            if let Some(pid) = fs::read_to_string(temp.path().join(name))
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                pids.push(pid);
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    let pid = pids[0];
-    axiom::goal::interject(temp.path(), "s", "stop").unwrap();
-    check(
-        &invoke(&a, "goal", json!({"session":"s","classify":"stop"})),
-        "completed",
-    );
-    let cancelled = one.join().unwrap();
-    assert_eq!(
-        cancelled["structuredContent"]["error"]["kind"],
-        "agy_no_result"
-    );
-    assert!(!axiom::base::proc::pid_alive(pid));
-    fs::write(release, "release").unwrap();
-    let completed = two.join().unwrap();
-    check(&completed, "completed");
-    assert!(completed["structuredContent"]["structured_output"]["answer"].is_string());
 }

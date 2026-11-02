@@ -34,7 +34,9 @@ fn required_phrases_are_present() {
         ("agents/dispatcher.md", "Give the files and contract to `chronos:reviewer`"),
         ("skills/wish/SKILL.md", "Declare the task mode (`review`, `answer` or `change`) with the bridge `goal` tool."),
         ("skills/wish/SKILL.md", "Give the `chronos:critic` agent the review schema, the plan path"),
-        ("skills/wish/SKILL.md", "`stage: \"rewrite\"`"),
+        ("skills/wish/SKILL.md", "An old `[astra]` marker at the start of the wish is removed as plain text and changes nothing."),
+        ("skills/wish/SKILL.md", "Every wish runs step 2a after step 2; there is no marker or option that skips it."),
+        ("skills/wish/SKILL.md", "Write the report yourself, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for the user."),
         ("skills/wish/SKILL.md", "output path `<store>/astra/plan.json`"),
         ("skills/wish/SKILL.md", "`## Coverage`"),
         ("skills/wish/SKILL.md", "`review-failed`, or `unreviewed`"),
@@ -60,6 +62,8 @@ fn required_phrases_are_present() {
 #[test]
 fn deleted_rules_have_enforcing_tests() {
     let cases = [
+        ("skills/wish/SKILL.md", "If it then starts with `[astra]`, drop that marker and do step 2a after step 2.", "wish_flow.rs::every_wish_runs_astra"),
+        ("skills/wish/SKILL.md", "If `gemini_preview` fails, write that rewrite yourself from the same material.", "wish_flow.rs::report_is_written_in_plain_language"),
         ("skills/wish/SKILL.md", "If any unit is not `verified` or the full test fails", "orch/lifecycle_cases.rs::ready_lists_waiting_units_with_next_step"),
         ("agents/dispatcher.md", "general-purpose", "hook.rs::nested_agents_only_reviewer"),
         ("agents/dispatcher.md", "time.sleep", "bridge/codex_cases.rs::unbound_writing_run_is_refused_before_codex_starts"),

@@ -114,6 +114,34 @@ pub fn append_evidence(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
     }
     with_lock(store, false, || {
         let mut all = rows(store, unit)?;
+        if unit == "_stages" {
+            let dir = store.join("reports");
+            let path = dir.join("_stages.evidence.tsv");
+            let mut text = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    format!("{HEADER}\n").into_bytes()
+                }
+                Err(e) => return Err(io(e)),
+            };
+            if !text.ends_with(b"\n") {
+                text.push(b'\n');
+            }
+            let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+            text.extend_from_slice(
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\n",
+                    clean(&row.kind),
+                    clean(&row.command),
+                    row.exit_code,
+                    clean(&row.commit),
+                    clean(&row.ts)
+                )
+                .as_bytes(),
+            );
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            return base::atomic_write(&path, &text).map_err(io);
+        }
         all.push(row.clone());
         let mut text = format!("{HEADER}\n");
         for r in all {
@@ -320,7 +348,7 @@ pub fn record_review(
     Ok(result)
 }
 pub fn record_stage(store: &Path, kind: &str, model: &str, ok: bool) -> Res<()> {
-    if !["astra", "second_review", "rewrite"].contains(&kind) {
+    if !["astra", "second_review"].contains(&kind) {
         return Err(invalid("invalid stage"));
     }
     append_evidence(
@@ -394,12 +422,6 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
             "not_done",
             "missing successful, current full test",
         ));
-    }
-    if !rows(store, "_stages")?
-        .iter()
-        .any(|r| r.kind == "rewrite" && r.ts > latest)
-    {
-        return Err(Failure::new("not_done", "missing current rewrite stage"));
     }
     Ok(())
 }

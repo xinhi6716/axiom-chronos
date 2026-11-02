@@ -17,8 +17,8 @@ fn wish_and_research() {
     let record = temp.path().join("record.json");
     for (args, expected, turns) in [
         (
-            vec!["wish", "--astra", "--no-architect", "add", "--pending"],
-            "/chronos:wish [no-architect] [astra] add --pending",
+            vec!["wish", "--no-architect", "add", "--pending"],
+            "/chronos:wish [no-architect] add --pending",
             None,
         ),
         (
@@ -55,6 +55,37 @@ fn wish_and_research() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("claude is not on PATH"));
+}
+#[test]
+fn wish_astra_option_removed() {
+    let t = common::temp();
+    let record = t.path().join("record.json");
+    let fake = serde_json::to_string(&common::fake("fake_claude")).unwrap();
+    let o = command(t.path())
+        .args(["wish", "--astra", "x"])
+        .env("AXIOM_CLAUDE_CMD", &fake)
+        .env("FAKE_CLAUDE_RECORD", &record)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unrecognized option: --astra"));
+    assert!(!record.exists());
+    for (args, expected) in [
+        (["wish", "x", "--astra"], "/chronos:wish x --astra"),
+        (["wish", "add", "x"], "/chronos:wish add x"),
+    ] {
+        let o = command(t.path())
+            .args(args)
+            .env("AXIOM_CLAUDE_CMD", &fake)
+            .env("FAKE_CLAUDE_RECORD", &record)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
+    }
 }
 #[test]
 fn wish_rejects_model_without_starting_session() {
@@ -141,7 +172,6 @@ fn bridge_hook_and_unicode_path() {
         .env("AXIOM_DATA_HOME", t.path())
         .env("AXIOM_CLAUDE_CMD", &fake)
         .env("AXIOM_CODEX_CMD", &fake)
-        .env("AXIOM_AGY_CMD", &fake)
         .env("AXIOM_WSL_CMD", &fake)
         .env(
             "AXIOM_PWSH_CMD",
@@ -309,7 +339,7 @@ fn creative_and_resume_usage() {
             "/chronos:wish [creative] invent x",
         ),
         (
-            vec!["wish", "--creative", "--no-architect", "--astra", "x"],
+            vec!["wish", "--creative", "--no-architect", "x"],
             "/chronos:wish [creative] x",
         ),
     ] {

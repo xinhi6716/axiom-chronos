@@ -1,5 +1,7 @@
 # 第五輪參考資料採納
 
+Gemini 已於第五輪收尾移除。
+
 ## DeepSeek
 來源：E:/codex/OPEN_DESIGN/axiom/experiments/refs-20261102/deepseek-ai-dsh-superagent-prototype HEAD 6337fc823ce20251c8de8085948165c81aaa701e
 閱讀：本輪實讀 src/core/assignments.ts；docs/003-execution.md、docs/007-architecture.md、src/core/engine.ts、src/app/runtime.ts 的相關區段；tests/runtime-concurrency.spec.ts 僅案例搜尋。

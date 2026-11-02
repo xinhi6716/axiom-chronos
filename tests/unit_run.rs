@@ -54,13 +54,12 @@ impl Fixture {
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
         }
         fs::write(store.join("units.tsv"), rows).unwrap();
-        let bridge = Bridge::new(Config {
-            data_home: Some(temp.path().into()),
-            codex: Ok(common::fake("fake_codex")),
-            agy: Ok(common::fake("fake_agy")),
-            wsl: None,
-            on_windows: false,
-        });
+        let mut config = Config::from_env();
+        config.data_home = Some(temp.path().into());
+        config.codex = Ok(common::fake("fake_codex"));
+        config.wsl = None;
+        config.on_windows = false;
+        let bridge = Bridge::new(config);
         Self {
             temp,
             repo,
@@ -84,6 +83,11 @@ impl Fixture {
             .count()
     }
     fn goal(&self) {
+        orch::record_stage(&self.store, "astra", "gpt-6-astra", true).unwrap();
+        fs::create_dir_all(self.store.join("astra")).unwrap();
+        for file in ["plan.json", "review.json", "ruling.md", "plan-final.md"] {
+            fs::write(self.store.join("astra").join(file), "ok").unwrap();
+        }
         let mut g = goal::open(
             self.temp.path(),
             "session",

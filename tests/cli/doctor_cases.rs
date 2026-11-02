@@ -10,7 +10,6 @@ fn doctor(home: &std::path::Path) -> Command {
         .env("AXIOM_DATA_HOME", home)
         .env("AXIOM_CLAUDE_CMD", &fake)
         .env("AXIOM_CODEX_CMD", &fake)
-        .env("AXIOM_AGY_CMD", &fake)
         .env("AXIOM_WSL_CMD", &fake)
         .env(
             "AXIOM_PWSH_CMD",
@@ -55,7 +54,9 @@ fn optional_and_required_failures() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("warn agy"));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("agy"));
+    assert!(!text.contains("Antigravity"));
     let output = doctor(temp.path())
         .env("AXIOM_CLAUDE_CMD", &missing)
         .output()

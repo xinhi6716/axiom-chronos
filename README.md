@@ -39,8 +39,6 @@ axiom wish add a --stats flag to cli.py that prints done/total
 
 `axiom doctor` checks tools, SQLite support and the state directory; it does not run a wish. SQLite needs FTS5 and JSON.
 
-Antigravity (`agy`) is optional. If its Gemini preview fails, the core can show the dispatcher report.
-
 On Windows, doctor flags Microsoft Store PowerShell because Codex cannot use it to run worker commands. Use the MSI build as described in the [bridge notes](docs/bridge.md).
 
 </details>
@@ -53,7 +51,9 @@ On Windows, doctor flags Microsoft Store PowerShell because Codex cannot use it 
 
 Describe one concrete change. The dispatcher writes a `GOAL · SCOPE · VERIFY` brief, sends it to a Codex worker, then checks the command record or runs VERIFY. Its instructions require it to ask first about unresolved interface or data choices.
 
-Claude (`chronos:reviewer`) reviews the work; Gemini only rewrites reports in plain language.
+Every wish starts with Astra: Astra plans the change, `chronos:critic` reviews the plan, and the core rules on it before any unit is built.
+
+Claude (`chronos:reviewer`, `chronos:critic`) reviews the Codex work; the core writes the final report in plain language.
 
 Put CLI options **before** the wish. Everything after them is wish text, including flag names.
 
@@ -78,7 +78,6 @@ axiom wish --project ../other rename calc to compute_total everywhere
 - **Claude Code core:** reads project history, delegates the wish and checks the final explanation against reported facts.
 - **Sonnet dispatcher:** scopes units, supplies relevant memory and verifies their command records.
 - **Codex `terra` workers:** work in ephemeral threads. A `sol` integration unit is used only when the full suite fails after more than one unit changed files.
-- **Optional Gemini via `agy`:** rewrites reports in plain language.
 - **Haiku memory keeper:** saves reusable work from verified units.
 
 Claude sessions load the engine with local settings. Codex workers use lean mode by default, requesting that unrelated plugins, MCP servers, apps and skills context be disabled for that thread. [Bridge contracts](docs/bridge.md#contracts).
@@ -126,7 +125,7 @@ Memory retains the wish and hashes of referenced files so later lookups can flag
 
 **Planned:** `ask`, `review`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped beta features.
 
-Tests use scripted stand-ins for Claude, Codex and `agy`; they check protocols and local behavior. The initial project report covers small-project Codex runs only. Neither establishes live-model performance or full end-to-end reliability.
+Tests use scripted stand-ins for Claude and Codex; they check protocols and local behavior. The initial project report covers small-project Codex runs only. Neither establishes live-model performance or full end-to-end reliability.
 
 [Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Tests](tests/)
 
