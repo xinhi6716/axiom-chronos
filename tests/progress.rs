@@ -127,17 +127,6 @@ fn codex_and_agy_events_and_invalid_tokens() {
         temp.path(),
     );
     assert_eq!(msgs.len(), 1);
-    std::fs::write(temp.path().join("review.txt"), "example").unwrap();
-    let msgs = run(
-        vec![request(
-            6,
-            "review_code",
-            json!({"project_dir":cwd,"paths":["review.txt"],"contract":"test"}),
-            Some(json!("review")),
-        )],
-        temp.path(),
-    );
-    check(&msgs, 6, json!("review"), &["event", "event"]);
     for token in [None, Some(json!(true)), Some(json!(1.5)), Some(json!({}))] {
         let msgs = run(
             vec![request(3, "codex_run", codex.clone(), token)],

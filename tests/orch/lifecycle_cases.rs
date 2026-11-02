@@ -393,14 +393,14 @@ fn extra_commands_preserve_output_and_failures() {
     let verdict = store.join("verdict.json");
     fs::write(
         &verdict,
-        r#"{"verdict":"pass","findings":[{"severity":"major"}]}"#,
+        r#"{"unit":"a","verdict":"pass","findings":[{"severity":"major"}]}"#,
     )
     .unwrap();
     let review = call(vec![
         "review".into(),
         "a".into(),
         "--reviewer".into(),
-        "claude-review".into(),
+        "chronos:reviewer".into(),
         "--verdict-file".into(),
         verdict.to_string_lossy().into_owned(),
         "--repo".into(),
@@ -415,7 +415,7 @@ fn extra_commands_preserve_output_and_failures() {
     assert_eq!(row.commit, verify_commit);
     let output = call(vec!["evidence".into(), "a".into()]);
     assert_eq!(output.exit_code, 0);
-    assert!(output.stdout.contains("review\tclaude-review\t1\t"));
+    assert!(output.stdout.contains("review\tchronos:reviewer\t1\t"));
     assert_eq!(output.stderr, "");
     let error = call(vec!["accept".into(), "m".into()]);
     assert_eq!(error.exit_code, 1);
@@ -478,7 +478,7 @@ fn map_and_review_errors() {
                 "review",
                 "a",
                 "--reviewer",
-                "claude",
+                "chronos:reviewer",
                 "--verdict-file",
                 path,
                 "--repo",
@@ -489,14 +489,18 @@ fn map_and_review_errors() {
         assert_eq!(out.exit_code, 1);
         assert!(out.stderr.contains(msg));
     }
-    fs::write(&verdict, r#"{"verdict":"pass","findings":[]}"#).unwrap();
+    fs::write(
+        &verdict,
+        r#"{"unit":"missing","verdict":"pass","findings":[]}"#,
+    )
+    .unwrap();
     assert_eq!(
         call(
             &[
                 "review",
                 "missing",
                 "--reviewer",
-                "claude",
+                "chronos:reviewer",
                 "--verdict-file",
                 path,
                 "--repo",
@@ -602,4 +606,175 @@ fn ready_lists_waiting_units_with_next_step() {
     assert_eq!(run(&store, &["ready".into()], false, false).stdout, "a\n");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
     let _ = repo;
+}
+
+#[test]
+fn review_is_bound_to_unit_and_reviewer() {
+    let (store, repo) = setup();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    let verdict = store.join("verdict.json");
+    let call = |units: &[&str], reviewer: &str, json: bool| {
+        let mut args = vec!["review".to_string()];
+        args.extend(units.iter().map(|s| s.to_string()));
+        args.extend([
+            "--repo".into(),
+            repo.to_string_lossy().into_owned(),
+            "--reviewer".into(),
+            reviewer.into(),
+            "--verdict-file".into(),
+            verdict.to_string_lossy().into_owned(),
+        ]);
+        run(&store, &args, json, false)
+    };
+    let before = evidence(&store, "a").unwrap().len();
+    fs::write(
+        &verdict,
+        r#"{"unit":"proc","verdict":"pass","findings":[]}"#,
+    )
+    .unwrap();
+    let out = call(&["a"], "chronos:reviewer", false);
+    assert!(out.stderr.contains("review is for unit proc, not a"));
+    assert_eq!(evidence(&store, "a").unwrap().len(), before);
+    for reviewer in ["gemini-4-argon-high", "claude-review"] {
+        assert!(call(&["a"], reviewer, false)
+            .stderr
+            .contains("reviewer must be chronos:reviewer"));
+    }
+    assert!(call(&["a", "b"], "chronos:reviewer", false)
+        .stderr
+        .contains("review takes one unit per verdict file"));
+    fs::write(&verdict, r#"{"verdict":"pass","findings":[]}"#).unwrap();
+    assert!(call(&["a"], "chronos:reviewer", false)
+        .stderr
+        .contains("missing unit"));
+    assert_eq!(evidence(&store, "a").unwrap().len(), before);
+    fs::write(&verdict, r#"{"unit":"a","verdict":"pass","findings":[]}"#).unwrap();
+    let out = call(&["a"], "chronos:reviewer", false);
+    assert_eq!(out.stdout, "a\tverified\n(none ready)\n");
+    let out = call(&["a"], "chronos:reviewer", true);
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["states"], json!([["a", "verified"]]));
+    assert_eq!(value["ready"], json!([]));
+    assert_eq!(value["waiting"], json!([]));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn tracks_dependencies_and_auto_accept() {
+    let (store, repo) = setup();
+    assert!(
+        matches!(accept_if_ready(&store, "a", &repo).unwrap(), AutoAccept::Skipped { reason, .. } if reason == "not_module")
+    );
+    add_unit(&store, "fix", "m", "fix.txt");
+    add_unit(&store, "dependent", "n", "dependent.txt");
+    add_unit(&store, "unknown", "other", "unknown.txt");
+    fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt fix.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## z\nPURPOSE x\nPATHS z.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS dependent.txt\nDEPENDS m z\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
+    let err = begin_unit(&store, "unknown", "worker", &repo, false)
+        .err()
+        .unwrap();
+    assert_eq!(err.kind, "unknown_track");
+    assert!(waiting_units(&store)
+        .unwrap()
+        .iter()
+        .any(|w| w.unit == "unknown" && w.next == "unknown_track"));
+    let err = begin_unit(&store, "dependent", "worker", &repo, false)
+        .err()
+        .unwrap();
+    assert_eq!(err.kind, "not_ready");
+    assert!(err.message.contains("z (no units)"));
+    assert!(err.message.contains("a"));
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    assert!(
+        matches!(accept_if_ready(&store, "a", &repo).unwrap(), AutoAccept::Skipped { reason, detail } if reason == "units_pending" && detail == "fix=pending")
+    );
+    assert!(matches!(
+        begin_unit(&store, "fix", "worker", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    assert!(
+        matches!(accept_if_ready(&store, "a", &repo).unwrap(), AutoAccept::Skipped { reason, detail } if reason == "claimed" && detail == "fix")
+    );
+    finish_unit(
+        &store,
+        "fix",
+        &attempt(&store, "fix"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = ["a", "fix"]
+        .into_iter()
+        .map(|id| {
+            let store = store.clone();
+            let repo = repo.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                accept_if_ready(&store, id, &repo).unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, AutoAccept::Ran { exit_code: 0, .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(
+                |r| matches!(r, AutoAccept::Skipped { reason, .. } if reason == "already_accepted")
+            )
+            .count(),
+        1
+    );
+    assert!(
+        matches!(accept_if_ready(&store, "a", &repo).unwrap(), AutoAccept::Skipped { reason, .. } if reason == "already_accepted")
+    );
+    for id in ["a", "fix"] {
+        assert!(evidence(&store, id)
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == "accept"));
+    }
+    record_full(&store, &repo, Some("exit 1")).unwrap();
+    assert!(matches!(
+        begin_unit(&store, "unknown", "sol", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    abort_unit(&store, "unknown", &attempt(&store, "unknown"));
+    fs::remove_file(store.join("modules.md")).unwrap();
+    assert!(matches!(
+        begin_unit(&store, "unknown", "worker", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    abort_unit(&store, "unknown", &attempt(&store, "unknown"));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }

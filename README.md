@@ -53,6 +53,8 @@ On Windows, doctor flags Microsoft Store PowerShell because Codex cannot use it 
 
 Describe one concrete change. The dispatcher writes a `GOAL · SCOPE · VERIFY` brief, sends it to a Codex worker, then checks the command record or runs VERIFY. Its instructions require it to ask first about unresolved interface or data choices.
 
+Claude (`chronos:reviewer`) reviews the work; Gemini only rewrites reports in plain language.
+
 Put CLI options **before** the wish. Everything after them is wish text, including flag names.
 
 For interjection, press Esc in interactive mode. In `axiom wish`, type a line and press Enter to send it into the running session: amend instructions, answer a question, or stop. Use `axiom research` for research.

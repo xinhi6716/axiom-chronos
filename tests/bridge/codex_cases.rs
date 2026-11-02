@@ -609,7 +609,7 @@ fn creative_goal_requires_architect() {
         invoke(&b, args.clone())["error"]["kind"],
         "architect_required"
     );
-    fs::write(store.join("modules.md"), "architecture").unwrap();
+    fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo accepted`\n").unwrap();
     assert_eq!(invoke(&b, args.clone())["error"]["kind"], "astra_gate");
     orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
     fs::create_dir_all(store.join("astra")).unwrap();

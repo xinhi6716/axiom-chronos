@@ -50,7 +50,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             let project = opt(a, "project");
             let stage = opt(a, "stage");
             if let Some(t) = stage {
-                if !["second_review", "rewrite"].contains(&t) {
+                if t != "rewrite" {
                     return Err(Failure::new("invalid_argument", "invalid stage"));
                 }
             }
@@ -130,34 +130,6 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             Ok(
                 json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err}),
             )
-        }
-        "review_code" => {
-            let model = opt(a, "model")
-                .filter(|x| !x.is_empty())
-                .unwrap_or("gemini-4-argon-high");
-            let mut r = agy::review(
-                s(a, "project_dir"),
-                &arr(a, "paths")?,
-                s(a, "contract"),
-                model,
-                timeout(a, 900),
-                &b.config.agy.clone()?,
-                &b.children,
-            )?;
-            if r["status"] == "completed" && a.get("units").is_some() && opt(a, "project").is_some()
-            {
-                let states = orch::record_review(
-                    &store(b, s(a, "project"))?,
-                    &arr(a, "units")?,
-                    model,
-                    r["verdict"] == "pass",
-                    std::path::Path::new(s(a, "project_dir")),
-                )?;
-                r["states"] = json!(states
-                    .into_iter()
-                    .collect::<std::collections::BTreeMap<_, _>>());
-            }
-            Ok(r)
         }
         "run_on_linux" => linux::run(
             b.config.wsl.clone(),

@@ -1,6 +1,6 @@
 ---
 name: research
-description: Turn a research question into a ruled research plan. Astra drafts it at maximum effort, Gemini reviews it for overreach, and you make the final ruling. Started by `axiom research`.
+description: Turn a research question into a ruled research plan. Astra drafts it at maximum effort, `chronos:critic` reviews it for overreach, and you make the final ruling. Started by `axiom research`.
 disable-model-invocation: true
 argument-hint: <question>
 ---

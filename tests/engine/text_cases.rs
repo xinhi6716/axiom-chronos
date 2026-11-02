@@ -69,7 +69,7 @@ fn deleted_rules_have_enforcing_tests() {
         ("agents/astra.md", "Write its `structured_output` to the given path.", "bridge/codex_cases.rs::astra_save_records_only_astra"),
         ("agents/astra.md", "or the model is not an Astra model", "bridge/codex_cases.rs::sol_and_astra_restrictions"),
         ("agents/reviewer.md", "You change nothing.", "engine/text_cases.rs::reviewer_tools_are_read_only"),
-        ("agents/reviewer.md", "and the verdict is `fail` when any finding is a blocker or major", "agy/review_cases.rs::review_verdict_and_failures"),
+        ("agents/reviewer.md", "and the verdict is `fail` when any finding is a blocker or major", "orch/lifecycle_cases.rs::extra_commands_preserve_output_and_failures"),
         ("agents/memory-keeper.md", "Only units in state `verified` count; that state means the dispatcher confirmed VERIFY passed and its review passed.", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "never read another unit's brief in its place", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "at most 12 lines", "memory.rs::record_search_stale_digest_and_validation"),

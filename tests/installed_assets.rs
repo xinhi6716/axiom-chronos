@@ -44,11 +44,29 @@ fn relative_path(base: &str, reference: &str) -> Option<String> {
 #[derive(Default)]
 struct Scan {
     missing: BTreeSet<String>,
+    malformed: BTreeSet<String>,
     referenced: BTreeSet<String>,
     plugin_references: usize,
     links: usize,
     md_files: usize,
     json_files: usize,
+}
+
+fn string_values<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(value) => strings.push(value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                string_values(value, strings);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                string_values(value, strings);
+            }
+        }
+        _ => {}
+    }
 }
 
 // Resolve lexically against the exact-case names of installed files.
@@ -70,12 +88,42 @@ fn scan(root: &Path) -> Scan {
         .collect();
     let mut scan = Scan::default();
     for path in paths {
-        match path.extension().and_then(|s| s.to_str()) {
-            Some("md") => scan.md_files += 1,
-            Some("json") => scan.json_files += 1,
+        let is_json = match path.extension().and_then(|s| s.to_str()) {
+            Some("md") => {
+                scan.md_files += 1;
+                false
+            }
+            Some("json") => {
+                scan.json_files += 1;
+                true
+            }
             _ => continue,
-        }
+        };
         let text = fs::read_to_string(&path).unwrap();
+        let json = if is_json {
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    scan.malformed.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .components()
+                            .map(|part| part.as_os_str().to_str().unwrap())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let mut strings = Vec::new();
+        if let Some(value) = &json {
+            string_values(value, &mut strings);
+        } else {
+            strings.push(text.as_str());
+        }
         let parent = path
             .parent()
             .unwrap()
@@ -86,21 +134,25 @@ fn scan(root: &Path) -> Scan {
             .collect::<Vec<_>>()
             .join("/");
         let mut references = Vec::new();
-        for capture in plugin.captures_iter(&text) {
-            scan.plugin_references += 1;
-            references.push(("", capture[1].to_owned()));
-        }
-        for capture in links.captures_iter(&text) {
-            let link = capture[1]
-                .trim()
-                .trim_start_matches('<')
-                .trim_end_matches('>');
-            if link.starts_with("http://") || link.starts_with("https://") || link.starts_with('#')
-            {
-                continue;
+        for text in strings {
+            for capture in plugin.captures_iter(text) {
+                scan.plugin_references += 1;
+                references.push(("", capture[1].to_owned()));
             }
-            scan.links += 1;
-            references.push((parent.as_str(), link.split('#').next().unwrap().to_owned()));
+            for capture in links.captures_iter(text) {
+                let link = capture[1]
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>');
+                if link.starts_with("http://")
+                    || link.starts_with("https://")
+                    || link.starts_with('#')
+                {
+                    continue;
+                }
+                scan.links += 1;
+                references.push((parent.as_str(), link.split('#').next().unwrap().to_owned()));
+            }
         }
         for (base, reference) in references {
             match relative_path(base, &reference) {
@@ -159,6 +211,7 @@ fn binary_installs_all_referenced_files() {
     let installed = home.join("engine").join(env!("CARGO_PKG_VERSION"));
     let result = scan(&installed);
     assert_eq!(result.missing, BTreeSet::new());
+    assert_eq!(result.malformed, BTreeSet::new());
     assert!(result.plugin_references > 0);
     assert!(result.md_files > 0);
     assert!(result.json_files > 0);
@@ -171,7 +224,34 @@ fn binary_installs_all_referenced_files() {
     let copy = temp.path().join("copy");
     copy_tree(&installed, &copy);
     fs::remove_file(copy.join(removed)).unwrap();
-    assert_eq!(scan(&copy).missing, BTreeSet::from([removed.clone()]));
+    let result = scan(&copy);
+    assert_eq!(result.missing, BTreeSet::from([removed.clone()]));
+    assert_eq!(result.malformed, BTreeSet::new());
+}
+
+#[test]
+fn checker_decodes_json_strings_and_reports_malformed_json() {
+    let temp = common::temp();
+    fs::create_dir(temp.path().join("sub")).unwrap();
+    fs::write(temp.path().join("sub/present.md"), "").unwrap();
+    fs::write(
+        temp.path().join("references.json"),
+        r#"{"nested":[{"present":"${CLAUDE_PLUGIN_ROOT}\/sub\/present.md","absent":"${CLAUDE_PLUGIN_ROOT}\/sub\/absent.md","backslash":"[x](sub\\present.md)"}]}"#,
+    ).unwrap();
+    fs::write(temp.path().join("malformed.json"), r#"{"a":"#).unwrap();
+    let result = scan(temp.path());
+    assert_eq!(
+        result.referenced,
+        BTreeSet::from(["sub/present.md".to_owned()])
+    );
+    assert_eq!(
+        result.missing,
+        BTreeSet::from(["sub/absent.md".to_owned(), "/sub\\present.md".to_owned(),])
+    );
+    assert_eq!(
+        result.malformed,
+        BTreeSet::from(["malformed.json".to_owned()])
+    );
 }
 
 #[test]

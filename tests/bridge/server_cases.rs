@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{self, Cursor, Write},
-    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -51,33 +50,6 @@ fn fixture(home: &std::path::Path) {
     fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tx\tverified\t\t\t\t{}\nu2\tx\tpending\t\t\t\t{}\nu3\tx\tbuilt\t\t\t\t{}\n", brief.display(), brief.display(), brief.display())).unwrap();
     fs::write(home.join("file.txt"), "content").unwrap();
 }
-fn verified_fixture(home: &std::path::Path) {
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "--", "file.txt"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-qm",
-            "fixture",
-        ],
-    ] {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(home)
-            .status()
-            .unwrap()
-            .success());
-    }
-    let commit = axiom::orch::snapshot(home, &["file.txt".into()]);
-    assert!(!commit.is_empty());
-    let reports = home.join("orchestrate/demo/reports");
-    fs::create_dir_all(&reports).unwrap();
-    fs::write(reports.join("u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{commit}\t2\n")).unwrap();
-}
 #[test]
 fn full_protocol_session() {
     let temp = common::temp();
@@ -114,7 +86,6 @@ fn full_protocol_session() {
             "codex_run",
             "gemini_preview",
             "orch",
-            "review_code",
             "run_on_linux",
             "memory_record",
             "memory_search",
@@ -131,11 +102,21 @@ fn full_protocol_session() {
 #[test]
 fn descriptor_names_policy() {
     let t = tools();
-    assert!(t[0]["description"]
-        .as_str()
-        .unwrap()
-        .contains("${CLAUDE_PLUGIN_ROOT}/DISPATCH.md"));
-    assert!(!t[1]["description"]
+    let descriptors = t.as_array().unwrap();
+    let codex = descriptors
+        .iter()
+        .find(|v| v["name"] == "codex_run")
+        .unwrap();
+    let preview = descriptors
+        .iter()
+        .find(|v| v["name"] == "gemini_preview")
+        .unwrap();
+    let description = codex["description"].as_str().unwrap();
+    let phrase = "${CLAUDE_PLUGIN_ROOT}/DISPATCH.md";
+    assert!(description.contains(phrase));
+    let stripped = description.replace(phrase, "");
+    assert!(!stripped.contains(phrase));
+    assert!(!preview["description"]
         .as_str()
         .unwrap()
         .contains("DISPATCH.md"));
@@ -199,28 +180,6 @@ fn preview_echo_and_bad_cwd() {
     );
     let failed = invoke(&b, "gemini_preview", json!({"prompt":"AGY_EMPTY"}));
     check(&failed, "failed");
-}
-#[test]
-fn review_records_state() {
-    let temp = common::temp();
-    fixture(temp.path());
-    let b = Bridge::new(config(temp.path()));
-    verified_fixture(temp.path());
-    let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract"});
-    let ok = invoke(&b, "review_code", args.clone());
-    check(&ok, "completed");
-    assert_eq!(ok["structuredContent"]["verdict"], "pass");
-    assert_eq!(ok["structuredContent"]["states"]["u3"], "verified");
-    let bad = invoke(
-        &b,
-        "review_code",
-        json!({"project_dir":temp.path(),"paths":["missing"],"contract":"contract"}),
-    );
-    check(&bad, "bridge_error");
-    assert_eq!(
-        bad["structuredContent"]["error"]["kind"],
-        "invalid_argument"
-    );
 }
 #[test]
 fn bridge_status_and_missing_command() {
@@ -366,12 +325,28 @@ fn serve_dispatches_tool_calls() {
 #[test]
 fn descriptors_expose_codex_unit_inputs() {
     let t = tools();
+    let codex = t
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "codex_run")
+        .unwrap();
     for key in ["project", "unit", "save_to", "stage"] {
-        assert_eq!(t[0]["inputSchema"]["properties"][key]["type"], "string");
+        assert_eq!(codex["inputSchema"]["properties"][key]["type"], "string");
     }
-    assert_eq!(t[0]["inputSchema"]["required"], json!(["cwd"]));
-    assert!(t[9]["description"].as_str().unwrap().contains("classify"));
-    assert!(t[9]["description"].as_str().unwrap().contains("mode"));
+    assert_eq!(codex["inputSchema"]["required"], json!(["cwd"]));
+    let goal = t
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "goal")
+        .unwrap();
+    let description = goal["description"].as_str().unwrap();
+    for phrase in ["classify", "mode"] {
+        assert!(description.contains(phrase));
+        let stripped = description.replace(phrase, "");
+        assert!(!stripped.contains(phrase));
+    }
 }
 #[test]
 fn preview_stage_and_absolute_save() {
@@ -395,7 +370,7 @@ fn preview_stage_and_absolute_save() {
     let ok = invoke(
         &b,
         "gemini_preview",
-        json!({"prompt":"hi","project":"demo","stage":"second_review","save_to":dest,"json_schema":{"type":"object"}}),
+        json!({"prompt":"hi","project":"demo","stage":"rewrite","save_to":dest,"json_schema":{"type":"object"}}),
     );
     check(&ok, "completed");
     assert_eq!(
@@ -411,7 +386,7 @@ fn preview_stage_and_absolute_save() {
     let rows = fs::read_to_string(store.join("reports/_stages.evidence.tsv")).unwrap();
     assert!(rows
         .lines()
-        .any(|r| r.starts_with("second_review\t") && r.contains("\t0\t")));
+        .any(|r| r.starts_with("rewrite\t") && r.contains("\t0\t")));
     assert!(rows
         .lines()
         .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
@@ -436,9 +411,16 @@ fn preview_stage_and_absolute_save() {
 fn preview_stage_schema_and_independent_inputs() {
     let temp = common::temp();
     let b = Bridge::new(config(temp.path()));
+    let descriptors = tools();
+    let preview = descriptors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "gemini_preview")
+        .unwrap();
     assert_eq!(
-        tools()[1]["inputSchema"]["properties"]["stage"]["enum"],
-        json!(["second_review", "rewrite"])
+        preview["inputSchema"]["properties"]["stage"]["enum"],
+        json!(["rewrite"])
     );
     for args in [
         json!({"prompt":"hi","project":"demo"}),
@@ -557,33 +539,6 @@ fn preview_run_error_records_failure() {
         .any(|r| r.starts_with("rewrite\t") && r.contains("\t1\t")));
 }
 
-#[test]
-fn review_blocker_and_units_without_project() {
-    let temp = common::temp();
-    fixture(temp.path());
-    let b = Bridge::new(config(temp.path()));
-    let store = temp.path().join("orchestrate/demo");
-    let before = fs::read(store.join("units.tsv")).unwrap();
-    let no_project = invoke(
-        &b,
-        "review_code",
-        json!({"units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
-    );
-    check(&no_project, "completed");
-    assert_eq!(no_project["structuredContent"]["verdict"], "fail");
-    assert!(no_project["structuredContent"].get("states").is_none());
-    assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
-    assert!(!store.join("reports/u3.evidence.tsv").exists());
-    verified_fixture(temp.path());
-    let failed = invoke(
-        &b,
-        "review_code",
-        json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"NEEDS_FIX"}),
-    );
-    check(&failed, "completed");
-    assert_eq!(failed["structuredContent"]["verdict"], "fail");
-    assert_eq!(failed["structuredContent"]["states"]["u3"], "review-failed");
-}
 #[test]
 fn goal_classify_amend_and_answer() {
     let temp = common::temp();

@@ -88,15 +88,27 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
             "review" => {
                 let repo = Path::new(option("--repo")?);
                 let reviewer = option("--reviewer")?;
+                if reviewer != "chronos:reviewer" {
+                    return Err(invalid("reviewer must be chronos:reviewer"));
+                }
                 let path = option("--verdict-file")?;
-                let units: Vec<String> = args
-                    .iter()
-                    .skip(1)
-                    .take_while(|s| !s.starts_with("--"))
-                    .cloned()
-                    .collect();
+                let mut units = Vec::new();
+                let mut i = 1;
+                while i < args.len() {
+                    if ["--repo", "--reviewer", "--verdict-file"].contains(&args[i].as_str()) {
+                        i += 2;
+                    } else {
+                        if !args[i].starts_with("--") {
+                            units.push(args[i].clone());
+                        }
+                        i += 1;
+                    }
+                }
                 if units.is_empty() {
                     return Err(invalid("missing units"));
+                }
+                if units.len() > 1 {
+                    return Err(invalid("review takes one unit per verdict file"));
                 }
                 let data =
                     std::fs::read_to_string(path).map_err(|e| Failure::new("io", e.to_string()))?;
@@ -110,6 +122,16 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     .get("findings")
                     .and_then(|v| v.as_array())
                     .ok_or_else(|| invalid("missing findings"))?;
+                let reviewed_unit = v
+                    .get("unit")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid("missing unit"))?;
+                if reviewed_unit != units[0] {
+                    return Err(invalid(&format!(
+                        "review is for unit {reviewed_unit}, not {}",
+                        units[0]
+                    )));
+                }
                 let pass = verdict.eq_ignore_ascii_case("pass")
                     && !findings.iter().any(|f| {
                         f.get("severity").and_then(|s| s.as_str()).is_some_and(|s| {
@@ -117,12 +139,22 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         })
                     });
                 let rows = record_review(store, &units, reviewer, pass, repo)?;
-                let text = rows
-                    .iter()
-                    .map(|(u, s)| format!("{u}\t{s}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok((0, text, serde_json::json!(rows)))
+                let ids = ready_units(store)?;
+                let waiting = waiting_units(store)?;
+                let mut ready_text = if ids.is_empty() {
+                    "(none ready)".into()
+                } else {
+                    ids.join("\n")
+                };
+                for w in &waiting {
+                    ready_text.push_str(&format!("\n{}\t{}\t{}", w.unit, w.state, w.next));
+                }
+                let text = format!("{}\t{}\n{ready_text}", rows[0].0, rows[0].1);
+                Ok((
+                    0,
+                    text,
+                    serde_json::json!({"states": rows, "ready": ids, "waiting": waiting}),
+                ))
             }
             _ => {
                 let unit = args.get(1).ok_or_else(|| invalid("missing unit"))?;

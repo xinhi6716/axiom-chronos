@@ -1,6 +1,6 @@
 ---
 name: critic
-description: Gives the second ruling on an Astra plan when Gemini is unavailable. Give it the prompt, the review schema and the plan file path.
+description: Gives the second ruling on an Astra or research plan. Give it the prompt, the review schema and the plan file path.
 model: sonnet
 tools: Read
 ---

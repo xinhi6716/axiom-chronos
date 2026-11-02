@@ -278,6 +278,51 @@ pub fn find_active(home: &Path, project: &str) -> Res<Option<(String, Goal)>> {
     }
     Ok(newest.map(|(_, session, goal)| (session, goal)))
 }
+pub fn accept_hold(home: &Path, project: &str) -> Res<Option<String>> {
+    let entries = match std::fs::read_dir(home.join("goals")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(e)),
+    };
+    let mut newest = None;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let file = entry.path();
+        if file.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(session) = file.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if path(home, session).is_err() {
+            continue;
+        }
+        let Some(goal) = load(home, session)? else {
+            continue;
+        };
+        if goal.project.as_deref() != Some(project) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map_err(io_error)?;
+        if newest.as_ref().map_or(true, |(time, _)| modified > *time) {
+            newest = Some((modified, goal));
+        }
+    }
+    Ok(newest.and_then(|(_, goal)| {
+        if goal.interjection.is_some() {
+            Some("amend_pending".into())
+        } else if goal.status == "blocked" && goal.reason.as_deref() == Some("user_stop") {
+            Some("stopped".into())
+        } else if goal.status != "active" {
+            Some(format!("goal_{}", goal.status))
+        } else {
+            None
+        }
+    }))
+}
 fn marker(goal: &Goal, wanted: &str) -> bool {
     let mut rest = goal.wish.trim_start();
     while rest.starts_with('[') {

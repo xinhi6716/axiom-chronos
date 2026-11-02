@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -63,6 +63,15 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     }
     Ok(result)
 }
+fn known_track(store: &Path, u: &Unit) -> Res<bool> {
+    if !store.join("modules.md").exists() {
+        return Ok(true);
+    }
+    let text = std::fs::read_to_string(store.join("modules.md"))
+        .map_err(|e| Failure::new("io", e.to_string()))?;
+    let map = parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
+    Ok(map.modules.iter().any(|m| m.id == u.track))
+}
 fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
     if !store.join("modules.md").exists() {
         return Ok(vec![]);
@@ -77,13 +86,19 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
         .map(|m| m.depends.as_slice())
         .unwrap_or(&[]);
     let mut missing = Vec::new();
-    for other in units.iter().filter(|x| deps.contains(&x.track)) {
-        if derive_state(
-            &evidence(store, &other.id)?,
-            needs_accept(store, &other.id)?,
-        ) != "verified"
-        {
-            missing.push(other.id.clone());
+    for dep in deps {
+        let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
+        if registered.is_empty() {
+            missing.push(format!("{dep} (no units)"));
+        }
+        for other in registered {
+            if derive_state(
+                &evidence(store, &other.id)?,
+                needs_accept(store, &other.id)?,
+            ) != "verified"
+            {
+                missing.push(other.id.clone());
+            }
         }
     }
     Ok(missing)
@@ -120,6 +135,15 @@ pub fn begin_unit(
                     format!("claim outcome unknown: {}", c.attempt),
                 )
             });
+        }
+        if role != "sol" && !known_track(store, u)? {
+            return Err(Failure::new(
+                "unknown_track",
+                format!(
+                    "unit {unit} track {} is not a module in modules.md",
+                    u.track
+                ),
+            ));
         }
         let missing = dependencies(store, u, &units)?;
         if !missing.is_empty() {
@@ -229,7 +253,8 @@ pub fn ready_units(store: &Path) -> Res<Vec<String>> {
     for u in &units {
         let rows = evidence(store, &u.id)?;
         let state = derive_state(&rows, needs_accept(store, &u.id)?);
-        if !["pending", "failed"].contains(&state.as_str())
+        if !known_track(store, u)?
+            || !["pending", "failed"].contains(&state.as_str())
             || rows.iter().filter(|r| r.kind == "run").count() >= 2
             || !dependencies(store, u, &units)?.is_empty()
         {
@@ -266,10 +291,15 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
         let rows = evidence(store, &u.id)?;
         let needs = needs_accept(store, &u.id)?;
         let state = derive_state(&rows, needs);
-        if (state == "verified" && !disk.iter().any(|c| c.unit == u.id)) || ready.contains(&u.id) {
+        let known = known_track(store, u)?;
+        if (known && state == "verified" && !disk.iter().any(|c| c.unit == u.id))
+            || ready.contains(&u.id)
+        {
             continue;
         }
-        let next = if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
+        let next = if !known {
+            "unknown_track".into()
+        } else if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
             if active
                 .get(&key(store, &u.id))
                 .is_some_and(|a| a.attempt_id == c.attempt)
@@ -306,6 +336,110 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
         });
     }
     Ok(waiting)
+}
+#[derive(Debug)]
+pub enum AutoAccept {
+    Ran {
+        module: String,
+        exit_code: i32,
+        output: String,
+        states: Vec<(String, String)>,
+    },
+    Skipped {
+        reason: String,
+        detail: String,
+    },
+}
+
+pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept> {
+    let skipped = |reason: &str, detail: String| AutoAccept::Skipped {
+        reason: reason.into(),
+        detail,
+    };
+    if !store.join("modules.md").exists() {
+        return Ok(skipped("not_module", String::new()));
+    }
+    let units = read_units(store)?;
+    let Some(trigger) = units.iter().find(|u| u.id == unit) else {
+        return Err(Failure::new("not_found", format!("unit {unit} not found")));
+    };
+    if !known_track(store, trigger)? {
+        return Ok(skipped("not_module", String::new()));
+    }
+    static LOCKS: OnceLock<Mutex<HashMap<(PathBuf, String), Arc<Mutex<()>>>>> = OnceLock::new();
+    let store_key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
+    let lock = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry((store_key, trigger.track.clone()))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let units = read_units(store)?;
+    let module_units: Vec<_> = units.iter().filter(|u| u.track == trigger.track).collect();
+    let claims = read_claims(store)?;
+    let claimed: Vec<_> = module_units
+        .iter()
+        .filter(|u| claims.iter().any(|c| c.unit == u.id))
+        .map(|u| u.id.clone())
+        .collect();
+    if !claimed.is_empty() {
+        return Ok(skipped("claimed", claimed.join(", ")));
+    }
+    let rows = evidence(store, unit)?;
+    let built_verify = |rows: &[Evidence]| -> Option<usize> {
+        let run = rows.iter().rposition(|r| r.kind == "run")?;
+        if rows[run].exit_code != 0 {
+            return None;
+        }
+        let verify = rows.iter().rposition(|r| r.kind == "verify")?;
+        if verify <= run
+            || rows[verify].exit_code != 0
+            || rows[run + 1..]
+                .iter()
+                .any(|r| r.kind == "scope" && r.exit_code != 0)
+        {
+            return None;
+        }
+        Some(verify)
+    };
+    let Some(verify) = built_verify(&rows) else {
+        return Ok(skipped("not_built", String::new()));
+    };
+    if rows[verify + 1..].iter().any(|r| r.kind == "accept") {
+        return Ok(skipped("already_accepted", String::new()));
+    }
+    let mut pending = Vec::new();
+    for other in module_units.iter().filter(|u| u.id != unit) {
+        let rows = evidence(store, &other.id)?;
+        if built_verify(&rows).is_none() {
+            pending.push(format!("{}={}", other.id, derive_state(&rows, true)));
+        }
+    }
+    if !pending.is_empty() {
+        return Ok(skipped("units_pending", pending.join(", ")));
+    }
+    let result = record_accept(store, &trigger.track, repo)?;
+    let states = module_units
+        .iter()
+        .map(|u| Ok((u.id.clone(), derive_state(&evidence(store, &u.id)?, true))))
+        .collect::<Res<Vec<_>>>()?;
+    let output: String = result
+        .output
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Ok(AutoAccept::Ran {
+        module: trigger.track.clone(),
+        exit_code: result.exit_code,
+        output,
+        states,
+    })
 }
 pub fn finish_unit(
     store: &Path,

@@ -20,12 +20,16 @@
 
 `axiom wish` runs the [wish skill](../engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../engine/agents/dispatcher.md) (`chronos:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../engine/agents/memory-keeper.md) (`chronos:memory-keeper`, Haiku) then records what later units can reuse.
 
+Reviews go to the `chronos:reviewer` agent, one whole unit per call; Gemini only rewrites reports (`gemini_preview` with `stage: "rewrite"`).
+
 Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`, `agy_error`). agy exits 0 on failed turns, so the bridge reads the result event rather than the exit code.
 
 <a id="contracts"></a>
 
 ## II · Contracts
 
+- Unit mode takes exactly `project`, `unit`, `role` and `cwd`; brief mode is for Astra.
+- When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.
 - `brief` follows the [dispatch policy](../engine/DISPATCH.md): GOAL, SCOPE and VERIFY, decided before dispatch. The worker sees nothing else. Map a returned report onto `orch inbox push` the same way as any other worker completion.
 - A workspace-writing `codex_run` without a bound project and unit is refused with `unbound_write` before Codex starts.
 - `cwd` must be an existing absolute directory; give each writer its own worktree.

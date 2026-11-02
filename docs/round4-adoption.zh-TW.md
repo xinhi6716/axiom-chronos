@@ -3,6 +3,7 @@
 Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證。舊七項的 manifest 本輪已讀，來源程式碼本輪未重審。
 
 ## DeepSeek
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/deepseek-ai--dsh-superagent-prototype，deepseek-ai/dsh-superagent-prototype，HEAD = 6337fc823ce20251c8de8085948165c81aaa701e（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；先記錄占用再執行。  
 整合：claims.tsv 在送出 turn 前寫入 attempt id；僅同 id 可釋放，bridge 消失時保留 outcome_unknown／unknown <id>，不再派送；可用 orch release <unit> --attempt <id>。  
@@ -11,6 +12,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：完整編排框架、UI、worktree 管理及 Codex checkpoint resume；只取占用機制，thread 仍是短暫的。  
 
 ## Orca
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/stablyai--orca，stablyai/orca，HEAD = 74bcbf0557efdd5ca1abb873d9b4611d03ef3866（manifest README blob id，未記錄 tree）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；區隔新舊執行。  
 整合：以 attempt id 隔離新舊占用；bridge 消失的 claim 為 outcome_unknown／unknown <id>，不再派送。  
@@ -19,6 +21,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：完整編排框架、UI、worktree 管理及 Codex checkpoint resume；只取執行隔離，thread 仍是短暫的。  
 
 ## Stop That Shit
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/lennney--stop-that-shit，lennney/stop-that-shit，HEAD = e4fe5296f6917849f7eec0860d6a1b68bc0292de（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；占用的擁有權。  
 整合：claims.tsv 在送出 turn 前記錄 attempt id，只允許同 id 釋放；未知結果保留占用且不再派送，可明確執行 orch release <unit> --attempt <id>。  
@@ -35,6 +38,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：orchestrate head／verdict 規則以外的 playbook 文字；該規則已是派送設計基礎。  
 
 ## Codebase Memory
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/DeusData--codebase-memory-mcp，DeusData/codebase-memory-mcp，HEAD = f29e74f276af08456ba80c3b8e21f466bd00765b（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；來源綁定。  
 整合：verified unit 的 memory_record 必須有非空 files；project、unit 與檔案雜湊相同時回傳既有 id（duplicate）。  
@@ -43,6 +47,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：圖索引、MCP server、schema 變更；現有記錄與雜湊已涵蓋此處需求。  
 
 ## Trail-Code
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/trailhq--Trail-Code，trailhq/Trail-Code，HEAD = a44da3dfb5894c8e316e320526041ef8e5ddbb8c（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；內容新鮮度。  
 整合：verified unit 的 memory_record 必須有非空 files；project、unit 與檔案雜湊相同時回傳既有 id（duplicate）。  
@@ -51,6 +56,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：圖索引、MCP server、schema 變更；只取檔案內容綁定。  
 
 ## Agency Agents
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/msitarzewski--agency-agents，msitarzewski/agency-agents，HEAD = b37b5bb33b78f2c1d6567d98e25ca818e3259219（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；交接與實證。  
 整合：bridge 的真實 VERIFY 輸出保存在 reports/<unit>.verify.txt，含 BRIDGE VERIFY 行；HANDOFF 包含 RESULT、PATHS、COMMANDS、OPEN、EVIDENCE 五欄。  
@@ -75,6 +81,7 @@ Codex-only 變體的同供應商 review 未採納；真實宿主驗收未驗證�
 排除：無人值守過夜 pipeline、auto-review-loop 輪數上限及額外資源檔；只取研究與審查約束。  
 
 ## ECC
+第五輪重評：round5-adoption.zh-TW.md 依來源實讀重新判斷。
 來源：E:/codex/OPEN_DESIGN/axiom/chronos-artifacts/evidence/codex-rebuild-20261101/references/affaan-m--ECC，affaan-m/ECC，HEAD = b38be6a7f6350964d59328b52f0624e1d1d552d1（manifest tree id）。  
 閱讀：承襲 E:/codex/OPEN_DESIGN/axiom/axiom-chronos-codex/docs/codex-rebuild.zh-TW.md；資源閉包與原生驗證邊界。  
 整合：安裝的 engine 資源相對引用均可解析，並有負控制；launch／drive／observe／cleanup 真實宿主清單區分 fake 回歸與真實驗收。  

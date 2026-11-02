@@ -56,6 +56,8 @@ Windows 的 doctor 會指出 Microsoft Store 版 PowerShell 的問題，因為 C
 
 描述一項具體修改。調度代理編寫 `GOAL · SCOPE · VERIFY` brief，交給 Codex worker，再檢查指令紀錄或執行 VERIFY。其指示要求遇到未定的介面或資料選擇時先提問。
 
+審查由 Claude（`chronos:reviewer`）負責；Gemini 只把報告改寫成白話。
+
 CLI 選項放在願望**前面**。後面的文字都是願望內容，包括參數名稱。
 
 Interjection（插話）：互動模式按 Esc；使用 `axiom wish` 時輸入一行並按 Enter，即可送入執行中的 session，用於修改指示、回答問題或停止。也可用 `axiom research` 進行研究。

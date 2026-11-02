@@ -64,6 +64,16 @@ impl Drop for UnitGuard {
 }
 fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let role = string(a, "role");
+    if string(a, "unit").is_some()
+        && (!matches!(role, Some("terra" | "sol"))
+            || a.get("brief").is_some()
+            || a.get("save_to").is_some()
+            || string(a, "sandbox").is_some_and(|s| s != "workspace-write"))
+    {
+        return Err(invalid(
+            "unit mode takes exactly project, unit, role (terra or sol) and cwd; brief and save_to belong to astra brief mode",
+        ));
+    }
     if a.get("role").is_some() && !matches!(role, Some("terra" | "sol" | "astra")) {
         return Err(invalid("invalid role"));
     }
@@ -84,16 +94,6 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     }
     if a.get("unit").is_some() && (project.is_none() || unit.is_none()) {
         return Err(invalid("unit requires project"));
-    }
-    if unit.is_some()
-        && (!matches!(role, Some("terra" | "sol"))
-            || a.get("brief").is_some()
-            || save.is_some()
-            || string(a, "sandbox").is_some_and(|s| s != "workspace-write"))
-    {
-        return Err(invalid(
-            "unit mode requires terra or sol, no brief, and workspace-write",
-        ));
     }
     if save.is_some() && (project.is_none() || role != Some("astra") || unit.is_some()) {
         return Err(invalid("save_to requires project and astra role"));
@@ -194,6 +194,39 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
         let built = finished.state == "built";
+        let accept = if built && finished.verify_exit == Some(0) {
+            let result =
+                goal::accept_hold(b.home()?, project.unwrap()).and_then(|hold| match hold {
+                    Some(reason) => Ok(orch::AutoAccept::Skipped {
+                        reason,
+                        detail: String::new(),
+                    }),
+                    None => orch::accept_if_ready(root, u, Path::new(cwd)),
+                });
+            match result {
+                Ok(orch::AutoAccept::Ran {
+                    module,
+                    exit_code,
+                    output,
+                    states,
+                }) => {
+                    let states: serde_json::Map<String, Value> = states
+                        .into_iter()
+                        .map(|(unit, state)| (unit, json!(state)))
+                        .collect();
+                    json!({"ran":true,"module":module,"exit_code":exit_code,"output":output,"states":states})
+                }
+                Ok(orch::AutoAccept::Skipped { reason, detail }) => {
+                    json!({"ran":false,"reason":reason,"detail":detail})
+                }
+                Err(e) => json!({"ran":false,"reason":"error","detail":e.message}),
+            }
+        } else {
+            json!({"ran":false,"reason":"not_built","detail":""})
+        };
+        let state = orch::evidence(root, u)
+            .and_then(|rows| Ok(orch::derive_state(&rows, orch::needs_accept(root, u)?)))
+            .unwrap_or_else(|_| finished.state.clone());
         let error = if built {
             Value::Null
         } else if report["status"] != "completed" {
@@ -205,7 +238,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         } else {
             json!({"kind":"unit_not_built","message":"unit was not built"})
         };
-        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":finished.state,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
+        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }
