@@ -8,7 +8,7 @@
 
 用 Claude Code 與 Codex 協作處理範圍明確的程式修改，保留驗證紀錄與可重用的專案內容。
 
-**公開測試版 · 0.2.0-beta.1。** 每次 commit 前請檢查 diff。
+**正式版 · 1.0.0。** 每次 commit 前請檢查 diff。
 
 | 01 · 準備 | 02 · 描述 | 03 · 檢查 |
 | --- | --- | --- |
@@ -89,10 +89,10 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="測試版設計流程：定義範圍、由 Codex thread 施工、檢查指令紀錄、記住已驗證且可重用的工作。接受結果前仍需檢查修改。" />
+  <img src="assets/chronos-process.svg" width="1200" alt="設計流程：定義範圍、由 Codex thread 施工、檢查指令紀錄、記住已驗證且可重用的工作。接受結果前仍需檢查修改。" />
 </picture></p>
 
-圖中是測試版預期流程，不是執行環境強制保證的正確性。
+圖中是預期流程，不是執行環境強制保證的正確性。
 
 </details>
 
@@ -128,7 +128,7 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
 
 **目前提供：**`axiom wish`、`axiom research` 與 `axiom doctor`。測試期間指令、狀態與代理行為仍可能改變。
 
-**仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的測試版功能。
+**仍在規劃：**`ask`、`review`、`catchup`、`evolve`，以及按階段整合 [Atropos](https://github.com/xinhi6716/axiom-atropos) 技能。這些都不是已提供的功能。
 
 測試以腳本替身模擬 Claude 與 Codex，檢查協定和本機行為。專案最初的說明只回報小型專案的 Codex 執行經驗；兩者都不證明真實模型表現或完整端到端可靠性。
 

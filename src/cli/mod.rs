@@ -248,7 +248,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let rest = &args[1..];
     match cmd {
         "--version" if rest.is_empty() => {
-            println!("axiom-chronos {} (beta)", env!("CARGO_PKG_VERSION"));
+            println!("axiom-chronos {}", env!("CARGO_PKG_VERSION"));
             0
         }
         "wish" | "research" => session_command(cmd, rest),

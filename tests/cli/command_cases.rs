@@ -131,7 +131,7 @@ fn bridge_hook_and_unicode_path() {
     std::fs::copy(env!("CARGO_BIN_EXE_axiom"), &exe).unwrap();
     assert_eq!(
         Command::new(&exe).arg("--version").output().unwrap().stdout,
-        b"axiom-chronos 0.2.0-beta.1 (beta)\n"
+        b"axiom-chronos 1.0.0\n"
     );
     let input = format!(
         "{}\n{}\n",

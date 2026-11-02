@@ -8,7 +8,7 @@
 
 Coordinate scoped code changes with Claude Code and Codex. Keep verification records and reusable project context.
 
-**Public beta · 0.2.0-beta.1.** Review each diff before committing.
+**Release · 1.0.0.** Review each diff before committing.
 
 | 01 · Prepare | 02 · Describe | 03 · Review |
 | --- | --- | --- |
@@ -86,10 +86,10 @@ Claude sessions load the engine with local settings. Codex workers use lean mode
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="Designed beta flow: scope the work, build in Codex threads, check command evidence, and remember useful verified work. Review changes before accepting them." />
+  <img src="assets/chronos-process.svg" width="1200" alt="Designed flow: scope the work, build in Codex threads, check command evidence, and remember useful verified work. Review changes before accepting them." />
 </picture></p>
 
-This diagram describes the intended beta workflow, not an enforced correctness guarantee.
+This diagram describes the intended workflow, not an enforced correctness guarantee.
 
 </details>
 
@@ -121,9 +121,9 @@ Memory retains the wish and hashes of referenced files so later lookups can flag
 
 ## Current status
 
-**Available:** `axiom wish`, `axiom research` and `axiom doctor`. Commands, state and agent behavior may change during beta.
+**Available:** `axiom wish`, `axiom research` and `axiom doctor`.
 
-**Planned:** `ask`, `review`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped beta features.
+**Planned:** `ask`, `review`, `catchup`, `evolve`, and stage-specific [Atropos](https://github.com/xinhi6716/axiom-atropos) skill integration. These are not shipped features.
 
 Tests use scripted stand-ins for Claude and Codex; they check protocols and local behavior. The initial project report covers small-project Codex runs only. Neither establishes live-model performance or full end-to-end reliability.
 
