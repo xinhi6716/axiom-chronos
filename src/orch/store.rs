@@ -186,6 +186,52 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
 }
+#[derive(Clone)]
+pub(crate) struct DiskClaim {
+    pub unit: String,
+    pub attempt: String,
+    pub scope: Vec<String>,
+    pub started: String,
+}
+pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
+    let text = match std::fs::read_to_string(store.join("claims.tsv")) {
+        Ok(s) => s.replace('\r', ""),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(io(e)),
+    };
+    let mut lines = text.lines();
+    if lines.next() != Some("unit\tattempt\tscope\tstarted") {
+        return Err(fail("claims.tsv has an invalid header"));
+    }
+    lines
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            let c: Vec<_> = line.split('\t').collect();
+            if c.len() != 4 || c[0].is_empty() || c[1].is_empty() {
+                return Err(fail("claims.tsv has a malformed row"));
+            }
+            Ok(DiskClaim {
+                unit: c[0].into(),
+                attempt: c[1].into(),
+                scope: c[2].split_whitespace().map(str::to_owned).collect(),
+                started: c[3].into(),
+            })
+        })
+        .collect()
+}
+pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
+    let mut text = String::from("unit\tattempt\tscope\tstarted\n");
+    for c in rows {
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            c.unit,
+            c.attempt,
+            c.scope.join(" "),
+            c.started
+        ));
+    }
+    write(store, "claims.tsv", &text)
+}
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
     with_lock(store, false, || {
         let mut rows = read_units(store)?;

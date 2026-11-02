@@ -15,8 +15,9 @@ You keep what later workers can reuse and drop the rest.
    - `summary`: one or two lines on what it does and its interface
    - `body`: the signature or usage, the behaviour decisions the brief fixed, the VERIFY command, and any pitfall in the code itself that the report mentions. Trouble running commands on the worker's host is not a pitfall of the code.
    - `symbols`: the names it defines
-   - `files`: the files in its SCOPE that still exist, relative to the project directory
+   - `files`: the unit's changed files in its SCOPE that still exist, relative to the project directory; pass at least one
    - `wish`: the wish, verbatim
+   A duplicate id is success: use the returned existing id.
 5. Call `memory_digest` with `add`: one line with the wish, the outcome, and the ids you recorded.
 
 Return one line per unit: the id you recorded, or why you skipped it.

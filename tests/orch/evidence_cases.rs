@@ -10,6 +10,28 @@ fn temp() -> std::path::PathBuf {
     fs::create_dir_all(&p).unwrap();
     p
 }
+fn git_repo(p: &Path) {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "--", "file.txt"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(p)
+            .status()
+            .unwrap()
+            .success());
+    }
+}
 fn row(kind: &str, command: &str, code: i32, commit: &str, ts: &str) -> Evidence {
     Evidence {
         kind: kind.into(),
@@ -38,9 +60,13 @@ fn setup(p: &Path) {
 }
 #[test]
 fn state_table() {
+    let p = temp();
+    fs::write(p.join("file.txt"), "one").unwrap();
+    git_repo(&p);
+    let commit = snapshot(&p, &["file.txt".into()]);
     let run = row("run", "gpt-worker", 0, "", "1");
-    let verify = row("verify", "test", 0, "", "2");
-    let review = row("review", "claude-review", 0, "a", "3");
+    let verify = row("verify", "test", 0, &commit, "2");
+    let review = row("review", "claude-review", 0, &commit, "3");
     assert_eq!(derive_state(&[], false), "pending");
     assert_eq!(derive_state(&[row("run", "x", 1, "", "")], false), "failed");
     assert_eq!(
@@ -68,7 +94,7 @@ fn state_table() {
             &[
                 run.clone(),
                 verify.clone(),
-                row("review", "gpt-review", 0, "a", "")
+                row("review", "gpt-review", 0, &commit, "")
             ],
             false
         ),
@@ -79,7 +105,7 @@ fn state_table() {
             &[
                 run.clone(),
                 verify.clone(),
-                row("review", "claude-review", 1, "a", ""),
+                row("review", "claude-review", 1, &commit, ""),
                 review.clone()
             ],
             false
@@ -98,6 +124,7 @@ fn state_table() {
         ),
         "verified"
     );
+    fs::remove_dir_all(p).unwrap();
 }
 #[test]
 fn snapshot_tracks_worktree() {
@@ -162,11 +189,22 @@ fn records_and_gates() {
 fn review_identity_empty_when_brief_unreadable() {
     let p = temp();
     setup(&p);
+    fs::write(p.join("file.txt"), "one").unwrap();
+    git_repo(&p);
     append_evidence(&p, "u", &row("run", "gpt-worker", 0, "", "1")).unwrap();
-    append_evidence(&p, "u", &row("verify", "test", 0, "verified-tree", "2")).unwrap();
+    let verified = snapshot(&p, &["file.txt".into()]);
+    append_evidence(&p, "u", &row("verify", "test", 0, &verified, "2")).unwrap();
     fs::remove_file(p.join("brief.txt")).unwrap();
-    record_review(&p, &["u".into()], "claude-review", true, &p).unwrap();
-    assert_eq!(evidence(&p, "u").unwrap().last().unwrap().commit, "");
+    assert_eq!(
+        record_review(&p, &["u".into()], "claude-review", true, &p)
+            .unwrap_err()
+            .kind,
+        "stale_review",
+        "unreadable brief cannot produce a review snapshot"
+    );
+    let rows = evidence(&p, "u").unwrap();
+    assert_eq!(rows.len(), 2, "stale review must not be appended");
+    assert_eq!(derive_state(&rows, false), "built");
     fs::remove_dir_all(p).unwrap();
 }
 
@@ -193,13 +231,8 @@ fn identities_are_current_git_trees() {
     fs::create_dir_all(&repo).unwrap();
     fs::create_dir_all(&store).unwrap();
     setup(&store);
-    assert!(Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
     fs::write(repo.join("file.txt"), "one").unwrap();
+    git_repo(&repo);
     append_evidence(&store, "u", &row("run", "gpt-worker", 0, "", "1")).unwrap();
     let verify = snapshot(&repo, &["file.txt".into()]);
     append_evidence(&store, "u", &row("verify", "test", 0, &verify, "2")).unwrap();
@@ -216,11 +249,20 @@ fn identities_are_current_git_trees() {
         .unwrap()
         .to_string();
     fs::write(repo.join("file.txt"), "two").unwrap();
+    assert_eq!(
+        record_review(&store, &["u".into()], "claude-review", true, &repo)
+            .unwrap_err()
+            .kind,
+        "stale_review"
+    );
+    let new_verify = snapshot(&repo, &["file.txt".into()]);
+    append_evidence(&store, "u", &row("verify", "test", 0, &new_verify, "3")).unwrap();
     record_review(&store, &["u".into()], "claude-review", true, &repo).unwrap();
     record_full(&store, &repo, Some("echo ok")).unwrap();
     let rows = evidence(&store, "u").unwrap();
     let review = &rows.last().unwrap().commit;
     assert_ne!(&verify, review);
+    assert_eq!(&new_verify, review);
     let full = fs::read_to_string(full_path).unwrap();
     let last_full = full.lines().last().unwrap().split('\t').nth(3).unwrap();
     assert_ne!(first_full, last_full);

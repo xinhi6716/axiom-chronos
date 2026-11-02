@@ -163,6 +163,14 @@ impl AppServer {
             {
                 continue;
             }
+            if method != "thread/started"
+                && method != "mcpServer/startupStatus/updated"
+                && (method != "turn/completed" || params["turn"]["id"] == turn_id)
+            {
+                if let Some(progress) = base::progress::current() {
+                    progress.emit(method);
+                }
+            }
             match method {
                 "thread/tokenUsage/updated" => {
                     report["usage"] = params["tokenUsage"]["total"].clone()

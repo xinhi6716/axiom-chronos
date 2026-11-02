@@ -54,11 +54,11 @@ pub(super) fn destination(root: &Path, path: &str) -> Res<PathBuf> {
     }
     Ok(dest.to_path_buf())
 }
-struct UnitGuard(Option<(PathBuf, String)>);
+struct UnitGuard(Option<(PathBuf, String, String)>);
 impl Drop for UnitGuard {
     fn drop(&mut self) {
-        if let Some((store, u)) = &self.0 {
-            orch::abort_unit(store, u);
+        if let Some((store, u, attempt_id)) = &self.0 {
+            orch::abort_unit(store, u, attempt_id);
         }
     }
 }
@@ -122,6 +122,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     };
     let mut brief = string(a, "brief").unwrap_or("").to_owned();
     let mut attempt = 0;
+    let mut attempt_id = String::new();
     let mut guard = UnitGuard(None);
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         let active = goal::find_active(b.home()?, project.unwrap())?;
@@ -138,15 +139,19 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         let required = active.is_some_and(|(_, g)| goal::astra_requested(&g));
         match orch::begin_unit(root, u, r, Path::new(cwd), required)? {
             orch::Begin::Reused => {
-                return Ok(json!({"status":"completed","unit":u,"state":"verified","reused":true}))
+                return Ok(
+                    json!({"status":"completed","unit":u,"state":"verified","reused":true,"attempt_id":null,"verify_output":null}),
+                )
             }
             orch::Begin::Run {
                 brief: value,
                 attempt: n,
+                attempt_id: id,
             } => {
                 brief = value.text;
                 attempt = n;
-                guard.0 = Some((root.to_path_buf(), u.to_owned()));
+                attempt_id = id;
+                guard.0 = Some((root.to_path_buf(), u.to_owned(), attempt_id.clone()));
             }
         }
     }
@@ -187,7 +192,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         }
     };
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
-        let finished = orch::finish_unit(root, u, Path::new(cwd), r, &model, &report)?;
+        let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
         let built = finished.state == "built";
         let error = if built {
             Value::Null
@@ -195,10 +200,12 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             report["error"].clone()
         } else if !finished.outside_scope.is_empty() {
             json!({"kind":"outside_scope","message":"changes outside unit scope"})
-        } else {
+        } else if finished.verify_exit.is_some_and(|code| code != 0) {
             json!({"kind":"verify_failed","message":"unit verification failed"})
+        } else {
+            json!({"kind":"unit_not_built","message":"unit was not built"})
         };
-        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":finished.state,"model":model,"attempt":attempt,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
+        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":finished.state,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }

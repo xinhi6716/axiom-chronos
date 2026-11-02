@@ -4,7 +4,11 @@ use std::path::Path;
 
 pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
-    if !["ready", "accept", "fulltest", "review", "evidence"].contains(&cmd) {
+    if ![
+        "ready", "accept", "fulltest", "review", "evidence", "release",
+    ]
+    .contains(&cmd)
+    {
         return None;
     }
     let result = (|| -> Res<(i32, String, serde_json::Value)> {
@@ -20,6 +24,18 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 .ok_or_else(|| invalid(&format!("{name} requires a value")))
         };
         match cmd {
+            "release" => {
+                let unit = args
+                    .get(1)
+                    .filter(|s| !s.starts_with("--"))
+                    .ok_or_else(|| invalid("missing unit"))?;
+                release_claim(store, unit, option("--attempt")?)?;
+                Ok((
+                    0,
+                    format!("released {unit}"),
+                    serde_json::json!({"released":unit}),
+                ))
+            }
             "ready" => {
                 let ids = ready_units(store)?;
                 let waiting = waiting_units(store)?;

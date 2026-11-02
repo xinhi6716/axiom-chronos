@@ -15,21 +15,66 @@ pub fn command(argv: &[String]) -> Command {
     }
     c
 }
-pub fn kill_tree(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+pub fn terminate_tree(child: &mut Child) -> Result<(), Failure> {
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(e) => return Err(Failure::new("kill_failed", format!("pid {pid}: {e}"))),
     }
     #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    {
+        if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(child.try_wait(), Ok(Some(_))) || !pid_alive(pid) {
+                return Ok(());
+            }
+            return Err(Failure::new(
+                "kill_failed",
+                format!("pid {pid}: {error} (errno {:?})", error.raw_os_error()),
+            ));
+        }
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &child.id().to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let result = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
+        match result {
+            Ok(output) if !output.status.success() && pid_alive(pid) => {
+                return Err(taskkill_failure(
+                    pid,
+                    output.status.code(),
+                    &output.stdout,
+                    &output.stderr,
+                ));
+            }
+            Err(error) if pid_alive(pid) => {
+                return Err(Failure::new(
+                    "kill_failed",
+                    format!("pid {pid}: taskkill failed to start: {error}"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn taskkill_failure(pid: u32, code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Failure {
+    let mut output = stdout.to_vec();
+    output.extend_from_slice(stderr);
+    Failure::new(
+        "kill_failed",
+        format!(
+            "pid {pid}: taskkill exit code {code:?}: {}",
+            String::from_utf8_lossy(&output).trim()
+        ),
+    )
+}
+pub fn kill_tree(child: &mut Child) {
+    if let Err(error) = terminate_tree(child) {
+        eprintln!("axiom: {}", error.message);
     }
     let _ = child.kill();
     let start = Instant::now();
@@ -56,7 +101,7 @@ pub fn pid_alive(pid: u32) -> bool {
         };
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
-            return false;
+            return std::io::Error::last_os_error().raw_os_error() == Some(5);
         }
         let mut code = 0;
         let ok = GetExitCodeProcess(h, &mut code);
@@ -121,4 +166,16 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
         output,
         timed_out,
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn taskkill_failure_includes_details() {
+        let error = super::taskkill_failure(123, Some(7), b"stdout", b"stderr");
+        assert_eq!(error.kind, "kill_failed");
+        for detail in ["123", "7", "stdout", "stderr"] {
+            assert!(error.message.contains(detail), "{}", error.message);
+        }
+    }
 }

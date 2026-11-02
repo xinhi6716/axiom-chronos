@@ -33,7 +33,7 @@ def emit(payload):
     sys.stdout.flush()
 
 
-emit({'event': 'init', 'conversation_id': 'c1'})
+emit({'event': 'init', 'conversation_id': 'c1', **({'type': 'init'} if 'AGY_TYPED' in prompt else {})})
 if prompt.startswith('AGY_WAIT:'):
     release = prompt[len('AGY_WAIT:'):]
     deadline = time.monotonic() + 30

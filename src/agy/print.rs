@@ -1,7 +1,7 @@
 use crate::base::{self, Failure, Res};
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{Arc, Mutex},
@@ -186,7 +186,30 @@ fn run_at_epoch(
         });
         rx
     };
-    let out = reader(Box::new(stdout));
+    let progress = base::progress::current();
+    let (out_tx, out) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stream = BufReader::new(stdout);
+        let mut bytes = Vec::new();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match stream.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(event) =
+                        serde_json::from_str::<Value>(&String::from_utf8_lossy(&line))
+                    {
+                        if let Some(p) = &progress {
+                            p.emit(event.get("type").and_then(Value::as_str).unwrap_or("event"));
+                        }
+                    }
+                    bytes.extend_from_slice(&line);
+                }
+            }
+        }
+        let _ = out_tx.send(bytes);
+    });
     let err = reader(Box::new(stderr));
     let event = json!({"event":"user", "message":{"role":"user", "content":prompt}}).to_string();
     let start = Instant::now();

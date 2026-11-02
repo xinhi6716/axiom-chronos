@@ -160,11 +160,21 @@ pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 's
             let b = bridge.clone();
             let o = out.clone();
             jobs.push(thread::spawn(move || {
-                let result = call(
-                    &b,
-                    params["name"].as_str().unwrap_or(""),
-                    params.get("arguments").unwrap_or(&Value::Null),
-                );
+                let progress = params
+                    .pointer("/_meta/progressToken")
+                    .filter(|v| v.is_string() || v.is_i64() || v.is_u64())
+                    .cloned()
+                    .map(|token| {
+                        let writer = o.clone();
+                        base::progress::Progress::new(token, move |msg| write_msg(&writer, msg))
+                    });
+                let result = base::progress::scope(progress, || {
+                    call(
+                        &b,
+                        params["name"].as_str().unwrap_or(""),
+                        params.get("arguments").unwrap_or(&Value::Null),
+                    )
+                });
                 write_msg(&o, json!({"jsonrpc":"2.0","id":id,"result":result}));
             }));
             continue;

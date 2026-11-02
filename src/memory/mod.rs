@@ -5,7 +5,7 @@ use rusqlite::{params, params_from_iter, Connection, Row};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     io::Write,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -121,11 +121,13 @@ impl Memory {
                 format!("unit {} is not verified", args.unit),
             ));
         }
-        let brief = if args.files.is_empty() {
-            None
-        } else {
-            Some(unit_brief(&store, &args.unit)?)
-        };
+        if args.files.is_empty() {
+            return Err(Failure::new(
+                "invalid_argument",
+                "files are required for a verified unit",
+            ));
+        }
+        let brief = unit_brief(&store, &args.unit)?;
         let mut files = Vec::new();
         for rel in &args.files {
             let relative = Path::new(rel);
@@ -139,7 +141,7 @@ impl Memory {
                     format!("invalid relative file path: {rel}"),
                 ));
             }
-            if !covers(&brief.as_ref().expect("brief exists").scope, rel) {
+            if !covers(&brief.scope, rel) {
                 return Err(Failure::new(
                     "outside_scope",
                     format!("file outside unit scope: {rel}"),
@@ -154,13 +156,35 @@ impl Memory {
             }
             files.push(json!({"path": rel, "sha256": hash(&path)?}));
         }
-        let db = self.connect()?;
+        let mut db = self.connect()?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(err)?;
+        let wanted = file_set(&files)?;
+        {
+            let mut stmt = tx
+                .prepare("SELECT id, files FROM entries WHERE project = ? AND unit = ? ORDER BY id")
+                .map_err(err)?;
+            let mut rows = stmt.query(params![args.project, args.unit]).map_err(err)?;
+            while let Some(row) = rows.next().map_err(err)? {
+                let stored: String = row.get(1).map_err(err)?;
+                let stored: Vec<Value> = serde_json::from_str(&stored).map_err(err)?;
+                if file_set(&stored)? == wanted {
+                    let id: i64 = row.get(0).map_err(err)?;
+                    return Ok(
+                        json!({"status":"completed", "id":id, "files":files, "duplicate":true, "error":null}),
+                    );
+                }
+            }
+        }
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
-        db.execute("INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created) VALUES (?,?,?,?,?,?,?,?,?,?)", params![args.project, args.unit, args.title.trim(), args.summary.trim(), args.body.trim(), args.symbols.join(" "), args.wish.trim(), serde_json::to_string(&files).map_err(err)?, args.project_dir, created]).map_err(err)?;
-        Ok(json!({"status":"completed", "id":db.last_insert_rowid(), "files":files, "error":null}))
+        tx.execute("INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created) VALUES (?,?,?,?,?,?,?,?,?,?)", params![args.project, args.unit, args.title.trim(), args.summary.trim(), args.body.trim(), args.symbols.join(" "), args.wish.trim(), serde_json::to_string(&files).map_err(err)?, args.project_dir, created]).map_err(err)?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(err)?;
+        Ok(json!({"status":"completed", "id":id, "files":files, "duplicate":false, "error":null}))
     }
     pub fn search(&self, query: &str, project: Option<&str>, limit: i64) -> Res<Value> {
         let terms = query_terms(query);
@@ -225,6 +249,22 @@ impl Memory {
         };
         Ok(json!({"status":"completed", "digest":digest, "error":null}))
     }
+}
+fn file_set(files: &[Value]) -> Res<BTreeSet<(&str, &str)>> {
+    files
+        .iter()
+        .map(|item| {
+            let path = item
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| err("invalid file path"))?;
+            let sha = item
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| err("invalid file hash"))?;
+            Ok((path, sha))
+        })
+        .collect()
 }
 fn hash(path: &Path) -> Res<String> {
     Ok(format!(

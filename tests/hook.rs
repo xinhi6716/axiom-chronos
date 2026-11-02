@@ -126,6 +126,54 @@ fn stop_reason_pending_only() {
     assert!(hook::stop_reason("s", &goal::load(h, "s").unwrap().unwrap()).contains(sentence));
 }
 #[test]
+fn stop_reason_truncates_long_wish_by_characters() {
+    for len in [120, 121, 300] {
+        let d = tempfile::tempdir().unwrap();
+        let wish = "願".repeat(len);
+        goal::open(d.path(), "s", &wish, None).unwrap();
+        let reason = hook::stop_reason("s", &goal::load(d.path(), "s").unwrap().unwrap());
+        assert!(reason.contains("Chronos goal s"));
+        if len == 120 {
+            assert!(reason.contains(&wish));
+            assert!(!reason.contains('…'));
+        } else {
+            assert!(reason.contains(&format!("{}…", "願".repeat(120))));
+            assert!(!reason.contains(&wish));
+        }
+    }
+}
+
+#[test]
+fn memory_keeper_background_requires_foreground_for_active_goal() {
+    for name in ["Agent", "Task"] {
+        let d = tempfile::tempdir().unwrap();
+        let h = d.path();
+        let background = tool(
+            name,
+            json!({"subagent_type":"chronos:memory-keeper", "run_in_background":true}),
+        );
+        assert!(call(h, &background).is_none());
+        open(h);
+        assert!(denial(call(h, &background)).contains("foreground"));
+        assert!(denial(call(h, &sub(background.clone()))).contains("foreground"));
+        assert!(call(
+            h,
+            &tool(name, json!({"subagent_type":"chronos:memory-keeper"}))
+        )
+        .is_none());
+        assert!(call(
+            h,
+            &tool(
+                name,
+                json!({"subagent_type":"chronos:memory-keeper", "run_in_background":false})
+            )
+        )
+        .is_none());
+        goal::set_status(h, "s", "done", None).unwrap();
+        assert!(call(h, &background).is_none());
+    }
+}
+#[test]
 fn question_limit() {
     let d = tempfile::tempdir().unwrap();
     let h = d.path();

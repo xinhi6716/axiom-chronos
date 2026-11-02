@@ -130,7 +130,12 @@ pub fn read_only_bash(command: &str) -> bool {
 }
 
 pub fn stop_reason(session: &str, goal: &Goal) -> String {
-    let mut text = format!("Chronos goal {session} is still active: {}. Take the next step through the chronos agents. When the wish is done and verified, call the bridge goal tool with status done. If it cannot go on without something only the user has, such as a credential, a payment or permission to delete their data, call it with status blocked and say what is needed.", goal.wish);
+    let mut chars = goal.wish.chars();
+    let mut wish: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        wish.push('…');
+    }
+    let mut text = format!("Chronos goal {session} is still active: {wish}. Take the next step through the chronos agents. When the wish is done and verified, call the bridge goal tool with status done. If it cannot go on without something only the user has, such as a credential, a payment or permission to delete their data, call it with status blocked and say what is needed.");
     if goal.interjection.is_some() {
         text.push_str(" Classify the pending interjection with the bridge goal tool as amend, answer or stop.");
     }
@@ -177,6 +182,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
+            if matches!(tool, "Agent" | "Task")
+                && input.get("subagent_type").and_then(Value::as_str)
+                    == Some("chronos:memory-keeper")
+                && input.get("run_in_background").and_then(Value::as_bool) == Some(true)
+                && home
+                    .and_then(|h| goal::load(h, session).ok().flatten())
+                    .is_some_and(|g| g.status == "active")
+            {
+                return deny("Run the chronos:memory-keeper in the foreground; it may share a batch with the rewrite.");
+            }
             if agent
                 && matches!(tool, "Agent" | "Task")
                 && input.get("subagent_type").and_then(Value::as_str) != Some("chronos:reviewer")

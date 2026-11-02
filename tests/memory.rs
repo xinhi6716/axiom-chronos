@@ -212,14 +212,15 @@ fn bad_record_input_is_explicit() {
 #[test]
 fn search_ranks_match_count_then_creation() {
     let (temp, memory, mut r) = setup();
-    r.files.clear();
     r.title = "alpha".into();
     r.summary = "plain".into();
     r.wish = "plain".into();
     r.symbols.clear();
     let first = memory.record(&r).unwrap()["id"].as_i64().unwrap();
+    fs::write(std::path::Path::new(&r.project_dir).join("a.py"), "second").unwrap();
     r.title = "alpha beta".into();
     let second = memory.record(&r).unwrap()["id"].as_i64().unwrap();
+    fs::write(std::path::Path::new(&r.project_dir).join("a.py"), "third").unwrap();
     let third = memory.record(&r).unwrap()["id"].as_i64().unwrap();
     let db = Connection::open(temp.path().join("home/memory/memory.db")).unwrap();
     for (id, created) in [(first, 3), (second, 1), (third, 2)] {
@@ -238,5 +239,49 @@ fn search_ranks_match_count_then_creation() {
             ))
             .collect::<Vec<_>>(),
         vec![(third, 2), (second, 2), (first, 1)]
+    );
+}
+
+#[test]
+fn record_requires_files_and_deduplicates_by_file_set() {
+    let (temp, memory, mut r) = setup();
+    r.files.clear();
+    let error = memory.record(&r).unwrap_err();
+    assert_eq!(error.kind, "invalid_argument");
+    assert_eq!(error.message, "files are required for a verified unit");
+    r.unit = "v".into();
+    assert_eq!(memory.record(&r).unwrap_err().kind, "not_verified");
+    r.unit = "u".into();
+    fs::write(
+        std::path::Path::new(&r.project_dir).join("missing.py"),
+        "other",
+    )
+    .unwrap();
+    r.files = vec!["a.py".into(), "missing.py".into()];
+    let first = memory.record(&r).unwrap();
+    assert_eq!(first["duplicate"], false);
+    r.files.reverse();
+    r.files.push("a.py".into());
+    let duplicate = memory.record(&r).unwrap();
+    assert_eq!(duplicate["status"], "completed");
+    assert_eq!(duplicate["id"], first["id"]);
+    assert_eq!(duplicate["duplicate"], true);
+    assert!(duplicate["error"].is_null());
+    let db = Connection::open(temp.path().join("home/memory/memory.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM entries", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    fs::write(std::path::Path::new(&r.project_dir).join("a.py"), "changed").unwrap();
+    let changed = memory.record(&r).unwrap();
+    assert_eq!(changed["duplicate"], false);
+    assert_ne!(changed["id"], first["id"]);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM entries", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
     );
 }

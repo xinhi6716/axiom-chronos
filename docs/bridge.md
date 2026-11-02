@@ -71,3 +71,12 @@ Restart Claude Code afterwards so the bridge's Codex app-server sees the new PAT
 ## IV · Tests
 
 `cargo test` runs the backends and the MCP session against scripted stand-ins in `tests/fakes/`.
+
+## Real-host acceptance checklist
+
+Fake-driven tests are regression checks; real-host acceptance is separate. The following items have **not been verified** on a real Claude Code host:
+
+- [ ] **Not verified — Launch:** Install and launch the Chronos plugin in Claude Code, and start its bridge.
+- [ ] **Not verified — Drive:** Run a wish, a `--creative` wish, an interjection, and `--resume`.
+- [ ] **Not verified — Observe:** During a long `codex_run`, observe progress notifications; inspect `claims.tsv` and verify the evidence files.
+- [ ] **Not verified — Cleanup:** Remove the acceptance run's claims, goals, and temporary worktrees.

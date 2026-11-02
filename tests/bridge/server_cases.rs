@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{self, Cursor, Write},
+    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -49,6 +50,33 @@ fn fixture(home: &std::path::Path) {
     fs::write(&brief, "GOAL test\nSCOPE file.txt\nVERIFY test\n").unwrap();
     fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tx\tverified\t\t\t\t{}\nu2\tx\tpending\t\t\t\t{}\nu3\tx\tbuilt\t\t\t\t{}\n", brief.display(), brief.display(), brief.display())).unwrap();
     fs::write(home.join("file.txt"), "content").unwrap();
+}
+fn verified_fixture(home: &std::path::Path) {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "--", "file.txt"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(home)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let commit = axiom::orch::snapshot(home, &["file.txt".into()]);
+    assert!(!commit.is_empty());
+    let reports = home.join("orchestrate/demo/reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(reports.join("u3.evidence.tsv"), format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\t\t1\nverify\ttest\t0\t{commit}\t2\n")).unwrap();
 }
 #[test]
 fn full_protocol_session() {
@@ -177,8 +205,7 @@ fn review_records_state() {
     let temp = common::temp();
     fixture(temp.path());
     let b = Bridge::new(config(temp.path()));
-    fs::create_dir_all(temp.path().join("orchestrate/demo/reports")).unwrap();
-    fs::write(temp.path().join("orchestrate/demo/reports/u3.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\tabc\t1\nverify\ttest\t0\tabc\t2\n").unwrap();
+    verified_fixture(temp.path());
     let args = json!({"project":"demo","units":["u3"],"project_dir":temp.path(),"paths":["file.txt"],"contract":"contract"});
     let ok = invoke(&b, "review_code", args.clone());
     check(&ok, "completed");
@@ -547,8 +574,7 @@ fn review_blocker_and_units_without_project() {
     assert!(no_project["structuredContent"].get("states").is_none());
     assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
     assert!(!store.join("reports/u3.evidence.tsv").exists());
-    fs::create_dir_all(store.join("reports")).unwrap();
-    fs::write(store.join("reports/u3.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-6-terra\t0\tabc\t1\nverify\ttest\t0\tabc\t2\n").unwrap();
+    verified_fixture(temp.path());
     let failed = invoke(
         &b,
         "review_code",

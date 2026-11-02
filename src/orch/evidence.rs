@@ -48,6 +48,9 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if current.iter().any(|r| r.exit_code != 0) {
         return "review-failed".into();
     }
+    if last.commit.is_empty() || last.commit != rest[v].commit {
+        return "built".into();
+    }
     if current
         .iter()
         .any(|r| base::family_of(&r.command) == base::family_of(&run.command))
@@ -274,6 +277,7 @@ pub fn record_review(
 ) -> Res<Vec<(String, String)>> {
     let existing = read_units(store)?;
     let mut commits = Vec::new();
+    let mut stale = Vec::new();
     for unit in units {
         if !existing.iter().any(|u| u.id == *unit) {
             return Err(Failure::new("not_found", format!("unit {unit} not found")));
@@ -288,11 +292,21 @@ pub fn record_review(
                 format!("reviewer {reviewer} has the same family as worker for {unit}"),
             ));
         }
-        commits.push(
-            unit_brief(store, unit)
-                .map(|brief| snapshot(repo, &brief.scope))
-                .unwrap_or_default(),
-        );
+        let commit = unit_brief(store, unit)
+            .map(|brief| snapshot(repo, &brief.scope))
+            .unwrap_or_default();
+        let verify = rs.iter().rev().find(|r| r.kind == "verify");
+        if commit.is_empty() || !verify.is_some_and(|r| !r.commit.is_empty() && r.commit == commit)
+        {
+            stale.push(unit.clone());
+        }
+        commits.push(commit);
+    }
+    if !stale.is_empty() {
+        return Err(Failure::new(
+            "stale_review",
+            format!("stale review for units: {}", stale.join(", ")),
+        ));
     }
     let mut result = Vec::new();
     for (unit, commit) in units.iter().zip(commits) {

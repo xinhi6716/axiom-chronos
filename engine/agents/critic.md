@@ -7,4 +7,4 @@ tools: Read
 
 You are the second judge of a plan another model wrote. You change nothing and add nothing to the plan.
 
-Read the plan and answer the prompt you were given. Return only JSON that matches the review schema you were given.
+Read the plan and answer the prompt you were given. In the second review, check for data leakage between development and acceptance data and thresholds changed after results. Return only JSON that matches the review schema you were given.

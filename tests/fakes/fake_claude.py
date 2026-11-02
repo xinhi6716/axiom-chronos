@@ -52,10 +52,14 @@ if scenario == 'resume':
     sys.exit(0)
 if scenario == 'crash':
     sys.exit(3)
-if scenario == 'interrupt':
+if scenario in ('interrupt', 'interrupt_orphan'):
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-    Path(os.environ['FAKE_CLAUDE_PIDS']).write_text(f'{os.getpid()} {child.pid}', encoding='utf-8')
-    child.wait()
+    pidfile = Path(os.environ['FAKE_CLAUDE_PIDS'])
+    temporary = pidfile.with_name(pidfile.name + '.tmp')
+    temporary.write_text(f'{os.getpid()}\n{child.pid}\nready\n', encoding='utf-8')
+    temporary.replace(pidfile)
+    if scenario == 'interrupt':
+        child.wait()
     sys.exit(0)
 if scenario == 'forward':
     for _ in range(2):

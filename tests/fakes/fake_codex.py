@@ -112,10 +112,14 @@ for line in sys.stdin:
             with barrier:
                 barrier_count += 1
                 barrier.notify_all()
-            def finish_barrier(tid=thread_id, turn=turn_id):
+            def finish_barrier(tid=thread_id, turn=turn_id, extra='EXTRA' in text):
                 with barrier:
                     ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
                 if ready:
+                    if extra:
+                        send({'method': 'test/other-turn', 'params': {'threadId': tid, 'turnId': 'other-turn'}})
+                        send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': tid, 'status': 'starting'}})
+                        send({'method': 'test/extra', 'params': {'threadId': tid, 'turnId': turn}})
                     item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
                     complete(tid, turn)
                 else:

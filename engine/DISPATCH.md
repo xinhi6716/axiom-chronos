@@ -12,7 +12,7 @@ SCOPE   the exact paths the worker may create, change or delete
 VERIFY  one command; exit code 0 means done
 ```
 
-Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream report or retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)); the full template is for coordinators.
+Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)); the full template is for coordinators.
 
 ## Before dispatch
 
@@ -26,3 +26,16 @@ Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the u
 - No prohibitions, warnings or reminders. Naming a behaviour puts it in the worker's context. SCOPE and the bridge (sandbox, lean mode) bound what the worker can do.
 - No persona, tone or background the unit does not use.
 
+
+## HANDOFF
+
+Use a short HANDOFF block with exactly these five fields:
+
+```
+HANDOFF
+RESULT  outcome and interface
+PATHS   changed paths
+COMMANDS  command and result
+OPEN    unresolved items
+EVIDENCE  report/verify paths
+```

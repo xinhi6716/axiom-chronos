@@ -36,6 +36,16 @@ fn setup() -> (std::path::PathBuf, std::path::PathBuf) {
 fn begin(store: &Path, repo: &Path) -> Begin {
     begin_unit(store, "a", "worker", repo, false).unwrap()
 }
+fn attempt(store: &Path, unit: &str) -> String {
+    fs::read_to_string(store.join("claims.tsv"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .find(|cols| cols[0] == unit)
+        .unwrap()[1]
+        .to_string()
+}
 #[test]
 fn legacy_bare_verify_identity_is_read_but_not_reused() {
     let (store, repo) = setup();
@@ -50,7 +60,7 @@ fn legacy_bare_verify_identity_is_read_but_not_reused() {
     assert_eq!(rows[1].commit, hash);
     assert_eq!(derive_state(&rows, false), "verified");
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
-    abort_unit(&store, "a");
+    abort_unit(&store, "a", &attempt(&store, "a"));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -83,8 +93,8 @@ fn projects_do_not_share_running_units() {
     assert!(matches!(begin(&store_a, &repo_a), Begin::Run { .. }));
     // Same unit id and scope in another project: neither busy nor excused by the first claim.
     assert!(matches!(begin(&store_b, &repo_b), Begin::Run { .. }));
-    abort_unit(&store_a, "a");
-    abort_unit(&store_b, "a");
+    abort_unit(&store_a, "a", &attempt(&store_a, "a"));
+    abort_unit(&store_b, "a", &attempt(&store_b, "a"));
     for store in [store_a, store_b] {
         fs::remove_dir_all(store.parent().unwrap()).unwrap();
     }
@@ -105,13 +115,25 @@ fn lifecycle_reuse_scope_and_limit() {
         "busy"
     );
     let report = json!({"status":"completed","final_message":"done","file_changes":[]});
-    let finished = finish_unit(&store, "a", &repo, "worker", "gpt-worker", &report).unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &report,
+    )
+    .unwrap();
     assert_eq!(finished.state, "built");
     assert_eq!(finished.verify_exit, Some(0));
     assert_eq!(finished.verify_tail.trim(), "ok");
     assert_eq!(
         fs::read_to_string(store.join("reports/a.md")).unwrap(),
-        "done"
+        format!(
+            "done\nBRIDGE VERIFY exit=0 output={}\n",
+            store.join("reports").join("a.verify.txt").display()
+        )
     );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(
@@ -140,7 +162,16 @@ fn lifecycle_reuse_scope_and_limit() {
     ));
     fs::write(repo.join("outside.txt"), "outside").unwrap();
     let report = json!({"status":"completed","file_changes":[{"path":"other.txt"}]});
-    let finished = finish_unit(&store, "a", &repo, "worker", "gpt-worker", &report).unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &report,
+    )
+    .unwrap();
     assert_eq!(finished.state, "failed");
     assert_eq!(finished.outside_scope, vec!["other.txt", "outside.txt"]);
     assert_eq!(
@@ -202,7 +233,7 @@ fn sol_and_extra_commands() {
         begin_unit(&store, "a", "sol", &repo, false).unwrap(),
         Begin::Run { .. }
     ));
-    abort_unit(&store, "a");
+    abort_unit(&store, "a", &attempt(&store, "a"));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -254,6 +285,7 @@ fn concurrent_workers_and_overlapping_scopes() {
                 let result = finish_unit(
                     &store,
                     id,
+                    &attempt(&store, id),
                     &repo,
                     "worker",
                     "gpt-worker",
@@ -284,6 +316,7 @@ fn dependencies_require_verified_unit() {
     finish_unit(
         &store,
         "a",
+        &attempt(&store, "a"),
         &repo,
         "worker",
         "gpt-worker",
@@ -300,7 +333,7 @@ fn dependencies_require_verified_unit() {
         begin_unit(&store, "b", "worker", &repo, false).unwrap(),
         Begin::Run { .. }
     ));
-    abort_unit(&store, "b");
+    abort_unit(&store, "b", &attempt(&store, "b"));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -337,6 +370,7 @@ fn extra_commands_preserve_output_and_failures() {
     finish_unit(
         &store,
         "a",
+        &attempt(&store, "a"),
         &repo,
         "worker",
         "gpt-worker",
@@ -399,6 +433,7 @@ fn non_git_and_reported_paths() {
     let result = finish_unit(
         &store,
         "a",
+        &attempt(&store, "a"),
         &plain,
         "worker",
         "gpt-worker",
@@ -488,6 +523,7 @@ fn verify_tail_keeps_last_2000_characters() {
     let result = finish_unit(
         &store,
         "a",
+        &attempt(&store, "a"),
         &repo,
         "worker",
         "gpt-worker",

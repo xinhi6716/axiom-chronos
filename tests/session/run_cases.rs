@@ -326,10 +326,19 @@ fn interrupt_kills_process_tree() {
     let wait_path = pids.clone();
     let trigger = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        while !wait_path.exists() && std::time::Instant::now() < deadline {
+        while !std::fs::read_to_string(&wait_path)
+            .map(|s| s.lines().last() == Some("ready"))
+            .unwrap_or(false)
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(wait_path.exists(), "fake did not start");
+        assert!(
+            std::fs::read_to_string(&wait_path)
+                .map(|s| s.lines().last() == Some("ready"))
+                .unwrap_or(false),
+            "fake did not signal readiness"
+        );
         axiom::session::trigger_interrupt();
     });
     let config = Config {
@@ -371,20 +380,25 @@ fn interrupt_kills_process_tree() {
     assert!(Path::new(path).is_file());
     let ids = std::fs::read_to_string(pids)
         .unwrap()
-        .split_whitespace()
+        .lines()
+        .filter(|s| *s != "ready")
         .map(|s| s.parse::<u32>().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(ids.len(), 2);
-    for id in ids {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while axiom::base::proc::pid_alive(id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            !axiom::base::proc::pid_alive(id),
-            "process {id} remains alive"
-        );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while ids.iter().any(|&id| axiom::base::proc::pid_alive(id))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
     }
+    let states: Vec<_> = ids
+        .iter()
+        .map(|&id| (id, axiom::base::proc::pid_alive(id)))
+        .collect();
+    assert!(
+        states.iter().all(|&(_, alive)| !alive),
+        "process states (pid, alive): {states:?}"
+    );
 }
 
 #[test]

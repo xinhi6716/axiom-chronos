@@ -359,6 +359,11 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
         if unit == "verifyunit" {
             assert_eq!(r["verify_exit"], 1);
             assert!(r["verify_tail"].is_string());
+            assert!(r["attempt_id"].is_string());
+            let path = std::path::Path::new(r["verify_output"].as_str().unwrap());
+            assert!(path.is_file());
+            let report = fs::read_to_string(r["report"].as_str().unwrap()).unwrap();
+            assert!(report.contains(&format!("BRIDGE VERIFY exit=1 output={}", path.display())));
         }
         if unit == "scopeunit" {
             assert!(!r["outside_scope"].as_array().unwrap().is_empty());

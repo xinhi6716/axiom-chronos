@@ -10,13 +10,18 @@ use std::{
 };
 
 pub enum Begin {
-    Run { brief: Brief, attempt: u32 },
+    Run {
+        brief: Brief,
+        attempt: u32,
+        attempt_id: String,
+    },
     Reused,
 }
 pub struct Finished {
     pub state: String,
     pub verify_exit: Option<i32>,
     pub verify_tail: String,
+    pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
 }
 struct Claim {
@@ -24,6 +29,7 @@ struct Claim {
     store: PathBuf,
     scope: Vec<String>,
     dirty: BTreeSet<String>,
+    attempt_id: String,
 }
 static RUNNING: OnceLock<Mutex<HashMap<String, Claim>>> = OnceLock::new();
 fn key(store: &Path, unit: &str) -> String {
@@ -90,75 +96,120 @@ pub fn begin_unit(
     astra_required: bool,
 ) -> Res<Begin> {
     let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
-    let units = read_units(store)?;
-    let u = units
-        .iter()
-        .find(|u| u.id == unit)
-        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-    let brief = unit_brief(store, unit)?;
-    let rows = evidence(store, unit)?;
-    let missing = dependencies(store, u, &units)?;
-    if !missing.is_empty() {
-        return Err(Failure::new("not_ready", missing.join(", ")));
-    }
-    if active.contains_key(&key(store, unit))
-        || active
-            .values()
-            .any(|c| c.store == store && overlaps(&brief.scope, &c.scope))
-    {
-        return Err(Failure::new("busy", format!("scope busy: {unit}")));
-    }
-    if derive_state(&rows, needs_accept(store, unit)?) == "verified"
-        && rows
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        let u = units
             .iter()
-            .rev()
-            .find(|r| r.kind == "verify")
-            .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
-    {
-        return Ok(Begin::Reused);
-    }
-    let count = rows.iter().filter(|r| r.kind == "run").count();
-    if count >= 2 {
-        return Err(Failure::new(
-            "fix_limit",
-            format!("unit {unit} has reached its fix limit"),
-        ));
-    }
-    if role == "sol" {
-        let full = super::evidence::full_evidence(store)?;
-        if !full
+            .find(|u| u.id == unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        let brief = unit_brief(store, unit)?;
+        let rows = evidence(store, unit)?;
+        let mut disk = read_claims(store)?;
+        if let Some(c) = disk
             .iter()
-            .rev()
-            .find(|r| r.kind == "full")
-            .is_some_and(|r| r.exit_code != 0)
+            .find(|c| c.unit == unit || overlaps(&brief.scope, &c.scope))
         {
+            let held = active
+                .get(&key(store, &c.unit))
+                .is_some_and(|a| a.attempt_id == c.attempt);
+            return Err(if held {
+                Failure::new("busy", format!("scope busy: {unit}"))
+            } else {
+                Failure::new(
+                    "outcome_unknown",
+                    format!("claim outcome unknown: {}", c.attempt),
+                )
+            });
+        }
+        let missing = dependencies(store, u, &units)?;
+        if !missing.is_empty() {
+            return Err(Failure::new("not_ready", missing.join(", ")));
+        }
+        if derive_state(&rows, needs_accept(store, unit)?) == "verified"
+            && rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
+        {
+            return Ok(Begin::Reused);
+        }
+        let count = rows.iter().filter(|r| r.kind == "run").count();
+        if count >= 2 {
             return Err(Failure::new(
-                "sol_not_allowed",
-                "sol requires a failing full test",
+                "fix_limit",
+                format!("unit {unit} has reached its fix limit"),
             ));
         }
-    }
-    if astra_required {
-        astra_gate(store)?;
-    }
-    active.insert(
-        key(store, unit),
-        Claim {
-            store: store.to_path_buf(),
+        if role == "sol" {
+            let full = super::evidence::full_evidence(store)?;
+            if !full
+                .iter()
+                .rev()
+                .find(|r| r.kind == "full")
+                .is_some_and(|r| r.exit_code != 0)
+            {
+                return Err(Failure::new(
+                    "sol_not_allowed",
+                    "sol requires a failing full test",
+                ));
+            }
+        }
+        if astra_required {
+            astra_gate(store)?;
+        }
+        let attempt = count as u32 + 1;
+        let attempt_id = format!("{}-{}", attempt, base::unique());
+        let before = dirty(repo)?;
+        disk.push(DiskClaim {
+            unit: unit.into(),
+            attempt: attempt_id.clone(),
             scope: brief.scope.clone(),
-            dirty: dirty(repo)?,
-        },
-    );
-    Ok(Begin::Run {
-        brief,
-        attempt: count as u32 + 1,
+            started: base::now_iso(),
+        });
+        save_claims(store, &disk)?;
+        active.insert(
+            key(store, unit),
+            Claim {
+                store: store.to_path_buf(),
+                scope: brief.scope.clone(),
+                dirty: before,
+                attempt_id: attempt_id.clone(),
+            },
+        );
+        Ok(Begin::Run {
+            brief,
+            attempt,
+            attempt_id,
+        })
     })
 }
-pub fn abort_unit(store: &Path, unit: &str) {
-    claims()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&key(store, unit));
+pub fn release_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
+    let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
+    with_lock(store, false, || {
+        let mut disk = read_claims(store)?;
+        let index = disk
+            .iter()
+            .position(|c| c.unit == unit && c.attempt == attempt_id)
+            .ok_or_else(|| {
+                Failure::new(
+                    "claim_mismatch",
+                    "claim not found or attempt does not match",
+                )
+            })?;
+        disk.remove(index);
+        save_claims(store, &disk)?;
+        if active
+            .get(&key(store, unit))
+            .is_some_and(|c| c.attempt_id == attempt_id)
+        {
+            active.remove(&key(store, unit));
+        }
+        Ok(())
+    })
+}
+pub fn abort_unit(store: &Path, unit: &str, attempt_id: &str) -> bool {
+    release_claim(store, unit, attempt_id).is_ok()
 }
 pub fn running() -> Vec<String> {
     let mut v: Vec<_> = claims()
@@ -171,13 +222,9 @@ pub fn running() -> Vec<String> {
     v
 }
 pub fn ready_units(store: &Path) -> Res<Vec<String>> {
-    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
     let units = read_units(store)?;
-    let mut selected: Vec<Vec<String>> = active
-        .values()
-        .filter(|c| c.store == store)
-        .map(|c| c.scope.clone())
-        .collect();
+    let disk = read_claims(store)?;
+    let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
     let mut result = vec![];
     for u in &units {
         let rows = evidence(store, &u.id)?;
@@ -193,7 +240,8 @@ pub fn ready_units(store: &Path) -> Res<Vec<String>> {
             Err(e) if e.kind == "no_brief" => continue,
             Err(e) => return Err(e),
         };
-        if selected.iter().any(|s| overlaps(s, &brief.scope)) {
+        if disk.iter().any(|c| c.unit == u.id) || selected.iter().any(|s| overlaps(s, &brief.scope))
+        {
             continue;
         }
         selected.push(brief.scope);
@@ -212,16 +260,24 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
     let ready = ready_units(store)?;
     let active = claims().lock().unwrap_or_else(|e| e.into_inner());
     let units = read_units(store)?;
+    let disk = read_claims(store)?;
     let mut waiting = Vec::new();
     for u in &units {
         let rows = evidence(store, &u.id)?;
         let needs = needs_accept(store, &u.id)?;
         let state = derive_state(&rows, needs);
-        if state == "verified" || ready.contains(&u.id) {
+        if (state == "verified" && !disk.iter().any(|c| c.unit == u.id)) || ready.contains(&u.id) {
             continue;
         }
-        let next = if active.contains_key(&key(store, &u.id)) {
-            "running".to_string()
+        let next = if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
+            if active
+                .get(&key(store, &u.id))
+                .is_some_and(|a| a.attempt_id == c.attempt)
+            {
+                "running".to_string()
+            } else {
+                format!("unknown {}", c.attempt)
+            }
         } else if state == "built" {
             let verify = rows.iter().rposition(|r| r.kind == "verify");
             if needs && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept")) {
@@ -254,24 +310,32 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
 pub fn finish_unit(
     store: &Path,
     unit: &str,
+    attempt_id: &str,
     repo: &Path,
     role: &str,
     model: &str,
     report: &Value,
 ) -> Res<Finished> {
-    struct Release<'a>(&'a Path, &'a str);
+    struct Release<'a>(&'a Path, &'a str, &'a str);
     impl Drop for Release<'_> {
         fn drop(&mut self) {
-            abort_unit(self.0, self.1);
+            abort_unit(self.0, self.1, self.2);
         }
     }
-    let _release = Release(store, unit);
+
     let brief = unit_brief(store, unit)?;
     let (before, others) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
-            .ok_or_else(|| Failure::new("not_found", "unit is not running"))?;
+            .filter(|c| c.attempt_id == attempt_id)
+            .ok_or_else(|| Failure::new("claim_mismatch", "unit attempt is not running"))?;
+        if !read_claims(store)?
+            .iter()
+            .any(|d| d.unit == unit && d.attempt == attempt_id)
+        {
+            return Err(Failure::new("claim_mismatch", "disk claim does not match"));
+        }
         (
             c.dirty.clone(),
             active
@@ -281,6 +345,7 @@ pub fn finish_unit(
                 .collect::<Vec<_>>(),
         )
     };
+    let _release = Release(store, unit, attempt_id);
     let status = report
         .get("status")
         .and_then(Value::as_str)
@@ -347,37 +412,83 @@ pub fn finish_unit(
             String::new(),
         ),
     )?;
+    let mut verify_output = None;
     let mut verify_exit = None;
     let mut verify_tail = String::new();
+    let mut verify_error = None;
     if status == "completed" && outside_scope.is_empty() {
-        let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
-        verify_exit = Some(result.exit_code);
-        verify_tail = result
-            .output
-            .chars()
-            .rev()
-            .take(2000)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        append_evidence(
-            store,
-            unit,
-            &mk(
-                "verify",
-                &brief.verify,
-                result.exit_code,
-                snapshot(repo, &brief.scope),
-            ),
-        )?;
+        match base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800)) {
+            Ok(result) => {
+                verify_exit = Some(result.exit_code);
+                let path = dir.join(format!("{unit}.verify.txt"));
+                let output: String = result
+                    .output
+                    .chars()
+                    .rev()
+                    .take(20000)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                base::atomic_write(&path, output.as_bytes())
+                    .map_err(|e| Failure::new("io", e.to_string()))?;
+                verify_output = Some(path);
+                verify_tail = result
+                    .output
+                    .chars()
+                    .rev()
+                    .take(2000)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                append_evidence(
+                    store,
+                    unit,
+                    &mk(
+                        "verify",
+                        &brief.verify,
+                        result.exit_code,
+                        snapshot(repo, &brief.scope),
+                    ),
+                )?;
+            }
+            Err(e) => verify_error = Some(e.message),
+        }
     }
+    let line = match (&verify_output, verify_exit) {
+        (Some(path), Some(code)) => format!("BRIDGE VERIFY exit={code} output={}", path.display()),
+        _ if verify_error.is_some() => format!("BRIDGE VERIFY not run: {}", verify_error.unwrap()),
+        _ if status != "completed" => "BRIDGE VERIFY not run: worker did not complete".to_string(),
+        _ => "BRIDGE VERIFY not run: changes outside scope".to_string(),
+    };
+    let message = report
+        .get("final_message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .replace("\r\n", "\n");
+    base::atomic_write(
+        &md,
+        format!(
+            "{}{}{}\n",
+            message,
+            if message.is_empty() || message.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            },
+            line
+        )
+        .as_bytes(),
+    )
+    .map_err(|e| Failure::new("io", e.to_string()))?;
     let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
     set_unit_state(store, unit, &state)?;
     Ok(Finished {
         state,
         verify_exit,
         verify_tail,
+        verify_output,
         outside_scope,
     })
 }
