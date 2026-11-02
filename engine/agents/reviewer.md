@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews Codex-written files against the contract they were built to, when the Gemini review_code tool is unavailable. Give it the project's absolute directory, the file paths and the contract.
+description: Reviews Codex-written files against the contract they were built to. Give it the project's absolute directory, the file paths and the contract.
 model: sonnet
 tools: Read, Glob, Grep
 ---

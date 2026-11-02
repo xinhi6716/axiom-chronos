@@ -21,10 +21,10 @@ Question: $ARGUMENTS
    ```
 
    If it reports a failure or a model that is not an Astra model, report that and stop.
-5. Call the bridge `gemini_preview` tool with `project` the slug, `stage: "second_review"`, `model: "gemini-4-argon-high"`, `json_schema` the review schema, and a prompt made of this paragraph, then the question, then the plan:
+5. Give the `chronos:critic` agent the review schema, the plan path and a prompt made of this paragraph, then the question:
 
    Review this research plan against its question. Report each item that goes beyond the question (out_of_scope), claims more than its evidence supports (overclaim), cannot be shown wrong by any test the plan lists (unfalsifiable), or adds machinery the question does not need (complexity). Check for data leakage between development and acceptance data and thresholds changed after results. Then give a verdict.
 
-   If it fails, give the `chronos:critic` agent that prompt, the review schema and the plan path instead. Write the review to `<store>/research/review.json`.
-6. Rule on each finding yourself: uphold it or overrule it, with a one-line reason grounded in the question and the plan. Do not send anything back to Astra or Gemini. Apply the upheld findings to the plan by removing or narrowing what they name, and write the result to `<store>/research/plan-final.md`, and your rulings to `<store>/research/ruling.md`.
-7. Show the final plan in the question's language. Under it, list Gemini's verdict, each finding with your ruling and reason, and the Astra model and its input tokens.
+   Write the review to `<store>/research/review.json`.
+6. Rule on each finding yourself: uphold it or overrule it, with a one-line reason grounded in the question and the plan. Do not send anything back to Astra or the critic. Apply the upheld findings to the plan by removing or narrowing what they name, and write the result to `<store>/research/plan-final.md`, and your rulings to `<store>/research/ruling.md`.
+7. Show the final plan in the question's language. Under it, list the critic's verdict, each finding with your ruling and reason, and the Astra model and its input tokens.
