@@ -89,7 +89,7 @@ Claude session 載入引擎與 local settings。Codex worker 預設使用 lean m
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="設計流程：定義範圍、由 Codex thread 施工、檢查指令紀錄、記住已驗證且可重用的工作。接受結果前仍需檢查修改。" />
+  <img src="assets/chronos-process.svg" width="1200" alt="流程：Astra 先規劃、critic 第二審、architect 切模組、Codex 施工（terra 實作、sol 整合）、Claude 審查程式，最後由完整測試、CI 與記憶收尾。接受結果前仍需檢查修改。" />
 </picture></p>
 
 圖中是預期流程，不是執行環境強制保證的正確性。

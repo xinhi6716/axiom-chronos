@@ -86,7 +86,7 @@ Claude sessions load the engine with local settings. Codex workers use lean mode
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="Designed flow: scope the work, build in Codex threads, check command evidence, and remember useful verified work. Review changes before accepting them." />
+  <img src="assets/chronos-process.svg" width="1200" alt="Workflow: Astra plans, the critic reviews the plan, the architect splits modules, Codex builds (terra builds, sol integrates), Claude reviews the code, then full tests, CI and memory close the loop. Review changes before accepting them." />
 </picture></p>
 
 This diagram describes the intended workflow, not an enforced correctness guarantee.
