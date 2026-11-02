@@ -17,6 +17,7 @@ const SECTIONS: [(&str, &str, Option<&str>); 12] = [
 const LABELS: [&str; 6] = ["來源：", "閱讀：", "整合：", "落點：", "測試：", "排除："];
 
 fn check(text: &str) -> Result<(), String> {
+    let text = text.replace("\r\n", "\n");
     let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in text.lines() {
         if let Some(name) = line.strip_prefix("## ") {
@@ -94,10 +95,16 @@ fn check(text: &str) -> Result<(), String> {
 
 #[test]
 fn adoption_document_and_negative_controls() {
-    let text = include_str!("../docs/round4-adoption.zh-TW.md");
-    assert!(check(text).is_ok(), "{:?}", check(text));
+    let text = include_str!("../docs/round4-adoption.zh-TW.md").replace("\r\n", "\n");
+    assert!(check(&text).is_ok(), "{:?}", check(&text));
+    assert!(check(&text.replace("\n", "\r\n")).is_ok());
     assert!(check(&text.replacen("## HERO", "## renamed", 1)).is_err());
-    assert!(check(&text.replacen("## HERO\n", "", 1)).is_err());
+    let missing_header = text
+        .lines()
+        .filter(|line| *line != "## HERO")
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(check(&missing_header).is_err());
     let swapped = text
         .replacen("92686ca", "TEMP_HEAD", 1)
         .replacen("c485faa", "92686ca", 1)
