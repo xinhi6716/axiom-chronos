@@ -211,3 +211,178 @@ fn atomic_write_outlasts_a_reader_that_blocks_replacement() {
     assert_eq!(fs::read_to_string(&target).unwrap(), "new");
     assert_eq!(fs::read_dir(t.path()).unwrap().count(), 1, "temp file left");
 }
+
+const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n";
+const EVIDENCE: &str = "kind\tcommand\texit_code\tcommit\tts\n";
+
+/// A store holding unit `u` over `f.txt` in a git repository, padded so reading units takes a moment.
+fn unit_in_repo(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let store = empty_store(root);
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("f.txt"), "one").unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let brief = store.join("u.brief");
+    fs::write(&brief, "GOAL g\nSCOPE f.txt\nVERIFY echo ok\n").unwrap();
+    let mut units = format!("{HEADER}u\tm\tpending\t\t\t\t{}\n", brief.display());
+    for i in 0..20_000 {
+        units.push_str(&format!("padding{i}\tother\tpending\t\t\t\t\n"));
+    }
+    fs::write(store.join("units.tsv"), units).unwrap();
+    (store, repo)
+}
+fn cached_state(store: &Path) -> String {
+    orch::read_units(store)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.id == "u")
+        .unwrap()
+        .state
+}
+fn evidence_state(store: &Path) -> String {
+    orch::derive_state(&orch::evidence(store, "u").unwrap(), false)
+}
+fn save_state_by_hand(store: &Path, state: &str) {
+    let text = fs::read_to_string(store.join("units.tsv")).unwrap();
+    let mut lines = text.lines();
+    let mut out = format!("{}\n", lines.next().unwrap());
+    for line in lines {
+        let mut cells: Vec<_> = line.split('\t').collect();
+        if cells[0] == "u" {
+            cells[2] = state;
+        }
+        out.push_str(&cells.join("\t"));
+        out.push('\n');
+    }
+    fs::write(store.join("units.tsv"), out).unwrap();
+}
+
+/// Another process appends a failing review and saves the state it derives, inside the
+/// gap after `racer` wrote the row named by `marker` and before `racer` saves its state.
+fn failing_review_lands_during(store: &Path, marker: &str, racer: impl FnOnce() + Send) {
+    let file = store.join("reports/u.evidence.tsv");
+    std::thread::scope(|scope| {
+        let racer = scope.spawn(racer);
+        while !racer.is_finished()
+            && !fs::read_to_string(&file).is_ok_and(|t| t.contains(marker))
+        {
+            std::hint::spin_loop();
+        }
+        orch::with_lock(store, false, || {
+            std::thread::sleep(Duration::from_millis(150));
+            let mut text = fs::read_to_string(&file).unwrap();
+            text.push_str("review\tclaude-review\t1\tnewer\t9\n");
+            base::atomic_write(&file, text.as_bytes()).unwrap();
+            save_state_by_hand(store, &evidence_state(store));
+            Ok(())
+        })
+        .unwrap();
+        racer.join().unwrap();
+    });
+}
+
+#[test]
+fn a_stale_state_cannot_hide_a_newer_failing_review() {
+    for _ in 0..3 {
+        let t = tempfile::tempdir().unwrap();
+        let (store, repo) = unit_in_repo(t.path());
+        let tree = orch::snapshot(&repo, &["f.txt".into()]);
+        fs::write(
+            store.join("reports/u.evidence.tsv"),
+            format!("{EVIDENCE}run\tgpt-worker\t0\t\t1\nverify\ttest\t0\t{tree}\t2\n"),
+        )
+        .unwrap();
+        failing_review_lands_during(&store, "\nreview\t", || {
+            orch::record_review(&store, &["u".into()], "claude-review", true, &repo).unwrap();
+        });
+        assert_eq!(cached_state(&store), "review-failed");
+        assert_eq!(cached_state(&store), evidence_state(&store));
+    }
+}
+
+#[test]
+fn a_stale_state_from_a_finished_unit_cannot_hide_a_newer_failing_review() {
+    for _ in 0..3 {
+        let t = tempfile::tempdir().unwrap();
+        let (store, repo) = unit_in_repo(t.path());
+        let attempt = match orch::begin_unit(&store, "u", "worker", &repo, false).unwrap() {
+            Begin::Run { attempt_id, .. } => attempt_id,
+            Begin::Reused => panic!("nothing to reuse"),
+        };
+        failing_review_lands_during(&store, "\nverify\t", || {
+            orch::finish_unit(
+                &store,
+                "u",
+                &attempt,
+                &repo,
+                "worker",
+                "gpt-worker",
+                &serde_json::json!({"status":"completed"}),
+            )
+            .unwrap();
+        });
+        assert_eq!(cached_state(&store), "review-failed");
+        assert_eq!(cached_state(&store), evidence_state(&store));
+    }
+}
+
+#[test]
+fn the_goal_cannot_close_while_a_unit_attempt_is_running() {
+    let t = tempfile::tempdir().unwrap();
+    let store = empty_store(t.path());
+    fs::write(
+        store.join("units.tsv"),
+        format!("{HEADER}u\tm\tverified\t\t\t\t\n"),
+    )
+    .unwrap();
+    fs::write(
+        store.join("reports/_full.evidence.tsv"),
+        format!("{EVIDENCE}full\ttest\t0\t\t9999\n"),
+    )
+    .unwrap();
+    assert!(orch::done_gate(&store, true).is_ok());
+    fs::write(
+        store.join("claims.tsv"),
+        "unit\tattempt\tscope\tstarted\nu\t2-running\tf.txt\t2026-01-01T00:00:00Z\n",
+    )
+    .unwrap();
+    let refused = orch::done_gate(&store, true).unwrap_err();
+    assert_eq!(refused.kind, "not_done");
+    assert!(refused.message.contains('u'), "{}", refused.message);
+    fs::write(store.join("claims.tsv"), "unit\tattempt\tscope\tstarted\n").unwrap();
+    assert!(orch::done_gate(&store, true).is_ok());
+}
+
+#[test]
+fn a_verified_unit_cannot_be_set_back_by_hand() {
+    let t = tempfile::tempdir().unwrap();
+    let store = empty_store(t.path());
+    fs::write(
+        store.join("units.tsv"),
+        format!("{HEADER}done\tm\tverified\t\t\t\t\nopen\tm\tpending\t\t\t\t\n"),
+    )
+    .unwrap();
+    let set = |unit: &str, state: &str| {
+        orch::run(
+            &store,
+            &["unit", "set", unit, "--state", state].map(String::from),
+            false,
+            false,
+        )
+    };
+    let refused = set("done", "pending");
+    assert_eq!(refused.exit_code, 1);
+    assert!(refused.stderr.contains("verified"), "{}", refused.stderr);
+    let states: Vec<_> = orch::read_units(&store)
+        .unwrap()
+        .into_iter()
+        .map(|u| u.state)
+        .collect();
+    assert_eq!(states, ["verified", "pending"]);
+    assert_eq!(set("open", "review-failed").exit_code, 0);
+}

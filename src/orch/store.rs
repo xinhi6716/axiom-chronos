@@ -280,15 +280,17 @@ pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
     write(store, "claims.tsv", &text)
 }
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
-    with_lock(store, false, || {
-        let mut rows = read_units(store)?;
-        let row = rows
-            .iter_mut()
-            .find(|u| u.id == unit)
-            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-        row.state = required(state, "state")?;
-        save_units(store, &rows)
-    })
+    with_lock(store, false, || save_unit_state(store, unit, state))
+}
+/// The caller holds the store lock.
+pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
+    let mut rows = read_units(store)?;
+    let row = rows
+        .iter_mut()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    row.state = required(state, "state")?;
+    save_units(store, &rows)
 }
 fn push(
     store: &Path,
@@ -928,6 +930,11 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         .iter_mut()
                         .find(|u| u.id == id)
                         .ok_or_else(|| Failure::new("not_found", format!("unit {id} not found")))?;
+                    if u.state == "verified" {
+                        return Err(fail(format!(
+                            "unit {id} is verified; its state follows its evidence and cannot be set"
+                        )));
+                    }
                     u.state = state;
                     if let Some(v) = option(args, "--branch")? {
                         u.branch = required(v, "branch")?;

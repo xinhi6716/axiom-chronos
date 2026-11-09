@@ -616,8 +616,7 @@ pub fn finish_unit(
         .as_bytes(),
     )
     .map_err(|e| Failure::new("io", e.to_string()))?;
-    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-    set_unit_state(store, unit, &state)?;
+    let state = update_unit_state(store, unit)?;
     Ok(Finished {
         state,
         verify_exit,

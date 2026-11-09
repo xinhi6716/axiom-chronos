@@ -59,7 +59,7 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     }
     "verified".into()
 }
-use super::{parse_map, read_units, set_unit_state, unit_brief, with_lock};
+use super::{parse_map, read_claims, read_units, save_unit_state, unit_brief, with_lock};
 use crate::base::{proc::ShellRun, Failure, Res};
 use std::{path::Path, process::Command, time::Duration};
 
@@ -234,10 +234,13 @@ fn row(kind: &str, command: &str, exit_code: i32, commit: String) -> Evidence {
         ts: base::now_iso(),
     }
 }
-fn update(store: &Path, unit: &str) -> Res<String> {
-    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-    set_unit_state(store, unit, &state)?;
-    Ok(state)
+/// Derives and saves under one lock, so a state derived from older evidence cannot land last.
+pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
+    with_lock(store, false, || {
+        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+        save_unit_state(store, unit, &state)?;
+        Ok(state)
+    })
 }
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
@@ -265,7 +268,7 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
                 snapshot(repo, &scope),
             ),
         )?;
-        update(store, &u.id)?;
+        update_unit_state(store, &u.id)?;
     }
     Ok(result)
 }
@@ -343,7 +346,7 @@ pub fn record_review(
             unit,
             &row("review", reviewer, if pass { 0 } else { 1 }, commit),
         )?;
-        result.push((unit.clone(), update(store, unit)?));
+        result.push((unit.clone(), update_unit_state(store, unit)?));
     }
     Ok(result)
 }
@@ -404,6 +407,13 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
         .collect();
     if !unfinished.is_empty() {
         return Err(Failure::new("not_done", unfinished.join(", ")));
+    }
+    let running: Vec<_> = read_claims(store)?
+        .into_iter()
+        .map(|c| format!("{} is running attempt {}", c.unit, c.attempt))
+        .collect();
+    if !running.is_empty() {
+        return Err(Failure::new("not_done", running.join(", ")));
     }
     let mut latest = String::new();
     for u in units {
