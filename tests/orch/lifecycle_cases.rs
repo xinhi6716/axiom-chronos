@@ -376,7 +376,10 @@ fn external_failure_without_real_evidence_records_nothing() {
     assert!(!unborn.exists(), "a mistyped store must not be created");
 
     assert_eq!(external(&store, &repo, &good).exit_code, 1);
-    assert!(full.exists(), "the same flags record once the input is valid");
+    assert!(
+        full.exists(),
+        "the same flags record once the input is valid"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -430,7 +433,11 @@ fn dispatcher_ci_call_uses_the_real_flags() {
         args.extend([flag.to_string(), value.to_string()]);
     }
     let out = run(&store, &args, false, false);
-    assert!(out.stdout.starts_with("fulltest\texit=1\n"), "{}", out.stderr);
+    assert!(
+        out.stdout.starts_with("fulltest\texit=1\n"),
+        "{}",
+        out.stderr
+    );
     assert_eq!(sol_refusal(&store, &repo), None);
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
