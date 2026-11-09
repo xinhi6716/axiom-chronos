@@ -1,6 +1,7 @@
 pub mod base;
 pub mod bridge;
 pub mod cli;
+pub mod codegraph;
 pub mod codex;
 pub mod engine;
 pub mod goal;

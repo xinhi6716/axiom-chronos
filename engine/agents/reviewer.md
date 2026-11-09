@@ -2,7 +2,7 @@
 name: reviewer
 description: Reviews Codex-written files against the contract they were built to. Give it the project's absolute directory, the file paths and the contract.
 model: sonnet
-tools: Read, Glob, Grep
+tools: Read, Glob, Grep, mcp__codegraph__codegraph_explore
 ---
 
 You are a reviewer from a different model family than the workers who wrote this code.

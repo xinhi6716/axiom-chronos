@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    engine, goal, hook,
+    codegraph, engine, goal, hook,
 };
 use std::{
     io::{BufRead, BufReader, Write},
@@ -214,7 +214,8 @@ fn run_inner(
 ) -> Res<i32> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns)?;
+    let graph = codegraph::detect(project);
+    let mut argv = command(config, &plugin, max_turns, graph.as_deref())?;
     if let Some(id) = resume {
         argv.extend(["--resume".into(), id.into()]);
     }

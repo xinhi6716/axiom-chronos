@@ -117,5 +117,5 @@ fn reviewer_tools_are_read_only() {
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:"))
         .collect();
-    assert_eq!(tools, [" Read, Glob, Grep"]);
+    assert_eq!(tools, [" Read, Glob, Grep, mcp__codegraph__codegraph_explore"]);
 }

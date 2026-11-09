@@ -1,4 +1,4 @@
-use crate::base;
+use crate::{base, codegraph};
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -120,6 +120,22 @@ fn state() -> Check {
     }
 }
 
+fn graph() -> Check {
+    let detail = match base::on_path(codegraph::SERVER) {
+        None => "not on PATH (optional; runs work without it)".to_string(),
+        Some(path) if std::env::current_dir().is_ok_and(|dir| codegraph::indexed(&dir)) => {
+            format!("{path} (this directory has .codegraph/, so runs here use it)")
+        }
+        Some(path) => format!("{path} (no .codegraph/ here; `codegraph init` turns it on)"),
+    };
+    Check {
+        label: "codegraph",
+        ok: true,
+        required: false,
+        detail,
+    }
+}
+
 #[cfg(windows)]
 fn windows_shell() -> Check {
     match base::resolve_command("AXIOM_PWSH_CMD", "pwsh") {
@@ -172,6 +188,7 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
         ),
         sqlite(),
         state(),
+        graph(),
     ];
     #[cfg(windows)]
     {
