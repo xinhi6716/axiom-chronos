@@ -45,7 +45,7 @@ pub fn command(
     config: &Config,
     plugin_dir: &Path,
     max_turns: Option<u32>,
-    graph: Option<&str>,
+    graph: bool,
 ) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
@@ -58,7 +58,7 @@ pub fn command(
         }
     })?;
     let mut tools = TOOLS.join(",");
-    if graph.is_some() {
+    if graph {
         tools = format!("{tools},{}", codegraph::TOOL);
     }
     cmd.extend([
@@ -81,8 +81,8 @@ pub fn command(
         "--model".into(),
         "opus".into(),
     ]);
-    if let Some(program) = graph {
-        cmd.extend(["--mcp-config".into(), codegraph::claude_config(program)]);
+    if graph {
+        cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);
     }
     if let Some(n) = max_turns {
         cmd.extend(["--max-turns".into(), n.to_string()]);

@@ -81,7 +81,10 @@ for line in sys.stdin:
         send({'id': message['id'], 'result': {'marketplaces': [{'name': 'personal', 'plugins': [
             {'id': 'panel@personal', 'enabled': True}, {'id': 'keepme@personal', 'enabled': True}, {'id': 'off@personal', 'enabled': False}]}]}})
     elif method == 'config/read':
-        send({'id': message['id'], 'result': {'config': {'mcp_servers': {'node_repl': {'command': 'x'}}}, 'origins': {}}})
+        servers = {'node_repl': {'command': 'x'}}
+        if os.getenv('FAKE_CODEX_CODEGRAPH'):
+            servers['codegraph'] = {'command': 'codegraph'}
+        send({'id': message['id'], 'result': {'config': {'mcp_servers': servers}, 'origins': {}}})
     elif method == 'thread/start':
         threads += 1
         thread_id = f'thread-{threads}'

@@ -9,7 +9,7 @@ fn command_and_message() {
         home: PathBuf::from("home"),
         bin: PathBuf::new(),
     };
-    let args = command(&config, Path::new("plugin"), Some(3), None).unwrap();
+    let args = command(&config, Path::new("plugin"), Some(3), false).unwrap();
     let tools = [
         "Agent",
         "Read",
@@ -55,7 +55,7 @@ fn command_and_message() {
     .collect();
     assert_eq!(args, expected);
     assert_eq!(
-        command(&config, Path::new("plugin"), None, None).unwrap(),
+        command(&config, Path::new("plugin"), None, false).unwrap(),
         expected[..expected.len() - 2]
     );
     let msg: Value = serde_json::from_str(&user_message("中文\r\n")).unwrap();
@@ -69,7 +69,7 @@ fn not_installed_message() {
         bin: PathBuf::new(),
     };
     assert_eq!(
-        command(&config, Path::new("plugin"), None, None)
+        command(&config, Path::new("plugin"), None, false)
             .unwrap_err()
             .message,
         "claude is not on PATH; install Claude Code and sign in with `claude`"

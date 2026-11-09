@@ -121,7 +121,7 @@ fn state() -> Check {
 }
 
 fn graph() -> Check {
-    let detail = match base::on_path(codegraph::SERVER) {
+    let detail = match base::on_path(codegraph::NAME) {
         None => "not on PATH (optional; runs work without it)".to_string(),
         Some(path) if std::env::current_dir().is_ok_and(|dir| codegraph::indexed(&dir)) => {
             format!("{path} (this directory has .codegraph/, so runs here use it)")

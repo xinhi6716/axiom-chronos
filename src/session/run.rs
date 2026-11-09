@@ -214,8 +214,7 @@ fn run_inner(
 ) -> Res<i32> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let graph = codegraph::detect(project);
-    let mut argv = command(config, &plugin, max_turns, graph.as_deref())?;
+    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if let Some(id) = resume {
         argv.extend(["--resume".into(), id.into()]);
     }
