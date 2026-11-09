@@ -2,7 +2,7 @@
 mod common;
 use axiom::{
     goal,
-    session::{run, Config},
+    session::{run, Clock, Config},
 };
 use serde_json::Value;
 use std::{
@@ -87,6 +87,7 @@ fn execute(
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     let mut output = Vec::new();
     let code = run(
@@ -269,6 +270,7 @@ fn existing_log_is_not_overwritten() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     std::fs::create_dir_all(home.join("logs")).unwrap();
     let now = std::time::SystemTime::now()
@@ -345,6 +347,7 @@ fn interrupt_kills_process_tree() {
         claude: Ok(common::fake("fake_claude")),
         home: temp.path().join("home"),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     goal::open(&config.home, SESSION, "test", None).unwrap();
     let mut out = Vec::new();
@@ -422,6 +425,7 @@ fn interrupted_and_resume() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     for scenario in ["limit", "crash"] {
         goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
@@ -461,7 +465,7 @@ fn interrupted_and_resume() {
     std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
     let mut resume_output = Vec::new();
     assert_eq!(
-        axiom::session::resume(&config, SESSION, Some(17), empty(), &mut resume_output).unwrap(),
+        axiom::session::resume(&config, SESSION, Some(17), None, empty(), &mut resume_output).unwrap(),
         0
     );
     let output = String::from_utf8(resume_output).unwrap();
@@ -500,7 +504,7 @@ fn interrupted_and_resume() {
     assert_eq!(g.amendments, ["amendment"]);
     std::fs::write(home.join("goals").join(format!("{SESSION}.json")), "{").unwrap();
     assert_eq!(
-        axiom::session::resume(&config, SESSION, None, empty(), &mut Vec::new())
+        axiom::session::resume(&config, SESSION, None, None, empty(), &mut Vec::new())
             .unwrap_err()
             .kind,
         "invalid_json"
@@ -515,9 +519,10 @@ fn resume_rejects_missing_done_and_missing_cwd() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     let attempt =
-        |id| axiom::session::resume(&config, id, None, empty(), &mut Vec::new()).unwrap_err();
+        |id| axiom::session::resume(&config, id, None, None, empty(), &mut Vec::new()).unwrap_err();
     assert_eq!(attempt("missing").kind, "not_found");
     goal::open(&home, "done", "wish", None).unwrap();
     goal::set_status(&home, "done", "done", None).unwrap();

@@ -20,6 +20,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
     let mut turns = (skill == "research").then_some(40);
     let (mut no_architect, mut creative, mut resume, mut project_set) =
         (false, false, None, false);
+    const RESUME_USAGE: &str = "--resume takes a session id and an optional message";
     if skill == "wish" && args.iter().any(|a| a == "--resume") {
         let mut j = 0;
         let mut seen = false;
@@ -32,11 +33,13 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
                 "--max-turns" if j + 1 < args.len() => {
                     j += 2;
                 }
-                _ => return usage("--resume takes only a session id"),
+                "--" if seen => break,
+                s if seen && !s.starts_with('-') => break,
+                _ => return usage(RESUME_USAGE),
             }
         }
         if !seen {
-            return usage("--resume takes only a session id");
+            return usage(RESUME_USAGE);
         }
     }
     let mut i = 0;
@@ -58,7 +61,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             },
             "--resume" if skill == "wish" => match value(args, &mut i, "--resume") {
                 Ok(v) if resume.is_none() => resume = Some(v),
-                _ => return usage("--resume takes only a session id"),
+                _ => return usage(RESUME_USAGE),
             },
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
@@ -72,13 +75,15 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         i += 1;
     }
     if let Some(id) = resume {
-        if i != args.len() || project_set || no_architect || creative {
-            return usage("--resume takes only a session id");
+        if project_set || no_architect || creative {
+            return usage(RESUME_USAGE);
         }
+        let message = (i < args.len()).then(|| args[i..].join(" "));
         return match session::resume(
             &session::Config::from_env(),
             &id,
             turns,
+            message.as_deref(),
             Box::new(io::BufReader::new(io::stdin())),
             &mut io::stdout(),
         ) {

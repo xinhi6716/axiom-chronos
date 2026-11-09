@@ -43,7 +43,10 @@ emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers':
 if scenario == 'limit':
     emit({'type': 'result', 'is_error': True, 'result': "You've hit your usage limit"})
     sys.exit(0)
-if scenario == 'resume':
+if scenario == 'limit-reset' and '--resume' not in sys.argv:
+    emit({'type': 'result', 'is_error': True, 'result': "You've hit your session limit · resets 4:40am (Asia/Taipei)"})
+    sys.exit(0)
+if scenario in ('resume', 'limit-reset'):
     path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
     goal = json.loads(path.read_text(encoding='utf-8'))
     goal['status'] = 'done'

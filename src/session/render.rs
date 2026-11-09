@@ -1,3 +1,4 @@
+use super::Clock;
 use crate::base::{self, Failure, Res};
 use serde_json::{json, Value};
 use std::{
@@ -28,6 +29,7 @@ pub struct Config {
     pub claude: Res<Vec<String>>,
     pub home: PathBuf,
     pub bin: PathBuf,
+    pub clock: Clock,
 }
 impl Config {
     pub fn from_env() -> Self {
@@ -35,6 +37,7 @@ impl Config {
             claude: base::resolve_command("AXIOM_CLAUDE_CMD", "claude"),
             home: base::axiom_home(),
             bin: std::env::current_exe().unwrap_or_default(),
+            clock: Clock::system(),
         }
     }
 }
