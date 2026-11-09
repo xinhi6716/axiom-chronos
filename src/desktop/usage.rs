@@ -12,6 +12,7 @@ use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHea
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, IconName, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,6 +22,7 @@ use std::collections::BTreeMap;
 const TEXT: i18n::Table = &[
     ("This run", "這次執行"),
     ("All runs", "全部執行"),
+    ("1 run", "共 1 次執行"),
     ("{n} runs", "共 {n} 次執行"),
     (
         "Dollar figures are API-price equivalents. Subscription plans are not billed these amounts.",
@@ -31,18 +33,23 @@ const TEXT: i18n::Table = &[
     ("Cached", "快取讀取"),
     ("Output", "輸出"),
     ("Peak context", "上下文高峰"),
-    ("{missing} of {runs} runs have no dollar figure", "{runs} 次中有 {missing} 次沒有金額"),
-    ("Codex tokens have no dollar figure", "Codex 的 token 沒有金額"),
+    ("{missing} of {runs} runs not reported", "{runs} 次中有 {missing} 次沒有金額"),
+    ("Excludes Codex", "不含 Codex"),
     ("{ratio}× the {limit} line", "警戒線 {limit} 的 {ratio} 倍"),
     ("Under the {limit} line", "在警戒線 {limit} 以下"),
     ("Peak context per agent", "各 agent 的上下文高峰"),
     ("Warning line {limit}", "警戒線 {limit}"),
+    (
+        "Each bar is the largest context that agent carried. Past the line, every step re-reads too much.",
+        "每條長度是該 agent 累積過的最大上下文；超過警戒線，代表每一步都要重讀太多內容。",
+    ),
     ("No agent has reported its context size yet.", "還沒有 agent 回報上下文大小。"),
     ("{tokens} tokens at its largest", "最大時 {tokens} token"),
     ("Highest in {project}", "最高出現在 {project}"),
     ("Over the line in {over} of {seen} runs", "{seen} 次中有 {over} 次超過警戒線"),
     ("Warnings", "警告"),
     ("Nothing to fix. Every agent stayed under the line.", "沒有需要處理的事，每個 agent 都在警戒線內。"),
+    ("Nothing to check yet.", "還沒有可檢查的資料。"),
     ("{agent}: context too large", "{agent}：上下文過大"),
     (
         "It reached {peak} tokens, {ratio} times the {limit} line. Every step re-reads all of it, so each step costs more than the last.",
@@ -50,14 +57,14 @@ const TEXT: i18n::Table = &[
     ),
     ("Over the line in {over} of {seen} runs, so this is a pattern.", "{seen} 次中有 {over} 次超過，不是偶發。"),
     (
-        "What to do: split the wish into smaller parts so a new agent takes over each one, and have it search large files instead of reading them whole.",
-        "建議：把願望拆成幾個較小的部分，讓每個部分由新的 agent 接手；大檔案用搜尋的，不要整份讀進來。",
+        "**What to do:** split the wish into smaller parts so a new agent takes over each one, and have it search large files instead of reading them whole.",
+        "**建議：**把願望拆成幾個較小的部分，讓每個部分由新的 agent 接手；大檔案用搜尋的，不要整份讀進來。",
     ),
     ("Cost by model", "各模型花費"),
     ("Cost by role", "各角色花費"),
     ("Model", "模型"),
     ("Role", "角色"),
-    ("Cost", "花費"),
+    ("API cost", "API 花費"),
     ("Tokens only", "只有 token"),
     (
         "Codex reports tokens but no dollars, so its rows show “—” and are not in the total.",
@@ -218,7 +225,7 @@ fn summarize(runs: &[Run]) -> Summary {
             add_cost(&mut summary.roles, &role.role, role.usd, [role.input, role.cached, role.output]);
         }
         let mut peaks: BTreeMap<&SharedString, u64> = BTreeMap::new();
-        for context in &usage.contexts {
+        for context in usage.contexts.iter().filter(|context| context.peak_tokens > 0) {
             let peak = peaks.entry(&context.agent).or_default();
             *peak = (*peak).max(context.peak_tokens);
         }
@@ -310,18 +317,22 @@ fn chart_scale(rows: &[ContextRow]) -> u64 {
         .max(CONTEXT_WARNING_TOKENS + CONTEXT_WARNING_TOKENS / 4)
 }
 
+fn with_commas(value: u64) -> String {
+    let mut text = value.to_string();
+    let mut comma = text.len();
+    while comma > 3 {
+        comma -= 3;
+        text.insert(comma, ',');
+    }
+    text
+}
+
 fn fmt_usd(value: f64) -> String {
     if value > 0.0 && value < 0.005 {
         return "<$0.01".into();
     }
     let cents = (value * 100.0).round() as u64;
-    let mut whole = (cents / 100).to_string();
-    let mut comma = whole.len();
-    while comma > 3 {
-        comma -= 3;
-        whole.insert(comma, ',');
-    }
-    format!("${whole}.{:02}", cents % 100)
+    format!("${}.{:02}", with_commas(cents / 100), cents % 100)
 }
 
 fn fmt_cost(cost: Option<f64>) -> String {
@@ -330,7 +341,7 @@ fn fmt_cost(cost: Option<f64>) -> String {
 
 fn fmt_dollars(dollars: Dollars) -> String {
     match dollars.known {
-        Some(known) if dollars.missing > 0 => format!("≥ {}", fmt_usd(known)),
+        Some(known) if dollars.missing > 0 => format!("{}+", fmt_usd(known)),
         known => fmt_cost(known),
     }
 }
@@ -384,11 +395,11 @@ const fn right(width: f32) -> Col {
     Col { width: Some(width), right: true }
 }
 
-const NUMBER_COLS: [Col; 4] = [right(84.), right(64.), right(64.), right(64.)];
-const RUN_COLS: [Col; 7] = [left(112.), left(132.), grow(), right(88.), right(72.), right(104.), right(116.)];
+const NUMBER_COLS: [Col; 4] = [right(80.), right(60.), right(60.), right(60.)];
+const RUN_COLS: [Col; 7] = [left(144.), left(120.), grow(), right(88.), right(72.), right(104.), right(104.)];
 
 fn sized<E: Styled>(element: E, col: Col) -> E {
-    let element = element.flex().items_center().px_2().text_size(px(13.));
+    let element = element.flex().items_center().overflow_hidden().px_2().text_size(px(13.));
     let element = match col.width {
         Some(width) => element.w(px(width)).flex_none(),
         None => element.flex_1().min_w_0(),
@@ -464,12 +475,12 @@ fn totals(summary: &Summary, cx: &App) -> Div {
     let peak = summary.peak();
     let cost_note = if summary.cost.known.is_some() && summary.cost.missing > 0 {
         Some(
-            tr(cx, TEXT, "{missing} of {runs} runs have no dollar figure")
+            tr(cx, TEXT, "{missing} of {runs} runs not reported")
                 .replace("{missing}", &summary.cost.missing.to_string())
                 .replace("{runs}", &summary.runs.to_string()),
         )
     } else if summary.models.iter().any(CostRow::tokens_only) {
-        Some(tr(cx, TEXT, "Codex tokens have no dollar figure").to_owned())
+        Some(tr(cx, TEXT, "Excludes Codex").to_owned())
     } else {
         None
     };
@@ -532,9 +543,9 @@ const CHART_LABEL: f32 = 20.;
 
 fn context_tooltip(row: &ContextRow, all_runs: bool, cx: &App) -> String {
     let mut lines = vec![
-        format!("{}: {}", row.agent, tr(cx, TEXT, "{tokens} tokens at its largest").replace("{tokens}", &fmt_with_commas(row.peak))),
+        format!("{}: {}", row.agent, tr(cx, TEXT, "{tokens} tokens at its largest").replace("{tokens}", &with_commas(row.peak))),
     ];
-    if all_runs {
+    if all_runs && row.runs_seen > 1 {
         lines.push(tr(cx, TEXT, "Highest in {project}").replace("{project}", &row.project));
         lines.push(
             tr(cx, TEXT, "Over the line in {over} of {seen} runs")
@@ -543,16 +554,6 @@ fn context_tooltip(row: &ContextRow, all_runs: bool, cx: &App) -> String {
         );
     }
     lines.join("\n")
-}
-
-fn fmt_with_commas(value: u64) -> String {
-    let mut text = value.to_string();
-    let mut comma = text.len();
-    while comma > 3 {
-        comma -= 3;
-        text.insert(comma, ',');
-    }
-    text
 }
 
 fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App) -> Stateful<Div> {
@@ -622,7 +623,20 @@ fn context_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
     let scale = chart_scale(&summary.contexts) as f32;
     let line = CONTEXT_WARNING_TOKENS as f32 / scale;
     let label = tr(cx, TEXT, "Warning line {limit}").replace("{limit}", &fmt_limit());
-    panel(t).child(panel_title(t, title)).child(
+    let caption = tr(
+        cx,
+        TEXT,
+        "Each bar is the largest context that agent carried. Past the line, every step re-reads too much.",
+    );
+    panel(t)
+        .child(
+            h_flex()
+                .justify_between()
+                .gap_4()
+                .child(panel_title(t, title).flex_none())
+                .child(div().min_w_0().truncate().text_xs().text_color(t.muted).child(caption)),
+        )
+        .child(
         div()
             .relative()
             .pt(px(CHART_LABEL))
@@ -655,30 +669,31 @@ fn warning_alert(ix: usize, warning: &Warning, all_runs: bool, cx: &App) -> Aler
     let icon = Icon::new(IconName::TriangleAlert).text_color(t.review);
     match warning {
         Warning::ContextTooLarge { agent, peak, runs_seen, runs_over } => {
-            let mut lines = vec![tr(
+            let mut why = tr(
                 cx,
                 TEXT,
                 "It reached {peak} tokens, {ratio} times the {limit} line. Every step re-reads all of it, so each step costs more than the last.",
             )
             .replace("{peak}", &fmt_tokens(*peak))
             .replace("{ratio}", &fmt_ratio(*peak))
-            .replace("{limit}", &fmt_limit())];
+            .replace("{limit}", &fmt_limit());
             if all_runs && *runs_over > 1 {
-                lines.push(
-                    tr(cx, TEXT, "Over the line in {over} of {seen} runs, so this is a pattern.")
+                why.push(' ');
+                why.push_str(
+                    &tr(cx, TEXT, "Over the line in {over} of {seen} runs, so this is a pattern.")
                         .replace("{over}", &runs_over.to_string())
                         .replace("{seen}", &runs_seen.to_string()),
                 );
             }
-            lines.push(
+            let body = format!(
+                "{why}\n\n{}",
                 tr(
                     cx,
                     TEXT,
-                    "What to do: split the wish into smaller parts so a new agent takes over each one, and have it search large files instead of reading them whole.",
-                )
-                .to_owned(),
+                    "**What to do:** split the wish into smaller parts so a new agent takes over each one, and have it search large files instead of reading them whole.",
+                ),
             );
-            Alert::warning(("usage-warning", ix), lines.join("\n"))
+            Alert::warning(("usage-warning", ix), TextView::markdown(("usage-warning-text", ix), body))
                 .title(tr(cx, TEXT, "{agent}: context too large").replace("{agent}", agent))
                 .text_color(t.text)
                 .icon(icon)
@@ -701,11 +716,23 @@ fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
                     .items_start()
                     .text_sm()
                     .text_color(t.muted)
-                    .child(Icon::new(IconName::CircleCheck).size(px(16.)).text_color(t.ok).mt(px(2.)).flex_shrink_0())
-                    .child(tr(cx, TEXT, "Nothing to fix. Every agent stayed under the line.")),
+                    .when(!summary.contexts.is_empty(), |line| {
+                        line.child(Icon::new(IconName::CircleCheck).size(px(16.)).text_color(t.ok).mt(px(2.)).flex_shrink_0())
+                    })
+                    .child(tr(
+                        cx,
+                        TEXT,
+                        if summary.contexts.is_empty() {
+                            "Nothing to check yet."
+                        } else {
+                            "Nothing to fix. Every agent stayed under the line."
+                        },
+                    )),
             )
         })
-        .children(summary.warnings.iter().enumerate().map(|(ix, warning)| warning_alert(ix, warning, all_runs, cx)))
+        .child(div().flex().flex_wrap().gap_3().children(summary.warnings.iter().enumerate().map(|(ix, warning)| {
+            div().flex().flex_1().min_w(px(360.)).child(warning_alert(ix, warning, all_runs, cx))
+        })))
 }
 
 fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: &App) -> BaseTable {
@@ -715,7 +742,7 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
     BaseTable::new(id)
         .row_count(rows.len() + 1)
         .column_count(cols.len())
-        .child(header_row(t, &cols, &[name_label, "Cost", "Input", "Cached", "Output"], cx))
+        .child(header_row(t, &cols, &[name_label, "API cost", "Input", "Cached", "Output"], cx))
         .child(BaseBody::new("body").children(rows.iter().enumerate().map(|(ix, row)| {
             BaseRow::new(("tr", ix), ix + 2)
                 .flex()
@@ -730,7 +757,7 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
                         .gap_2()
                         .min_w_0()
                         .tooltip(tooltip_text(row.name.clone()))
-                        .child(div().truncate().child(row.name.clone()))
+                        .child(div().min_w_0().truncate().child(row.name.clone()))
                         .when(row.tokens_only(), |name| {
                             name.child(Tag::secondary().outline().small().flex_none().child(tr(cx, TEXT, "Tokens only")))
                         }),
@@ -783,6 +810,15 @@ impl UsageView {
         let scene = state.read(cx).scene.clone().unwrap_or_default();
         if scene.contains("usage-min") {
             window.resize(size(px(1100.), px(700.)));
+        } else if scene.contains("usage-tall") {
+            window.resize(size(px(1100.), px(1300.)));
+        }
+        if scene.contains("usage-blank") {
+            state.update(cx, |state, _| {
+                if let Some(run) = state.current.and_then(|index| state.runs.get_mut(index)) {
+                    run.usage = Usage::default();
+                }
+            });
         }
         Self {
             state,
@@ -809,7 +845,7 @@ impl UsageView {
         BaseTable::new("usage-runs")
             .row_count(rows.len() + 1)
             .column_count(RUN_COLS.len())
-            .child(header_row(t, &RUN_COLS, &["Status", "Project", "Wish", "Cost", "Tokens", "Peak context", "Started"], cx))
+            .child(header_row(t, &RUN_COLS, &["Status", "Project", "Wish", "API cost", "Tokens", "Peak context", "Started"], cx))
             .child(BaseBody::new("body").children(rows.iter().zip(&self.row_focus).enumerate().map(|(ix, (row, focus))| {
                 let state = self.state.clone();
                 let index = row.index;
@@ -831,16 +867,18 @@ impl UsageView {
                         0,
                         RUN_COLS[0],
                         h_flex()
+                            .min_w_0()
                             .gap_1p5()
                             .child(div().size_2().rounded_full().flex_shrink_0().bg(t.status(row.status)))
-                            .child(div().truncate().text_color(t.text).child(tr(cx, TEXT, row.status.label()))),
+                            .child(div().min_w_0().truncate().text_color(t.text).child(tr(cx, TEXT, row.status.label()))),
                     ))
-                    .child(data_cell(1, RUN_COLS[1], div().truncate().text_color(t.text).child(row.project.clone())))
+                    .child(data_cell(1, RUN_COLS[1], div().min_w_0().truncate().text_color(t.text).child(row.project.clone())))
                     .child(data_cell(
                         2,
                         RUN_COLS[2],
                         div()
                             .id(("wish", ix))
+                            .min_w_0()
                             .truncate()
                             .text_color(t.muted)
                             .tooltip(tooltip_text(row.wish.clone()))
@@ -857,7 +895,7 @@ impl UsageView {
                             .when(over, |peak| peak.child(Icon::new(IconName::TriangleAlert).size(px(13.))))
                             .child(fmt_tokens(row.peak)),
                     ))
-                    .child(data_cell(6, RUN_COLS[6], div().truncate().text_color(t.muted).child(row.started.clone())))
+                    .child(data_cell(6, RUN_COLS[6], div().min_w_0().truncate().text_color(t.muted).child(row.started.clone())))
             })))
     }
 
@@ -904,6 +942,7 @@ impl Render for UsageView {
         let rows = run_rows(&state.runs);
         let subtitle: SharedString = match (scope, current) {
             (Scope::ThisRun, Some(index)) => format!("{} · {}", state.runs[index].project, state.runs[index].wish).into(),
+            _ if state.runs.len() == 1 => tr(cx, TEXT, "1 run").into(),
             _ => tr(cx, TEXT, "{n} runs").replace("{n}", &state.runs.len().to_string()).into(),
         };
         while self.row_focus.len() < rows.len() {
@@ -935,16 +974,11 @@ impl Render for UsageView {
                             .child(div().flex_none().child(self.scope_tabs(scope, current.is_some(), cx))),
                     )
                     .child(totals(&summary, cx))
+                    .child(context_panel(&summary, all_runs, cx))
+                    .child(warnings_panel(&summary, all_runs, cx))
                     .child(
                         h_flex()
                             .items_stretch()
-                            .gap_4()
-                            .child(context_panel(&summary, all_runs, cx).flex_1())
-                            .child(warnings_panel(&summary, all_runs, cx).w(px(400.)).flex_none()),
-                    )
-                    .child(
-                        h_flex()
-                            .items_start()
                             .gap_4()
                             .child(cost_panel("usage-models", "Cost by model", "Model", &summary.models, cx))
                             .when(has_roles, |this| this.child(cost_panel("usage-roles", "Cost by role", "Role", &summary.roles, cx))),
@@ -972,6 +1006,7 @@ mod tests {
         chart_scale, fmt_cost, fmt_dollars, fmt_ratio, fmt_tokens, fmt_usd, run_cost, run_rows, summarize, ContextRow,
         Dollars, Warning, CONTEXT_WARNING_TOKENS, TEXT, UNKNOWN,
     };
+    use crate::desktop::i18n::COMMON;
 
     fn run(project: &'static str) -> Run {
         Run {
@@ -999,6 +1034,14 @@ mod tests {
 
     fn model(name: &'static str, usd: Option<f64>, tokens: [u64; 3]) -> ModelCost {
         ModelCost { model: name.into(), usd, input: tokens[0], cached: tokens[1], output: tokens[2] }
+    }
+
+    #[test]
+    fn an_agent_with_no_reported_peak_is_not_charted() {
+        let usage = Usage { contexts: vec![agent("silent", 0), agent("loud", 42)], ..Default::default() };
+        let summary = summarize(&[with_usage("a", usage)]);
+        let names: Vec<&str> = summary.contexts.iter().map(|c| c.agent.as_ref()).collect();
+        assert_eq!(names, ["loud"]);
     }
 
     fn agent(name: &'static str, peak_tokens: u64) -> AgentContext {
@@ -1033,7 +1076,7 @@ mod tests {
         ];
         let summary = summarize(&runs);
         assert_eq!(summary.cost, Dollars { known: Some(2.5), missing: 1 });
-        assert_eq!(fmt_dollars(summary.cost), "≥ $2.50");
+        assert_eq!(fmt_dollars(summary.cost), "$2.50+");
     }
 
     #[test]
@@ -1212,6 +1255,20 @@ mod tests {
         assert_eq!(fmt_tokens(11_643_991), "11.6M");
         assert_eq!(fmt_tokens(226_026_522), "226M");
         assert_eq!(fmt_tokens(1_500_000_000), "1.5B");
+    }
+
+    #[test]
+    fn every_string_the_screen_draws_is_in_a_table() {
+        let source = include_str!("usage.rs");
+        let calls = regex::Regex::new(r#"tr\(\s*cx,\s*TEXT,\s*"([^"]+)""#).unwrap();
+        let drawn = calls.captures_iter(source).map(|call| call.get(1).unwrap().as_str());
+        let passed = [
+            "API cost", "Input", "Cached", "Output", "Status", "Project", "Wish", "Tokens", "Peak context", "Started",
+            "Model", "Role", "Cost by model", "Cost by role",
+        ];
+        for text in drawn.chain(passed) {
+            assert!(TEXT.iter().chain(COMMON).any(|(key, _)| *key == text), "no translation for {text}");
+        }
     }
 
     #[test]

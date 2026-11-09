@@ -206,6 +206,7 @@ fn waiting_run() -> Run {
     run.started = "Nov 4, 12:50".into();
     run.started_at = Some(1_793_767_800);
     scale_usage(&mut run.usage, 0.33, 0.4);
+    run.warnings = vec!["快取在長時間等待後過期，重寫了 6 次（約 2,100 萬 token）。等待長批次時請讓它在背景執行，這次對話先結束。".into()];
     for unit in &mut run.units {
         if unit.state == UnitState::Running {
             unit.state = UnitState::Built;
