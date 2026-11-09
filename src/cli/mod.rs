@@ -252,6 +252,13 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        #[cfg(feature = "app")]
+        "app" => match crate::desktop::parse_options(rest) {
+            Ok(options) => crate::desktop::run(options),
+            Err(message) => usage(message),
+        },
+        #[cfg(not(feature = "app"))]
+        "app" => usage("this build has no desktop app; build with --features app"),
         "doctor" if rest.is_empty() => doctor::doctor(&mut io::stdout()),
         "bridge" if rest.is_empty() => bridge::serve(
             bridge::Config::from_env(),
