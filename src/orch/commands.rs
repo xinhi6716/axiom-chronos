@@ -23,6 +23,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 .map(String::as_str)
                 .ok_or_else(|| invalid(&format!("{name} requires a value")))
         };
+        let has = |name: &str| args.iter().any(|s| s == name);
         match cmd {
             "release" => {
                 let unit = args
@@ -61,8 +62,23 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         .filter(|s| !s.starts_with("--"))
                         .ok_or_else(|| invalid("missing module"))?;
                     (name.as_str(), record_accept(store, name, repo)?)
+                } else if has("--external") {
+                    if has("--command") {
+                        return Err(invalid("--external cannot be combined with --command"));
+                    }
+                    let exit_code = option("--exit")?
+                        .parse::<i32>()
+                        .map_err(|_| invalid("--exit must be an integer"))?;
+                    let log = Path::new(option("--log")?);
+                    let label = option("--external")?;
+                    (
+                        "fulltest",
+                        record_external_full(store, repo, label, exit_code, log)?,
+                    )
+                } else if has("--exit") || has("--log") {
+                    return Err(invalid("--exit and --log require --external"));
                 } else {
-                    let command = if args.iter().any(|s| s == "--command") {
+                    let command = if has("--command") {
                         Some(option("--command")?)
                     } else {
                         None
