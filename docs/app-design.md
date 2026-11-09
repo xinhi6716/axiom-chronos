@@ -74,6 +74,8 @@ A left rail: **Run**, **Wishes**, **Memory**, **Usage**, **Settings**, with the 
 
 The app checks the environment on launch, in the background. If `claude` or `codex` is missing or signed out, the Run screen shows a setup card naming what is wrong and how to fix it, and New wish is disabled with the reason beside it. Optional tools such as codegraph never block.
 
+Until the first wish has finished, a short first-day checklist sits on the Run screen: tools found, signed in, a project chosen, first wish made. Each item ticks itself from real state and the list leaves for good once it is complete.
+
 With no runs: an empty state with one line of explanation and a large **Make a wish** button. Every list has an empty state that says what would appear there. Data that cannot be read shows a quiet warning on the affected panel; the rest of the app keeps working.
 
 ## Making a wish (Ctrl+N)
@@ -111,7 +113,7 @@ Chronos as a live mesh: the core on the left, then modules, then their units. Co
 
 - Nothing selected: **Overview**. What is running now, any needs-you card, the decisions Chronos made on the user's behalf, recent events.
 - Module: purpose, contract, dependencies and units.
-- Unit: state word, attempts, then tabs **Brief**, **Report**, **Verify**, **Review**. Each tab has Copy and Open in editor. Large files show their beginning and say that they were cut.
+- Unit: state word, attempts, then tabs **Brief**, **Report**, **Verify**, **Review**. Each tab has Copy and Open in editor. Large files show their beginning and say that they were cut. On a run started here, **Say something about this** opens the interjection box already addressed to the selected goal, module or unit.
 
 ### Control bar (bottom)
 
@@ -145,7 +147,7 @@ Every run, newest first: status, project, wish, `verified / total`, cost, start 
 
 ## Memory
 
-Filter by project, search, a list and a detail pane. Stale entries are marked. Deleting asks first and says it cannot be undone.
+Titled "What Chronos has learned". Filter by project, search, a list and a detail pane. Each entry says which wish it came from and when it was last confirmed, and it can be corrected in place; a correction becomes the entry's new text and is what later briefs see. Stale entries are marked. Deleting asks first and says it cannot be undone.
 
 ## Usage
 
