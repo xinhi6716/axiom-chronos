@@ -26,11 +26,15 @@ fn brief_fields_and_crlf() {
 
 #[test]
 fn brief_settings_are_read_and_kept_from_the_worker() {
-    let text = "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
+    let text =
+        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
     let b = parse_brief(text).unwrap();
     assert_eq!(b.effort.as_deref(), Some("low"));
     assert_eq!(b.tier.as_deref(), Some("luna"));
-    assert_eq!(b.text, "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n");
+    assert_eq!(
+        b.text,
+        "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n"
+    );
     assert_eq!((b.goal.as_str(), b.verify.as_str()), ("g", "v"));
     assert_eq!(b.scope, ["a"]);
     for effort in ["low", "medium", "high"] {
@@ -43,21 +47,37 @@ fn brief_settings_are_read_and_kept_from_the_worker() {
 
 #[test]
 fn brief_settings_outside_the_allowed_set_are_refused() {
-    let efforts = "as one of low, medium, high";
-    let tiers = "as one of luna";
-    for (line, reason) in [
-        ("EFFORT xhigh", format!("has invalid EFFORT \"xhigh\": give it once, {efforts}")),
-        ("EFFORT Low", format!("has invalid EFFORT \"Low\": give it once, {efforts}")),
-        ("EFFORT low please", format!("has invalid EFFORT \"low please\": give it once, {efforts}")),
-        ("EFFORT", format!("has invalid EFFORT \"\": give it once, {efforts}")),
-        ("EFFORT low\nEFFORT high", format!("has invalid EFFORT \"high\": give it once, {efforts}")),
-        ("TIER terra", format!("has invalid TIER \"terra\": give it once, {tiers}")),
-        ("TIER sol", format!("has invalid TIER \"sol\": give it once, {tiers}")),
-        ("TIER gpt-6-luna", format!("has invalid TIER \"gpt-6-luna\": give it once, {tiers}")),
-        ("TIER", format!("has invalid TIER \"\": give it once, {tiers}")),
+    let efforts = "low, medium, high";
+    for (line, field, value, allowed) in [
+        ("EFFORT xhigh", "EFFORT", "xhigh", efforts),
+        ("EFFORT Low", "EFFORT", "Low", efforts),
+        ("EFFORT low please", "EFFORT", "low please", efforts),
+        ("EFFORT", "EFFORT", "", efforts),
+        (
+            "EFFORT low
+EFFORT high",
+            "EFFORT",
+            "high",
+            efforts,
+        ),
+        ("TIER terra", "TIER", "terra", "luna"),
+        ("TIER sol", "TIER", "sol", "luna"),
+        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", "luna"),
+        ("TIER", "TIER", "", "luna"),
     ] {
-        let err = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\n{line}\n")).unwrap_err();
-        assert_eq!(err, reason, "{line}");
+        let err = parse_brief(&format!(
+            "GOAL g
+SCOPE a
+VERIFY v
+{line}
+"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            format!("has invalid {field} {value:?}: give it once, as one of {allowed}"),
+            "{line}"
+        );
     }
 }
 
@@ -65,15 +85,42 @@ fn brief_settings_outside_the_allowed_set_are_refused() {
 fn old_briefs_cannot_trip_the_settings() {
     for text in [
         "EFFORT was spent here\nTIER 1 sources\nGOAL g\nSCOPE a\nVERIFY v\n",
-        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT low\n",
-        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT was spent here\n",
-        "GOAL g\n  EFFORT was spent here\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\nTIER sol\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT low\n  TIER luna\n",
+        "GOAL g\n  EFFORT low\nSCOPE a\nVERIFY v\n",
         "GOAL g\nEFFORTS low\nTIERED luna\nSCOPE a\nVERIFY v\n",
     ] {
         let b = parse_brief(text).unwrap();
         assert_eq!((b.effort, b.tier), (None, None), "{text}");
         assert_eq!(b.text, text);
     }
+}
+
+#[test]
+fn misplaced_settings_are_refused_instead_of_ignored() {
+    for (text, line) in [
+        ("EFFORT low\nGOAL g\nSCOPE a\nVERIFY v\n", "EFFORT low"),
+        (
+            "TIER luna\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\n",
+            "TIER luna",
+        ),
+        (
+            "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT c\nEFFORT high\n",
+            "EFFORT high",
+        ),
+        (
+            "GOAL g\nCONTEXT c\nTIER luna\nSCOPE a\nVERIFY v\n",
+            "TIER luna",
+        ),
+    ] {
+        assert_eq!(
+            parse_brief(text).unwrap_err(),
+            format!("has \"{line}\" outside the lines between GOAL and CONTEXT"),
+            "{text}"
+        );
+    }
+    let placed = "GOAL g\nEFFORT high\nTIER luna\nSCOPE a\nVERIFY v\nCONTEXT c\n";
+    assert_eq!(parse_brief(placed).unwrap().effort.as_deref(), Some("high"));
 }
 
 #[test]

@@ -80,6 +80,12 @@ fn setting(
     *slot = Some(value.into());
     Ok(())
 }
+fn is_valid_setting(line: &str) -> bool {
+    let valid = |name: &str, allowed: &[&str]| {
+        is_field(line, name) && allowed.contains(&line[name.len()..].trim())
+    };
+    valid("EFFORT", &EFFORTS) || valid("TIER", &TIERS)
+}
 pub fn parse_brief(text: &str) -> Result<Brief, String> {
     let start = text.lines().position(|line| is_field(line, "GOAL"));
     let body = start
@@ -111,6 +117,11 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
         }
     }
     worker_text.extend(lines);
+    if let Some(stray) = worker_text.lines().find(|l| is_valid_setting(l)) {
+        return Err(format!(
+            "has {stray:?} outside the lines between GOAL and CONTEXT"
+        ));
+    }
     Ok(Brief {
         goal: f["GOAL"].clone(),
         scope: words(&f["SCOPE"]),
