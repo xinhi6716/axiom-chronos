@@ -1,7 +1,13 @@
 use super::{AppServer, SANDBOXES};
-use crate::base::{self, Failure, Res};
+use crate::{
+    base::{self, Failure, Res},
+    codegraph,
+};
 use serde_json::{json, Map, Value};
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub struct RunRequest {
     pub brief: String,
@@ -37,6 +43,7 @@ impl AppServer {
         {
             thread["developerInstructions"] = json!(s);
         }
+        let graph = codegraph::enabled(Path::new(&req.cwd));
         let disabled = if req.lean {
             let installed = self.request("plugin/installed", json!({"cwds":[req.cwd]}))?;
             let mut plugins: Vec<String> = installed["marketplaces"]
@@ -55,6 +62,7 @@ impl AppServer {
                 .as_object()
                 .into_iter()
                 .flat_map(|m| m.keys().cloned())
+                .filter(|name| !graph || name != codegraph::NAME)
                 .collect();
             servers.sort();
             let plugin_config: Map<String, Value> = plugins
@@ -76,6 +84,9 @@ impl AppServer {
         } else {
             Value::Null
         };
+        if graph {
+            thread["config"]["mcp_servers"][codegraph::NAME] = codegraph::codex_server(&req.cwd);
+        }
         let started = self.request("thread/start", thread)?;
         let thread_id = started
             .pointer("/thread/id")

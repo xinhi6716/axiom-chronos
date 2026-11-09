@@ -269,6 +269,45 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     }
     Ok(result)
 }
+pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
+    let rows = evidence(store, unit)?;
+    if !rows
+        .iter()
+        .rev()
+        .find(|r| r.kind == "run")
+        .is_some_and(|r| r.exit_code == 0)
+    {
+        return Err(invalid(format!(
+            "unit {unit} has no completed worker run to verify; dispatch it with codex_run"
+        )));
+    }
+    let brief = unit_brief(store, unit)?;
+    let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let tail: String = result
+        .output
+        .chars()
+        .rev()
+        .take(20000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
+    append_evidence(
+        store,
+        unit,
+        &row(
+            "verify",
+            &brief.verify,
+            result.exit_code,
+            snapshot(repo, &brief.scope),
+        ),
+    )?;
+    update(store, unit)?;
+    Ok(result)
+}
 pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<ShellRun> {
     let command = match command {
         Some(c) if !c.trim().is_empty() => c.to_string(),
@@ -295,6 +334,69 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
         ),
     )?;
     Ok(result)
+}
+/// A failure seen outside orch, such as on CI. It is a plain `full` row so the sol and done gates read it as they read a local failure.
+pub fn record_external_full(
+    store: &Path,
+    repo: &Path,
+    label: &str,
+    exit_code: i32,
+    log: &Path,
+) -> Res<ShellRun> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(invalid("external full test label is empty"));
+    }
+    if exit_code == 0 {
+        return Err(invalid(
+            "external full test records failures only; a pass needs a real fulltest run",
+        ));
+    }
+    if !store.is_dir() {
+        return Err(invalid(format!(
+            "store is not initialized at {}; run orch init",
+            store.display()
+        )));
+    }
+    if !repo.is_dir() {
+        return Err(invalid(format!("not a directory: {}", repo.display())));
+    }
+    let bytes = std::fs::read(log)
+        .map_err(|e| Failure::new("io", format!("cannot read {}: {e}", log.display())))?;
+    let text = String::from_utf8_lossy(&bytes).replace('\0', "");
+    if text.trim().is_empty() {
+        return Err(invalid(format!(
+            "external full test log is empty: {}",
+            log.display()
+        )));
+    }
+    let output: String = text
+        .chars()
+        .rev()
+        .take(20000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let saved = format!("_full.external-{}.txt", base::unique());
+    base::atomic_write(&dir.join(&saved), output.as_bytes()).map_err(io)?;
+    append_evidence(
+        store,
+        "_full",
+        &row(
+            "full",
+            &format!("external:{label} log={saved}"),
+            exit_code,
+            snapshot(repo, &[".".into()]),
+        ),
+    )?;
+    Ok(ShellRun {
+        exit_code,
+        output,
+        timed_out: false,
+    })
 }
 pub fn record_review(
     store: &Path,
@@ -333,7 +435,10 @@ pub fn record_review(
     if !stale.is_empty() {
         return Err(Failure::new(
             "stale_review",
-            format!("stale review for units: {}", stale.join(", ")),
+            format!(
+                "stale review for units: {}; files in SCOPE changed after VERIFY ran (another unit or a test run wrote there); run orch verify <unit> --repo <dir>, then review again",
+                stale.join(", ")
+            ),
         ));
     }
     let mut result = Vec::new();

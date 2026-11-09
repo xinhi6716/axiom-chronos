@@ -7,7 +7,7 @@ use std::{
 };
 pub mod proc;
 pub mod schema;
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Failure {
     pub kind: String,
     pub message: String,
@@ -44,6 +44,14 @@ pub fn resolve_command(env_name: &str, executable: &str) -> Res<Vec<String>> {
                 )
             });
     }
+    on_path(executable).map(|path| vec![path]).ok_or_else(|| {
+        Failure::new(
+            "not_installed",
+            format!("{executable} is not on PATH; install it or set {env_name}"),
+        )
+    })
+}
+pub fn on_path(executable: &str) -> Option<String> {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&paths) {
         #[cfg(unix)]
@@ -80,14 +88,11 @@ pub fn resolve_command(env_name: &str, executable: &str) -> Res<Vec<String>> {
                         continue;
                     }
                 }
-                return Ok(vec![path.to_string_lossy().into_owned()]);
+                return Some(path.to_string_lossy().into_owned());
             }
         }
     }
-    Err(Failure::new(
-        "not_installed",
-        format!("{executable} is not on PATH; install it or set {env_name}"),
-    ))
+    None
 }
 pub fn axiom_home() -> PathBuf {
     std::env::var_os("AXIOM_HOME")

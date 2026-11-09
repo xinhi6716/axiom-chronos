@@ -14,7 +14,7 @@ if '--version' in sys.argv:
     sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
-record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN')}, 'messages': []}
+record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL')}, 'messages': []}
 
 def save():
     with open(os.environ['FAKE_CLAUDE_RECORD'], 'w', encoding='utf-8') as f:
@@ -94,7 +94,7 @@ if scenario == 'continue':
     while incoming.get() is not None:
         pass
     sys.exit(0)
-emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
+emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})
 emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': scenario == 'error', 'result': '統計功能已完成。', 'duration_ms': 4200, 'total_cost_usd': 0.36, 'modelUsage': {'claude-opus-5-5': {'costUSD': 0.25}}})

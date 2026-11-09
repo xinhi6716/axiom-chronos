@@ -9,6 +9,8 @@ use std::{
     time::Duration,
 };
 
+/// Test scratch space under the project root; the sandbox cannot write to the system temp directory.
+pub const TEMP_DIR: &str = ".axiom-tmp/";
 pub enum Begin {
     Run {
         brief: Brief,
@@ -89,19 +91,39 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
     for dep in deps {
         let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
         if registered.is_empty() {
-            missing.push(format!("{dep} (no units)"));
+            missing.push(format!("{dep} (no units registered)"));
         }
         for other in registered {
-            if derive_state(
-                &evidence(store, &other.id)?,
-                needs_accept(store, &other.id)?,
-            ) != "verified"
-            {
-                missing.push(other.id.clone());
+            let rows = evidence(store, &other.id)?;
+            let needs = needs_accept(store, &other.id)?;
+            let state = derive_state(&rows, needs);
+            if state != "verified" {
+                missing.push(format!(
+                    "{} ({state}; next {})",
+                    other.id,
+                    next_step(&rows, &state, needs)
+                ));
             }
         }
     }
     Ok(missing)
+}
+fn next_step(rows: &[Evidence], state: &str, needs_accept: bool) -> String {
+    match state {
+        "built" => {
+            let verify = rows.iter().rposition(|r| r.kind == "verify");
+            if needs_accept
+                && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept"))
+            {
+                "accept".into()
+            } else {
+                "review".into()
+            }
+        }
+        "accept-failed" | "review-failed" => "fix".into(),
+        "failed" if rows.iter().filter(|r| r.kind == "run").count() >= 2 => "fix".into(),
+        _ => "run".into(),
+    }
 }
 pub fn begin_unit(
     store: &Path,
@@ -147,7 +169,19 @@ pub fn begin_unit(
         }
         let missing = dependencies(store, u, &units)?;
         if !missing.is_empty() {
-            return Err(Failure::new("not_ready", missing.join(", ")));
+            let ready = ready_units(store)?;
+            return Err(Failure::new(
+                "not_ready",
+                format!(
+                    "{unit} waits on {}; {}",
+                    missing.join(", "),
+                    if ready.is_empty() {
+                        "none ready".to_string()
+                    } else {
+                        format!("ready now: {}", ready.join(", "))
+                    }
+                ),
+            ));
         }
         if derive_state(&rows, needs_accept(store, unit)?) == "verified"
             && rows
@@ -308,19 +342,12 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
             } else {
                 format!("unknown {}", c.attempt)
             }
-        } else if state == "built" {
-            let verify = rows.iter().rposition(|r| r.kind == "verify");
-            if needs && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept")) {
-                "accept".into()
-            } else {
-                "review".into()
-            }
-        } else if state == "accept-failed" || state == "review-failed" {
-            "fix".into()
+        } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
+            next_step(&rows, &state, needs)
         } else {
             let missing = dependencies(store, u, &units)?;
             if !missing.is_empty() {
-                format!("wait {}", missing.join(","))
+                format!("wait {}", missing.join(", "))
             } else if rows.iter().filter(|r| r.kind == "run").count() >= 2
                 || unit_brief(store, &u.id).is_err()
             {
@@ -336,6 +363,16 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
         });
     }
     Ok(waiting)
+}
+pub fn next_step_for(store: &Path, unit: &str) -> Res<String> {
+    if ready_units(store)?.iter().any(|id| id == unit) {
+        return Ok("ready".into());
+    }
+    Ok(waiting_units(store)?
+        .into_iter()
+        .find(|w| w.unit == unit)
+        .map(|w| w.next)
+        .unwrap_or_else(|| "verified".into()))
 }
 #[derive(Debug)]
 pub enum AutoAccept {
@@ -534,7 +571,7 @@ pub fn finish_unit(
     }
     let outside_scope: Vec<_> = paths
         .into_iter()
-        .filter(|p| !covers(&brief.scope, p) && !covers(&others, p))
+        .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))
         .collect();
     append_evidence(
         store,
@@ -590,6 +627,9 @@ pub fn finish_unit(
             Err(e) => verify_error = Some(e.message),
         }
     }
+    let temp = repo.join(TEMP_DIR);
+    let _ = std::fs::remove_dir_all(temp.join(unit));
+    let _ = std::fs::remove_dir(&temp);
     let line = match (&verify_output, verify_exit) {
         (Some(path), Some(code)) => format!("BRIDGE VERIFY exit={code} output={}", path.display()),
         _ if verify_error.is_some() => format!("BRIDGE VERIFY not run: {}", verify_error.unwrap()),

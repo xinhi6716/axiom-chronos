@@ -113,22 +113,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             project.display()
         ));
     }
-    let text = if creative {
-        format!(
-            "[creative]{}",
-            if i == args.len() {
-                String::new()
-            } else {
-                format!(" {}", args[i..].join(" "))
-            }
-        )
-    } else {
-        format!(
-            "{}{}",
-            if no_architect { "[no-architect] " } else { "" },
-            args[i..].join(" ")
-        )
-    };
+    let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
     match session::run(
         &session::Config::from_env(),
         skill,

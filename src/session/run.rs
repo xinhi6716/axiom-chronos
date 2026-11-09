@@ -1,15 +1,17 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    engine, goal, hook,
+    codegraph, engine, goal, hook,
 };
+use serde_json::{json, Value};
 use std::{
+    fs::File,
     io::{BufRead, BufReader, Write},
-    path::Path,
-    process::{ChildStdin, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Mutex,
+        mpsc, Arc, Mutex,
     },
     time::Duration,
 };
@@ -81,6 +83,12 @@ fn failure(e: impl std::fmt::Display) -> Failure {
 }
 
 pub const CONTINUE_TAG: &str = "<chronos-continue/>";
+/// Long `codex_run` calls outlast the five-minute prompt cache; the one-hour
+/// TTL keeps the dispatcher's prefix warm across them (Claude Code 2.1.242+).
+pub const CACHE_TTL_ENV: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"),
+    ("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h"),
+];
 pub const LIMIT_MARGIN_SECS: i64 = 120;
 const LIMIT_JUST_PASSED_SECS: i64 = 15 * 60;
 
@@ -207,14 +215,38 @@ pub fn local_offset_secs(unix_secs: i64) -> i32 {
     }
 }
 
-pub fn resume(
+pub fn wish_text(words: &str, creative: bool, no_architect: bool) -> String {
+    if creative {
+        format!(
+            "[creative]{}",
+            if words.is_empty() {
+                String::new()
+            } else {
+                format!(" {words}")
+            }
+        )
+    } else if no_architect {
+        format!("[no-architect] {words}")
+    } else {
+        words.to_owned()
+    }
+}
+
+fn continue_prompt(config: &Config, session: &str) -> Res<String> {
+    let goal = goal::reopen(&config.home, session)?;
+    Ok(format!(
+        "{CONTINUE_TAG} {}",
+        hook::stop_reason(session, &goal)
+    ))
+}
+
+/// The first prompt and project directory of a resumable goal: the user's `message` when
+/// given, otherwise the continuation prompt.
+pub fn resume_target(
     config: &Config,
     session: &str,
-    max_turns: Option<u32>,
     message: Option<&str>,
-    input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-) -> Res<i32> {
+) -> Res<(String, PathBuf)> {
     let goal = goal::load(&config.home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     if goal.status == "done" {
@@ -242,7 +274,19 @@ pub fn resume(
         }
         None => continue_prompt(config, session)?,
     };
-    run_loop(
+    Ok((prompt, cwd))
+}
+
+pub fn resume(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    message: Option<&str>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+) -> Res<i32> {
+    let (prompt, cwd) = resume_target(config, session, message)?;
+    run_inner(
         config,
         "wish",
         &prompt,
@@ -263,97 +307,7 @@ pub fn run(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    run_loop(config, skill, text, project, max_turns, input, out, None)
-}
-fn continue_prompt(config: &Config, session: &str) -> Res<String> {
-    let goal = goal::reopen(&config.home, session)?;
-    Ok(format!(
-        "{CONTINUE_TAG} {}",
-        hook::stop_reason(session, &goal)
-    ))
-}
-fn send(pipe: &mut ChildStdin, text: &str) -> std::io::Result<()> {
-    pipe.write_all(user_message(text).as_bytes())?;
-    pipe.flush()
-}
-fn wait_until(config: &Config, at: i64) -> bool {
-    loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            return false;
-        }
-        let remaining = at - (config.clock.now)();
-        if remaining <= 0 {
-            return true;
-        }
-        (config.clock.sleep)(Duration::from_secs(remaining.min(1) as u64));
-    }
-}
-fn run_loop(
-    config: &Config,
-    skill: &str,
-    text: &str,
-    project: &Path,
-    max_turns: Option<u32>,
-    mut input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-    resume: Option<&str>,
-) -> Res<i32> {
-    let (tx, lines) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match input.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if !line.trim().is_empty() && tx.send(line.to_owned()).is_err() {
-                break;
-            }
-        }
-    });
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _signals = Signals::install();
-    let mut prompt = text.to_owned();
-    let mut resume = resume.map(str::to_owned);
-    loop {
-        let outcome = run_inner(
-            config,
-            skill,
-            &prompt,
-            project,
-            max_turns,
-            &lines,
-            out,
-            resume.as_deref(),
-        )?;
-        let Some((session, reset)) = outcome.limit else {
-            return Ok(outcome.code);
-        };
-        let now = (config.clock.now)();
-        let at = reset.max(now) + LIMIT_MARGIN_SECS;
-        let wait = at - now;
-        let _ = writeln!(
-            out,
-            "usage limit: continuing at {} (in {}h{:02}m); Ctrl-C to stop",
-            clock_time(at, local_offset_secs(at)),
-            wait / 3600,
-            wait / 60 % 60
-        );
-        let _ = out.flush();
-        if !wait_until(config, at) {
-            let _ = writeln!(out, "interrupted; resume: axiom wish --resume {session}");
-            let _ = out.flush();
-            return Ok(130);
-        }
-        prompt = continue_prompt(config, &session)?;
-        resume = Some(session);
-    }
-}
-struct Outcome {
-    code: i32,
-    limit: Option<(String, i64)>,
+    run_inner(config, skill, text, project, max_turns, input, out, None)
 }
 fn run_inner(
     config: &Config,
@@ -361,13 +315,48 @@ fn run_inner(
     text: &str,
     project: &Path,
     max_turns: Option<u32>,
-    lines: &mpsc::Receiver<String>,
+    input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
     resume: Option<&str>,
-) -> Res<Outcome> {
+) -> Res<i32> {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _signals = Signals::install();
+    let spawned = spawn(config, skill, text, project, max_turns, resume)?;
+    forward_input(Arc::clone(&spawned.writer), input);
+    drive(spawned, config, out, &INTERRUPTED, &mut |_| {})
+}
+
+pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
+
+pub fn send(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
+    stdin
+        .write_all(user_message(text).as_bytes())
+        .and_then(|_| stdin.flush())
+}
+
+/// A running claude with its first message sent; `drive` takes it from here.
+pub struct Spawned {
+    child: Child,
+    pub writer: Writer,
+    lines: mpsc::Receiver<Vec<u8>>,
+    log: File,
+    pub log_path: PathBuf,
+    skill: String,
+    project: PathBuf,
+    max_turns: Option<u32>,
+}
+
+pub fn spawn(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    resume: Option<&str>,
+) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns)?;
+    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if let Some(id) = resume {
         argv.extend(["--resume".into(), id.into()]);
     }
@@ -375,7 +364,7 @@ fn run_inner(
     std::fs::create_dir_all(&logs).map_err(failure)?;
     let now = (config.clock.now)();
     let stamp = log_stamp(now, local_offset_secs(now));
-    let (log_path, mut log) = (0u64..)
+    let (log_path, log) = (0u64..)
         .find_map(|n| {
             let suffix = if n == 0 {
                 String::new()
@@ -399,25 +388,28 @@ fn run_inner(
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
+        .envs(CACHE_TTL_ENV)
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
-    let mut stdin = child.stdin.take();
-    let first = if resume.is_some() {
-        text.to_owned()
-    } else if text.is_empty() {
-        format!("/chronos:{skill}")
-    } else {
-        format!("/chronos:{skill} {text}")
-    };
-    if let Err(e) = send(stdin.as_mut().unwrap(), &first) {
+    let mut stdin = child.stdin.take().unwrap();
+    if let Err(e) = send(
+        &mut stdin,
+        &if resume.is_some() {
+            text.to_owned()
+        } else if text.is_empty() {
+            format!("/chronos:{skill}")
+        } else {
+            format!("/chronos:{skill} {text}")
+        },
+    ) {
         base::proc::kill_tree(&mut child);
         return Err(failure(e));
     }
     let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
+    let (tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -433,6 +425,135 @@ fn run_inner(
             }
         }
     });
+    Ok(Spawned {
+        child,
+        writer: Arc::new(Mutex::new(Some(stdin))),
+        lines,
+        log,
+        log_path,
+        skill: skill.to_owned(),
+        project: project.to_path_buf(),
+        max_turns,
+    })
+}
+
+/// Forwards each non-blank line of `input` to claude as a user message until EOF. While the
+/// writer is empty because claude is waiting out a usage limit, the line waits for the resumed
+/// process; the thread ends once `drive` has let go of the writer.
+pub fn forward_input(writer: Writer, mut input: Box<dyn BufRead + Send>) {
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match input.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.trim().is_empty() {
+                continue;
+            }
+            loop {
+                let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.as_mut() {
+                    Some(stdin) => {
+                        if send(stdin, line).is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    None if Arc::strong_count(&writer) == 1 => return,
+                    None => {
+                        drop(guard);
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn wait_until(config: &Config, at: i64, stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = at - (config.clock.now)();
+        if remaining <= 0 {
+            return true;
+        }
+        (config.clock.sleep)(Duration::from_secs(remaining.min(1) as u64));
+    }
+}
+
+/// Runs the session to its end: renders to `out`, hands every parsed event to `observe`,
+/// keeps an active goal going, and kills the process tree once `stop` is set. When claude
+/// reports a usage limit with a reset time, waits for it (interruptible through `stop`),
+/// resumes the same session into the same writer, and tells `observe` with a
+/// `{"type":"chronos","subtype":"limit_wait","session":..,"until":..}` event.
+pub fn drive(
+    spawned: Spawned,
+    config: &Config,
+    out: &mut dyn Write,
+    stop: &AtomicBool,
+    observe: &mut dyn FnMut(&Value),
+) -> Res<i32> {
+    let writer = Arc::clone(&spawned.writer);
+    let (skill, project, max_turns) = (
+        spawned.skill.clone(),
+        spawned.project.clone(),
+        spawned.max_turns,
+    );
+    let mut spawned = spawned;
+    loop {
+        let outcome = drive_once(spawned, config, out, stop, observe)?;
+        let Some((session, reset)) = outcome.limit else {
+            return Ok(outcome.code);
+        };
+        let now = (config.clock.now)();
+        let at = reset.max(now) + LIMIT_MARGIN_SECS;
+        let wait = at - now;
+        let _ = writeln!(
+            out,
+            "usage limit: continuing at {} (in {}h{:02}m); Ctrl-C to stop",
+            clock_time(at, local_offset_secs(at)),
+            wait / 3600,
+            wait / 60 % 60
+        );
+        let _ = out.flush();
+        observe(&json!({"type":"chronos","subtype":"limit_wait","session":session,"until":at}));
+        if !wait_until(config, at, stop) {
+            let _ = writeln!(out, "interrupted; resume: axiom wish --resume {session}");
+            let _ = out.flush();
+            return Ok(130);
+        }
+        let prompt = continue_prompt(config, &session)?;
+        let mut next = spawn(config, &skill, &prompt, &project, max_turns, Some(&session))?;
+        *writer.lock().unwrap_or_else(|e| e.into_inner()) =
+            next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
+        next.writer = Arc::clone(&writer);
+        spawned = next;
+    }
+}
+struct Outcome {
+    code: i32,
+    limit: Option<(String, i64)>,
+}
+fn drive_once(
+    spawned: Spawned,
+    config: &Config,
+    out: &mut dyn Write,
+    stop: &AtomicBool,
+    observe: &mut dyn FnMut(&Value),
+) -> Res<Outcome> {
+    let Spawned {
+        mut child,
+        writer,
+        lines: rx,
+        mut log,
+        log_path,
+        ..
+    } = spawned;
     let mut renderer = Renderer::new();
     let mut session = None::<String>;
     let mut final_result = false;
@@ -440,18 +561,10 @@ fn run_inner(
     let mut cause = None;
     let mut reset = None;
     let result: Res<i32> = loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) {
             base::proc::kill_tree(&mut child);
             cause = Some("interrupted by the user".to_string());
             break Ok(130);
-        }
-        while let Ok(line) = lines.try_recv() {
-            if stdin
-                .as_mut()
-                .is_some_and(|pipe| send(pipe, &line).is_err())
-            {
-                stdin = None;
-            }
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(bytes) => {
@@ -459,13 +572,14 @@ fn run_inner(
                     base::proc::kill_tree(&mut child);
                     break Err(failure(e));
                 }
-                let Ok(event) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                let Ok(event) = serde_json::from_slice::<Value>(&bytes) else {
                     continue;
                 };
                 if event["type"] == "system" && event["subtype"] == "init" {
                     session = event["session_id"].as_str().map(str::to_owned);
                 }
                 renderer.event(&event, out);
+                observe(&event);
                 if event["type"] != "result" {
                     continue;
                 }
@@ -481,10 +595,12 @@ fn run_inner(
                 } else if let Some(id) = session.as_deref() {
                     match goal::load(&config.home, id) {
                         Ok(Some(g)) if g.status == "active" => {
-                            if let Some(pipe) = stdin.as_mut() {
-                                let prompt =
-                                    format!("{CONTINUE_TAG} {}", hook::stop_reason(id, &g));
-                                if let Err(e) = send(pipe, &prompt) {
+                            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(stdin) = guard.as_mut() {
+                                if let Err(e) = send(
+                                    stdin,
+                                    &format!("{CONTINUE_TAG} {}", hook::stop_reason(id, &g)),
+                                ) {
                                     base::proc::kill_tree(&mut child);
                                     break Err(failure(e));
                                 }
@@ -509,7 +625,7 @@ fn run_inner(
                     final_result = true;
                 }
                 if final_result {
-                    stdin = None;
+                    writer.lock().unwrap_or_else(|e| e.into_inner()).take();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -532,7 +648,7 @@ fn run_inner(
             }
         }
     };
-    drop(stdin);
+    writer.lock().unwrap_or_else(|e| e.into_inner()).take();
     if final_result {
         renderer.summary(out);
     }

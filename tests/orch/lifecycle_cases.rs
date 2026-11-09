@@ -237,6 +237,211 @@ fn sol_and_extra_commands() {
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
+fn sol_refusal(store: &Path, repo: &Path) -> Option<String> {
+    match begin_unit(store, "a", "sol", repo, false) {
+        Ok(_) => {
+            abort_unit(store, "a", &attempt(store, "a"));
+            None
+        }
+        Err(e) => Some(e.kind),
+    }
+}
+fn external(store: &Path, repo: &Path, flags: &[&str]) -> Output {
+    let mut args = vec![
+        "fulltest".to_string(),
+        "--repo".to_string(),
+        repo.to_string_lossy().into_owned(),
+    ];
+    args.extend(flags.iter().map(|s| s.to_string()));
+    run(store, &args, false, false)
+}
+
+#[test]
+fn ci_failure_opens_sol_like_a_local_failure() {
+    let (store, repo) = setup();
+    let refused = Some("sol_not_allowed".to_string());
+    assert_eq!(
+        sol_refusal(&store, &repo),
+        refused,
+        "no failure recorded yet"
+    );
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused, "only a passing run");
+
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "running tests\nerror: linux job failed\n").unwrap();
+    let log = log.to_string_lossy().into_owned();
+    let out = external(
+        &store,
+        &repo,
+        &["--external", "ci-run-42", "--exit", "101", "--log", &log],
+    );
+    assert_eq!(out.exit_code, 1);
+    assert_eq!(out.stderr, "");
+    assert!(
+        out.stdout
+            .starts_with("fulltest\texit=101\nrunning tests\nerror: linux job failed"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        sol_refusal(&store, &repo),
+        None,
+        "recorded failure opens sol"
+    );
+
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused, "later pass closes sol");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn external_failure_without_real_evidence_records_nothing() {
+    let (store, repo) = setup();
+    let root = store.parent().unwrap().to_path_buf();
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    fs::write(root.join("ci.log"), "failing job").unwrap();
+    fs::write(root.join("blank.log"), " \r\n\t\0\n").unwrap();
+    let log = text(&root.join("ci.log"));
+    let blank = text(&root.join("blank.log"));
+    let absent = text(&root.join("absent.log"));
+    let directory = text(&root);
+    let good = ["--external", "ci-1", "--exit", "1", "--log", log.as_str()];
+    let cases: [(Vec<&str>, &str); 12] = [
+        (
+            vec!["--external", "", "--exit", "1", "--log", &log],
+            "label is empty",
+        ),
+        (
+            vec!["--external", "   ", "--exit", "1", "--log", &log],
+            "label is empty",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "0", "--log", &log],
+            "failures only",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "soon", "--log", &log],
+            "--exit must be an integer",
+        ),
+        (vec!["--external", "ci-1", "--log", &log], "missing --exit"),
+        (vec!["--external", "ci-1", "--exit", "1"], "missing --log"),
+        (
+            vec!["--external", "--exit", "1", "--log", &log],
+            "--external requires a value",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &absent],
+            "cannot read",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &directory],
+            "cannot read",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &blank],
+            "log is empty",
+        ),
+        (
+            [good.as_slice(), &["--command", "echo x > marker"]].concat(),
+            "cannot be combined",
+        ),
+        (
+            vec!["--exit", "1", "--log", &log, "--command", "echo x > marker"],
+            "require --external",
+        ),
+    ];
+    let full = store.join("reports/_full.evidence.tsv");
+    for (flags, message) in cases {
+        let out = external(&store, &repo, &flags);
+        assert_eq!(out.exit_code, 1, "{flags:?}");
+        assert_eq!(out.stdout, "", "{flags:?}");
+        assert!(out.stderr.contains(message), "{flags:?}: {}", out.stderr);
+        assert!(!full.exists(), "{flags:?}");
+        assert!(!repo.join("marker").exists(), "{flags:?}");
+        assert_eq!(
+            sol_refusal(&store, &repo).as_deref(),
+            Some("sol_not_allowed"),
+            "{flags:?}"
+        );
+    }
+
+    let out = external(&store, &root.join("absent-repo"), &good);
+    assert!(out.stderr.contains("not a directory"), "{}", out.stderr);
+    assert!(!full.exists());
+
+    let unborn = root.join("unborn");
+    let out = external(&unborn, &repo, &good);
+    assert!(out.stderr.contains("run orch init"), "{}", out.stderr);
+    assert!(!unborn.exists(), "a mistyped store must not be created");
+
+    assert_eq!(external(&store, &repo, &good).exit_code, 1);
+    assert!(
+        full.exists(),
+        "the same flags record once the input is valid"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn old_full_evidence_still_reads_beside_external_rows() {
+    let (store, repo) = setup();
+    let path = store.join("reports/_full.evidence.tsv");
+    let header = "kind\tcommand\texit_code\tcommit\tts";
+    let refused = Some("sol_not_allowed".to_string());
+    fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused);
+    fs::write(&path, format!("{header}\r\nfull\told\t3\t\t2000\r\n")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), None);
+    fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
+
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    record_external_full(&store, &repo, "ci-1", 1, &log).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), None);
+    let saved = fs::read_to_string(&path).unwrap();
+    let lines: Vec<_> = saved.lines().collect();
+    assert_eq!(lines.len(), 3, "{saved}");
+    assert_eq!(lines[0], header);
+    assert_eq!(lines[1], "full\told\t0\t\t2000");
+    assert_eq!(lines[2].split('\t').count(), header.split('\t').count());
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn dispatcher_ci_call_uses_the_real_flags() {
+    let text = axiom::engine::FILES
+        .iter()
+        .find(|(path, _)| *path == "agents/dispatcher.md")
+        .unwrap()
+        .1;
+    let start = text
+        .find("[\"fulltest\", \"--repo\", <dir>, \"--external\"")
+        .unwrap();
+    let call = &text[start..start + text[start..].find(']').unwrap()];
+    let flags: Vec<_> = call.split('"').filter(|s| s.starts_with("--")).collect();
+    assert_eq!(flags, ["--repo", "--external", "--exit", "--log"]);
+
+    let (store, repo) = setup();
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let log_arg = log.to_string_lossy().into_owned();
+    let values = [repo_arg.as_str(), "ci-1", "1", log_arg.as_str()];
+    let mut args = vec!["fulltest".to_string()];
+    for (flag, value) in flags.iter().zip(values) {
+        args.extend([flag.to_string(), value.to_string()]);
+    }
+    let out = run(&store, &args, false, false);
+    assert!(
+        out.stdout.starts_with("fulltest\texit=1\n"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(sol_refusal(&store, &repo), None);
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
 fn add_unit(store: &Path, id: &str, track: &str, scope: &str) {
     let brief = store.join(format!("{id}.brief"));
     fs::write(
@@ -307,12 +512,22 @@ fn dependencies_require_verified_unit() {
     let (store, repo) = setup();
     add_unit(&store, "b", "n", "b.txt");
     fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS b.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
-    let err = begin_unit(&store, "b", "worker", &repo, false)
-        .err()
-        .unwrap();
-    assert_eq!(err.kind, "not_ready");
-    assert!(err.message.contains('a'));
+    let not_ready = |unit: &str| {
+        let err = begin_unit(&store, unit, "worker", &repo, false)
+            .err()
+            .unwrap();
+        assert_eq!(err.kind, "not_ready");
+        err.message
+    };
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (pending; next run); ready now: a"
+    );
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (pending; next run); none ready"
+    );
     finish_unit(
         &store,
         "a",
@@ -323,7 +538,15 @@ fn dependencies_require_verified_unit() {
         &json!({"status":"completed","file_changes":[]}),
     )
     .unwrap();
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (built; next accept); none ready"
+    );
     record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (built; next review); none ready"
+    );
     record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
     assert_eq!(
         derive_state(&evidence(&store, "a").unwrap(), true),
@@ -471,6 +694,27 @@ fn map_and_review_errors() {
     assert_eq!(call(&["evidence", "missing"], false).exit_code, 2);
     let verdict = store.join("verdict.json");
     let path = verdict.to_str().unwrap();
+    let out = call(
+        &[
+            "review",
+            "a",
+            "--reviewer",
+            "chronos:reviewer",
+            "--verdict-file",
+            path,
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+        false,
+    );
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "verdict file {path} does not exist; save the reviewer's verdict there"
+        )),
+        "{}",
+        out.stderr
+    );
     for (data, msg) in [("{", "error:"), ("{}", "missing verdict")] {
         fs::write(&verdict, data).unwrap();
         let out = call(
@@ -511,6 +755,117 @@ fn map_and_review_errors() {
         .exit_code,
         2
     );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn verify_command_refreshes_a_stale_unit() {
+    let (store, repo) = setup();
+    fs::write(
+        store.join("modules.md"),
+        "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
+    )
+    .unwrap();
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let verify = |json| {
+        run(
+            &store,
+            &["verify".into(), "a".into(), "--repo".into(), repo_arg.clone()],
+            json,
+            false,
+        )
+    };
+    let early = verify(false);
+    assert_eq!(early.exit_code, 1);
+    assert!(
+        early.stderr.contains("unit a has no completed worker run to verify"),
+        "{}",
+        early.stderr
+    );
+    assert!(evidence(&store, "a").unwrap().is_empty());
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    fs::write(repo.join("a.txt"), "changed by a neighbour").unwrap();
+    let stale = record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap_err();
+    assert_eq!(stale.kind, "stale_review");
+    assert!(
+        stale.message.contains("run orch verify <unit> --repo <dir>, then review again"),
+        "{}",
+        stale.message
+    );
+    let out = verify(false);
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\nok"), "{}", out.stdout);
+    assert_eq!(
+        fs::read_to_string(store.join("reports/a.verify.txt")).unwrap().trim(),
+        "ok"
+    );
+    record_accept(&store, "m", &repo).unwrap();
+    let rows = record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
+    assert_eq!(rows, vec![("a".to_string(), "verified".to_string())]);
+    fs::write(store.join("a.brief"), "GOAL test\nSCOPE a.txt\nVERIFY exit 3\n").unwrap();
+    let out = verify(true);
+    assert_eq!(out.exit_code, 1);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["exit_code"], 3);
+    assert_eq!(v["state"], "failed");
+    assert_eq!(v["next"], "ready");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn temp_dir_is_not_scope_and_is_removed() {
+    let (store, repo) = setup();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    let temp = repo.join(TEMP_DIR);
+    fs::create_dir_all(temp.join("a/pytest-0")).unwrap();
+    fs::write(temp.join("a/pytest-0/case.txt"), "scratch").unwrap();
+    fs::create_dir_all(temp.join("other")).unwrap();
+    fs::write(temp.join("other/keep.txt"), "another unit's scratch").unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[{"path":".axiom-tmp/a/pytest-0/case.txt"}]}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "built");
+    assert!(finished.outside_scope.is_empty(), "{:?}", finished.outside_scope);
+    assert!(!temp.join("a").exists());
+    assert!(temp.join("other/keep.txt").exists());
+    fs::remove_dir_all(&temp).unwrap();
+    fs::write(repo.join("a.txt"), "changed").unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::create_dir_all(repo.join(".axiom-tmp-a")).unwrap();
+    fs::write(repo.join(".axiom-tmp-a/case.txt"), "scratch").unwrap();
+    fs::create_dir_all(temp.join("a")).unwrap();
+    fs::write(temp.join("a/case.txt"), "scratch").unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "failed");
+    assert_eq!(finished.outside_scope, vec![".axiom-tmp-a/case.txt"]);
+    assert!(!temp.exists());
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -589,7 +944,7 @@ fn ready_lists_waiting_units_with_next_step() {
             ("d", "accept"),
             ("e", "review"),
             ("f", "blocked"),
-            ("g", "wait a,b,c,d,e,f")
+            ("g", "wait a (pending; next run), b (accept-failed; next fix), c (review-failed; next fix), d (built; next accept), e (built; next review), f (failed; next fix)")
         ]
     );
     let compact = run(&store, &["ready".into()], false, false);
@@ -692,8 +1047,10 @@ fn tracks_dependencies_and_auto_accept() {
         .err()
         .unwrap();
     assert_eq!(err.kind, "not_ready");
-    assert!(err.message.contains("z (no units)"));
-    assert!(err.message.contains("a"));
+    assert_eq!(
+        err.message,
+        "dependent waits on a (pending; next run), fix (pending; next run), z (no units registered); ready now: a, fix"
+    );
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
     finish_unit(
         &store,

@@ -7,6 +7,8 @@ pub struct Brief {
     pub scope: Vec<String>,
     pub verify: String,
     pub context: Option<String>,
+    pub effort: Option<String>,
+    pub tier: Option<String>,
     pub text: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,14 +27,17 @@ pub struct Map {
     pub modules: Vec<Module>,
     pub full_test: Option<String>,
 }
+const EFFORTS: [&str; 3] = ["low", "medium", "high"];
+const TIERS: [&str; 1] = ["luna"];
+fn is_field(line: &str, name: &str) -> bool {
+    line.strip_prefix(name)
+        .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+}
 fn fields(text: &str, names: &[&str]) -> HashMap<String, String> {
     let mut result = HashMap::<String, String>::new();
     let mut active: Option<&str> = None;
     for line in text.lines() {
-        let field = names.iter().find(|name| {
-            line.strip_prefix(**name)
-                .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
-        });
+        let field = names.iter().find(|name| is_field(line, name));
         if let Some(name) = field {
             active = Some(name);
             result
@@ -59,29 +64,72 @@ fn words(s: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+fn setting(
+    line: &str,
+    name: &str,
+    allowed: &[&str],
+    slot: &mut Option<String>,
+) -> Result<(), String> {
+    let value = line[name.len()..].trim();
+    if slot.is_some() || !allowed.contains(&value) {
+        return Err(format!(
+            "has invalid {name} {value:?}: give it once, as one of {}",
+            allowed.join(", ")
+        ));
+    }
+    *slot = Some(value.into());
+    Ok(())
+}
+fn is_valid_setting(line: &str) -> bool {
+    let valid = |name: &str, allowed: &[&str]| {
+        is_field(line, name) && allowed.contains(&line[name.len()..].trim())
+    };
+    valid("EFFORT", &EFFORTS) || valid("TIER", &TIERS)
+}
 pub fn parse_brief(text: &str) -> Result<Brief, String> {
-    let start = text.lines().position(|line| {
-        line.strip_prefix("GOAL")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-    });
+    let start = text.lines().position(|line| is_field(line, "GOAL"));
     let body = start
         .map(|n| text.lines().skip(n).collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
     let f = fields(&body, &["GOAL", "SCOPE", "VERIFY", "CONTEXT"]);
     for n in ["GOAL", "SCOPE", "VERIFY"] {
         if f.get(n).is_none_or(|s| s.trim().is_empty()) {
-            return Err(n.into());
+            return Err(format!("is missing {n}"));
         }
     }
     if words(&f["SCOPE"]).is_empty() {
-        return Err("SCOPE".into());
+        return Err("is missing SCOPE".into());
+    }
+    let (mut effort, mut tier) = (None, None);
+    let mut worker_text = String::with_capacity(text.len());
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next_if(|l| !is_field(l, "GOAL")) {
+        worker_text.push_str(line);
+    }
+    // Pasted CONTEXT can start a line with anything, so only lines before it are settings.
+    while let Some(line) = lines.next_if(|l| !is_field(l, "CONTEXT")) {
+        if is_field(line, "EFFORT") {
+            setting(line, "EFFORT", &EFFORTS, &mut effort)?;
+        } else if is_field(line, "TIER") {
+            setting(line, "TIER", &TIERS, &mut tier)?;
+        } else {
+            worker_text.push_str(line);
+        }
+    }
+    worker_text.extend(lines);
+    if let Some(stray) = worker_text.lines().find(|l| is_valid_setting(l)) {
+        return Err(format!(
+            "has {stray:?} outside the lines between GOAL and CONTEXT"
+        ));
     }
     Ok(Brief {
         goal: f["GOAL"].clone(),
         scope: words(&f["SCOPE"]),
         verify: f["VERIFY"].clone(),
         context: f.get("CONTEXT").cloned(),
-        text: text.into(),
+        effort,
+        tier,
+        text: worker_text,
     })
 }
 fn normalized(s: &str) -> String {

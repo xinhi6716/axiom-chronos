@@ -1,5 +1,8 @@
 use super::Clock;
-use crate::base::{self, Failure, Res};
+use crate::{
+    base::{self, Failure, Res},
+    codegraph,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -41,7 +44,12 @@ impl Config {
         }
     }
 }
-pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Res<Vec<String>> {
+pub fn command(
+    config: &Config,
+    plugin_dir: &Path,
+    max_turns: Option<u32>,
+    graph: bool,
+) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
@@ -52,6 +60,10 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
             e
         }
     })?;
+    let mut tools = TOOLS.join(",");
+    if graph {
+        tools = format!("{tools},{}", codegraph::TOOL);
+    }
     cmd.extend([
         "-p".into(),
         "--input-format".into(),
@@ -66,12 +78,15 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
         "--add-dir".into(),
         config.home.to_string_lossy().into_owned(),
         "--allowedTools".into(),
-        TOOLS.join(","),
+        tools,
         "--disallowedTools".into(),
         "PowerShell,ScheduleWakeup,CronCreate".into(),
         "--model".into(),
         "opus".into(),
     ]);
+    if graph {
+        cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);
+    }
     if let Some(n) = max_turns {
         cmd.extend(["--max-turns".into(), n.to_string()]);
     }
@@ -92,6 +107,75 @@ fn short(s: &str) -> String {
 fn line(out: &mut dyn Write, depth: usize, text: &str) {
     let _ = writeln!(out, "{}{text}", "  ".repeat(depth));
     let _ = out.flush();
+}
+fn agent_name(args: &Value) -> &str {
+    args["subagent_type"].as_str().unwrap_or("agent")
+}
+fn codex_role(args: &Value) -> &str {
+    args["role"]
+        .as_str()
+        .filter(|x| !x.is_empty())
+        .or_else(|| args["model"].as_str())
+        .unwrap_or("None")
+}
+/// The one-line progress label for a tool call, or None for tools that are not shown.
+pub fn tool_label(name: &str, args: &Value) -> Option<String> {
+    if name == "Agent" {
+        Some(format!(
+            "> {}: {}",
+            agent_name(args),
+            s(&args["description"])
+        ))
+    } else if let Some(tool) = name.strip_prefix(BRIDGE) {
+        if tool == "codex_run" {
+            let brief = s(&args["brief"]);
+            let label = brief
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("GOAL")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| {
+                    brief
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty() && *l != "GOAL")
+                })
+                .unwrap_or("(no brief)");
+            Some(format!("- codex {}: {}", codex_role(args), short(label)))
+        } else if tool == "orch" {
+            let args = args["args"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            Some(format!("- orch {}", short(&args)))
+        } else {
+            Some(format!("- {tool}"))
+        }
+    } else if name == "Bash" {
+        Some(format!("- $ {}", short(s(&args["command"]))))
+    } else {
+        None
+    }
+}
+/// The text of a tool_result content field, which is a string or a list of text blocks.
+pub fn content_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        Some(text.to_string())
+    } else {
+        content.as_array().map(|a| {
+            a.iter()
+                .filter(|x| s(&x["type"]) == "text")
+                .map(|x| s(&x["text"]))
+                .collect::<String>()
+        })
+    }
 }
 fn comma(n: u64) -> String {
     let t = n.to_string();
@@ -142,54 +226,12 @@ impl Renderer {
                         let name = s(&b["name"]);
                         let args = &b["input"];
                         let id = s(&b["id"]).to_string();
-                        let text = if name == "Agent" {
-                            let agent = args["subagent_type"].as_str().unwrap_or("agent");
-                            self.agents.insert(id, agent.into());
-                            Some(format!("> {agent}: {}", s(&args["description"])))
-                        } else if let Some(tool) = name.strip_prefix(BRIDGE) {
-                            if tool == "codex_run" {
-                                let role = args["role"]
-                                    .as_str()
-                                    .filter(|x| !x.is_empty())
-                                    .or_else(|| args["model"].as_str())
-                                    .unwrap_or("None");
-                                self.calls.insert(id, (role.into(), depth));
-                                let brief = s(&args["brief"]);
-                                let label = brief
-                                    .lines()
-                                    .find_map(|l| {
-                                        l.strip_prefix("GOAL")
-                                            .map(str::trim)
-                                            .filter(|s| !s.is_empty())
-                                    })
-                                    .or_else(|| {
-                                        brief
-                                            .lines()
-                                            .map(str::trim)
-                                            .find(|l| !l.is_empty() && *l != "GOAL")
-                                    })
-                                    .unwrap_or("(no brief)");
-                                Some(format!("- codex {role}: {}", short(label)))
-                            } else if tool == "orch" {
-                                let args = args["args"]
-                                    .as_array()
-                                    .map(|a| {
-                                        a.iter()
-                                            .filter_map(Value::as_str)
-                                            .collect::<Vec<_>>()
-                                            .join(" ")
-                                    })
-                                    .unwrap_or_default();
-                                Some(format!("- orch {}", short(&args)))
-                            } else {
-                                Some(format!("- {tool}"))
-                            }
-                        } else if name == "Bash" {
-                            Some(format!("- $ {}", short(s(&args["command"]))))
-                        } else {
-                            None
-                        };
-                        if let Some(text) = text {
+                        if name == "Agent" {
+                            self.agents.insert(id, agent_name(args).into());
+                        } else if name == format!("{BRIDGE}codex_run") {
+                            self.calls.insert(id, (codex_role(args).into(), depth));
+                        }
+                        if let Some(text) = tool_label(name, args) {
                             line(out, depth, &text);
                         }
                     }
@@ -219,15 +261,7 @@ impl Renderer {
         }
     }
     fn codex_result(&mut self, block: &Value, role: &str, depth: usize, out: &mut dyn Write) {
-        let content = &block["content"];
-        let text = if let Some(s) = content.as_str() {
-            s.to_string()
-        } else if let Some(a) = content.as_array() {
-            a.iter()
-                .filter(|x| s(&x["type"]) == "text")
-                .map(|x| s(&x["text"]))
-                .collect::<String>()
-        } else {
+        let Some(text) = content_text(&block["content"]) else {
             return;
         };
         let Ok(report) = serde_json::from_str::<Value>(&text) else {
