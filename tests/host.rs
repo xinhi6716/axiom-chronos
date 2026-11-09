@@ -153,13 +153,19 @@ fn start_streams_structured_events() {
         std::fs::canonicalize(setup.project()).unwrap()
     );
     assert_eq!(record["env"]["AXIOM_HEADLESS"], "1");
-    assert_eq!(record["env"]["AXIOM_DATA_HOME"], setup.home.to_str().unwrap());
+    assert_eq!(
+        record["env"]["AXIOM_DATA_HOME"],
+        setup.home.to_str().unwrap()
+    );
     assert!(!record["argv"]
         .as_array()
         .unwrap()
         .iter()
         .any(|v| v == "--max-turns"));
-    assert_eq!(std::fs::read_dir(setup.home.join("logs")).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_dir(setup.home.join("logs")).unwrap().count(),
+        1
+    );
 }
 
 #[test]
@@ -213,8 +219,17 @@ fn options_and_argument_checks() {
 #[test]
 fn interjection_is_delivered_while_running() {
     let setup = Setup::new("interject");
-    let wish = Wish::start(setup.config(), setup.project(), "等一下", &Options::default()).unwrap();
-    assert_eq!(wish.interject(" \r\n").unwrap_err().kind, "invalid_argument");
+    let wish = Wish::start(
+        setup.config(),
+        setup.project(),
+        "等一下",
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        wish.interject(" \r\n").unwrap_err().kind,
+        "invalid_argument"
+    );
     assert_eq!(
         next(&wish),
         Event::Started {
@@ -303,7 +318,9 @@ fn stop_kills_the_process_tree_and_blocks_the_goal() {
     assert_eq!(g.status, "blocked");
     assert_eq!(
         g.note.as_deref(),
-        Some(format!("interrupted by the user. Resume with: axiom wish --resume {SESSION}").as_str())
+        Some(
+            format!("interrupted by the user. Resume with: axiom wish --resume {SESSION}").as_str()
+        )
     );
 }
 
@@ -325,13 +342,7 @@ fn drop_stops_a_running_wish() {
 #[test]
 fn resume_continues_a_blocked_goal() {
     let setup = Setup::new("resume");
-    goal::open(
-        &setup.home,
-        SESSION,
-        "original",
-        setup.project().to_str(),
-    )
-    .unwrap();
+    goal::open(&setup.home, SESSION, "original", setup.project().to_str()).unwrap();
     goal::set_status(&setup.home, SESSION, "blocked", Some("stopped")).unwrap();
     let wish = Wish::resume(setup.config(), SESSION, Some(17)).unwrap();
     assert_eq!(
@@ -363,13 +374,18 @@ fn resume_continues_a_blocked_goal() {
         .unwrap();
     assert!(prompt.starts_with(CONTINUE_TAG));
     assert!(prompt.contains("still active"));
-    assert_eq!(goal::load(&setup.home, SESSION).unwrap().unwrap().status, "done");
+    assert_eq!(
+        goal::load(&setup.home, SESSION).unwrap().unwrap().status,
+        "done"
+    );
 
     let err = Wish::resume(setup.config(), SESSION, None).unwrap_err();
     assert_eq!(err.kind, "invalid_argument");
     assert!(err.message.contains("already done"));
     assert_eq!(
-        Wish::resume(setup.config(), "missing", None).unwrap_err().kind,
+        Wish::resume(setup.config(), "missing", None)
+            .unwrap_err()
+            .kind,
         "not_found"
     );
 }

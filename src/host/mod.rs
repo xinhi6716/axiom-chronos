@@ -23,12 +23,25 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// Claude is up; `session` is the id to resume with later.
-    Started { session: String },
+    Started {
+        session: String,
+    },
     Text(String),
-    ToolUse { name: String, label: Option<String> },
-    ToolResult { name: String, summary: String },
-    Result { text: String, is_error: bool },
-    Exited { code: i32 },
+    ToolUse {
+        name: String,
+        label: Option<String>,
+    },
+    ToolResult {
+        name: String,
+        summary: String,
+    },
+    Result {
+        text: String,
+        is_error: bool,
+    },
+    Exited {
+        code: i32,
+    },
     Failed(Failure),
 }
 
