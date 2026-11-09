@@ -243,6 +243,8 @@ pub struct WishRequest {
     pub cwd: PathBuf,
     pub wish: String,
     pub creative: bool,
+    /// `None` leaves the turn count uncapped, as `axiom wish` does without `--max-turns`.
+    pub max_turns: Option<u32>,
 }
 
 /// Commands a screen can send. The app shell connects these to the session host.
