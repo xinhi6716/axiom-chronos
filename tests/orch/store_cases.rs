@@ -358,6 +358,43 @@ fn scope_outside_module_rejected() {
 }
 
 #[test]
+fn unit_add_refuses_bad_brief_settings_with_a_clear_error() {
+    let t = Temp::new();
+    let p = &t.0;
+    ok(p, &["init"], false);
+    let brief = p.join("brief.md");
+    let brief_path = brief.to_str().unwrap();
+    let add = |id: &str| {
+        call(
+            p,
+            &["unit", "add", id, "--track", "core", "--brief", brief_path],
+            false,
+            false,
+        )
+    };
+    for (body, reason) in [
+        (
+            "GOAL g\nSCOPE a\nVERIFY v\nEFFORT extreme\n",
+            "has invalid EFFORT \"extreme\": give it once, as one of low, medium, high",
+        ),
+        (
+            "GOAL g\nSCOPE a\nVERIFY v\nTIER sol\n",
+            "has invalid TIER \"sol\": give it once, as one of luna",
+        ),
+        ("GOAL g\nSCOPE a\n", "is missing VERIFY"),
+    ] {
+        std::fs::write(&brief, body).unwrap();
+        let out = add("x");
+        assert_eq!(out.exit_code, 1, "{body}");
+        assert_eq!(out.stderr, format!("error: brief {brief_path} {reason}\n"));
+        assert!(call(p, &["unit", "get", "x"], false, false).exit_code != 0);
+    }
+    std::fs::write(&brief, "GOAL g\nSCOPE a\nVERIFY v\nEFFORT low\nTIER luna\n").unwrap();
+    assert_eq!(add("x").exit_code, 0);
+    assert_eq!(call(p, &["unit", "get", "x"], false, false).exit_code, 0);
+}
+
+#[test]
 fn invalid_unit_ids_rejected() {
     let t = Temp::new();
     ok(&t.0, &["init"], false);

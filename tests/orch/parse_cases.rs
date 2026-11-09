@@ -13,12 +13,67 @@ fn brief_fields_and_crlf() {
     assert_eq!(b.verify, "cargo test");
     assert_eq!(b.context.as_deref(), Some("背景"));
     assert_eq!(b.text, text);
-    assert!(parse_brief("GOAL x\nSCOPE x\n")
-        .unwrap_err()
-        .contains("VERIFY"));
-    assert!(parse_brief("GOAL x\nSCOPE ,,,\nVERIFY x\n")
-        .unwrap_err()
-        .contains("SCOPE"));
+    assert_eq!((b.effort, b.tier), (None, None));
+    assert_eq!(
+        parse_brief("GOAL x\nSCOPE x\n").unwrap_err(),
+        "is missing VERIFY"
+    );
+    assert_eq!(
+        parse_brief("GOAL x\nSCOPE ,,,\nVERIFY x\n").unwrap_err(),
+        "is missing SCOPE"
+    );
+}
+
+#[test]
+fn brief_settings_are_read_and_kept_from_the_worker() {
+    let text = "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
+    let b = parse_brief(text).unwrap();
+    assert_eq!(b.effort.as_deref(), Some("low"));
+    assert_eq!(b.tier.as_deref(), Some("luna"));
+    assert_eq!(b.text, "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n");
+    assert_eq!((b.goal.as_str(), b.verify.as_str()), ("g", "v"));
+    assert_eq!(b.scope, ["a"]);
+    for effort in ["low", "medium", "high"] {
+        let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nEFFORT {effort}")).unwrap();
+        assert_eq!(b.effort.as_deref(), Some(effort));
+        assert_eq!(b.tier, None);
+        assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
+    }
+}
+
+#[test]
+fn brief_settings_outside_the_allowed_set_are_refused() {
+    let efforts = "as one of low, medium, high";
+    let tiers = "as one of luna";
+    for (line, reason) in [
+        ("EFFORT xhigh", format!("has invalid EFFORT \"xhigh\": give it once, {efforts}")),
+        ("EFFORT Low", format!("has invalid EFFORT \"Low\": give it once, {efforts}")),
+        ("EFFORT low please", format!("has invalid EFFORT \"low please\": give it once, {efforts}")),
+        ("EFFORT", format!("has invalid EFFORT \"\": give it once, {efforts}")),
+        ("EFFORT low\nEFFORT high", format!("has invalid EFFORT \"high\": give it once, {efforts}")),
+        ("TIER terra", format!("has invalid TIER \"terra\": give it once, {tiers}")),
+        ("TIER sol", format!("has invalid TIER \"sol\": give it once, {tiers}")),
+        ("TIER gpt-6-luna", format!("has invalid TIER \"gpt-6-luna\": give it once, {tiers}")),
+        ("TIER", format!("has invalid TIER \"\": give it once, {tiers}")),
+    ] {
+        let err = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\n{line}\n")).unwrap_err();
+        assert_eq!(err, reason, "{line}");
+    }
+}
+
+#[test]
+fn old_briefs_cannot_trip_the_settings() {
+    for text in [
+        "EFFORT was spent here\nTIER 1 sources\nGOAL g\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT low\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT was spent here\n",
+        "GOAL g\n  EFFORT was spent here\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nEFFORTS low\nTIERED luna\nSCOPE a\nVERIFY v\n",
+    ] {
+        let b = parse_brief(text).unwrap();
+        assert_eq!((b.effort, b.tier), (None, None), "{text}");
+        assert_eq!(b.text, text);
+    }
 }
 
 #[test]
