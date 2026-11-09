@@ -22,7 +22,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash|PowerShell|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run",
+        "matcher": "Write|Edit|NotebookEdit|Bash|PowerShell|Read|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run|mcp__plugin_chronos_bridge__goal",
         "hooks": [
           {
             "type": "command",

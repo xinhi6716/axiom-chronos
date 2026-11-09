@@ -5,7 +5,8 @@ use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
+    time::{Duration, Instant},
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
@@ -159,17 +160,50 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
     let text = std::fs::read_to_string(&row.brief).map_err(io)?;
     parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))
 }
-static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
+static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+struct LockFile {
+    path: PathBuf,
+    pid: String,
+}
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+/// Holds the lock of a store until dropped; the file goes before the next thread may enter.
+pub struct StoreLock {
+    _file: LockFile,
+    _threads: MutexGuard<'static, ()>,
+}
+/// Only the process that creates the marker may delete a dead holder's lock, so two that
+/// saw the same dead holder cannot delete the fresh lock one of them has just taken.
+fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
+    let marker = path.with_extension(format!("lock.{holder}.stale"));
+    let claimed = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .is_ok();
+    if !claimed && !force {
+        return false;
+    }
+    let cleared = std::fs::read_to_string(path).is_ok_and(|s| s.trim() == holder)
+        && std::fs::remove_file(path).is_ok();
+    let _ = std::fs::remove_file(&marker);
+    cleared
+}
+fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let m = LOCKS
+    let threads: &'static Mutex<()> = *LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
+    let threads = threads.lock().unwrap_or_else(|e| e.into_inner());
     let path = store.join(".orch.lock");
     let pid = std::process::id().to_string();
     let create = || -> std::io::Result<()> {
@@ -179,9 +213,18 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
             .open(&path)?;
         writeln!(file, "{pid}")
     };
-    if let Err(e) = create() {
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(io(e));
+    let deadline = Instant::now() + wait;
+    let mut pause = 1;
+    loop {
+        match create() {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            // Windows answers access denied while the previous lock file is still being deleted.
+            Err(e)
+                if cfg!(windows)
+                    && e.kind() == std::io::ErrorKind::PermissionDenied
+                    && Instant::now() < deadline => {}
+            Err(e) => return Err(io(e)),
         }
         let holder = std::fs::read_to_string(&path).unwrap_or_default();
         let holder = if holder.trim().is_empty() {
@@ -194,34 +237,38 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
             .ok()
             .filter(|p| *p > 0 && p.to_string() == holder)
             .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p));
-        if dead {
+        if dead && clear_dead_lock(&path, holder, force) {
             note.push_str(&format!(
-                "replacing stale store lock (pid {holder} is dead)\n"
+                "replacing stale store lock (pid {holder} is dead)
+"
             ));
-        } else if force {
-            note.push_str(&format!("stealing store lock held by pid {holder}\n"));
-        } else {
+            continue;
+        }
+        if !dead && force && std::fs::remove_file(&path).is_ok() {
+            note.push_str(&format!("stealing store lock held by pid {holder}
+"));
+            continue;
+        }
+        if holder == pid || Instant::now() >= deadline {
             return Err(fail(format!("store lock held by pid {holder}")));
         }
-        std::fs::remove_file(&path).map_err(io)?;
-        create().map_err(io)?;
+        std::thread::sleep(Duration::from_millis(pause));
+        pause = (pause * 2).min(50);
     }
-    struct Guard {
-        path: PathBuf,
-        pid: String,
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
-    }
-    let _file_guard = Guard { path, pid };
+    Ok(StoreLock {
+        _file: LockFile { path, pid },
+        _threads: threads,
+    })
+}
+fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
+    let _lock = acquire(store, force, note, LOCK_WAIT)?;
     f()
 }
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
+}
+pub fn lock_store(store: &Path) -> Res<StoreLock> {
+    acquire(store, false, &mut String::new(), LOCK_WAIT)
 }
 #[derive(Clone)]
 pub(crate) struct DiskClaim {
@@ -270,18 +317,20 @@ pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
     write(store, "claims.tsv", &text)
 }
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
-    with_lock(store, false, || {
-        let mut rows = read_units(store)?;
-        let row = rows
-            .iter_mut()
-            .find(|u| u.id == unit)
-            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-        if row.superseded_by().is_some() {
-            return Ok(());
-        }
-        row.state = required(state, "state")?;
-        save_units(store, &rows)
-    })
+    with_lock(store, false, || save_unit_state(store, unit, state))
+}
+/// The caller holds the store lock.
+pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
+    let mut rows = read_units(store)?;
+    let row = rows
+        .iter_mut()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    if row.superseded_by().is_some() {
+        return Ok(());
+    }
+    row.state = required(state, "state")?;
+    save_units(store, &rows)
 }
 fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     let mut rows = read_units(store)?;
@@ -997,6 +1046,11 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         .find(|u| u.id == id)
                         .ok_or_else(|| Failure::new("not_found", format!("unit {id} not found")))?;
                     u.refuse_superseded()?;
+                    if u.state == "verified" {
+                        return Err(fail(format!(
+                            "unit {id} is verified; its state follows its evidence and cannot be set"
+                        )));
+                    }
                     u.state = state;
                     if let Some(v) = option(args, "--branch")? {
                         u.branch = required(v, "branch")?;
@@ -1369,5 +1423,43 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             stdout: String::new(),
             stderr: format!("{note}error: {}\n", e.message),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_holder_that_never_lets_go_ends_the_wait_with_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        let mut holder = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let lock = t.path().join(".orch.lock");
+        std::fs::write(&lock, format!("{}
+", holder.id())).unwrap();
+        let started = Instant::now();
+        let refused = acquire(
+            t.path(),
+            false,
+            &mut String::new(),
+            Duration::from_millis(150),
+        )
+        .err()
+        .expect("a live holder keeps the lock");
+        assert!(refused.message.contains("store lock held"));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap().trim(),
+            holder.id().to_string()
+        );
+        drop(holder.stdin.take());
+        holder.wait().unwrap();
     }
 }

@@ -10,6 +10,7 @@ use std::{
 };
 
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
+const GOAL: &str = "mcp__plugin_chronos_bridge__goal";
 
 fn deny(reason: &str) -> Option<Value> {
     Some(
@@ -36,19 +37,52 @@ fn normalize(path: &Path) -> PathBuf {
     }
     out
 }
-fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
+fn absolute(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
     if path.is_empty() {
-        return false;
+        return None;
     }
     let p = Path::new(path);
-    let p = if p.is_absolute() {
-        p.to_path_buf()
-    } else if let Some(cwd) = cwd {
-        Path::new(cwd).join(p)
+    if p.is_absolute() {
+        Some(normalize(p))
     } else {
+        cwd.map(|cwd| normalize(&Path::new(cwd).join(p)))
+    }
+}
+fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
+    absolute(path, cwd).is_some_and(|p| p.starts_with(normalize(home)))
+}
+/// Goals, units, claims and evidence change only through the engine's own gates.
+fn engine_state(home: &Path, path: &str, cwd: Option<&str>) -> bool {
+    let fold = |p: &Path| -> PathBuf {
+        if cfg!(windows) {
+            p.to_string_lossy().to_lowercase().into()
+        } else {
+            p.to_path_buf()
+        }
+    };
+    let Some(path) = absolute(path, cwd).map(|p| fold(&p)) else {
         return false;
     };
-    normalize(&p).starts_with(normalize(home))
+    let Ok(rest) = path.strip_prefix(fold(&normalize(home))) else {
+        return false;
+    };
+    let parts: Vec<_> = rest.iter().map(|c| c.to_string_lossy()).collect();
+    let parts: Vec<&str> = parts.iter().map(|c| c.as_ref()).collect();
+    match parts.as_slice() {
+        ["goals", ..] => true,
+        ["orchestrate", _, file] => {
+            ["units.tsv", "claims.tsv"].contains(file) || file.starts_with(".orch.lock")
+        }
+        ["orchestrate", _, "reports", file] => file.ends_with(".evidence.tsv"),
+        _ => false,
+    }
+}
+/// A variable that chooses which program runs makes even `git diff` a write.
+fn steers_execution(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name == "PATH"
+        || name == "RIPGREP_CONFIG_PATH"
+        || ["GIT_", "LD_", "DYLD_"].iter().any(|p| name.starts_with(p))
 }
 
 pub fn read_only_bash(command: &str) -> bool {
@@ -67,6 +101,7 @@ pub fn read_only_bash(command: &str) -> bool {
         while words.peek().is_some_and(|w| {
             w.split_once('=').is_some_and(|(k, _)| {
                 !k.is_empty()
+                    && !steers_execution(k)
                     && k.chars().enumerate().all(|(i, c)| {
                         c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
                     })
@@ -206,18 +241,21 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
     };
     let marker = store.join("agents").join(agent);
     // Parallel hooks can see the marker before its writer finishes, so an empty one counts as absent.
-    let first = std::fs::read_to_string(&marker).unwrap_or_default();
-    let first = first.trim();
-    if first.is_empty() {
-        std::fs::create_dir_all(marker.parent()?).ok()?;
-        crate::base::atomic_write(&marker, track.as_bytes()).ok()?;
-        return None;
-    }
-    (first != track).then(|| {
-        format!(
-            "This dispatcher already works on module {first}; unit {unit} belongs to {track}. Report back: each module gets a fresh dispatcher."
-        )
+    let first = crate::orch::with_lock(&store, false, || {
+        if let Ok(first) = std::fs::read_to_string(&marker) {
+            if !first.trim().is_empty() {
+                return Ok(first);
+            }
+        }
+        let _ = std::fs::create_dir_all(store.join("agents"));
+        let _ = base::atomic_write(&marker, track.as_bytes());
+        Ok(track.to_string())
     })
+    .ok()?;
+    (first.trim() != track).then(|| format!(
+        "This dispatcher already works on module {}; unit {unit} belongs to {track}. Report back: each module gets a fresh dispatcher.",
+        first.trim()
+    ))
 }
 
 fn wish_text(prompt: &str) -> Option<&str> {
@@ -289,9 +327,28 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             if tool == CODEX && !agent {
                 return deny("codex_run is for the chronos agents. Hand building to chronos:dispatcher and Astra plans to chronos:astra.");
             }
+            if tool == GOAL && agent {
+                return deny("Only the core session may change the goal; report back instead.");
+            }
             let home = home?;
-            let g = goal::load(home, session).ok()??;
+            let g = match goal::load(home, session) {
+                Ok(Some(g)) => g,
+                Ok(None) => return None,
+                Err(e) if e.kind == "invalid_argument" => return None,
+                Err(e) => {
+                    return deny(&format!(
+                        "The goal could not be read, so this call cannot be checked: {}",
+                        e.message
+                    ))
+                }
+            };
             if g.status == "active" {
+                if !agent
+                    && matches!(tool, "Agent" | "Task")
+                    && !subagent.is_some_and(|s| s.starts_with("chronos:"))
+                {
+                    return deny("While a goal is active only chronos agents may be started.");
+                }
                 if tool == "Read" && oversized_read(input) {
                     return deny("This file is too large to read whole: use Grep, or Read with offset and a limit of at most 500 lines.");
                 }
@@ -318,16 +375,25 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     "The goal mode is review/answer; dispatch and writable sandboxes require change mode."
                 });
             }
-            let restricted = !agent || matches!(mode, Some("review" | "answer"));
-            if restricted && ["Write", "Edit", "NotebookEdit"].contains(&tool) {
+            let restricted = !agent || mode != Some("change");
+            if ["Write", "Edit", "NotebookEdit"].contains(&tool) {
                 let path = input
                     .get("file_path")
                     .or_else(|| input.get("notebook_path"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if !inside(home, path, event.get("cwd").and_then(Value::as_str)) {
+                let cwd = event.get("cwd").and_then(Value::as_str);
+                if engine_state(home, path, cwd) {
+                    return deny("Goals, units, claims and evidence change only through the engine.");
+                }
+                if restricted && !inside(home, path, cwd) {
                     return deny("Writes outside the data home are not allowed for this caller or goal mode.");
                 }
+            }
+            if restricted && tool == "PowerShell" {
+                return deny(
+                    "PowerShell cannot be checked as read-only; use read-only Bash commands.",
+                );
             }
             if restricted
                 && tool == "Bash"
@@ -347,8 +413,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                         "Questions are unavailable in this session or exceed the limit of four.",
                     );
                 }
-                if goal::mark_asked(home, session).is_err() {
-                    return deny("Could not record the question.");
+                match goal::mark_asked(home, session) {
+                    Ok(true) => (),
+                    Ok(false) => {
+                        return deny(
+                            "Questions are unavailable in this session or exceed the limit of four.",
+                        )
+                    }
+                    Err(_) => return deny("Could not record the question."),
                 }
             }
             if dispatcher
