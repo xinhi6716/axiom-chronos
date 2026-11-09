@@ -166,12 +166,14 @@ fn bridge_hook_and_unicode_path() {
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
     let fake = serde_json::to_string(&common::fake("fake_claude")).unwrap();
+    let codex =
+        serde_json::to_string(&common::fake_codex(&[&common::tested_codex_flag()])).unwrap();
     let o = Command::new(&exe)
         .arg("doctor")
         .env("AXIOM_HOME", t.path())
         .env("AXIOM_DATA_HOME", t.path())
         .env("AXIOM_CLAUDE_CMD", &fake)
-        .env("AXIOM_CODEX_CMD", &fake)
+        .env("AXIOM_CODEX_CMD", &codex)
         .env("AXIOM_WSL_CMD", &fake)
         .env(
             "AXIOM_PWSH_CMD",

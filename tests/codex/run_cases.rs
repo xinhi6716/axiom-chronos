@@ -1,5 +1,5 @@
 use crate::common;
-use axiom::codex::{AppServer, RunRequest};
+use axiom::codex::{AppServer, RunRequest, TESTED_CODEX};
 use serde_json::{json, Value};
 use std::{
     sync::Arc,
@@ -261,4 +261,90 @@ fn cancel_all_interrupts_single_and_concurrent_turns() {
         }
         assert!(start.elapsed() < Duration::from_secs(5));
     }
+}
+
+const NEWER: &str = "--fake-version=codex-cli 999.1.2";
+
+fn assert_names_versions(message: &str) {
+    assert!(message.contains("installed codex-cli 999.1.2"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "last tested with Chronos {}",
+            TESTED_CODEX.last_tested
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn newer_codex_still_runs() {
+    let dir = common::temp();
+    let server = AppServer::new(common::fake_codex(&[NEWER]));
+    let report = server.run(&request(dir.path(), "hello")).unwrap();
+    assert_eq!(report["status"], "completed");
+    assert!(report["error"].is_null());
+}
+
+#[test]
+fn run_failures_from_a_protocol_change_name_both_versions() {
+    let dir = common::temp();
+    for breakage in [
+        "--fake-break=plugin/installed:-32600:Invalid request: unknown variant `plugin/installed`",
+        "--fake-break=config/read:-32601:Method not found",
+        "--fake-break=thread/start:empty-result",
+        "--fake-break=thread/start:-32602:Invalid params",
+        "--fake-break=turn/start:empty-result",
+        "--fake-break=turn/start:-32600:Invalid request: missing field `threadId`",
+    ] {
+        let server = AppServer::new(common::fake_codex(&[NEWER, breakage]));
+        let failure = server.run(&request(dir.path(), "hello")).unwrap_err();
+        assert_eq!(failure.kind, "codex_protocol", "{breakage}: {failure}");
+        assert_names_versions(&failure.message);
+    }
+}
+
+#[test]
+fn ordinary_turn_start_errors_are_not_called_protocol_mismatches() {
+    let dir = common::temp();
+    let server = AppServer::new(common::fake_codex(&[
+        NEWER,
+        "--fake-break=turn/start:-32600:thread not found: x",
+    ]));
+    let failure = server.run(&request(dir.path(), "hello")).unwrap_err();
+    assert_eq!(failure.kind, "codex_rpc", "{failure}");
+    assert!(!failure.message.contains("999.1.2"), "{failure}");
+}
+
+#[test]
+fn turn_timeout_names_the_version_only_outside_the_tested_range() {
+    let dir = common::temp();
+    let tested = common::tested_codex_flag();
+    for (flag, named) in [(NEWER, true), (tested.as_str(), false)] {
+        let server = AppServer::new(common::fake_codex(&[flag]));
+        let mut req = request(dir.path(), "HANG");
+        req.timeout_s = 1;
+        let report = server.run(&req).unwrap();
+        assert_eq!(report["status"], "timeout");
+        assert_eq!(report["error"]["kind"], "timeout");
+        let message = report["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("turn exceeded 1s"), "{message}");
+        assert_eq!(message.contains("newer than"), named, "{message}");
+    }
+}
+
+#[test]
+fn unexpected_turn_status_is_failed_and_names_both_versions() {
+    let dir = common::temp();
+    let server = AppServer::new(common::fake_codex(&[NEWER]));
+    for (brief, shown) in [("ODDSTATUS", "\"succeeded\""), ("NOSTATUS", "null")] {
+        let report = server.run(&request(dir.path(), brief)).unwrap();
+        assert_eq!(report["status"], "failed", "{report}");
+        assert_eq!(report["error"]["kind"], "codex_protocol", "{report}");
+        let message = report["error"]["message"].as_str().unwrap();
+        assert_names_versions(message);
+        assert!(message.contains(shown), "{message}");
+    }
+    let report = server.run(&request(dir.path(), "ODDFAILURE")).unwrap();
+    assert_eq!(report["status"], "failed", "{report}");
+    assert_eq!(report["error"]["message"], "kept", "{report}");
 }

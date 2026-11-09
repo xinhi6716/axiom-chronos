@@ -167,6 +167,11 @@ fn bridge_status_and_missing_command() {
         ok["structuredContent"]["codex"]["version"],
         json!(["codex-cli fake"])
     );
+    assert_eq!(ok["structuredContent"]["codex"]["exit_code"], 0);
+    assert_eq!(
+        ok["structuredContent"]["codex"]["version_check"]["verdict"],
+        "fail"
+    );
     assert_eq!(ok["structuredContent"]["codex_app_server_running"], false);
     assert!(ok["structuredContent"].get("agy").is_none());
     let mut c = config(temp.path());
@@ -178,6 +183,42 @@ fn bridge_status_and_missing_command() {
         missing["structuredContent"]["codex"]["error"]["kind"],
         "missing"
     );
+    let mut c = config(temp.path());
+    c.codex = Ok(vec![temp
+        .path()
+        .join("no-such-codex")
+        .to_string_lossy()
+        .into_owned()]);
+    let unstartable = invoke(&Bridge::new(c), "bridge_status", json!({}));
+    check(&unstartable, "completed");
+    assert_eq!(
+        unstartable["structuredContent"]["codex"]["error"]["kind"],
+        "probe_failed"
+    );
+}
+#[test]
+fn codex_run_failure_from_a_protocol_change_names_both_versions() {
+    let temp = common::temp();
+    let mut c = config(temp.path());
+    c.codex = Ok(common::fake_codex(&[
+        "--fake-version=codex-cli 999.1.2",
+        "--fake-break=initialize:-32600:Invalid request: missing field `clientInfo`",
+    ]));
+    let result = invoke(
+        &Bridge::new(c),
+        "codex_run",
+        json!({"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}),
+    );
+    check(&result, "bridge_error");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["kind"], "codex_protocol");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("installed codex-cli 999.1.2"), "{message}");
+    assert!(
+        message.contains(&axiom::codex::TESTED_CODEX.last_tested.to_string()),
+        "{message}"
+    );
+    assert!(message.starts_with("Codex app-server protocol mismatch"), "{message}");
 }
 #[test]
 fn goal_operations_and_mode_lock() {

@@ -6,7 +6,6 @@ use crate::{
     orch,
 };
 use serde_json::{json, Value};
-use std::process::Stdio;
 fn s<'a>(a: &'a Value, k: &str) -> &'a str {
     a.get(k).and_then(Value::as_str).unwrap_or("")
 }
@@ -127,21 +126,11 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             for (key, cmd) in [("codex", &b.config.codex)] {
                 result[key] = match cmd {
                     Err(e) => json!({"error":e.to_json()}),
-                    Ok(c) => match crate::base::proc::command(c)
-                        .arg("--version")
-                        .stdin(Stdio::null())
-                        .output()
-                    {
-                        Ok(o) => {
-                            let text = if o.stdout.is_empty() {
-                                &o.stderr
-                            } else {
-                                &o.stdout
-                            };
-                            let text = String::from_utf8_lossy(text);
-                            json!({"command":c,"version":text.trim().lines().last().map(|x|vec![x]),"exit_code":o.status.code()})
+                    Ok(c) => match crate::codex::probe_version(c) {
+                        Ok(p) => {
+                            json!({"command":c,"version":p.last_line.map(|x|vec![x]),"exit_code":p.exit_code,"version_check":p.check})
                         }
-                        Err(e) => json!({"error":{"kind":"probe_failed","message":e.to_string()}}),
+                        Err(e) => json!({"error":e.to_json()}),
                     },
                 };
             }
