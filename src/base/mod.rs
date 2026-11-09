@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 pub mod proc;
 pub mod schema;
@@ -199,12 +199,28 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             .open(&temp)?;
         f.write_all(contents)?;
         drop(f);
-        std::fs::rename(&temp, path)
+        replace(&temp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+/// On Windows a file open elsewhere refuses replacement until it is closed.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;
