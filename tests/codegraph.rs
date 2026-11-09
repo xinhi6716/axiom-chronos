@@ -106,7 +106,7 @@ fn today(f: &Fixture) -> Vec<String> {
         bin: PathBuf::new(),
         clock: Clock::system(),
     };
-    let plugin = home.join("engine").join(env!("CARGO_PKG_VERSION"));
+    let plugin = axiom::engine::plugin_dir(&home).unwrap();
     let mut argv = command(&config, &plugin, None, false).unwrap();
     argv.remove(0);
     argv
@@ -227,11 +227,14 @@ fn codex_thread_is_untouched_unless_both_conditions_hold() {
 fn doctor_line(f: &Fixture) -> String {
     let home = f.root.join("home");
     let fake = stand_in("fake_claude");
+    let mut tested_codex: Vec<String> = serde_json::from_str(&stand_in("fake_codex")).unwrap();
+    tested_codex.push(common::tested_codex_flag());
+    let tested_codex = serde_json::to_string(&tested_codex).unwrap();
     let output = axiom(f, &home)
         .arg("doctor")
         .current_dir(&f.project)
         .env("AXIOM_CLAUDE_CMD", &fake)
-        .env("AXIOM_CODEX_CMD", &fake)
+        .env("AXIOM_CODEX_CMD", tested_codex)
         .env("AXIOM_WSL_CMD", &fake)
         .env(
             "AXIOM_PWSH_CMD",

@@ -57,6 +57,7 @@ impl Fixture {
             claude: Ok(common::fake("fake_claude")),
             home: temp.path().join("home"),
             bin: temp.path().join("axiom"),
+            clock: axiom::session::Clock::system(),
         };
         std::env::set_var("FAKE_CLAUDE_RECORD", temp.path().join("record"));
         std::env::set_var("FAKE_CLAUDE_SCENARIO", "batch");
@@ -221,7 +222,7 @@ fn resuming_a_waiting_goal_by_hand_says_what_it_was_waiting_on() {
     f.wait_on(&b);
     let mut out = Vec::new();
     assert_eq!(
-        session::resume(&f.config, SESSION, None, empty(), &mut out).unwrap(),
+        session::resume(&f.config, SESSION, None, None, empty(), &mut out).unwrap(),
         0
     );
     assert!(f.resumed(0));
@@ -261,7 +262,7 @@ fn what_a_goal_waited_on_survives_a_crash_of_the_resumed_session() {
     std::env::set_var("FAKE_CLAUDE_SCENARIO", "batch");
     std::env::set_var("FAKE_CLAUDE_RECORD", f.temp.path().join("record"));
     assert_eq!(
-        session::resume(&f.config, SESSION, None, empty(), &mut Vec::new()).unwrap(),
+        session::resume(&f.config, SESSION, None, None, empty(), &mut Vec::new()).unwrap(),
         0
     );
     let prompt = f.prompt(0);
@@ -379,7 +380,7 @@ fn resuming_a_wish_also_waits_when_it_ends_waiting() {
     f.plan(&[&b]);
     let mut out = Vec::new();
     assert_eq!(
-        session::resume(&f.config, SESSION, None, empty(), &mut out).unwrap(),
+        session::resume(&f.config, SESSION, None, None, empty(), &mut out).unwrap(),
         0
     );
     let output = String::from_utf8(out).unwrap();
@@ -451,6 +452,7 @@ fn axiom_wait_refuses_what_it_could_not_resume_before_waiting() {
         claude: Err(axiom::base::Failure::new("not_installed", "no claude")),
         home: home.clone(),
         bin: f.config.bin.clone(),
+        clock: axiom::session::Clock::system(),
     };
     assert_eq!(attempt(&no_claude, SESSION).kind, "not_installed");
     goal::open(home, SESSION, "wish", None).unwrap();

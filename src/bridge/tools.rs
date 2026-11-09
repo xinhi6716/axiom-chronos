@@ -145,7 +145,12 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             } else {
                 return Err(Failure::new("invalid_argument", "invalid goal operation"));
             };
-            let reply = json!({"status":g["status"],"mode":g["mode"],"reason":g["reason"]});
+            let mut reply = json!({"status":g["status"],"mode":g["mode"],"reason":g["reason"]});
+            for key in ["batch", "provenance"] {
+                if !g[key].is_null() {
+                    reply[key] = g[key].clone();
+                }
+            }
             Ok(json!({"status":"completed","goal":reply}))
         }
         "bridge_status" => {

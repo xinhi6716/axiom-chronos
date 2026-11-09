@@ -341,7 +341,7 @@ pub(super) fn run_observed(
     let _signals = Signals::install();
     let spawned = spawn(config, skill, text, project, max_turns, resume)?;
     forward_input(Arc::clone(&spawned.writer), input);
-    drive(spawned, config, out, &INTERRUPTED, &mut |_| {})
+    drive(spawned, config, out, &INTERRUPTED, observe)
 }
 
 pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
@@ -359,6 +359,7 @@ pub struct Spawned {
     lines: mpsc::Receiver<Vec<u8>>,
     log: File,
     pub log_path: PathBuf,
+    pub provenance: provenance::Provenance,
     skill: String,
     project: PathBuf,
     max_turns: Option<u32>,
@@ -382,7 +383,7 @@ pub fn spawn(
     std::fs::create_dir_all(&logs).map_err(failure)?;
     let now = (config.clock.now)();
     let stamp = log_stamp(now, local_offset_secs(now));
-    let (log_path, log) = (0u64..)
+    let (log_path, mut log) = (0u64..)
         .find_map(|n| {
             let suffix = if n == 0 {
                 String::new()
@@ -459,6 +460,7 @@ pub fn spawn(
         lines,
         log,
         log_path,
+        provenance,
         skill: skill.to_owned(),
         project: project.to_path_buf(),
         max_turns,
@@ -580,6 +582,7 @@ fn drive_once(
         lines: rx,
         mut log,
         log_path,
+        provenance,
         ..
     } = spawned;
     let mut renderer = Renderer::new();

@@ -135,10 +135,11 @@ fn resume_run(
     config: &Config,
     session: &str,
     max_turns: Option<u32>,
+    message: Option<&str>,
     lines: &mut SharedInput,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    run::resume(config, session, max_turns, lines.for_run(), out)
+    run::resume(config, session, max_turns, message, lines.for_run(), out)
 }
 
 /// While the session's goal waits on a batch: wait with no model running, then resume the session.
@@ -183,7 +184,7 @@ fn follow(
                 ),
             },
         );
-        code = resume_run(config, session, max_turns, lines, out)?;
+        code = resume_run(config, session, max_turns, None, lines, out)?;
     }
     Ok(code)
 }
@@ -226,11 +227,12 @@ pub fn resume(
     config: &Config,
     session: &str,
     max_turns: Option<u32>,
+    message: Option<&str>,
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
     let mut lines = SharedInput::new(input);
-    let code = resume_run(config, session, max_turns, &mut lines, out)?;
+    let code = resume_run(config, session, max_turns, message, &mut lines, out)?;
     follow(config, session, code, max_turns, &mut lines, out)
 }
 
