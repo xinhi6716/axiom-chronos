@@ -18,6 +18,8 @@ VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `se
 
 Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
+A registered brief can run its unit cheaper with two optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use them only when the wish or the plan asks for a cheaper run of that unit, such as reading papers into notes. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Any other value is refused when the unit is registered. Without them the unit keeps its role's model and the default effort. `TIER luna` alone keeps luna's own default effort, which can be higher than terra's, so set both for the cheapest run.
+
 Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)); the full template is for coordinators.
 
 ## Before dispatch
