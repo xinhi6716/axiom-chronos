@@ -1379,6 +1379,26 @@ impl Todo {
         let Some(scene) = self.state.read(cx).scene.clone() else { return };
         for part in scene.split('+') {
             match part {
+                "todo-sim" => {
+                    let state = self.state.clone();
+                    cx.spawn(async move |_, cx| {
+                        loop {
+                            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                            let _ = state.update(cx, |s, cx| {
+                                edit_run(s, |run| {
+                                    if let Some(i) = run.units.iter().position(|u| u.state == UnitState::Running) {
+                                        run.units[i].state = UnitState::Verified;
+                                        if let Some(j) = (i + 1..run.units.len()).find(|&j| run.units[j].state == UnitState::Pending) {
+                                            run.units[j].state = UnitState::Running;
+                                        }
+                                    }
+                                });
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                }
                 "todo-narrow" => self.forced_width = Some(260.0),
                 "todo-filter-active" => self.filter = Filter::Active,
                 "todo-filter-review" => self.filter = Filter::Review,
