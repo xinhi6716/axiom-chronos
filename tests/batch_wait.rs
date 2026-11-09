@@ -57,6 +57,7 @@ fn wait(batch: &Batch, mut step: impl FnMut(usize, &AtomicBool)) -> Waited {
         &stop,
         &mut |pause| {
             sleeps.push(pause);
+            assert!(sleeps.len() < 50, "the wait never ended");
             step(sleeps.len(), &stop);
         },
         &mut |text| progress.push(text.to_owned()),

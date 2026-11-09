@@ -114,6 +114,43 @@ fn report_is_written_in_plain_language() {
 }
 
 #[test]
+fn a_long_batch_is_piloted_then_waited_on_without_a_model() {
+    let file = |name: &str| {
+        axiom::engine::FILES
+            .iter()
+            .find(|(path, _)| *path == name)
+            .unwrap()
+            .1
+    };
+    let skill = file("skills/wish/SKILL.md");
+    let step = skill.lines().find(|line| line.starts_with("7. ")).unwrap();
+    for phrase in [
+        "one pilot unit before any fan-out",
+        "Only after a clean pilot",
+        "`progress_file`",
+        "`marker_file`",
+        "`pid`",
+        "`$!` in Git Bash is not a Windows pid",
+        "No model runs while the goal waits",
+        "`axiom wait <session>`",
+        "A batch that died without its marker is a failure",
+        "Never watch a batch.",
+    ] {
+        let has = |value: &str| value.contains(phrase);
+        assert!(has(step), "missing {phrase}");
+        assert!(!has(&step.replace(phrase, "")));
+    }
+    let pilot = step.find("one pilot unit").unwrap();
+    assert!(pilot < step.find("launch the full batch").unwrap());
+    assert!(step.find("launch the full batch").unwrap() < step.find("`waiting`").unwrap());
+
+    let dispatcher = file("agents/dispatcher.md");
+    let phrase = "report its progress file, completion marker and pid";
+    assert!(dispatcher.contains(phrase));
+    assert!(!dispatcher.replace(phrase, "").contains(phrase));
+}
+
+#[test]
 fn memory_keeper_denial_names_no_rewrite() {
     let home = tempfile::tempdir().unwrap();
     axiom::goal::open(home.path(), "s", "wish", None).unwrap();
