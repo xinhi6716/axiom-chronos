@@ -286,7 +286,10 @@ fn find_transcript(projects: &Path, session: &str, cwd: Option<&str>) -> Res<Opt
         dirs.push(entry.map_err(|e| io_failure(projects, e))?.path());
     }
     dirs.sort();
-    Ok(dirs.into_iter().map(|d| d.join(&name)).find(|p| p.is_file()))
+    Ok(dirs
+        .into_iter()
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file()))
 }
 
 fn discover(locations: &Locations) -> Res<BTreeMap<String, Run>> {
@@ -332,10 +335,7 @@ fn locate(locations: &Locations, session: Option<&str>) -> Res<(String, Run)> {
             .filter(|(_, run)| run.has_records())
             .max_by_key(|(_, run)| run.activity)
             .ok_or_else(|| {
-                Failure::new(
-                    "not_found",
-                    "no runs found; name one with --session <id>",
-                )
+                Failure::new("not_found", "no runs found; name one with --session <id>")
             });
     };
     if let Some(run) = runs.remove(session).filter(Run::has_records) {
@@ -404,7 +404,10 @@ fn subagent_sources(transcript: &Path) -> Res<Vec<SourceFile>> {
             .unwrap_or(Value::Null);
         sources.push(SourceFile {
             instance: instance.to_owned(),
-            agent_type: meta["agentType"].as_str().unwrap_or(UNKNOWN_AGENT).to_owned(),
+            agent_type: meta["agentType"]
+                .as_str()
+                .unwrap_or(UNKNOWN_AGENT)
+                .to_owned(),
             description: meta["description"].as_str().map(str::to_owned),
             path,
         });
@@ -484,7 +487,11 @@ fn build(session: String, run: Run) -> Res<Ledger> {
                 zeroed_calls: inseparable_copies,
             });
         }
-        let own = agents.slot(&source.instance, &source.agent_type, source.description.as_deref());
+        let own = agents.slot(
+            &source.instance,
+            &source.agent_type,
+            source.description.as_deref(),
+        );
         agents.agents[own].compactions += compacted;
         let attribute = |agents: &mut Agents, parent: Option<&str>| match parent {
             Some(parent) => {
@@ -566,7 +573,7 @@ fn build(session: String, run: Run) -> Res<Ledger> {
                 .or_default()
                 .add(call);
         }
-        if instance.peak_context >= CONTEXT_WARN {
+        if instance.peak_context > CONTEXT_WARN {
             warnings.push(Warning::ContextHigh {
                 agent_type: agent.agent_type.clone(),
                 instance: agent.id.clone(),
@@ -621,7 +628,11 @@ fn build(session: String, run: Run) -> Res<Ledger> {
     Ok(Ledger {
         session,
         cwd: run.cwd,
-        source: if transcript_source { "transcript" } else { "log" },
+        source: if transcript_source {
+            "transcript"
+        } else {
+            "log"
+        },
         subagent_files,
         output_tokens_partial: !transcript_source,
         totals,

@@ -134,8 +134,7 @@ impl Rates {
         )
     }
     fn write_cost(&self, u: &CallUsage) -> f64 {
-        (u.cache_write_5m() as f64 * self.write_5m + u.cache_write_1h as f64 * self.write_1h)
-            / 1e6
+        (u.cache_write_5m() as f64 * self.write_5m + u.cache_write_1h as f64 * self.write_1h) / 1e6
     }
     fn cost(&self, u: &CallUsage) -> f64 {
         (u.input as f64 * self.input

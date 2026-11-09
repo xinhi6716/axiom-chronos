@@ -192,7 +192,13 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 pub(super) fn parse_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let (body, fraction) = match s[19..].strip_suffix('Z')? {
@@ -229,7 +235,9 @@ impl FileScan {
         };
         match head.kind.as_str() {
             "assistant" => self.assistant(line, head, number),
-            "user" if contains(line, b"\"tool_result\"") => self.tool_results(line, head.parent_tool_use_id),
+            "user" if contains(line, b"\"tool_result\"") => {
+                self.tool_results(line, head.parent_tool_use_id)
+            }
             "api-request" => {
                 if let Some(id) = head.id {
                     self.api_requests.insert(id);
@@ -300,7 +308,8 @@ impl FileScan {
                 "Agent" | "Task" => {
                     let kind = input["subagent_type"].as_str().unwrap_or("general-purpose");
                     let description = input["description"].as_str().map(str::to_owned);
-                    self.subagents.insert(block.id, (kind.to_owned(), description));
+                    self.subagents
+                        .insert(block.id, (kind.to_owned(), description));
                     continue;
                 }
                 name if name.ends_with("codex_run") => Tool::Codex,
@@ -359,7 +368,10 @@ impl FileScan {
         if !self.api_requests.is_empty() {
             let requests = &self.api_requests;
             self.calls.retain(|call| {
-                let own = call.request_ref.as_ref().map_or(true, |r| requests.contains(r));
+                let own = call
+                    .request_ref
+                    .as_ref()
+                    .map_or(true, |r| requests.contains(r));
                 if !own {
                     copied.insert(call.id.clone());
                 }

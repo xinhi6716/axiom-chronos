@@ -103,8 +103,17 @@ pub fn render(ledger: &Ledger) -> String {
     let _ = writeln!(
         out,
         "{:<26} {:<20} {:>6} {:>10} {:>13} {:>13} {:>14} {:>11} {:>10} {:>10} {:>5}",
-        "agent", "model", "calls", "input", "cache write", "of it 1h", "cache read", "output", "USD",
-        "peak ctx", "gaps"
+        "agent",
+        "model",
+        "calls",
+        "input",
+        "cache write",
+        "of it 1h",
+        "cache read",
+        "output",
+        "USD",
+        "peak ctx",
+        "gaps"
     );
     for r in &ledger.by_agent {
         row(&mut out, &r.agent_type, &r.model, &r.tally);
@@ -124,7 +133,11 @@ pub fn render(ledger: &Ledger) -> String {
         instance_line(&mut out, i);
     }
     if ledger.instances.len() > INSTANCE_LINES {
-        let _ = writeln!(out, "  and {} more", ledger.instances.len() - INSTANCE_LINES);
+        let _ = writeln!(
+            out,
+            "  and {} more",
+            ledger.instances.len() - INSTANCE_LINES
+        );
     }
 
     if ledger.totals.gap_rewrites > 0 {
@@ -202,6 +215,10 @@ pub fn render(ledger: &Ledger) -> String {
             "No transcript was found: output tokens come from the stream log and are lower bounds."
         );
     }
-    let _ = writeln!(out, "Prices as of {} ({}).", ledger.prices.as_of, ledger.prices.source);
+    let _ = writeln!(
+        out,
+        "Prices as of {} ({}).",
+        ledger.prices.as_of, ledger.prices.source
+    );
     out
 }

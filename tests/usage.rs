@@ -89,7 +89,10 @@ fn date_suffixes_resolve_to_their_family_and_nothing_else_does() {
         15.0,
     );
     near(usd("claude-opus-4-20250514", &tokens(M, 0, 0, 0, 0)), 15.0);
-    near(usd("claude-sonnet-4-5-20250929", &tokens(M, 0, 0, 0, 0)), 3.0);
+    near(
+        usd("claude-sonnet-4-5-20250929", &tokens(M, 0, 0, 0, 0)),
+        3.0,
+    );
     for unknown in [
         "claude-opus-5-6",
         "claude-opus-4-2",
@@ -111,8 +114,14 @@ fn fast_mode_doubles_every_rate_where_it_exists_and_is_unpriced_elsewhere() {
         fast: true,
         ..tokens(M, M, M, M, M)
     };
-    near(usd("claude-opus-5-5", &u), 2.0 * (4.0 + 5.0 + 8.0 + 0.20 + 20.0));
-    near(usd("claude-opus-4-8", &u), 2.0 * (5.0 + 6.25 + 10.0 + 0.5 + 25.0));
+    near(
+        usd("claude-opus-5-5", &u),
+        2.0 * (4.0 + 5.0 + 8.0 + 0.20 + 20.0),
+    );
+    near(
+        usd("claude-opus-4-8", &u),
+        2.0 * (5.0 + 6.25 + 10.0 + 0.5 + 25.0),
+    );
     assert_eq!(usd("claude-sonnet-5-5", &u), None);
 }
 
@@ -211,7 +220,8 @@ impl Run {
         if let Some(agent_type) = agent_type {
             fs::write(
                 dir.join(format!("agent-{agent}.meta.json")),
-                json!({"agentType": agent_type, "description": format!("{agent} task")}).to_string(),
+                json!({"agentType": agent_type, "description": format!("{agent} task")})
+                    .to_string(),
             )
             .unwrap();
         }
@@ -228,7 +238,11 @@ impl Run {
             .join("goals")
             .join(format!("{session}.json"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, json!({"wish": "w", "cwd": cwd, "status": "done"}).to_string()).unwrap();
+        fs::write(
+            &path,
+            json!({"wish": "w", "cwd": cwd, "status": "done"}).to_string(),
+        )
+        .unwrap();
         path
     }
     fn ledger(&self) -> Ledger {
@@ -299,26 +313,51 @@ fn subagents_are_attributed_by_their_meta_type_and_shared_messages_count_once() 
     run.subagent(
         "ccc",
         None,
-        &[assistant("x1", SONNET, &at(0, 0, 0), counts(5, 500, 5000, 50))],
+        &[assistant(
+            "x1",
+            SONNET,
+            &at(0, 0, 0),
+            counts(5, 500, 5000, 50),
+        )],
     );
     let l = run.ledger();
     assert_eq!(l.subagent_files, 3);
     assert_eq!(l.totals.calls, 6);
     let main = &row(&l, "main", OPUS).tally;
     assert_eq!(
-        (main.calls, main.input, main.cache_write, main.cache_read, main.output),
+        (
+            main.calls,
+            main.input,
+            main.cache_write,
+            main.cache_read,
+            main.output
+        ),
         (2, 8, 170, 1700, 87)
     );
     let reviewer = &row(&l, "chronos:reviewer", SONNET).tally;
     assert_eq!(
-        (reviewer.calls, reviewer.input, reviewer.cache_write, reviewer.cache_read, reviewer.output),
+        (
+            reviewer.calls,
+            reviewer.input,
+            reviewer.cache_write,
+            reviewer.cache_read,
+            reviewer.output
+        ),
         (3, 9, 900, 9000, 90)
     );
     let unknown = &row(&l, "unknown", SONNET).tally;
     assert_eq!((unknown.calls, unknown.output), (1, 50));
-    assert!(l.by_agent.iter().all(|r| r.agent_type != "chronos:reviewer" || r.model != OPUS));
+    assert!(l
+        .by_agent
+        .iter()
+        .all(|r| r.agent_type != "chronos:reviewer" || r.model != OPUS));
     assert_eq!(
-        l.instances.iter().find(|i| i.id == "aaa").unwrap().description.as_deref(),
+        l.instances
+            .iter()
+            .find(|i| i.id == "aaa")
+            .unwrap()
+            .description
+            .as_deref(),
         Some("aaa task")
     );
 }
@@ -334,12 +373,20 @@ fn peak_context_is_the_largest_single_call_not_a_sum() {
     run.subagent(
         "big",
         Some("chronos:dispatcher"),
-        &[assistant("d", SONNET, &at(0, 0, 0), counts(1000, 2000, 3000, 7))],
+        &[assistant(
+            "d",
+            SONNET,
+            &at(0, 0, 0),
+            counts(1000, 2000, 3000, 7),
+        )],
     );
     let l = run.ledger();
     assert_eq!(row(&l, "main", OPUS).tally.peak_context, 303);
     assert_eq!(instance_peak(&l, "main"), 303);
-    assert_eq!(row(&l, "chronos:dispatcher", SONNET).tally.peak_context, 6000);
+    assert_eq!(
+        row(&l, "chronos:dispatcher", SONNET).tally.peak_context,
+        6000
+    );
     assert_eq!(instance_peak(&l, "big"), 6000);
     assert_eq!(l.totals.peak_context, 6000);
     assert_eq!(l.instances[0].id, "big");
@@ -355,14 +402,24 @@ fn only_large_cache_writes_after_a_gap_over_five_minutes_count() {
         assistant("first", OPUS, &at(0, 0, 0), large.clone()),
         assistant("at_limit", OPUS, &at(5, 0, 0), large.clone()),
         assistant("just_over", OPUS, &at(10, 0, 1), large.clone()),
-        assistant("small", OPUS, &at(20, 0, 0), counts(1, LARGE_CACHE_WRITE - 1, 10, 1)),
+        assistant(
+            "small",
+            OPUS,
+            &at(20, 0, 0),
+            counts(1, LARGE_CACHE_WRITE - 1, 10, 1),
+        ),
     ]);
     run.subagent(
         "busy",
         Some("chronos:reviewer"),
         &[
             assistant("s1", SONNET, &at(0, 0, 0), counts(1, 10, 10, 1)),
-            assistant("s2", SONNET, &at(10, 0, 0), counts(1, LARGE_CACHE_WRITE, 10, 1)),
+            assistant(
+                "s2",
+                SONNET,
+                &at(10, 0, 0),
+                counts(1, LARGE_CACHE_WRITE, 10, 1),
+            ),
         ],
     );
     let l = run.ledger();
@@ -416,6 +473,49 @@ fn gaps_run_from_the_previous_calls_last_line_within_one_agent_across_dates() {
 }
 
 #[test]
+fn gaps_are_measured_correctly_across_every_month_boundary() {
+    let large = counts(1, LARGE_CACHE_WRITE, 10, 1);
+    for (last_day, first_day) in [
+        ("2025-01-31", "2025-02-01"),
+        ("2025-02-28", "2025-03-01"),
+        ("2024-02-29", "2024-03-01"),
+        ("2025-03-31", "2025-04-01"),
+        ("2025-04-30", "2025-05-01"),
+        ("2025-05-31", "2025-06-01"),
+        ("2025-06-30", "2025-07-01"),
+        ("2025-07-31", "2025-08-01"),
+        ("2025-08-31", "2025-09-01"),
+        ("2025-09-30", "2025-10-01"),
+        ("2025-10-31", "2025-11-01"),
+        ("2025-11-30", "2025-12-01"),
+        ("2025-12-31", "2026-01-01"),
+    ] {
+        for (minute, flagged) in [("01", 0), ("03", 1)] {
+            let run = Run::new();
+            run.transcript(&[
+                assistant(
+                    "a",
+                    OPUS,
+                    &format!("{last_day}T23:57:00.000Z"),
+                    large.clone(),
+                ),
+                assistant(
+                    "b",
+                    OPUS,
+                    &format!("{first_day}T00:{minute}:00.000Z"),
+                    large.clone(),
+                ),
+            ]);
+            assert_eq!(
+                run.ledger().totals.gap_rewrites,
+                flagged,
+                "{first_day} {minute}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_truncated_last_line_is_skipped_and_everything_before_it_counts() {
     let run = Run::new();
     let path = run.transcript(&[
@@ -437,18 +537,32 @@ fn a_truncated_last_line_is_skipped_and_everything_before_it_counts() {
 fn unknown_models_report_tokens_with_no_usd_and_never_a_guess() {
     let run = Run::new();
     run.transcript(&[
-        assistant("a", "claude-opus-9", &at(0, 0, 0), counts(1000, 2000, 3000, 4000)),
+        assistant(
+            "a",
+            "claude-opus-9",
+            &at(0, 0, 0),
+            counts(1000, 2000, 3000, 4000),
+        ),
         assistant("b", OPUS, &at(0, 1, 0), counts(1_000_000, 0, 0, 0)),
     ]);
     let l = run.ledger();
     let unknown = &row(&l, "main", "claude-opus-9").tally;
     assert_eq!(
-        (unknown.calls, unknown.input, unknown.cache_write, unknown.cache_read, unknown.output),
+        (
+            unknown.calls,
+            unknown.input,
+            unknown.cache_write,
+            unknown.cache_read,
+            unknown.output
+        ),
         (1, 1000, 2000, 3000, 4000)
     );
     assert_eq!(unknown.usd, None);
     assert_eq!(unknown.unpriced_calls, 1);
-    assert_eq!(l.totals.usd, None, "a total with an unpriced call is not known");
+    assert_eq!(
+        l.totals.usd, None,
+        "a total with an unpriced call is not known"
+    );
     assert_eq!(l.totals.unpriced_calls, 1);
     assert!((l.totals.priced_usd - 4.0).abs() < 1e-9);
     assert_eq!(row(&l, "main", OPUS).tally.usd, Some(4.0));
@@ -473,7 +587,10 @@ fn five_minute_and_one_hour_writes_are_priced_at_their_own_rates() {
     );
     assert_eq!(opus.usd, Some(2.0 * 5.0 + 8.0));
     let sonnet = &row(&l, "main", SONNET).tally;
-    assert_eq!((sonnet.cache_write_5m, sonnet.cache_write_1h), (1_000_000, 0));
+    assert_eq!(
+        (sonnet.cache_write_5m, sonnet.cache_write_1h),
+        (1_000_000, 0)
+    );
     assert_eq!(sonnet.usd, Some(2.5));
 }
 
@@ -519,10 +636,19 @@ fn history_copied_from_an_earlier_session_is_excluded() {
     assert_eq!(l.totals.calls, 1);
     assert_eq!((l.totals.input, l.totals.output), (1, 4));
     assert_eq!(l.copied_calls, 2);
-    assert_eq!(l.compactions, 1, "only the one after this session's own first call");
-    assert!(l.codex.is_empty(), "codex runs of copied calls are excluded too");
+    assert_eq!(
+        l.compactions, 1,
+        "only the one after this session's own first call"
+    );
+    assert!(
+        l.codex.is_empty(),
+        "codex runs of copied calls are excluded too"
+    );
     assert_eq!(l.codex_runs_without_usage, 0);
-    assert!(l.warnings.iter().all(|w| !matches!(w, Warning::CopiedHistoryNotSeparable { .. })));
+    assert!(l
+        .warnings
+        .iter()
+        .all(|w| !matches!(w, Warning::CopiedHistoryNotSeparable { .. })));
 }
 
 #[test]
@@ -530,17 +656,25 @@ fn a_format_without_request_records_warns_that_copies_may_be_included() {
     let zeroed = line_with("old", OPUS, &at(0, 0, 0), counts(0, 0, 0, 0), json!([]));
     let run = Run::new();
     run.transcript(&[
+        zeroed.clone(),
         zeroed,
         json!({"type": "assistant", "timestamp": at(0, 1, 0), "requestRef": "unmatched",
                "message": {"id": "kept", "model": OPUS, "content": [], "usage": counts(1, 1, 1, 1)}})
         .to_string(),
     ]);
     let l = run.ledger();
-    assert_eq!(l.totals.calls, 1, "without request records a reference proves nothing");
+    assert_eq!(
+        l.totals.calls, 1,
+        "without request records a reference proves nothing"
+    );
     assert_eq!(l.copied_calls, 1);
-    assert!(l.warnings.iter().any(
-        |w| matches!(w, Warning::CopiedHistoryNotSeparable { zeroed_calls: 1, .. })
-    ));
+    assert!(l.warnings.iter().any(|w| matches!(
+        w,
+        Warning::CopiedHistoryNotSeparable {
+            zeroed_calls: 1,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -553,7 +687,12 @@ fn a_single_agent_above_the_context_threshold_is_warned_about_once() {
     run.subagent(
         "under",
         Some("chronos:reviewer"),
-        &[assistant("c", SONNET, &at(0, 0, 0), counts(0, 0, CONTEXT_WARN - 1, 1))],
+        &[assistant(
+            "c",
+            SONNET,
+            &at(0, 0, 0),
+            counts(0, 0, CONTEXT_WARN, 1),
+        )],
     );
     let l = run.ledger();
     assert_eq!(
@@ -603,7 +742,10 @@ fn whole_reads_of_large_files_are_warned_about_and_bounded_ones_are_not() {
         .iter()
         .filter_map(|w| match w {
             Warning::LargeFileRead {
-                path, reads, largest_bytes, ..
+                path,
+                reads,
+                largest_bytes,
+                ..
             } => Some((path.as_str(), *reads, *largest_bytes)),
             _ => None,
         })
@@ -648,7 +790,9 @@ fn codex_tokens_come_from_run_results_and_missing_usage_is_counted() {
             tool_result("c2", json!([{"type": "text", "text": usage(200)}])),
             tool_result(
                 "c3",
-                json!(json!({"status": "bridge_error", "error": {"kind": "not_ready"}}).to_string()),
+                json!(
+                    json!({"status": "bridge_error", "error": {"kind": "not_ready"}}).to_string()
+                ),
             ),
             tool_result("c4", json!("{\"truncated\": \"before the use")),
             tool_result("other", json!(usage(9999))),
@@ -659,7 +803,15 @@ fn codex_tokens_come_from_run_results_and_missing_usage_is_counted() {
     assert_eq!(l.codex.len(), 1);
     let c = &l.codex[0];
     assert_eq!(
-        (c.model.as_str(), c.runs, c.tokens.input, c.tokens.cached_input, c.tokens.output, c.tokens.reasoning_output, c.tokens.total),
+        (
+            c.model.as_str(),
+            c.runs,
+            c.tokens.input,
+            c.tokens.cached_input,
+            c.tokens.output,
+            c.tokens.reasoning_output,
+            c.tokens.total
+        ),
         ("gpt-terra", 2, 300, 150, 60, 20, 360)
     );
     assert_eq!(l.codex_runs_without_usage, 2);
@@ -735,7 +887,10 @@ fn claude_codes_own_total_is_the_last_one_saved_in_the_main_transcript() {
     run.subagent(
         "worker",
         Some("general-purpose"),
-        &[assistant("b", SONNET, &at(0, 0, 0), counts(1, 1, 1, 1)), state(9.0)],
+        &[
+            assistant("b", SONNET, &at(0, 0, 0), counts(1, 1, 1, 1)),
+            state(9.0),
+        ],
     );
     assert_eq!(run.ledger().claude_code_usd, Some(2.5));
 }
@@ -743,7 +898,9 @@ fn claude_codes_own_total_is_the_last_one_saved_in_the_main_transcript() {
 #[test]
 fn a_run_with_no_calls_costs_nothing() {
     let run = Run::new();
-    run.transcript(&[json!({"type": "user", "message": {"role": "user", "content": "hi"}}).to_string()]);
+    run.transcript(&[
+        json!({"type": "user", "message": {"role": "user", "content": "hi"}}).to_string(),
+    ]);
     let l = run.ledger();
     assert_eq!(l.totals.calls, 0);
     assert_eq!(l.totals.usd, Some(0.0));
@@ -781,12 +938,30 @@ fn the_newest_run_is_the_one_most_recently_active_across_logs_goals_and_transcri
         "20260101-000000-wish.jsonl",
         &[init(HEADLESS, "E:\\one"), stream("h1", OPUS, None, 1)],
     );
-    let headless = run.transcript_at("E--one", HEADLESS, &[assistant("h1", OPUS, &at(0, 0, 0), counts(1, 1, 1, 1))]);
+    let headless = run.transcript_at(
+        "E--one",
+        HEADLESS,
+        &[assistant("h1", OPUS, &at(0, 0, 0), counts(1, 1, 1, 1))],
+    );
     let goal = run.goal(WISH, "E:\\two");
-    let wish = run.transcript_at("E--two", WISH, &[assistant("w1", OPUS, &at(0, 0, 0), counts(2, 2, 2, 2))]);
+    let wish = run.transcript_at(
+        "E--two",
+        WISH,
+        &[assistant("w1", OPUS, &at(0, 0, 0), counts(2, 2, 2, 2))],
+    );
     let no_records = run.goal(STALE, "E:\\three");
-    run.log("20260102-000000-wish.jsonl", &["{\"hostEvent\":\"threadStarted\"}".to_owned()]);
-    fs::write(run.locations().home.join("logs").join("20260103-000000-wish.jsonl"), "").unwrap();
+    run.log(
+        "20260102-000000-wish.jsonl",
+        &["{\"hostEvent\":\"threadStarted\"}".to_owned()],
+    );
+    fs::write(
+        run.locations()
+            .home
+            .join("logs")
+            .join("20260103-000000-wish.jsonl"),
+        "",
+    )
+    .unwrap();
 
     for path in [&log, &headless, &goal] {
         age(path, 500);
@@ -821,8 +996,16 @@ fn a_named_session_is_found_without_a_goal_or_log_and_its_cwd_read_from_the_tran
 fn the_directory_for_the_recorded_cwd_wins_over_a_stray_copy() {
     let run = Run::new();
     run.log("20260101-000000-wish.jsonl", &[init(SESSION, "E:\\real")]);
-    run.transcript_at("E--aaa-stray", SESSION, &[assistant("x", OPUS, &at(0, 0, 0), counts(9, 9, 9, 9))]);
-    run.transcript_at("E--real", SESSION, &[assistant("y", OPUS, &at(0, 0, 0), counts(1, 1, 1, 1))]);
+    run.transcript_at(
+        "E--aaa-stray",
+        SESSION,
+        &[assistant("x", OPUS, &at(0, 0, 0), counts(9, 9, 9, 9))],
+    );
+    run.transcript_at(
+        "E--real",
+        SESSION,
+        &[assistant("y", OPUS, &at(0, 0, 0), counts(1, 1, 1, 1))],
+    );
     assert_eq!(run.ledger().totals.input, 1);
 }
 
@@ -847,21 +1030,44 @@ fn axiom(run: &Run) -> Command {
 #[test]
 fn the_cli_prints_a_ledger_as_text_or_json_and_reports_errors() {
     let run = Run::new();
-    run.transcript(&[assistant("a", OPUS, &at(0, 0, 0), counts(1_000_000, 0, 0, 2_000))]);
+    run.transcript(&[assistant(
+        "a",
+        OPUS,
+        &at(0, 0, 0),
+        counts(1_000_000, 0, 0, 2_000),
+    )]);
     run.subagent(
         "worker",
         Some("chronos:reviewer"),
-        &[assistant("b", SONNET, &at(0, 0, 0), counts(0, 0, 1_234_567, 1))],
+        &[assistant(
+            "b",
+            SONNET,
+            &at(0, 0, 0),
+            counts(0, 0, 1_234_567, 1),
+        )],
     );
 
-    let o = axiom(&run).args(["usage", "--session", SESSION]).output().unwrap();
+    let o = axiom(&run)
+        .args(["usage", "--session", SESSION])
+        .output()
+        .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let text = String::from_utf8(o.stdout).unwrap();
-    for expected in [SESSION, "chronos:reviewer", OPUS, "1,234,567", "$4.04", "total"] {
+    for expected in [
+        SESSION,
+        "chronos:reviewer",
+        OPUS,
+        "1,234,567",
+        "$4.04",
+        "total",
+    ] {
         assert!(text.contains(expected), "{expected} missing from {text}");
     }
 
-    let o = axiom(&run).args(["usage", "--json", "--session", SESSION]).output().unwrap();
+    let o = axiom(&run)
+        .args(["usage", "--json", "--session", SESSION])
+        .output()
+        .unwrap();
     assert!(o.status.success());
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["session"], SESSION);
@@ -877,11 +1083,18 @@ fn the_cli_prints_a_ledger_as_text_or_json_and_reports_errors() {
     assert_eq!(v["warnings"][0]["peak_context"], 1_234_567);
     assert_eq!(v["warnings"][1]["peak_context"], 1_000_000);
 
-    let o = axiom(&run).args(["usage", "--session", "no-such-run"]).output().unwrap();
+    let o = axiom(&run)
+        .args(["usage", "--session", "no-such-run"])
+        .output()
+        .unwrap();
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stderr).contains("no records for session no-such-run"));
 
-    for bad in [vec!["usage", "--session"], vec!["usage", "--what"], vec!["usage", "--session", "../x"]] {
+    for bad in [
+        vec!["usage", "--session"],
+        vec!["usage", "--what"],
+        vec!["usage", "--session", "../x"],
+    ] {
         let o = axiom(&run).args(bad).output().unwrap();
         assert_eq!(o.status.code(), Some(2));
     }
