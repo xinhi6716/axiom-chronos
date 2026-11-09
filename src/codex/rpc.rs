@@ -1,4 +1,6 @@
-use super::version::{self, PROTOCOL_MISMATCH};
+use super::version::{
+    mismatch_failure, note_untested_version, suggests_mismatch, PROTOCOL_MISMATCH,
+};
 use crate::base::{proc, Failure, Res};
 use serde_json::{json, Value};
 use std::{
@@ -202,7 +204,7 @@ impl AppServer {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            let kind = if version::suggests_mismatch(code.as_i64(), text) {
+            let kind = if suggests_mismatch(code.as_i64(), text) {
                 PROTOCOL_MISMATCH
             } else {
                 "codex_rpc"
@@ -223,10 +225,10 @@ impl AppServer {
             })
     }
     pub(crate) fn protocol_failure(&self, detail: &str) -> Failure {
-        version::mismatch_failure(&self.command, detail)
+        mismatch_failure(&self.command, detail)
     }
     pub(crate) fn note_untested_version(&self, message: &str) -> String {
-        version::note_untested_version(&self.command, message)
+        note_untested_version(&self.command, message)
     }
     pub(crate) fn subscribe(&self, thread_id: &str) -> Receiver<Value> {
         let Some(c) = self.connection.lock().unwrap().clone() else {

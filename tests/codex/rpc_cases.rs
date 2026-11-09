@@ -228,6 +228,32 @@ fn ordinary_rpc_errors_are_not_called_protocol_mismatches() {
 }
 
 #[test]
+fn a_tested_version_is_not_blamed_for_a_protocol_error() {
+    let tested = common::tested_codex_flag();
+    let failure = AppServer::new(common::fake_codex(&[
+        &tested,
+        "--fake-break=initialize:-32601:Method not found",
+    ]))
+    .list_models()
+    .unwrap_err();
+    assert_eq!(failure.kind, "codex_protocol", "{failure}");
+    assert!(
+        failure
+            .message
+            .starts_with("Codex app-server protocol error"),
+        "{failure}"
+    );
+    assert!(
+        failure.message.contains(&format!(
+            "installed codex-cli {}, last tested with Chronos {}",
+            TESTED_CODEX.last_tested, TESTED_CODEX.last_tested
+        )),
+        "{failure}"
+    );
+    assert!(!failure.message.contains("mismatch"), "{failure}");
+}
+
+#[test]
 fn raw_protocol_error_text_is_cut_short() {
     let long = format!(
         "--fake-break=model/list:-32600:Invalid request: unknown variant `x`, expected one of {}",

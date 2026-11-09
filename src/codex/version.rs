@@ -214,6 +214,11 @@ pub(crate) fn suggests_mismatch(code: Option<i64>, message: &str) -> bool {
 
 pub(crate) fn mismatch_failure(command: &[String], detail: &str) -> Failure {
     let check = check_installed_version(command);
+    let headline = if check.verdict == Verdict::Ok {
+        "protocol error"
+    } else {
+        "protocol mismatch suspected"
+    };
     let installed = check.installed.map_or_else(
         || "installed version unknown".to_owned(),
         |v| format!("installed codex-cli {v}"),
@@ -221,7 +226,7 @@ pub(crate) fn mismatch_failure(command: &[String], detail: &str) -> Failure {
     Failure::new(
         PROTOCOL_MISMATCH,
         format!(
-            "Codex app-server protocol mismatch suspected ({installed}, last tested with Chronos {}); run `axiom doctor`. Raw error: {detail:.200}",
+            "Codex app-server {headline} ({installed}, last tested with Chronos {}); run `axiom doctor`. Raw error: {detail:.200}",
             check.last_tested
         ),
     )
