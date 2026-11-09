@@ -186,6 +186,67 @@ fn records_and_gates() {
 }
 
 #[test]
+fn external_failure_blocks_done_until_a_later_pass() {
+    let p = temp();
+    setup(&p);
+    append_evidence(&p, "u", &row("run", "gpt-worker", 0, "", "2000-01-01")).unwrap();
+    set_unit_state(&p, "u", "verified").unwrap();
+    assert_eq!(record_full(&p, &p, None).unwrap().exit_code, 0);
+    assert!(done_gate(&p, true).is_ok());
+    let log = p.join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    let recorded = record_external_full(&p, &p, "ci-run-7", 2, &log).unwrap();
+    assert_eq!(recorded.exit_code, 2);
+    let error = done_gate(&p, true).unwrap_err();
+    assert_eq!(
+        (error.kind.as_str(), error.message.as_str()),
+        ("not_done", "missing successful, current full test")
+    );
+    assert_eq!(record_full(&p, &p, Some("exit 3")).unwrap().exit_code, 3);
+    assert_eq!(done_gate(&p, true).unwrap_err().kind, "not_done");
+    assert_eq!(record_full(&p, &p, None).unwrap().exit_code, 0);
+    assert!(done_gate(&p, true).is_ok());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn external_failure_keeps_its_evidence() {
+    let p = temp();
+    setup(&p);
+    let repo = p.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("file.txt"), "one").unwrap();
+    git_repo(&repo);
+    let log = p.join("ci.log");
+    let mut bytes = vec![0xff, 0];
+    bytes.extend(vec![b'x'; 30000]);
+    bytes.extend_from_slice(b"\nEND\n");
+    fs::write(&log, &bytes).unwrap();
+
+    let result = record_external_full(&p, &repo, "  run/9\tattempt 2 ", -1, &log).unwrap();
+    assert_eq!(result.exit_code, -1);
+    assert_eq!(result.output.chars().count(), 20000);
+    assert!(result.output.ends_with("x\nEND\n"));
+    fs::remove_file(&log).unwrap();
+
+    let table = fs::read_to_string(p.join("reports/_full.evidence.tsv")).unwrap();
+    let cells: Vec<_> = table.lines().nth(1).unwrap().split('\t').collect();
+    assert_eq!(cells.len(), 5, "{table}");
+    assert_eq!(cells[0], "full");
+    let (label, saved) = cells[1].split_once(" log=").unwrap();
+    assert_eq!(label, "external:run/9 attempt 2");
+    assert_eq!(cells[2], "-1");
+    assert_eq!(cells[3], snapshot(&repo, &[".".into()]));
+    assert!(cells[3].starts_with("tree:"), "{table}");
+    assert_eq!(
+        fs::read_to_string(p.join("reports").join(saved)).unwrap(),
+        result.output,
+        "the kept copy survives the original log"
+    );
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
 fn review_identity_empty_when_brief_unreadable() {
     let p = temp();
     setup(&p);

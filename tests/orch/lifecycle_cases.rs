@@ -237,6 +237,204 @@ fn sol_and_extra_commands() {
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
+fn sol_refusal(store: &Path, repo: &Path) -> Option<String> {
+    match begin_unit(store, "a", "sol", repo, false) {
+        Ok(_) => {
+            abort_unit(store, "a", &attempt(store, "a"));
+            None
+        }
+        Err(e) => Some(e.kind),
+    }
+}
+fn external(store: &Path, repo: &Path, flags: &[&str]) -> Output {
+    let mut args = vec![
+        "fulltest".to_string(),
+        "--repo".to_string(),
+        repo.to_string_lossy().into_owned(),
+    ];
+    args.extend(flags.iter().map(|s| s.to_string()));
+    run(store, &args, false, false)
+}
+
+#[test]
+fn ci_failure_opens_sol_like_a_local_failure() {
+    let (store, repo) = setup();
+    let refused = Some("sol_not_allowed".to_string());
+    assert_eq!(
+        sol_refusal(&store, &repo),
+        refused,
+        "no failure recorded yet"
+    );
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused, "only a passing run");
+
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "running tests\nerror: linux job failed\n").unwrap();
+    let log = log.to_string_lossy().into_owned();
+    let out = external(
+        &store,
+        &repo,
+        &["--external", "ci-run-42", "--exit", "101", "--log", &log],
+    );
+    assert_eq!(out.exit_code, 1);
+    assert_eq!(out.stderr, "");
+    assert!(
+        out.stdout
+            .starts_with("fulltest\texit=101\nrunning tests\nerror: linux job failed"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        sol_refusal(&store, &repo),
+        None,
+        "recorded failure opens sol"
+    );
+
+    record_full(&store, &repo, Some("echo ok")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused, "later pass closes sol");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn external_failure_without_real_evidence_records_nothing() {
+    let (store, repo) = setup();
+    let root = store.parent().unwrap().to_path_buf();
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    fs::write(root.join("ci.log"), "failing job").unwrap();
+    fs::write(root.join("blank.log"), " \r\n\t\0\n").unwrap();
+    let log = text(&root.join("ci.log"));
+    let blank = text(&root.join("blank.log"));
+    let absent = text(&root.join("absent.log"));
+    let directory = text(&root);
+    let good = ["--external", "ci-1", "--exit", "1", "--log", log.as_str()];
+    let cases: [(Vec<&str>, &str); 12] = [
+        (
+            vec!["--external", "", "--exit", "1", "--log", &log],
+            "label is empty",
+        ),
+        (
+            vec!["--external", "   ", "--exit", "1", "--log", &log],
+            "label is empty",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "0", "--log", &log],
+            "failures only",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "soon", "--log", &log],
+            "--exit must be an integer",
+        ),
+        (vec!["--external", "ci-1", "--log", &log], "missing --exit"),
+        (vec!["--external", "ci-1", "--exit", "1"], "missing --log"),
+        (
+            vec!["--external", "--exit", "1", "--log", &log],
+            "--external requires a value",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &absent],
+            "cannot read",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &directory],
+            "cannot read",
+        ),
+        (
+            vec!["--external", "ci-1", "--exit", "1", "--log", &blank],
+            "log is empty",
+        ),
+        (
+            [good.as_slice(), &["--command", "echo x > marker"]].concat(),
+            "cannot be combined",
+        ),
+        (
+            vec!["--exit", "1", "--log", &log, "--command", "echo x > marker"],
+            "require --external",
+        ),
+    ];
+    let full = store.join("reports/_full.evidence.tsv");
+    for (flags, message) in cases {
+        let out = external(&store, &repo, &flags);
+        assert_eq!(out.exit_code, 1, "{flags:?}");
+        assert_eq!(out.stdout, "", "{flags:?}");
+        assert!(out.stderr.contains(message), "{flags:?}: {}", out.stderr);
+        assert!(!full.exists(), "{flags:?}");
+        assert!(!repo.join("marker").exists(), "{flags:?}");
+        assert_eq!(
+            sol_refusal(&store, &repo).as_deref(),
+            Some("sol_not_allowed"),
+            "{flags:?}"
+        );
+    }
+
+    let out = external(&store, &root.join("absent-repo"), &good);
+    assert!(out.stderr.contains("not a directory"), "{}", out.stderr);
+    assert!(!full.exists());
+
+    let unborn = root.join("unborn");
+    let out = external(&unborn, &repo, &good);
+    assert!(out.stderr.contains("run orch init"), "{}", out.stderr);
+    assert!(!unborn.exists(), "a mistyped store must not be created");
+
+    assert_eq!(external(&store, &repo, &good).exit_code, 1);
+    assert!(full.exists(), "the same flags record once the input is valid");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn old_full_evidence_still_reads_beside_external_rows() {
+    let (store, repo) = setup();
+    let path = store.join("reports/_full.evidence.tsv");
+    let header = "kind\tcommand\texit_code\tcommit\tts";
+    let refused = Some("sol_not_allowed".to_string());
+    fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), refused);
+    fs::write(&path, format!("{header}\r\nfull\told\t3\t\t2000\r\n")).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), None);
+    fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
+
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    record_external_full(&store, &repo, "ci-1", 1, &log).unwrap();
+    assert_eq!(sol_refusal(&store, &repo), None);
+    let saved = fs::read_to_string(&path).unwrap();
+    let lines: Vec<_> = saved.lines().collect();
+    assert_eq!(lines.len(), 3, "{saved}");
+    assert_eq!(lines[0], header);
+    assert_eq!(lines[1], "full\told\t0\t\t2000");
+    assert_eq!(lines[2].split('\t').count(), header.split('\t').count());
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn dispatcher_ci_call_uses_the_real_flags() {
+    let text = axiom::engine::FILES
+        .iter()
+        .find(|(path, _)| *path == "agents/dispatcher.md")
+        .unwrap()
+        .1;
+    let start = text
+        .find("[\"fulltest\", \"--repo\", <dir>, \"--external\"")
+        .unwrap();
+    let call = &text[start..start + text[start..].find(']').unwrap()];
+    let flags: Vec<_> = call.split('"').filter(|s| s.starts_with("--")).collect();
+    assert_eq!(flags, ["--repo", "--external", "--exit", "--log"]);
+
+    let (store, repo) = setup();
+    let log = store.parent().unwrap().join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let log_arg = log.to_string_lossy().into_owned();
+    let values = [repo_arg.as_str(), "ci-1", "1", log_arg.as_str()];
+    let mut args = vec!["fulltest".to_string()];
+    for (flag, value) in flags.iter().zip(values) {
+        args.extend([flag.to_string(), value.to_string()]);
+    }
+    let out = run(&store, &args, false, false);
+    assert!(out.stdout.starts_with("fulltest\texit=1\n"), "{}", out.stderr);
+    assert_eq!(sol_refusal(&store, &repo), None);
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
 fn add_unit(store: &Path, id: &str, track: &str, scope: &str) {
     let brief = store.join(format!("{id}.brief"));
     fs::write(

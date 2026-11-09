@@ -457,6 +457,36 @@ fn sol_requires_failing_fulltest() {
     assert_eq!(r["state"], "built", "{r}");
 }
 #[test]
+fn sol_runs_on_external_failure_recorded_through_the_bridge() {
+    let temp = common::temp();
+    let (repo, _) = fixture(
+        temp.path(),
+        &[("solunit", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n")],
+    );
+    let b = bridge(temp.path());
+    let log = temp.path().join("ci.log");
+    fs::write(&log, "linux job failed").unwrap();
+    let args =
+        json!({"project":"demo","unit":"solunit","cwd":repo,"role":"sol","model":"gpt-6-sol"});
+    assert_eq!(invoke(&b, args.clone())["error"]["kind"], "sol_not_allowed");
+    let recorded = call(
+        &b,
+        "orch",
+        &json!({"project":"demo","args":["fulltest","--repo",repo,"--external","ci-run-1","--exit","101","--log",log]}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(recorded["exit_code"], 1, "{recorded}");
+    assert!(
+        recorded["stdout"]
+            .as_str()
+            .unwrap()
+            .starts_with("fulltest\texit=101\nlinux job failed"),
+        "{recorded}"
+    );
+    let r = invoke(&b, args);
+    assert_eq!(r["state"], "built", "{r}");
+}
+#[test]
 fn astra_save_records_only_astra() {
     let temp = common::temp();
     let (repo, store) = fixture(temp.path(), &[]);
