@@ -12,6 +12,9 @@ sys.stdout.reconfigure(encoding='utf-8')
 if '--version' in sys.argv:
     print('2.1.281 (Claude Code)')
     sys.exit(0)
+if sys.argv[1:4] == ['plugin', 'list', '--json']:
+    print(os.environ.get('FAKE_CLAUDE_PLUGINS', '[]'))
+    sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
 record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN')}, 'messages': []}

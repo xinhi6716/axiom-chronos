@@ -144,3 +144,31 @@ pub fn differing_files(root: &Path) -> Vec<&'static str> {
         .map(|(path, _)| *path)
         .collect()
 }
+
+#[derive(Debug, PartialEq)]
+pub struct PluginCheck {
+    pub version: String,
+    pub differing: Vec<&'static str>,
+}
+
+/// Err is the explanation to stop on: the plugin at `root` cannot be shown to be this binary's.
+pub fn check_plugin(root: &Path) -> Result<PluginCheck, String> {
+    let binary = env!("CARGO_PKG_VERSION");
+    let exe = std::env::current_exe().map_or_else(|_| "axiom".into(), |p| p.display().to_string());
+    let version = plugin_version(root).map_err(|why| {
+        format!(
+            "the version of the plugin at {} is unavailable ({why}) and the axiom binary at {exe} is version {binary}. Reinstall the plugin, for example `claude plugin update chronos@axiom-chronos`, then restart Claude Code and run `axiom doctor`.",
+            root.display()
+        )
+    })?;
+    if version != binary {
+        return Err(format!(
+            "the plugin at {} is version {version} but the axiom binary at {exe} is version {binary}, and the plugin's rules and the binary's gates must come from the same release. Update the plugin with `claude plugin update chronos@axiom-chronos`, or install axiom {version} and put it on PATH or in AXIOM_BIN, then restart Claude Code and run `axiom doctor`.",
+            root.display()
+        ));
+    }
+    Ok(PluginCheck {
+        version,
+        differing: differing_files(root),
+    })
+}

@@ -259,3 +259,69 @@ fn every_release_manifest_carries_the_crate_version() {
     .unwrap();
     assert_eq!(marketplace["plugins"][0]["version"], version);
 }
+
+fn with_plugin_version(root: &Path, version: &str) {
+    let file = root.join(".claude-plugin/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    manifest["version"] = json!(version);
+    fs::write(file, manifest.to_string()).unwrap();
+}
+
+#[test]
+fn plugin_of_another_version_is_refused_naming_both_and_the_fix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = engine::plugin_dir(temp.path()).unwrap();
+    assert_eq!(
+        engine::check_plugin(&root).unwrap(),
+        engine::PluginCheck {
+            version: env!("CARGO_PKG_VERSION").into(),
+            differing: vec![],
+        }
+    );
+    with_plugin_version(&root, "0.3.0-codex");
+    let reason = engine::check_plugin(&root).unwrap_err();
+    for part in [
+        "0.3.0-codex",
+        env!("CARGO_PKG_VERSION"),
+        "claude plugin update chronos@axiom-chronos",
+        "AXIOM_BIN",
+        "axiom doctor",
+    ] {
+        assert!(reason.contains(part), "{reason}");
+    }
+}
+
+#[test]
+fn plugin_without_a_readable_version_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    let reason = engine::check_plugin(&root).unwrap_err();
+    assert!(reason.contains("cannot read"), "{reason}");
+    assert!(reason.contains(env!("CARGO_PKG_VERSION")), "{reason}");
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    for (manifest, part) in [("{", "not valid JSON"), ("{}", "declares no version")] {
+        fs::write(root.join(".claude-plugin/plugin.json"), manifest).unwrap();
+        let reason = engine::check_plugin(&root).unwrap_err();
+        assert!(reason.contains(part), "{reason}");
+    }
+}
+
+#[test]
+fn plugin_files_are_compared_by_content_but_not_line_endings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = engine::plugin_dir(temp.path()).unwrap();
+    for (path, text) in engine::FILES {
+        let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        fs::write(root.join(path), crlf).unwrap();
+    }
+    assert_eq!(
+        engine::check_plugin(&root).unwrap().differing,
+        Vec::<&str>::new()
+    );
+    fs::write(root.join("DISPATCH.md"), "other rules").unwrap();
+    fs::remove_file(root.join("agents/critic.md")).unwrap();
+    assert_eq!(
+        engine::check_plugin(&root).unwrap().differing,
+        ["DISPATCH.md", "agents/critic.md"]
+    );
+}
