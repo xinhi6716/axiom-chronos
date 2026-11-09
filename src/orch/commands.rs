@@ -1,11 +1,12 @@
 use super::*;
-use crate::base::{Failure, Res};
+use crate::base::{self, Failure, Res};
 use std::path::Path;
 
 pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
     if ![
-        "ready", "verify", "accept", "fulltest", "review", "evidence", "release",
+        "ready", "verify", "accept", "fulltest", "review", "evidence", "release", "report",
+        "review-pack",
     ]
     .contains(&cmd)
     {
@@ -25,6 +26,36 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         };
         let has = |name: &str| args.iter().any(|s| s == name);
         match cmd {
+            "report" => {
+                let repo = Path::new(option("--repo")?);
+                let module = if args.iter().any(|s| s == "--module") {
+                    Some(option("--module")?)
+                } else {
+                    None
+                };
+                let text = digest(store, repo, module)?;
+                Ok((0, text.clone(), serde_json::json!({"digest":text})))
+            }
+            "review-pack" => {
+                let repo = Path::new(option("--repo")?);
+                let unit = args
+                    .get(1)
+                    .filter(|s| !s.starts_with("--"))
+                    .ok_or_else(|| invalid("missing unit"))?;
+                let pack = review_pack(store, unit, repo)?;
+                let text = format!(
+                    "{}\tfiles={}\tread-directly={}\tbytes={}",
+                    pack.path.display(),
+                    pack.files,
+                    pack.omitted.len(),
+                    pack.bytes
+                );
+                Ok((
+                    0,
+                    text,
+                    serde_json::json!({"pack":pack.path,"tree":pack.tree,"files":pack.files,"read_directly":pack.omitted,"bytes":pack.bytes}),
+                ))
+            }
             "release" => {
                 let unit = args
                     .get(1)
@@ -192,7 +223,28 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                             s.eq_ignore_ascii_case("blocker") || s.eq_ignore_ascii_case("major")
                         })
                     });
+                let verified = evidence(store, &units[0])?
+                    .into_iter()
+                    .rev()
+                    .find(|r| r.kind == "verify")
+                    .map(|r| r.commit)
+                    .unwrap_or_default();
+                let pack = std::fs::read_to_string(pack_path(store, &units[0])).unwrap_or_default();
+                if !verified.is_empty() && !pack.contains(&verified) {
+                    return Err(Failure::new(
+                        "no_review_pack",
+                        format!(
+                            "the review pack of {} is missing or older than its VERIFY; run orch review-pack first",
+                            units[0]
+                        ),
+                    ));
+                }
                 let rows = record_review(store, &units, reviewer, pass, repo)?;
+                base::atomic_write(
+                    &store.join("reports").join(format!("{}.verdict.json", units[0])),
+                    data.as_bytes(),
+                )
+                .map_err(|e| Failure::new("io", e.to_string()))?;
                 let ids = ready_units(store)?;
                 let waiting = waiting_units(store)?;
                 let mut ready_text = if ids.is_empty() {

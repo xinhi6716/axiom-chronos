@@ -619,6 +619,16 @@ fn extra_commands_preserve_output_and_failures() {
         r#"{"unit":"a","verdict":"pass","findings":[{"severity":"major"}]}"#,
     )
     .unwrap();
+    assert_eq!(
+        call(vec![
+            "review-pack".into(),
+            "a".into(),
+            "--repo".into(),
+            repo.to_string_lossy().into_owned(),
+        ])
+        .exit_code,
+        0
+    );
     let review = call(vec![
         "review".into(),
         "a".into(),
@@ -1014,6 +1024,11 @@ fn review_is_bound_to_unit_and_reviewer() {
         .contains("missing unit"));
     assert_eq!(evidence(&store, "a").unwrap().len(), before);
     fs::write(&verdict, r#"{"unit":"a","verdict":"pass","findings":[]}"#).unwrap();
+    assert!(call(&["a"], "chronos:reviewer", false)
+        .stderr
+        .contains("run orch review-pack first"));
+    assert_eq!(evidence(&store, "a").unwrap().len(), before);
+    review_pack(&store, "a", &repo).unwrap();
     let out = call(&["a"], "chronos:reviewer", false);
     assert_eq!(out.stdout, "a\tverified\n(none ready)\n");
     let out = call(&["a"], "chronos:reviewer", true);

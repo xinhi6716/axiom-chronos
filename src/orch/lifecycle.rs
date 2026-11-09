@@ -32,6 +32,7 @@ struct Claim {
     scope: Vec<String>,
     dirty: BTreeSet<String>,
     attempt_id: String,
+    base: String,
 }
 static RUNNING: OnceLock<Mutex<HashMap<String, Claim>>> = OnceLock::new();
 fn key(store: &Path, unit: &str) -> String {
@@ -231,6 +232,7 @@ pub fn begin_unit(
         let attempt = count as u32 + 1;
         let attempt_id = format!("{}-{}", attempt, base::unique());
         let before = dirty(repo)?;
+        let base = base_snapshot(repo, &brief.scope);
         disk.push(DiskClaim {
             unit: unit.into(),
             attempt: attempt_id.clone(),
@@ -245,6 +247,7 @@ pub fn begin_unit(
                 scope: brief.scope.clone(),
                 dirty: before,
                 attempt_id: attempt_id.clone(),
+                base,
             },
         );
         Ok(Begin::Run {
@@ -493,6 +496,25 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         states,
     })
 }
+/// Project-relative paths of a worker report's `file_changes`.
+pub(crate) fn report_paths(report: &Value, repo: &Path) -> Vec<String> {
+    report
+        .get("file_changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("path").and_then(Value::as_str))
+        .map(|p| {
+            let p = Path::new(p);
+            let p = if p.is_absolute() {
+                p.strip_prefix(repo).unwrap_or(p)
+            } else {
+                p
+            };
+            p.to_string_lossy().replace('\\', "/")
+        })
+        .collect()
+}
 pub fn finish_unit(
     store: &Path,
     unit: &str,
@@ -510,7 +532,7 @@ pub fn finish_unit(
     }
 
     let brief = unit_brief(store, unit)?;
-    let (before, others) = {
+    let (before, others, base_tree) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
@@ -529,6 +551,7 @@ pub fn finish_unit(
                 .filter(|(id, c)| c.store == store && **id != key(store, unit))
                 .flat_map(|(_, c)| c.scope.clone())
                 .collect::<Vec<_>>(),
+            c.base.clone(),
         )
     };
     let _release = Release(store, unit, attempt_id);
@@ -550,7 +573,7 @@ pub fn finish_unit(
             "run",
             model,
             if status == "completed" { 0 } else { 1 },
-            String::new(),
+            base_tree,
         ),
     )?;
     let dir = store.join("reports");
@@ -571,19 +594,7 @@ pub fn finish_unit(
         .map_err(|e| Failure::new("io", e.to_string()))?;
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
     let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
-    if let Some(changes) = report.get("file_changes").and_then(Value::as_array) {
-        for c in changes {
-            if let Some(p) = c.get("path").and_then(Value::as_str) {
-                let p = Path::new(p);
-                let p = if p.is_absolute() {
-                    p.strip_prefix(repo).unwrap_or(p)
-                } else {
-                    p
-                };
-                paths.insert(p.to_string_lossy().replace('\\', "/"));
-            }
-        }
-    }
+    paths.extend(report_paths(report, repo));
     let outside_scope: Vec<_> = paths
         .into_iter()
         .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))

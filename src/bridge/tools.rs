@@ -145,7 +145,8 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             } else {
                 return Err(Failure::new("invalid_argument", "invalid goal operation"));
             };
-            Ok(json!({"status":"completed","goal":g}))
+            let reply = json!({"status":g["status"],"mode":g["mode"],"reason":g["reason"]});
+            Ok(json!({"status":"completed","goal":reply}))
         }
         "bridge_status" => {
             let mut result = json!({"status":"completed","codex_app_server_running":b.running()});

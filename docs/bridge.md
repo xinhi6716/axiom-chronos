@@ -13,7 +13,7 @@
 | Tool | Backend | Use |
 | --- | --- | --- |
 | `codex_run` | one long-lived `codex app-server` (JSON-RPC over stdio), one ephemeral thread per call | Send a brief to a `terra` worker or a `sol` integrator; the role resolves to a model the signed-in account lists |
-| `orch` | in process | Units, inbox, gates and status for one program; the store lives under `CLAUDE_PLUGIN_DATA` (or `AXIOM_DATA_HOME`) so it survives plugin updates |
+| `orch` | in process | Units, inbox, gates and status for one program, a bounded `report` digest for the core and a `review-pack` of each unit's contract and diff for the reviewer; the store lives under `CLAUDE_PLUGIN_DATA` (or `AXIOM_DATA_HOME`) so it survives plugin updates |
 | `memory_record`, `memory_search`, `memory_get`, `memory_digest` | SQLite FTS5 (trigram) in the same data directory | Long-run memory: verified units distilled for later briefs, and a one-line-per-wish history per project. Original-wish text remains searchable even when summaries are English. CJK query runs become bigrams; matching uses stored terms, not translation. Each entry hashes its files and reports `stale` once they change |
 | `bridge_status` | `--version` probe | Resolved Codex executable, whether the app-server is up, and how the installed Codex compares with the versions Chronos has been tested with (`codex.version_check`) |
 

@@ -416,6 +416,7 @@ pub fn spawn(
         .env("AXIOM_BIN", &config.bin)
         .envs(CACHE_TTL_ENV)
         .env(provenance::ENV, provenance.to_value().to_string())
+        .env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

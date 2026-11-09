@@ -165,3 +165,44 @@ fn memory_keeper_denial_names_no_rewrite() {
     assert!(reason.contains("foreground"));
     assert!(!reason.to_lowercase().contains("rewrite"));
 }
+
+#[test]
+fn the_core_reads_a_digest_not_the_reports_directory() {
+    let text = axiom::engine::FILES
+        .iter()
+        .find(|(path, _)| *path == "skills/wish/SKILL.md")
+        .unwrap()
+        .1;
+    let step = text.lines().find(|l| l.starts_with("5. ")).unwrap();
+    assert!(step.contains(r#"`["report", "--repo", <project directory>]`"#));
+    assert!(step.contains("Never read `<store>/reports/` file by file"));
+    assert!(!text.contains("Read every file in `<store>/reports/`"));
+    let report = text.lines().find(|l| l.starts_with("6. ")).unwrap();
+    assert!(report.contains("list from the digest the changed files"));
+    let hand_off = text.lines().find(|l| l.starts_with("4. ")).unwrap();
+    assert!(hand_off.contains("Never poll, sleep or watch files while an agent runs"));
+}
+
+#[test]
+fn dispatcher_reports_the_digest_and_reviews_through_the_pack() {
+    let asset = |name: &str| {
+        axiom::engine::FILES
+            .iter()
+            .find(|(path, _)| *path == name)
+            .unwrap()
+            .1
+    };
+    let dispatcher = asset("agents/dispatcher.md");
+    assert!(dispatcher.contains(r#"`orch` `["review-pack", <unit>, "--repo", <dir>]`"#));
+    let report = dispatcher.split("## Report").nth(1).unwrap();
+    assert!(report.contains(r#"`orch` `["report", "--repo", <dir>, "--module", <module>]` unedited"#));
+    assert!(report.contains("at most ten lines"));
+    assert!(!report.contains("each decided choice"));
+    let reviewer = asset("agents/reviewer.md");
+    assert!(reviewer.contains("Read the review pack you were given."));
+    assert!(reviewer.contains("tests included"));
+    assert!(!reviewer.contains("Read every file you were given"));
+    for check in ["contract_mismatch", "vacuous_check", "untested", "platform"] {
+        assert!(reviewer.contains(check), "{check}");
+    }
+}

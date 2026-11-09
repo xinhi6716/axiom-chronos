@@ -126,21 +126,19 @@ fn stop_reason_pending_only() {
     assert!(hook::stop_reason("s", &goal::load(h, "s").unwrap().unwrap()).contains(sentence));
 }
 #[test]
-fn stop_reason_truncates_long_wish_by_characters() {
-    for len in [120, 121, 300] {
+fn stop_reason_does_not_grow_with_the_wish() {
+    let mut lengths = Vec::new();
+    for len in [1, 121, 3000] {
         let d = tempfile::tempdir().unwrap();
-        let wish = "願".repeat(len);
-        goal::open(d.path(), "s", &wish, None).unwrap();
+        goal::open(d.path(), "s", &"願".repeat(len), None).unwrap();
         let reason = hook::stop_reason("s", &goal::load(d.path(), "s").unwrap().unwrap());
-        assert!(reason.contains("Chronos goal s"));
-        if len == 120 {
-            assert!(reason.contains(&wish));
-            assert!(!reason.contains('…'));
-        } else {
-            assert!(reason.contains(&format!("{}…", "願".repeat(120))));
-            assert!(!reason.contains(&wish));
-        }
+        assert!(reason.contains("Chronos goal s is still active"));
+        assert!(reason.contains("status done"));
+        assert!(reason.contains("status blocked"));
+        assert!(!reason.contains('願'));
+        lengths.push(reason.len());
     }
+    assert!(lengths.iter().all(|n| *n == lengths[0] && *n < 300), "{lengths:?}");
 }
 
 #[test]

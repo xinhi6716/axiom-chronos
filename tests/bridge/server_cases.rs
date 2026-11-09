@@ -543,16 +543,32 @@ fn goal_classify_amend_and_answer() {
         axiom::goal::interject(temp.path(), kind, "new words").unwrap();
         let result = invoke(&b, "goal", json!({"session":kind,"classify":kind}));
         check(&result, "completed");
-        assert_eq!(result["structuredContent"]["goal"]["wish"], "wish");
-        if kind == "amend" {
-            assert_eq!(
-                result["structuredContent"]["goal"]["amendments"][0],
-                "new words"
-            );
-        } else {
-            assert_eq!(result["structuredContent"]["goal"]["status"], "active");
+        assert_eq!(result["structuredContent"]["goal"]["status"], "active");
+        let stored = axiom::goal::load(temp.path(), kind).unwrap().unwrap();
+        assert_eq!(stored.amendments.len(), usize::from(kind == "amend"));
+        assert_eq!(stored.wish, "wish");
+    }
+}
+#[test]
+fn goal_reply_does_not_echo_the_wish() {
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    axiom::goal::open(temp.path(), "s", "the long wish text", None).unwrap();
+    axiom::goal::interject(temp.path(), "s", "the amendment text").unwrap();
+    let classified = invoke(&b, "goal", json!({"session":"s","classify":"amend"}));
+    let blocked = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"blocked","note":"the note text"}),
+    );
+    for reply in [&classified, &blocked] {
+        check(reply, "completed");
+        let text = reply["structuredContent"].to_string();
+        for echoed in ["the long wish text", "the amendment text", "the note text"] {
+            assert!(!text.contains(echoed), "{text}");
         }
     }
+    assert_eq!(blocked["structuredContent"]["goal"]["status"], "blocked");
 }
 #[test]
 fn panic_in_tool_body_is_bridge_error() {
