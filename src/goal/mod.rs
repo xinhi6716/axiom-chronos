@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
+mod batch;
+pub use batch::{sleep_unless_stopped, wait_for_batch, Batch, BatchEnd, BATCH_POLL};
+
 fn is_false(v: &bool) -> bool {
     !v
 }
@@ -17,6 +20,10 @@ pub struct Goal {
     pub amendments: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Batch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +97,8 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         status: "active".into(),
         amendments: vec![],
         note: None,
+        batch: None,
+        batch_outcome: None,
         project: cwd.map(|c| base::slug_for_dir(Path::new(c))),
         mode: None,
         mode_locked: false,
@@ -128,6 +137,7 @@ pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
     }
     goal.status = "active".into();
     goal.note = None;
+    goal.batch = None;
     goal.reason = None;
     goal.interjection = None;
     save(home, session, &goal)?;
@@ -213,6 +223,15 @@ pub fn mark_dispatched(home: &Path, session: &str) -> Res<()> {
     save(home, session, &goal)
 }
 pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) -> Res<Value> {
+    set_status_with_batch(home, session, status, note, None)
+}
+pub fn set_status_with_batch(
+    home: &Path,
+    session: &str,
+    status: &str,
+    note: Option<&str>,
+    batch: Option<Batch>,
+) -> Res<Value> {
     if !["done", "blocked", "waiting"].contains(&status) {
         return Err(Failure::new(
             "invalid_argument",
@@ -231,6 +250,15 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
             "a blocked goal needs a note saying what only the user can provide",
         ));
     }
+    if let Some(batch) = &batch {
+        if status != "waiting" {
+            return Err(Failure::new(
+                "invalid_argument",
+                "progress_file, marker_file and pid belong to status waiting",
+            ));
+        }
+        batch.validate()?;
+    }
     let mut goal = required(home, session)?;
     if status == "done" {
         if let Some(project) = &goal.project {
@@ -242,9 +270,25 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
     }
     goal.status = status.into();
     goal.note = Some(note.unwrap_or("").into());
+    goal.batch = batch;
+    goal.batch_outcome = None;
     goal.interjection = None;
     save(home, session, &goal)?;
     Ok(serde_json::json!({"status": "completed", "goal": goal}))
+}
+/// Records how the batch this goal waits on ended and makes the goal active for the resumed session.
+/// False when the goal no longer waits on that batch, so the caller must not resume it.
+pub fn batch_ended(home: &Path, session: &str, batch: &Batch, end: BatchEnd) -> Res<bool> {
+    let mut goal = required(home, session)?;
+    if goal.status != "waiting" || goal.batch.as_ref() != Some(batch) {
+        return Ok(false);
+    }
+    goal.status = "active".into();
+    goal.note = None;
+    goal.batch = None;
+    goal.batch_outcome = Some(batch.outcome(end));
+    save(home, session, &goal)?;
+    Ok(true)
 }
 pub fn find_active(home: &Path, project: &str) -> Res<Option<(String, Goal)>> {
     let entries = match std::fs::read_dir(home.join("goals")) {

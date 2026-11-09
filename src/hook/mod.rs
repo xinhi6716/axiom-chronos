@@ -139,6 +139,10 @@ pub fn stop_reason(session: &str, goal: &Goal) -> String {
     if goal.interjection.is_some() {
         text.push_str(" Classify the pending interjection with the bridge goal tool as amend, answer or stop.");
     }
+    if let Some(outcome) = &goal.batch_outcome {
+        text.push(' ');
+        text.push_str(outcome);
+    }
     text
 }
 
