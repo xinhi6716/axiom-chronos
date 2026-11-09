@@ -25,6 +25,8 @@ impl EnvRestore {
                 "FAKE_CLAUDE_PIDS",
                 "AXIOM_PYTHON",
                 "AXIOM_HEADLESS",
+                "CLAUDE_CODE_PROMPT_CACHE_TTL",
+                "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
             ]
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
@@ -72,6 +74,8 @@ fn execute(
     std::env::remove_var("FAKE_CLAUDE_SESSION");
     std::env::set_var("AXIOM_PYTHON", "/x");
     std::env::set_var("AXIOM_HEADLESS", "0");
+    std::env::set_var("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m");
+    std::env::set_var("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "5m");
     if active {
         goal::open(&home, "12345678-1234-1234-1234-123456789abc", "目標", None).unwrap();
     }
@@ -118,6 +122,8 @@ fn execute(
     assert_eq!(record["env"]["AXIOM_HEADLESS"], "1");
     assert_eq!(record["env"]["AXIOM_BIN"], config.bin.to_str().unwrap());
     assert!(record["env"]["AXIOM_PYTHON"].is_null());
+    assert_eq!(record["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h");
+    assert_eq!(record["env"]["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"], "1h");
     assert_eq!(
         record["messages"][0]["message"]["content"][0]["text"],
         "/chronos:wish 幫 todo 加統計功能"

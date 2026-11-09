@@ -256,6 +256,41 @@ fn mode_restrictions() {
     }
 }
 #[test]
+fn dispatcher_stays_on_its_module() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    open(h);
+    goal::set_mode(h, "s", "change").unwrap();
+    let store = axiom::orch::store_for(h, "demo").unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("modules.md"), "## a\n## b\n").unwrap();
+    let header = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n";
+    std::fs::write(store.join("units.tsv"), header).unwrap();
+    let run = |unit: &str, track: Option<&str>| {
+        let mut input = json!({"project":"demo","unit":unit,"role":"terra","sandbox":"workspace-write"});
+        if let Some(track) = track {
+            input["track"] = json!(track);
+        }
+        sub(tool(CODEX, input))
+    };
+    assert!(call(h, &run("u1", None)).is_none());
+    assert!(!store.join("agents/a").exists());
+    assert!(call(h, &run("u1", Some("a"))).is_none());
+    assert_eq!(std::fs::read_to_string(store.join("agents/a")).unwrap(), "a");
+    assert_eq!(
+        denial(call(h, &run("u2", Some("b")))),
+        "This dispatcher already works on module a; unit u2 belongs to b. Report back: each module gets a fresh dispatcher."
+    );
+    assert!(call(h, &run("u3", Some("a"))).is_none());
+    std::fs::write(
+        store.join("units.tsv"),
+        format!("{header}u4\tb\tpending\t\t\t\tx\n"),
+    )
+    .unwrap();
+    denial(call(h, &run("u4", Some("a"))));
+    denial(call(h, &run("u4", None)));
+}
+#[test]
 fn nested_agents_only_reviewer() {
     let d = tempfile::tempdir().unwrap();
     let reason = "Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.";
