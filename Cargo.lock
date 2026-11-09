@@ -522,6 +522,7 @@ dependencies = [
 name = "axiom-chronos"
 version = "1.0.0"
 dependencies = [
+ "embed-resource",
  "gpui-kit",
  "libc",
  "regex",
