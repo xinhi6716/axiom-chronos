@@ -36,6 +36,9 @@ const T: Table = &[
     ("The architect is splitting the plan into modules…", "正在把計畫切成模組…"),
     ("Getting the work ready…", "正在準備工作…"),
     ("Planning stopped before a plan was made.", "規劃中斷，尚未產生計畫。"),
+    ("Splitting the plan into modules stopped.", "切分模組時中斷。"),
+    ("This wish needs you before it can go on.", "這個願望需要你處理後才能繼續。"),
+    ("This wish ended before the plan was split into modules.", "這個願望在切分模組前就結束了。"),
     ("Waiting on a background batch.", "正在等待背景批次。"),
     ("This wish needs you before it can plan.", "這個願望需要你處理後才能規劃。"),
     ("This wish ended without a plan.", "這個願望結束時沒有產生計畫。"),
@@ -177,6 +180,10 @@ impl Tally {
     fn needs_attention(self) -> bool {
         self.running + self.failed + self.review > 0
     }
+}
+
+fn module_tallies(run: &Run) -> Vec<Tally> {
+    run.modules.iter().map(|m| Tally::of(run, &m.units)).collect()
 }
 
 /// A goal's counts and state. With no module it can name, its state is neutral.
@@ -324,9 +331,9 @@ fn slot(index: Option<usize>) -> u64 {
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     key: RowKey,
+    /// For a goal, its number and title, the number taking the first `badge_len` bytes.
     title: SharedString,
-    /// The goal's number; empty for other rows.
-    badge: SharedString,
+    badge_len: usize,
     progress: Progress,
     tally: Tally,
     attempts: u32,
@@ -342,7 +349,7 @@ impl Row {
         Self {
             key,
             title,
-            badge: SharedString::default(),
+            badge_len: 0,
             progress,
             tally,
             attempts: 0,
@@ -363,20 +370,12 @@ impl Row {
             RowKey::Unit { .. } => tier.pad * 2.0 + tier.line * lines + META_LINE,
         }
     }
-
-    fn measured_text(&self) -> String {
-        if self.badge.is_empty() {
-            self.title.to_string()
-        } else {
-            format!("{} {}", self.badge, self.title)
-        }
-    }
 }
 
 /// Flattens the plan into the rows to draw. Every module and unit appears somewhere, and a filter
 /// never hides the item that is selected.
 fn build_rows(run: &Run, expansion: &Expansion, filter: Filter, selection: &Selection) -> Vec<Row> {
-    let tallies: Vec<Tally> = run.modules.iter().map(|m| Tally::of(run, &m.units)).collect();
+    let tallies = module_tallies(run);
     let filtering = filter != Filter::All;
     let unit_shown = |unit: usize| {
         *selection == Selection::Unit(unit) || run.units.get(unit).is_some_and(|u| filter.matches(u.state))
@@ -430,8 +429,8 @@ fn build_rows(run: &Run, expansion: &Expansion, filter: Filter, selection: &Sele
         let (tally, progress) = goal_summary(goal, &tallies);
         let open = filtering
             || expansion.goals.get(&g).copied().unwrap_or(progress != Progress::Done);
-        let mut row = Row::new(RowKey::Goal(g), goal.title.clone(), progress, tally);
-        row.badge = goal.id.clone();
+        let mut row = Row::new(RowKey::Goal(g), format!("{} {}", goal.id, goal.title).into(), progress, tally);
+        row.badge_len = goal.id.len();
         row.open = (!filtering && !shown.is_empty()).then_some(open);
         rows.push(row);
         if open {
@@ -589,13 +588,19 @@ struct PlanNote {
 /// What to say while there is no plan yet, from the stages and the run's status.
 fn plan_note(run: &Run) -> PlanNote {
     let say = |text: &'static str| PlanNote { text, detail: None, busy: false, failed: false };
+    let planned = !run.goals.is_empty();
     if let Some(stage) = run.stages.iter().find(|s| s.phase == Phase::Failed) {
-        return PlanNote { detail: stage.note.clone(), failed: true, ..say("Planning stopped before a plan was made.") };
+        let text = if planned { "Splitting the plan into modules stopped." } else { "Planning stopped before a plan was made." };
+        return PlanNote { detail: stage.note.clone(), failed: true, ..say(text) };
     }
     match run.status {
         RunStatus::Waiting => return say("Waiting on a background batch."),
-        RunStatus::Blocked => return say("This wish needs you before it can plan."),
-        RunStatus::Done => return say("This wish ended without a plan."),
+        RunStatus::Blocked => {
+            return say(if planned { "This wish needs you before it can go on." } else { "This wish needs you before it can plan." })
+        }
+        RunStatus::Done => {
+            return say(if planned { "This wish ended before the plan was split into modules." } else { "This wish ended without a plan." })
+        }
         RunStatus::Active => {}
     }
     match run.stages.iter().find(|s| s.phase == Phase::Running) {
@@ -617,6 +622,10 @@ fn plan_note(run: &Run) -> PlanNote {
 enum Rebuild {
     /// New data: stay put, and keep active work in view while following.
     Data,
+    /// The list changed size: while following, start again from the top if the work still fits.
+    Viewport,
+    /// A different list: other rows, so the old position means nothing.
+    Fresh,
     /// The user changed what is open: stay put and do not chase anything.
     Manual,
     /// The selection changed: bring it into view.
@@ -709,7 +718,7 @@ pub struct Todo {
     selection: Selection,
     /// The list's width and height at the last prepaint.
     viewport: Rc<Cell<(f32, f32)>>,
-    measured_width: f32,
+    measured: (f32, f32),
     /// The scroll position when the last frame was prepainted, to notice the user scrolling.
     painted_scroll: Rc<Cell<f32>>,
     forced_width: Option<f32>,
@@ -740,7 +749,7 @@ impl Todo {
             session: None,
             selection: Selection::None,
             viewport: Rc::new(Cell::new((0.0, 0.0))),
-            measured_width: 0.0,
+            measured: (0.0, 0.0),
             painted_scroll: Rc::new(Cell::new(0.0)),
             forced_width: None,
         };
@@ -788,7 +797,7 @@ impl Todo {
             self.cursor = None;
             self.follow = true;
             self.set_scroll(0.0);
-            self.request(Rebuild::Data);
+            self.request(Rebuild::Fresh);
         }
         if selection != self.selection {
             if let Some(run) = self.state.read(cx).run() {
@@ -799,9 +808,8 @@ impl Todo {
         }
         self.live = live;
 
-        let width = self.viewport.get().0;
-        if width > 0.0 && (width - self.measured_width).abs() > 0.5 {
-            self.request(Rebuild::Data);
+        if self.viewport.get() != self.measured {
+            self.request(Rebuild::Viewport);
         }
         if let Some(rebuild) = self.rebuild.take() {
             self.rebuild_rows(rebuild, window, cx);
@@ -819,14 +827,11 @@ impl Todo {
             return;
         };
         let mut rows = build_rows(run, &self.expansion, self.filter, &state.selection);
-        let width = match self.viewport.get().0 {
-            w if w > 0.0 => w,
-            _ => FALLBACK_WIDTH,
-        };
-        self.measured_width = width;
+        self.measured = self.viewport.get();
+        let width = if self.measured.0 > 0.0 { self.measured.0 } else { FALLBACK_WIDTH };
         measure(&mut rows, width, window);
         self.tally = Tally::of_run(run);
-        let tallies: Vec<Tally> = run.modules.iter().map(|m| Tally::of(run, &m.units)).collect();
+        let tallies = module_tallies(run);
         self.goals_total = run.goals.len();
         self.goals_done = run
             .goals
@@ -834,9 +839,9 @@ impl Todo {
             .filter(|g| goal_summary(g, &tallies).1 == Progress::Done)
             .count();
 
-        let viewport = self.viewport.get().1;
+        let viewport = self.measured.1;
         let mut scroll = self.scroll_pos();
-        if rebuild != Rebuild::Reveal {
+        if matches!(rebuild, Rebuild::Data | Rebuild::Manual | Rebuild::Viewport) {
             scroll = anchored_scroll(&self.rows, &rows, scroll);
         }
         if let Some(key) = self.cursor {
@@ -867,11 +872,13 @@ impl Todo {
                         self.follow = visible;
                     }
                 }
-                Rebuild::Data => {
+                Rebuild::Data | Rebuild::Viewport | Rebuild::Fresh => {
                     if self.follow {
                         if let Some(index) = follow_target(&self.rows) {
                             let (top, height) = (row_top(&self.rows, index), self.rows[index].height());
-                            if !is_visible(top, height, scroll, viewport) {
+                            if rebuild == Rebuild::Viewport && is_visible(top, height, 0.0, viewport) {
+                                scroll = 0.0;
+                            } else if !is_visible(top, height, scroll, viewport) {
                                 scroll = centered_scroll(top, height, viewport, content);
                             }
                         }
@@ -887,7 +894,7 @@ impl Todo {
             self.filter = filter;
             self.follow = true;
             self.set_scroll(0.0);
-            self.request(Rebuild::Data);
+            self.request(Rebuild::Fresh);
             cx.notify();
         }
     }
@@ -1053,14 +1060,13 @@ impl Todo {
         let ring = self.focus.is_focused(window)
             && window.last_input_was_keyboard()
             && self.cursor_index() == Some(index);
-        let title_width = key.title_width(self.measured_width);
+        let title_width = key.title_width(self.measured.0.max(1.0));
         let title_color = if done { t.muted } else { t.text };
-        let title: AnyElement = if row.badge.is_empty() {
+        let title: AnyElement = if row.badge_len == 0 {
             row.title.clone().into_any_element()
         } else {
-            let text: SharedString = format!("{} {}", row.badge, row.title).into();
-            StyledText::new(text)
-                .with_highlights([(0..row.badge.len(), HighlightStyle::color(t.gold))])
+            StyledText::new(row.title.clone())
+                .with_highlights([(0..row.badge_len, HighlightStyle::color(t.gold))])
                 .into_any_element()
         };
         let weight = match key {
@@ -1125,6 +1131,7 @@ impl Todo {
                     .px(px(0.0))
                     .py(px(0.0))
                     .rounded(px(6.0))
+                    .accessibility_label(format!("{}: {}", row.title, tr(cx, T, row.progress.label())))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.activate(key, cx)))
                     .when_some(tooltip_text, |this, text| {
                         this.tooltip(move |window, cx| Tooltip::new(text.clone()).max_w(px(360.0)).build(window, cx))
@@ -1297,11 +1304,13 @@ impl Todo {
                     Button::new(("todo-filter", option as usize))
                         .ghost()
                         .xsmall()
+                        .compact()
                         .selected(selected)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(option, cx)))
                         .child(
                             h_flex()
-                                .gap(px(4.0))
+                                .gap(px(3.0))
+                                .px(px(5.0))
                                 .text_size(px(12.0))
                                 .text_color(if selected { t.text } else { t.muted })
                                 .child(tr(cx, T, option.label()))
@@ -1497,9 +1506,8 @@ fn measure(rows: &mut [Row], list_width: f32, window: &Window) {
     let mut module = wrapper(&MODULE, FontWeight::MEDIUM);
     let mut unit = wrapper(&UNIT, FontWeight::NORMAL);
     for row in rows.iter_mut() {
-        let text = row.measured_text();
         let width = px(row.key.title_width(list_width));
-        let fragments = [LineFragment::text(&text)];
+        let fragments = [LineFragment::text(&row.title)];
         let adjust = IndentAdjustment::default();
         let lines = 1 + match row.key {
             RowKey::Goal(_) => goal.wrap_line(&fragments, width, adjust).count(),
