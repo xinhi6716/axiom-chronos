@@ -59,8 +59,6 @@ const T: Table = &[
 const GIT_TIMEOUT: Duration = Duration::from_secs(6);
 const RECENT_LIMIT: usize = 5;
 
-actions!(chronos, [NewWish]);
-
 /// What a git probe found about the chosen folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FolderCheck {
@@ -244,9 +242,6 @@ impl Composer {
             wish
         });
         let turns = cx.new(|cx| InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit())));
-        cx.bind_keys([KeyBinding::new("ctrl-n", NewWish, None)]);
-        let on_new_wish = state.clone();
-        App::on_action(cx, move |_: &NewWish, cx: &mut App| on_new_wish.update(cx, |s, cx| s.set_composing(true, cx)));
         let changed = |this: &mut Self, event: &InputEvent, cx: &mut Context<Self>| {
             if matches!(event, InputEvent::Change) {
                 this.not_connected = false;
