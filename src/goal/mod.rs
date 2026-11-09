@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 mod batch;
-pub use batch::{sleep_unless_stopped, wait_for_batch, Batch, BatchEnd, BATCH_POLL};
+pub use batch::{sleep_unless_stopped, wait_for_batch, Batch, BatchEnd, Waited, BATCH_POLL};
 
 fn is_false(v: &bool) -> bool {
     !v
@@ -23,7 +23,7 @@ pub struct Goal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<Batch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_outcome: Option<String>,
+    pub waited: Option<Waited>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,7 +98,7 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         amendments: vec![],
         note: None,
         batch: None,
-        batch_outcome: None,
+        waited: None,
         project: cwd.map(|c| base::slug_for_dir(Path::new(c))),
         mode: None,
         mode_locked: false,
@@ -110,6 +110,15 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     };
     save(home, session, &goal)?;
     Ok(goal)
+}
+fn leave_waiting(goal: &mut Goal, end: Option<BatchEnd>) {
+    if goal.status == "waiting" {
+        goal.waited = Some(Waited {
+            note: goal.note.clone().unwrap_or_default(),
+            batch: goal.batch.clone(),
+            end,
+        });
+    }
 }
 pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
     let Some(mut goal) = load(home, session)? else {
@@ -135,6 +144,7 @@ pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
             format!("goal {session} is already done"),
         ));
     }
+    leave_waiting(&mut goal, None);
     goal.status = "active".into();
     goal.note = None;
     goal.batch = None;
@@ -154,6 +164,7 @@ pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> 
         Some(pending) => (pending.prior_status, pending.prior_note),
         None => (goal.status.clone(), goal.note.clone()),
     };
+    leave_waiting(&mut goal, None);
     goal.interjection = Some(Interjection {
         prompt: prompt.into(),
         prior_status,
@@ -175,6 +186,9 @@ pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
     match kind {
         "amend" => (),
         "answer" => {
+            if pending.prior_status == "waiting" {
+                goal.waited = None;
+            }
             goal.status = pending.prior_status;
             goal.note = pending.prior_note;
             if let Some(i) = goal.amendments.iter().rposition(|a| a == &pending.prompt) {
@@ -192,6 +206,9 @@ pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
                 format!("invalid classification: {kind}"),
             ))
         }
+    }
+    if goal.status != "waiting" {
+        goal.batch = None;
     }
     save(home, session, &goal)?;
     Ok(goal)
@@ -268,10 +285,14 @@ pub fn set_status_with_batch(
             )?;
         }
     }
+    if status == "blocked" {
+        leave_waiting(&mut goal, None);
+    } else {
+        goal.waited = None;
+    }
     goal.status = status.into();
     goal.note = Some(note.unwrap_or("").into());
     goal.batch = batch;
-    goal.batch_outcome = None;
     goal.interjection = None;
     save(home, session, &goal)?;
     Ok(serde_json::json!({"status": "completed", "goal": goal}))
@@ -283,10 +304,10 @@ pub fn batch_ended(home: &Path, session: &str, batch: &Batch, end: BatchEnd) -> 
     if goal.status != "waiting" || goal.batch.as_ref() != Some(batch) {
         return Ok(false);
     }
+    leave_waiting(&mut goal, Some(end));
     goal.status = "active".into();
     goal.note = None;
     goal.batch = None;
-    goal.batch_outcome = Some(batch.outcome(end));
     save(home, session, &goal)?;
     Ok(true)
 }

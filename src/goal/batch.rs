@@ -19,10 +19,41 @@ pub struct Batch {
     pub pid: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BatchEnd {
     Finished,
     Died,
+}
+
+/// What a goal waited on after it stopped waiting; survives crashes and resumes until the wish moves on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Waited {
+    pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Batch>,
+    /// `None` when the goal left waiting before the batch was seen to end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<BatchEnd>,
+}
+
+impl Waited {
+    pub fn prompt(&self) -> String {
+        let mut text = format!("This goal had been waiting, with the note: {}.", self.note);
+        if let Some(batch) = &self.batch {
+            text.push_str(&format!(
+                " Its batch: progress file {}, completion marker {}, pid {}.",
+                batch.progress_file, batch.marker_file, batch.pid
+            ));
+        }
+        text.push(' ');
+        text.push_str(match self.end {
+            Some(BatchEnd::Finished) => "The wait ended because the batch finished: its completion marker exists. Check its results against the wish before closing the goal, and do not start it again.",
+            Some(BatchEnd::Died) => "The wait ended because the batch died without writing its completion marker. Treat this as a failure: diagnose why from its progress file and its logs before anything else, and do not count its work as done.",
+            None => "The wait ended before the batch was seen to end, so it may still be running: check on it before anything else, and do not start it again while it runs.",
+        });
+        text
+    }
 }
 
 impl Batch {
@@ -45,18 +76,6 @@ impl Batch {
             ));
         }
         Ok(())
-    }
-    pub(super) fn outcome(&self, end: BatchEnd) -> String {
-        match end {
-            BatchEnd::Finished => format!(
-                "The detached batch (pid {}) finished: its completion marker {} exists. Check its results against the wish before closing the goal.",
-                self.pid, self.marker_file
-            ),
-            BatchEnd::Died => format!(
-                "The detached batch (pid {}) died without writing its completion marker {}. Treat this as a failure: diagnose why from its progress file {} and its logs before anything else, and do not count its work as done.",
-                self.pid, self.marker_file, self.progress_file
-            ),
-        }
     }
 }
 
