@@ -10,7 +10,7 @@ fn contains(text: &str, phrase: &str) -> bool {
 
 #[test]
 fn contract_sentences_are_embedded() {
-    let unit_mode = "Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`; never add `brief` or `save_to`. Brief mode is for Astra only.";
+    let unit_mode = "Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
     let cases = [
         ("DISPATCH.md", "SCOPE lists paths only; notes such as \"(new)\" go in CONTEXT."),
         ("DISPATCH.md", "VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME."),
@@ -18,6 +18,7 @@ fn contract_sentences_are_embedded() {
         ("agents/dispatcher.md", "Before writing any brief, call `memory_search`"),
         ("agents/dispatcher.md", "`memory_get`"),
         ("agents/dispatcher.md", unit_mode),
+        ("agents/dispatcher.md", "A unit that is ready to run is registered by its own `codex_run` call: add `track` (the module id, or \"build\") and `brief_file` (the brief path) to the dispatch, in the same message as the Write."),
         ("agents/dispatcher.md", "Register every unit, fix units included, under its module id as track; with a map, only a `sol` unit may use another track."),
         ("agents/dispatcher.md", "A unit's `codex_run` reply carries `accept`. When `accept.ran` is true, ACCEPT already ran for the module; do not call it again. When `accept.reason` is `units_pending` or `claimed`, a later unit of the module will run it. For any other reason, call `orch` `[\"accept\", <module>, \"--repo\", <dir>]` yourself."),
         ("agents/dispatcher.md", "Give `chronos:reviewer` one whole unit per call: the unit id, every file of the unit including tests, and the module CONTRACT."),

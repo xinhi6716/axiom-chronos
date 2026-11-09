@@ -172,6 +172,67 @@ fn mixed_mode_message() {
 }
 
 #[test]
+fn registers_the_unit_in_the_dispatch_call() {
+    let f = Fixture::new(&[], "echo accepted");
+    fs::create_dir_all(f.store.join("briefs")).unwrap();
+    let brief = f.store.join("briefs/new.md");
+    fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    let dispatch = |track: &str| {
+        call(
+            &f.bridge,
+            "codex_run",
+            &json!({"project":"demo","unit":"new","role":"terra","cwd":f.repo,"track":track,"brief_file":brief}),
+        )["structuredContent"]
+            .clone()
+    };
+    let first = dispatch("m");
+    assert_eq!(first["status"], "completed", "{first}");
+    assert_eq!(first["registered"], true);
+    assert_eq!(first["accept"]["ran"], true, "{first}");
+    let units = orch::read_units(&f.store).unwrap();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].track, "m");
+    assert_eq!(units[0].brief, brief.to_str().unwrap());
+    let again = dispatch("m");
+    assert_eq!(again["status"], "completed", "{again}");
+    assert_eq!(again["registered"], false);
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let other = dispatch("other");
+    assert_eq!(other["error"]["kind"], "invalid_argument");
+    assert_eq!(
+        other["error"]["message"],
+        "unit new is registered under track m, not other"
+    );
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let half = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","unit":"two","role":"terra","cwd":f.repo,"track":"m"}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(half["error"]["message"], "track and brief_file go together");
+    let astra = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","role":"astra","cwd":f.repo,"brief":"plan","sandbox":"read-only","track":"m","brief_file":brief}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(
+        astra["error"]["message"],
+        "track and brief_file register a unit; they need unit mode"
+    );
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let missing = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","unit":"two","role":"terra","cwd":f.repo,"track":"m","brief_file":f.store.join("briefs/none.md")}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(missing["error"]["kind"], "orch_failed", "{missing}");
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+}
+
+#[test]
 fn accept_failure_does_not_fail_run() {
     let f = Fixture::new(&[("one", "echo ok")], "exit 1");
     let r = f.run("one");

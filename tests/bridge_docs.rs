@@ -19,7 +19,7 @@ fn bridge_documentation_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cases: &[(&str, &[&str])] = &[
         ("docs/bridge.md", &[
-            "Unit mode takes exactly `project`, `unit`, `role` and `cwd`; brief mode is for Astra.",
+            "Unit mode takes exactly `project`, `unit`, `role` and `cwd`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
             "When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.",
             "Every wish runs Astra first; no option or marker skips it.",
             "Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; the core writes the final report itself.",

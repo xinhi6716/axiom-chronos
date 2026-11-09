@@ -177,7 +177,10 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
         return None;
     }
     let units = crate::orch::read_units(&store).ok()?;
-    let track = &units.iter().find(|u| u.id == unit)?.track;
+    let track = match units.iter().find(|u| u.id == unit) {
+        Some(u) => u.track.as_str(),
+        None => input.get("track")?.as_str()?,
+    };
     let marker = store.join("agents").join(agent);
     match std::fs::read_to_string(&marker) {
         Ok(first) if first.trim() != track => Some(format!(

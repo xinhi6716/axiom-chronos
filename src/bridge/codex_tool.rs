@@ -54,6 +54,30 @@ pub(super) fn destination(root: &Path, path: &str) -> Res<PathBuf> {
     }
     Ok(dest.to_path_buf())
 }
+/// Registers `unit` under `track` from the brief at `brief_file`, so the
+/// dispatcher's register-then-dispatch pair is one `codex_run` call.
+/// Returns false when the unit is already registered under that track.
+fn register(store: &Path, unit: &str, track: &str, brief_file: &str) -> Res<bool> {
+    if let Some(existing) = orch::read_units(store)?.iter().find(|u| u.id == unit) {
+        if existing.track != track {
+            return Err(invalid(&format!(
+                "unit {unit} is registered under track {}, not {track}",
+                existing.track
+            )));
+        }
+        return Ok(false);
+    }
+    let args: Vec<String> = ["unit", "add", unit, "--track", track, "--brief", brief_file]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let out = orch::run(store, &args, false, false);
+    if out.exit_code != 0 {
+        let text = if out.stderr.is_empty() { out.stdout } else { out.stderr };
+        return Err(Failure::new("orch_failed", text.trim().to_string()));
+    }
+    Ok(true)
+}
 struct UnitGuard(Option<(PathBuf, String, String)>);
 impl Drop for UnitGuard {
     fn drop(&mut self) {
@@ -89,6 +113,14 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let project = string(a, "project");
     let unit = string(a, "unit");
     let save = string(a, "save_to");
+    let track = string(a, "track");
+    let brief_file = string(a, "brief_file");
+    if (track.is_some() || brief_file.is_some()) && unit.is_none() {
+        return Err(invalid("track and brief_file register a unit; they need unit mode"));
+    }
+    if track.is_some() != brief_file.is_some() {
+        return Err(invalid("track and brief_file go together"));
+    }
     if unit.is_none() && string(a, "brief").is_none() {
         return Err(invalid("brief is required outside unit mode"));
     }
@@ -124,7 +156,11 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut attempt = 0;
     let mut attempt_id = String::new();
     let mut guard = UnitGuard(None);
+    let mut registered = false;
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
+        if let (Some(t), Some(file)) = (track, brief_file) {
+            registered = register(root, u, t, file)?;
+        }
         let active = goal::find_active(b.home()?, project.unwrap())?;
         if active
             .as_ref()
@@ -140,7 +176,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         match orch::begin_unit(root, u, r, Path::new(cwd), required)? {
             orch::Begin::Reused => {
                 return Ok(
-                    json!({"status":"completed","unit":u,"state":"verified","reused":true,"attempt_id":null,"verify_output":null}),
+                    json!({"status":"completed","unit":u,"state":"verified","reused":true,"registered":registered,"attempt_id":null,"verify_output":null}),
                 )
             }
             orch::Begin::Run {
@@ -238,7 +274,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         } else {
             json!({"kind":"unit_not_built","message":"unit was not built"})
         };
-        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
+        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"registered":registered,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }

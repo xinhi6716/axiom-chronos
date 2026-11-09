@@ -29,7 +29,7 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 
 ## II · Contracts
 
-- Unit mode takes exactly `project`, `unit`, `role` and `cwd`; brief mode is for Astra.
+- Unit mode takes exactly `project`, `unit`, `role` and `cwd`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.
 - When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.
 - `brief` follows the [dispatch policy](../engine/DISPATCH.md): GOAL, SCOPE and VERIFY, decided before dispatch. The worker sees nothing else. Map a returned report onto `orch inbox push` the same way as any other worker completion.
 - A workspace-writing `codex_run` without a bound project and unit is refused with `unbound_write` before Codex starts.
