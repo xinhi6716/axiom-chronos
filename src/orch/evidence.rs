@@ -64,7 +64,7 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     "verified".into()
 }
 use super::{
-    parse_map, read_claims, read_units, save_unit_state, set_unit_state, standing_unit, unit_brief,
+    parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief,
     with_lock,
 };
 use crate::base::{proc::ShellRun, Failure, Res};
@@ -327,7 +327,7 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
             snapshot(repo, &brief.scope),
         ),
     )?;
-    update(store, unit)?;
+    update_unit_state(store, unit)?;
     Ok(result)
 }
 pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<ShellRun> {

@@ -102,10 +102,11 @@ fn the_core_cannot_poll_with_powershell() {
         assert!(!denied(d.path(), &agent(ps(command), "x")), "{command}");
     }
     for command in ["Get-Content units.tsv", "Start-Process python batch.py"] {
-        assert!(!denied(d.path(), &ps(command)), "{command}");
+        assert!(denied(d.path(), &ps(command)), "{command}");
+        assert!(!denied(d.path(), &agent(ps(command), "x")), "{command}");
     }
     goal::set_status(d.path(), "s", "blocked", Some("note")).unwrap();
-    assert!(!denied(d.path(), &ps("Start-Sleep 5")));
+    assert!(!denied(d.path(), &agent(ps("Start-Sleep 5"), "x")));
 }
 
 #[test]
