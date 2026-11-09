@@ -17,42 +17,49 @@ pub struct Tokens {
     pub review: Hsla,
     pub fail: Hsla,
     pub idle: Hsla,
+    /// Chart lines and dividers: visible only as structure, never as text.
+    pub orbit: Hsla,
 }
 
 impl Global for Tokens {}
 
+// Aged pigments, dark enough to read on parchment and light enough to read on the night sky.
 const MODULE_HUES: [u32; 10] = [
-    0x36d399, 0xf472b6, 0x60a5fa, 0xa78bfa, 0xfb923c, 0xfacc15, 0x22d3ee, 0xf87171, 0x84cc16, 0xe879f9,
+    0x53947c, 0xbc7379, 0x6589bc, 0x907dbc, 0xb67948, 0x9a8644, 0x47929b, 0xb96f9a, 0x7c8f4c, 0x76889c,
 ];
 
+// Sampled from the Chronos portrait: navy night, ivory robes, old gold.
 const DARK: Tokens = Tokens {
-    canvas: hex(0x0b1016),
-    surface: hex(0x121a24),
-    raised: hex(0x18222e),
-    border: hex(0x26323f),
-    text: hex(0xf4efe3),
-    muted: hex(0x8a97a6),
-    gold: hex(0xd7bd82),
-    ok: hex(0x36d399),
-    run: hex(0x60a5fa),
-    review: hex(0xfacc15),
-    fail: hex(0xf87171),
-    idle: hex(0x566675),
+    canvas: hex(0x0c1826),
+    surface: hex(0x122233),
+    raised: hex(0x1a2e42),
+    border: hex(0x2b4154),
+    text: hex(0xf6ead2),
+    muted: hex(0xb3b6b4),
+    gold: hex(0xdcc28a),
+    ok: hex(0x7cc4a4),
+    run: hex(0x8fb8de),
+    review: hex(0xe0a458),
+    fail: hex(0xe58a76),
+    idle: hex(0x75879c),
+    orbit: hex(0x4a5a66),
 };
 
+// The same order drawn as a star chart: parchment and navy ink.
 const LIGHT: Tokens = Tokens {
-    canvas: hex(0xf4efe3),
-    surface: hex(0xfbf8f1),
-    raised: hex(0xffffff),
-    border: hex(0xd9d2c1),
-    text: hex(0x101a22),
+    canvas: hex(0xf6ecd8),
+    surface: hex(0xfbf5e8),
+    raised: hex(0xfffcf4),
+    border: hex(0xdccfb4),
+    text: hex(0x142838),
     muted: hex(0x5b5548),
-    gold: hex(0x8d6b2d),
-    ok: hex(0x0f9d6b),
-    run: hex(0x2563eb),
-    review: hex(0xb7791f),
-    fail: hex(0xc53b3b),
-    idle: hex(0x9d9788),
+    gold: hex(0x7f5f26),
+    ok: hex(0x2c7259),
+    run: hex(0x2f5f8f),
+    review: hex(0x96590f),
+    fail: hex(0xad3d2b),
+    idle: hex(0x8a8270),
+    orbit: hex(0xc9bda2),
 };
 
 const fn hex(rgb: u32) -> Hsla {
@@ -180,4 +187,44 @@ pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     theme.list_hover = t.raised;
     theme.list_active = t.raised;
     theme.list_active_border = t.gold;
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports: a glob would bring in gpui's own `test` macro.
+    use super::{module_color, Hsla, Rgba, DARK, LIGHT, MODULE_HUES};
+
+    fn luminance(c: Hsla) -> f32 {
+        let c = Rgba::from(c);
+        let line = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * line(c.r) + 0.7152 * line(c.g) + 0.0722 * line(c.b)
+    }
+
+    fn contrast(a: Hsla, b: Hsla) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn text_meets_aa_on_every_background_in_both_themes() {
+        for t in [DARK, LIGHT] {
+            for bg in [t.canvas, t.surface, t.raised] {
+                for fg in [t.text, t.muted, t.gold, t.ok, t.run, t.review, t.fail] {
+                    assert!(contrast(fg, bg) >= 4.5, "{fg:?} on {bg:?}: {}", contrast(fg, bg));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn state_marks_and_module_colors_stay_visible_in_both_themes() {
+        for t in [DARK, LIGHT] {
+            for bg in [t.canvas, t.surface, t.raised] {
+                assert!(contrast(t.idle, bg) >= 3.0, "idle on {bg:?}: {}", contrast(t.idle, bg));
+            }
+            for i in 0..MODULE_HUES.len() {
+                assert!(contrast(module_color(i), t.canvas) >= 3.0, "module {i}");
+            }
+        }
+    }
 }

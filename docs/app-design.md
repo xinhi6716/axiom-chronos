@@ -12,6 +12,56 @@ Screens draw `desktop::model::AppState` and call its command methods. They never
 - **Calm by default.** Animate only while something is actually running. When nothing runs, the app uses no CPU. `reduce_motion` turns animation off.
 - **Never lose work or surprise.** Anything irreversible asks first and says what will happen. Closing the window never silently kills a wish.
 
+## Visual language: the Celestial Order
+
+The source is the Chronos portrait in `assets/chronos.ico`: a blindfolded keeper of time, an hourglass held in orbits, a deco frame with ring and diamond studs, navy, ivory and old gold. The app should feel like that card come to life in a dark observatory. It must not look like a stock SaaS dashboard or a fantasy game.
+
+Mystery comes from low light, empty space and restraint. It never comes from hiding information.
+
+- **One light source.** Gold is the only accent. It marks the current action, the selection and the running path. Everything else recedes into navy until it is needed.
+- **Colors.** Use only `theme::Tokens`. Navy night and ivory in dark; a parchment star chart with navy ink in light. State colors are aged pigments (patina, moonlight, amber, cinnabar), never neon. `orbit` is for chart lines and dividers.
+- **Shape carries state as well as color.** Verified is a steady star, running a slowly breathing ring, needs review an open eye, failed a broken ring with a cross, waiting a faint point.
+- **Frames.** The tarot frame (a hairline, a second hairline inset 3px in `orbit`, diamond studs at the corners) is for moments that matter: the needs-you card, empty states, the end-of-run summary, dialogs. Ordinary panels are separated by one hairline. Corners stay nearly square, 4px at most.
+- **Dividers.** A measured hairline with a small central diamond, as in `assets/chronos-threshold-*.svg`, separates major sections only.
+- **Graph.** Keep the tested layout, and draw it as an orrery. The core is the hourglass; modules are ringed bodies; units are stars. Edges are `orbit` hairlines that turn gold only along running work. Behind them sit two or three faint arcs and a sparse fixed star field under 6% opacity, which never move.
+- **Type.** System sans for all content, 12px at the very least, tabular figures for numbers. Small section labels may use widely spaced gold capitals, like `A X I O M`, for Latin text only.
+- **Portrait.** It appears small at the top of the rail and large and dim behind empty states. It never sits behind text that has to be read.
+- **Motion.** Slow as breath: 1.5 to 3 seconds per cycle, no bounce. Two small ceremonies exist: the orbit fades in when a wish starts, and the hourglass turns once when a run ends. Both are skipped under `reduce_motion`, and nothing moves while nothing runs.
+
+## Humane use
+
+The myth is in the atmosphere. The facts are in plain words.
+
+**Voice.** Mythic words are allowed only in headings, empty states and ceremonies. Anything stating a fact, error, cost or consequence is plain, and every button says what it does.
+
+| Moment | Text (zh-TW) |
+|---|---|
+| No runs yet | 星圖尚空。說出你的願望，Chronos 會拆解、動工，並逐項驗證。 |
+| Primary button | 許願 |
+| Planning | Astra 正在推演計畫… |
+| Blocked heading | 等你定奪 |
+| Waiting on a batch | 批次仍在執行，等待期間不消耗模型額度 |
+| Finished, everything verified and the full test passed | 願望已實現 |
+| Finished otherwise | 已結束：3 個單元尚未驗證 |
+
+"願望已實現" is earned: it never appears on a run that was not fully verified.
+
+**Always answer three questions at the top of the Run screen, in one sentence:** what is happening, whether the person needs to act, and what happens next. For example "正在建造 2 個單元，暫時不需要你動手".
+
+**Respect the person's attention.**
+- Interrupt only when they are needed. Routine progress never notifies.
+- A needs-you card says what happened, what it means, and what Chronos recommends, with that recommendation as the one primary button.
+- Do not make people learn the machine. Internal ids, session ids and file paths stay under a "Technical details" fold; role names such as Astra or Critic explain themselves on hover.
+
+**Respect the person's work.**
+- A click answers within 100 ms: the control shows that it is working, even if the result takes longer.
+- Selection, scroll, filters and expanded rows survive refreshes. Nothing jumps while someone is reading; new content waits or arrives below.
+- Text being typed is kept as a draft if the dialog closes or the app quits.
+- Confirm only what cannot be undone, and name the action on the button: "停止並關閉", never "確定".
+- Errors say what happened, what it affects and what to do next, with the raw message behind Copy. Never a bare code.
+
+**Respect the body.** Targets are at least 28px. Text meets WCAG AA contrast in both themes, which the theme tests enforce. No flashing, and low brightness stays the default in the dark theme.
+
 ## Language
 
 The interface is Traditional Chinese by default and English when chosen in Settings or when the system language is English. All text goes through `i18n::tr`. Wish text, file contents and log lines stay as written.
