@@ -213,10 +213,16 @@ pub fn mark_dispatched(home: &Path, session: &str) -> Res<()> {
     save(home, session, &goal)
 }
 pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) -> Res<Value> {
-    if !["done", "blocked"].contains(&status) {
+    if !["done", "blocked", "waiting"].contains(&status) {
         return Err(Failure::new(
             "invalid_argument",
-            "status must be done or blocked",
+            "status must be done, blocked or waiting",
+        ));
+    }
+    if status == "waiting" && note.unwrap_or("").trim().is_empty() {
+        return Err(Failure::new(
+            "invalid_argument",
+            "a waiting goal needs a note naming the batch, its progress file and its completion marker",
         ));
     }
     if status == "blocked" && note.unwrap_or("").trim().is_empty() {

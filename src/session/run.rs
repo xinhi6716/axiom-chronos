@@ -374,9 +374,13 @@ fn run_inner(
                             }
                             continue;
                         }
-                        Ok(Some(g)) if g.status == "blocked" => {
-                            let _ =
-                                writeln!(out, "goal blocked: {}", g.note.as_deref().unwrap_or(""));
+                        Ok(Some(g)) if g.status == "blocked" || g.status == "waiting" => {
+                            let _ = writeln!(
+                                out,
+                                "goal {}: {}",
+                                g.status,
+                                g.note.as_deref().unwrap_or("")
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => {

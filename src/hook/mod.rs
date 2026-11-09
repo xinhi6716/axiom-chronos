@@ -142,6 +142,57 @@ pub fn stop_reason(session: &str, goal: &Goal) -> String {
     text
 }
 
+const MAX_WHOLE_READ: u64 = 256 * 1024;
+const MAX_READ_LINES: u64 = 500;
+
+fn oversized_read(input: &Value) -> bool {
+    let path = Path::new(input.get("file_path").and_then(Value::as_str).unwrap_or(""));
+    let binary = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"].contains(&e.as_str()));
+    !binary
+        && std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_WHOLE_READ)
+        && input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map_or(true, |limit| limit > MAX_READ_LINES)
+}
+
+/// With a module map, a dispatcher stays on the first module it dispatches, so its context stays small.
+fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
+    let agent: String = event
+        .get("agent_id")?
+        .as_str()?
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if agent.is_empty() || input.get("role").and_then(Value::as_str) == Some("sol") {
+        return None;
+    }
+    let unit = input.get("unit")?.as_str()?;
+    let store = crate::orch::store_for(home, input.get("project")?.as_str()?).ok()?;
+    if !store.join("modules.md").is_file() {
+        return None;
+    }
+    let units = crate::orch::read_units(&store).ok()?;
+    let track = &units.iter().find(|u| u.id == unit)?.track;
+    let marker = store.join("agents").join(agent);
+    match std::fs::read_to_string(&marker) {
+        Ok(first) if first.trim() != track => Some(format!(
+            "This dispatcher already works on module {}; unit {unit} belongs to {track}. Report back: each module gets a fresh dispatcher.",
+            first.trim()
+        )),
+        Ok(_) => None,
+        Err(_) => {
+            std::fs::create_dir_all(marker.parent()?).ok()?;
+            std::fs::write(&marker, track).ok()?;
+            None
+        }
+    }
+}
+
 pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Value> {
     let kind = event.get("hook_event_name")?.as_str()?;
     let session = event
@@ -182,15 +233,21 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
+            let subagent = input.get("subagent_type").and_then(Value::as_str);
             if matches!(tool, "Agent" | "Task")
-                && input.get("subagent_type").and_then(Value::as_str)
-                    == Some("chronos:memory-keeper")
+                && matches!(
+                    subagent,
+                    Some("chronos:memory-keeper" | "chronos:dispatcher")
+                )
                 && input.get("run_in_background").and_then(Value::as_bool) == Some(true)
                 && home
                     .and_then(|h| goal::load(h, session).ok().flatten())
                     .is_some_and(|g| g.status == "active")
             {
-                return deny("Run the chronos:memory-keeper in the foreground.");
+                return deny(&format!(
+                    "Run {} in the foreground; waiting needs no polling.",
+                    subagent.unwrap_or("this agent")
+                ));
             }
             if agent
                 && matches!(tool, "Agent" | "Task")
@@ -203,6 +260,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             }
             let home = home?;
             let g = goal::load(home, session).ok()??;
+            if g.status == "active" {
+                if tool == "Read" && oversized_read(input) {
+                    return deny("This file is too large to read whole: use Grep, or Read with offset and a limit of at most 500 lines.");
+                }
+                if tool == CODEX {
+                    if let Some(reason) = other_module(home, event, input) {
+                        return deny(&reason);
+                    }
+                }
+            }
             let mode = g.mode.as_deref();
             let dispatcher = (tool == "Agent" || tool == "Task")
                 && input.get("subagent_type").and_then(Value::as_str) == Some("chronos:dispatcher");
