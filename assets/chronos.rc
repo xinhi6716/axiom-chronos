@@ -1,0 +1,30 @@
+// gpui's window class loads icon resource 1 from the executable, so this id must stay 1.
+1 ICON "chronos.ico"
+
+1 VERSIONINFO
+FILEVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+PRODUCTVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Axiom Chronos"
+            VALUE "FileVersion", VERSION_TEXT
+            VALUE "InternalName", "chronos"
+            VALUE "LegalCopyright", "Copyright (c) 2026 xinhi6716"
+            VALUE "OriginalFilename", "chronos.exe"
+            VALUE "ProductName", "Axiom Chronos"
+            VALUE "ProductVersion", VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 0x04B0
+    END
+END
