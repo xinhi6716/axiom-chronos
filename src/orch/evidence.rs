@@ -25,21 +25,25 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if rest[v].exit_code != 0 {
         return "failed".into();
     }
-    let mut start = v + 1;
+    let mut checks = vec![v];
     if needs_accept {
-        match rest[start..].iter().rposition(|r| r.kind == "accept") {
-            None => return "built".into(),
-            Some(a) => {
-                start += a + 1;
-                if rest[start - 1].exit_code != 0 {
-                    return "accept-failed".into();
-                }
-            }
+        let Some(a) = rest[v + 1..].iter().rposition(|r| r.kind == "accept") else {
+            return "built".into();
+        };
+        let a = v + 1 + a;
+        if rest[a].exit_code != 0 {
+            return "accept-failed".into();
         }
+        checks.push(a);
     }
-    let reviews: Vec<_> = rest[start..]
+    // A review stands until a later VERIFY or ACCEPT saw different files.
+    let reviews: Vec<_> = rest
         .iter()
-        .filter(|r| r.kind == "review")
+        .enumerate()
+        .filter(|&(n, r)| {
+            r.kind == "review" && checks.iter().all(|&c| n > c || rest[c].commit == r.commit)
+        })
+        .map(|(_, r)| r)
         .collect();
     let Some(last) = reviews.last() else {
         return "built".into();
