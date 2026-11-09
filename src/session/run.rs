@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    engine, goal, hook,
+    codegraph, engine, goal, hook,
 };
 use serde_json::Value;
 use std::{
@@ -279,7 +279,7 @@ pub fn spawn(
 ) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns)?;
+    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if let Some(id) = resume {
         argv.extend(["--resume".into(), id.into()]);
     }

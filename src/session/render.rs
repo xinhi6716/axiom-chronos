@@ -1,4 +1,7 @@
-use crate::base::{self, Failure, Res};
+use crate::{
+    base::{self, Failure, Res},
+    codegraph,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -38,7 +41,12 @@ impl Config {
         }
     }
 }
-pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Res<Vec<String>> {
+pub fn command(
+    config: &Config,
+    plugin_dir: &Path,
+    max_turns: Option<u32>,
+    graph: bool,
+) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
@@ -49,6 +57,10 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
             e
         }
     })?;
+    let mut tools = TOOLS.join(",");
+    if graph {
+        tools = format!("{tools},{}", codegraph::TOOL);
+    }
     cmd.extend([
         "-p".into(),
         "--input-format".into(),
@@ -63,12 +75,15 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
         "--add-dir".into(),
         config.home.to_string_lossy().into_owned(),
         "--allowedTools".into(),
-        TOOLS.join(","),
+        tools,
         "--disallowedTools".into(),
         "PowerShell,ScheduleWakeup,CronCreate".into(),
         "--model".into(),
         "opus".into(),
     ]);
+    if graph {
+        cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);
+    }
     if let Some(n) = max_turns {
         cmd.extend(["--max-turns".into(), n.to_string()]);
     }

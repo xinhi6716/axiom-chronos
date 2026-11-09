@@ -77,7 +77,7 @@ fn reviewer_and_critic_use_claude() {
     let reviewer = asset("agents/reviewer.md");
     let frontmatter = reviewer.strip_prefix("---\n").or_else(|| reviewer.strip_prefix("---\r\n")).unwrap().split_once("\n---").unwrap().0;
     let tools: Vec<_> = frontmatter.lines().filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:")).collect();
-    assert_eq!(tools, [" Read, Glob, Grep"]);
+    assert_eq!(tools, [" Read, Glob, Grep, mcp__codegraph__codegraph_explore"]);
     assert!(!reviewer.contains("Gemini"));
     let critic_description = asset("agents/critic.md").lines().find(|line| line.starts_with("description:")).unwrap();
     assert!(!critic_description.contains("Gemini"));
