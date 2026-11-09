@@ -74,6 +74,11 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             "unit mode takes exactly project, unit, role (terra or sol) and cwd; brief and save_to belong to astra brief mode",
         ));
     }
+    if string(a, "unit").is_some() && a.get("effort").is_some() {
+        return Err(invalid(
+            "a registered unit takes its effort from EFFORT in its brief, not from an effort argument",
+        ));
+    }
     if a.get("role").is_some() && !matches!(role, Some("terra" | "sol" | "astra")) {
         return Err(invalid("invalid role"));
     }
@@ -121,6 +126,8 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         _ => return Err(invalid("keep_plugins must be an array")),
     };
     let mut brief = string(a, "brief").unwrap_or("").to_owned();
+    let mut effort = string(a, "effort").map(str::to_owned);
+    let mut tier = None;
     let mut attempt = 0;
     let mut attempt_id = String::new();
     let mut guard = UnitGuard(None);
@@ -149,9 +156,16 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 attempt_id: id,
             } => {
                 brief = value.text;
+                effort = value.effort;
+                tier = value.tier;
                 attempt = n;
                 attempt_id = id;
                 guard.0 = Some((root.to_path_buf(), u.to_owned(), attempt_id.clone()));
+                if tier.is_some() && (r != "terra" || explicit.is_some()) {
+                    return Err(invalid(
+                        "TIER in a brief applies only to a terra unit dispatched without model",
+                    ));
+                }
             }
         }
     }
@@ -160,7 +174,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         let server = b.codex()?;
         let model = match explicit {
             Some(m) => m.to_owned(),
-            None => server.resolve_model(role.unwrap())?,
+            None => server.resolve_model(tier.as_deref().or(role).unwrap())?,
         };
         resolved = model.clone();
         let req = RunRequest {
@@ -168,7 +182,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             cwd: cwd.into(),
             model: model.clone(),
             sandbox: string(a, "sandbox").unwrap_or("workspace-write").into(),
-            effort: string(a, "effort").map(str::to_owned),
+            effort,
             output_schema: a.get("output_schema").filter(|v| !v.is_null()).cloned(),
             developer_instructions: string(a, "developer_instructions").map(str::to_owned),
             timeout_s: a
