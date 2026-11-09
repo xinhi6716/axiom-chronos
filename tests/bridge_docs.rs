@@ -20,6 +20,7 @@ fn bridge_documentation_contract() {
     let cases: &[(&str, &[&str])] = &[
         ("docs/bridge.md", &[
             "Unit mode takes exactly `project`, `unit`, `role` and `cwd`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
+            "A registered brief may carry `EFFORT` (`low`, `medium` or `high`) and `TIER` (`luna`, terra units only) as their own lines between GOAL and CONTEXT.",
             "When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.",
             "Every wish runs Astra first; no option or marker skips it.",
             "Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; the core writes the final report itself.",

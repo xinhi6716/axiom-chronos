@@ -60,6 +60,7 @@ fn tool_contract_and_rewrite_evidence() {
     assert!(description.contains(phrase));
     let stripped = description.replace(phrase, "");
     assert!(!stripped.contains(phrase));
+    assert!(description.contains("A registered brief can set EFFORT and TIER; unit mode takes no argument for them."));
     let clean = |text: &str| {
         let lower = text.to_lowercase();
         !lower.contains("gemini") && !lower.contains("rewrite")

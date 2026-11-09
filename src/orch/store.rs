@@ -121,7 +121,7 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
         ));
     }
     let text = std::fs::read_to_string(&row.brief).map_err(io)?;
-    parse_brief(&text).map_err(|field| fail(format!("brief {} is missing {field}", row.brief)))
+    parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))
 }
 static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
@@ -831,8 +831,8 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             io(e)
                         }
                     })?;
-                    let b = parse_brief(&text)
-                        .map_err(|field| fail(format!("brief {brief} is missing {field}")))?;
+                    let b =
+                        parse_brief(&text).map_err(|why| fail(format!("brief {brief} {why}")))?;
                     let path = store.join("modules.md");
                     if path.exists() {
                         let map =

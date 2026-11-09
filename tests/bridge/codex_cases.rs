@@ -644,3 +644,233 @@ fn creative_goal_requires_architect() {
     let result = invoke(&b, args);
     assert_eq!(result["state"], "built", "{result}");
 }
+
+const PLAIN: &str = "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n";
+
+fn logged(log: &Path, method: &str) -> Vec<Value> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|e| e["method"] == method)
+        .map(|e| e["params"].clone())
+        .collect()
+}
+fn claim_count(store: &Path) -> usize {
+    fs::read_to_string(store.join("claims.tsv"))
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter(|l| !l.is_empty())
+        .count()
+}
+
+#[test]
+fn brief_settings_choose_model_and_effort() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, store) = fixture(
+        home,
+        &[
+            (
+                "cheap",
+                "GOAL build\nEFFORT low\nTIER luna\nSCOPE src/mod.py\nVERIFY echo ok\nCONTEXT\nEFFORT stays pasted\n",
+            ),
+            (
+                "modest",
+                "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nEFFORT medium\n",
+            ),
+        ],
+    );
+    let log = home.join("codex.log");
+    let b = logged_bridge(home, &log);
+    let cheap = invoke(
+        &b,
+        json!({"project":"demo","unit":"cheap","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(cheap["state"], "built", "{cheap}");
+    assert_eq!(cheap["model"], "gpt-6-luna", "{cheap}");
+    assert!(orch::evidence(&store, "cheap")
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "run" && e.command == "gpt-6-luna"));
+    let modest = invoke(
+        &b,
+        json!({"project":"demo","unit":"modest","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(modest["state"], "built", "{modest}");
+    assert_eq!(modest["model"], "gpt-6.10-terra", "{modest}");
+    let threads = logged(&log, "thread/start");
+    let turns = logged(&log, "turn/start");
+    assert_eq!((threads.len(), turns.len()), (2, 2));
+    assert_eq!(threads[0]["model"], "gpt-6-luna");
+    assert_eq!(turns[0]["effort"], "low");
+    assert_eq!(
+        turns[0]["input"][0]["text"],
+        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nCONTEXT\nEFFORT stays pasted\n"
+    );
+    assert_eq!(threads[1]["model"], "gpt-6.10-terra");
+    assert_eq!(turns[1]["effort"], "medium");
+    assert_eq!(turns[1]["input"][0]["text"], PLAIN);
+}
+
+#[test]
+fn briefs_without_settings_keep_the_role_model_and_send_no_effort() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, _) = fixture(home, &[("plain", PLAIN)]);
+    let log = home.join("codex.log");
+    let b = logged_bridge(home, &log);
+    let r = invoke(
+        &b,
+        json!({"project":"demo","unit":"plain","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(r["state"], "built", "{r}");
+    assert_eq!(r["model"], "gpt-6.10-terra", "{r}");
+    assert_eq!(logged(&log, "thread/start")[0]["model"], "gpt-6.10-terra");
+    let turn = &logged(&log, "turn/start")[0];
+    assert!(turn.get("effort").is_none(), "{turn}");
+    assert_eq!(turn["input"][0]["text"], PLAIN);
+}
+
+#[test]
+fn unit_mode_refuses_an_effort_argument() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, _) = fixture(home, &[("plain", PLAIN)]);
+    let log = home.join("codex.log");
+    let b = logged_bridge(home, &log);
+    let mut args = json!({"project":"demo","unit":"plain","cwd":repo,"role":"terra"});
+    args["effort"] = json!("low");
+    let refused = invoke(&b, args.clone());
+    assert_eq!(refused["error"]["kind"], "invalid_argument", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("EFFORT"),
+        "{refused}"
+    );
+    assert!(logged(&log, "turn/start").is_empty());
+    args.as_object_mut().unwrap().remove("effort");
+    let accepted = invoke(&b, args);
+    assert_eq!(accepted["state"], "built", "{accepted}");
+}
+
+#[test]
+fn bad_brief_settings_are_refused_before_any_turn() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, store) = fixture(
+        home,
+        &[
+            (
+                "badeffort",
+                "GOAL build\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+            (
+                "badtier",
+                "GOAL build\nTIER sol\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+        ],
+    );
+    let log = home.join("codex.log");
+    let b = logged_bridge(home, &log);
+    for (unit, field, value, allowed) in [
+        ("badeffort", "EFFORT", "xhigh", "low, medium, high"),
+        ("badtier", "TIER", "sol", "luna"),
+    ] {
+        let r = invoke(
+            &b,
+            json!({"project":"demo","unit":unit,"cwd":repo,"role":"terra"}),
+        );
+        assert_eq!(r["error"]["kind"], "invalid_argument", "{r}");
+        let brief = store.join(format!("{unit}.brief"));
+        assert_eq!(
+            r["error"]["message"],
+            format!(
+                "brief {} has invalid {field} \"{value}\": give it once, as one of {allowed}",
+                brief.display()
+            ),
+            "{r}"
+        );
+        assert!(orch::evidence(&store, unit).unwrap().is_empty(), "{r}");
+    }
+    assert!(logged(&log, "turn/start").is_empty());
+    assert_eq!(claim_count(&store), 0);
+}
+
+#[test]
+fn tier_needs_a_terra_unit_without_a_model() {
+    let temp = common::temp();
+    let home = temp.path();
+    let (repo, store) = fixture(
+        home,
+        &[(
+            "cheap",
+            "GOAL build\nTIER luna\nSCOPE src/mod.py\nVERIFY echo ok\n",
+        )],
+    );
+    orch::record_full(&store, &repo, Some("exit 1")).unwrap();
+    let log = home.join("codex.log");
+    let b = logged_bridge(home, &log);
+    let call_with = |choice: Value| {
+        let mut args = json!({"project":"demo","unit":"cheap","cwd":repo});
+        args.as_object_mut()
+            .unwrap()
+            .extend(choice.as_object().unwrap().clone());
+        invoke(&b, args)
+    };
+    for choice in [
+        json!({"role":"sol"}),
+        json!({"role":"sol","model":"gpt-6-sol"}),
+        json!({"role":"terra","model":"gpt-6-terra"}),
+    ] {
+        let r = call_with(choice);
+        assert_eq!(r["error"]["kind"], "invalid_argument", "{r}");
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains("TIER"),
+            "{r}"
+        );
+        assert_eq!(claim_count(&store), 0, "{r}");
+    }
+    assert!(logged(&log, "turn/start").is_empty());
+    let accepted = call_with(json!({"role":"terra"}));
+    assert_eq!(accepted["state"], "built", "{accepted}");
+    assert_eq!(accepted["attempt"], 1, "{accepted}");
+    assert_eq!(accepted["model"], "gpt-6-luna", "{accepted}");
+}
+
+#[test]
+fn tier_the_account_does_not_list_fails_without_fallback() {
+    let temp = common::temp();
+    let (repo, store) = fixture(
+        temp.path(),
+        &[(
+            "cheap",
+            "GOAL build\nTIER luna\nSCOPE src/mod.py\nVERIFY echo ok\n",
+        )],
+    );
+    let wrapper = temp.path().join("no_luna.py");
+    fs::write(&wrapper, "import sys\np=sys.argv[1]\ns=open(p,encoding='utf8').read().replace(\"{'id': 'gpt-6-luna', 'isDefault': True}, \", '')\nexec(compile(s,p,'exec'))\n").unwrap();
+    let b = Bridge::new(Config {
+        data_home: Some(temp.path().into()),
+        codex: Ok(vec![
+            common::python(),
+            wrapper.to_string_lossy().into_owned(),
+            common::repo_root()
+                .join("tests/fakes/fake_codex.py")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
+        wsl: None,
+        on_windows: false,
+    });
+    let r = invoke(
+        &b,
+        json!({"project":"demo","unit":"cheap","cwd":repo,"role":"terra"}),
+    );
+    assert_eq!(r["error"]["kind"], "model_not_found", "{r}");
+    assert!(orch::evidence(&store, "cheap").unwrap().is_empty(), "{r}");
+    assert_eq!(claim_count(&store), 0, "{r}");
+}
