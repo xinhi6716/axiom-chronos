@@ -328,7 +328,11 @@ fn turn_timeout_names_the_version_only_outside_the_tested_range() {
         assert_eq!(report["error"]["kind"], "timeout");
         let message = report["error"]["message"].as_str().unwrap();
         assert!(message.starts_with("turn exceeded 1s"), "{message}");
-        assert_eq!(message.contains("newer than"), named, "{message}");
+        if named {
+            assert!(message.contains("newer than"), "{message}");
+        } else {
+            assert_eq!(message, "turn exceeded 1s and was interrupted");
+        }
     }
 }
 

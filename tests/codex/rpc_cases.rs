@@ -301,6 +301,10 @@ fn request_timeout_mentions_the_version_only_outside_the_tested_range() {
         );
         let failure = server.list_models().unwrap_err();
         assert_eq!(failure.kind, "timeout", "{failure}");
-        assert_eq!(failure.message.contains("newer than"), named, "{failure}");
+        if named {
+            assert!(failure.message.contains("newer than"), "{failure}");
+        } else {
+            assert_eq!(failure.message, "model/list timed out");
+        }
     }
 }
