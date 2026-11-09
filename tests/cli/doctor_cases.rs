@@ -149,6 +149,23 @@ fn doctor_and_bridge_status_report_the_same_codex_result() {
 }
 
 #[test]
+fn codex_that_cannot_start_is_a_required_failure() {
+    let temp = common::temp();
+    let missing = serde_json::to_string(&vec![temp
+        .path()
+        .join("missing")
+        .to_string_lossy()
+        .to_string()])
+    .unwrap();
+    let output = doctor(temp.path())
+        .env("AXIOM_CODEX_CMD", &missing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ERR  codex"));
+}
+
+#[test]
 fn newer_codex_is_a_clear_warning_and_older_codex_names_the_minimum() {
     let temp = common::temp();
     let last_tested = TESTED_CODEX.last_tested.to_string();
