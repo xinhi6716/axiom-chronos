@@ -177,7 +177,7 @@ pub fn content_text(content: &Value) -> Option<String> {
         })
     }
 }
-fn comma(n: u64) -> String {
+pub(crate) fn comma(n: u64) -> String {
     let t = n.to_string();
     let mut x = String::new();
     for (i, c) in t.chars().enumerate() {
