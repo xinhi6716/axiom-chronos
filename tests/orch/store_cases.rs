@@ -53,12 +53,11 @@ fn commands_round_trip() {
         let id = if json { "u2" } else { "u1" };
         let add = ok(p, &["unit", "add", id, "--track", "core"], json);
         if json {
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&add.stdout).unwrap()["state"],
-                "pending"
-            )
+            let v = serde_json::from_str::<serde_json::Value>(&add.stdout).unwrap();
+            assert_eq!(v["state"], "pending");
+            assert_eq!(v["next"], "blocked");
         } else {
-            assert_eq!(add.stdout, "u1\tcore\tpending\t\t\t\t\n")
+            assert_eq!(add.stdout, "u1\tcore\tpending\t\t\t\t\nblocked\n")
         };
         ok(
             p,
@@ -355,6 +354,86 @@ fn scope_outside_module_rejected() {
     );
     assert_eq!(out.exit_code, 1);
     assert!(out.stderr.contains("outside module"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("its PATHS are src/core/"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn errors_name_the_missing_file_and_the_commands() {
+    let t = Temp::new();
+    ok(&t.0, &["init"], false);
+    let brief = t.0.join("never-written.md");
+    let out = call(
+        &t.0,
+        &[
+            "unit",
+            "add",
+            "x",
+            "--track",
+            "core",
+            "--brief",
+            brief.to_str().unwrap(),
+        ],
+        false,
+        false,
+    );
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "brief {} does not exist; write the brief file",
+            brief.display()
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("os error"), "{}", out.stderr);
+    assert!(std::fs::read_to_string(t.0.join("units.tsv"))
+        .unwrap()
+        .lines()
+        .count()
+        == 1);
+    let out = call(&t.0, &["help"], false, false);
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        out.stderr.starts_with("error: unknown command help; commands: init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit>"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        call(&t.0, &[], false, false).stderr,
+        "error: a valid command is required\n"
+    );
+}
+
+#[test]
+fn unit_add_reports_the_next_step() {
+    let t = Temp::new();
+    let p = &t.0;
+    ok(p, &["init"], false);
+    std::fs::write(p.join("modules.md"), "## m\nPURPOSE x\nPATHS src/m/\nDEPENDS none\nCONTRACT x\nACCEPT tests/m.rs `echo ok`\n## n\nPURPOSE x\nPATHS src/n/\nDEPENDS m\nCONTRACT x\nACCEPT tests/n.rs `echo ok`\n").unwrap();
+    let brief = |name: &str, scope: &str| {
+        let path = p.join(format!("{name}.md"));
+        std::fs::write(&path, format!("GOAL g\nSCOPE {scope}\nVERIFY echo ok\n")).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    let first = brief("first", "src/m/a.rs");
+    let out = ok(p, &["unit", "add", "first", "--track", "m", "--brief", &first], false);
+    assert_eq!(out.stdout, format!("first\tm\tpending\t\t\t\t{first}\nready\n"));
+    let dependent = brief("dependent", "src/n/a.rs");
+    let out = ok(
+        p,
+        &["unit", "add", "dependent", "--track", "n", "--brief", &dependent],
+        true,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["state"], "pending");
+    assert_eq!(v["next"], "wait first (pending; next run)");
+    let other = brief("other", "src/m/b.rs");
+    let out = ok(p, &["unit", "add", "other", "--track", "zzz", "--brief", &other], false);
+    assert!(out.stdout.ends_with("\nunknown_track\n"), "{}", out.stdout);
 }
 
 #[test]

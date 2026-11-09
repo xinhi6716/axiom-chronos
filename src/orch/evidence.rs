@@ -285,7 +285,15 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
     let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
     let dir = store.join("reports");
     std::fs::create_dir_all(&dir).map_err(io)?;
-    let tail: String = result.output.chars().rev().take(20000).collect::<String>().chars().rev().collect();
+    let tail: String = result
+        .output
+        .chars()
+        .rev()
+        .take(20000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
     append_evidence(
         store,

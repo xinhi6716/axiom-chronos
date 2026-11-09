@@ -871,11 +871,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 let next = crate::orch::next_step_for(store, &row.id)?;
                 let mut value = serde_json::to_value(&row).unwrap();
                 value["next"] = serde_json::json!(next);
-                Ok(emit(
-                    value,
-                    format!("{}\n{next}", unit_line(&row)),
-                    json,
-                ))
+                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
             }
             ("unit", "set") => {
                 let id = required(arg(args, 2)?, "unit id")?;
