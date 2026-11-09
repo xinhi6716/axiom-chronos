@@ -208,7 +208,11 @@ fn binary_installs_all_referenced_files() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let installed = home.join("engine").join(env!("CARGO_PKG_VERSION"));
+    let installed = home.join("engine").join(format!(
+        "{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        axiom::engine::build_id()
+    ));
     let result = scan(&installed);
     assert_eq!(result.missing, BTreeSet::new());
     assert_eq!(result.malformed, BTreeSet::new());

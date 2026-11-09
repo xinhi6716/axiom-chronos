@@ -180,7 +180,11 @@ fn launch_progress_and_log() {
         Path::new(argv[flag("--plugin-dir") + 1].as_str().unwrap()),
         Path::new(record["home"].as_str().unwrap())
             .join("engine")
-            .join(env!("CARGO_PKG_VERSION"))
+            .join(format!(
+                "{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                axiom::engine::build_id()
+            ))
     );
 }
 #[test]

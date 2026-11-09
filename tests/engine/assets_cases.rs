@@ -42,7 +42,11 @@ fn embedded_files_match_disk_and_install_idempotently() {
     let dir = engine::plugin_dir(temp.path()).unwrap();
     assert_eq!(
         dir,
-        temp.path().join("engine").join(env!("CARGO_PKG_VERSION"))
+        temp.path().join("engine").join(format!(
+            "{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            engine::build_id()
+        ))
     );
     for (path, text) in engine::FILES {
         assert_eq!(fs::read(dir.join(path)).unwrap(), text.as_bytes());
@@ -192,4 +196,66 @@ fn models_and_binary_configuration() {
             assert!(!text.contains(forbidden), "{path}: {forbidden}");
         }
     }
+}
+
+#[test]
+fn builds_with_one_version_never_share_or_clean_an_engine_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let older = temp.path().join("engine/1.0.0/agents/old.md");
+    fs::create_dir_all(older.parent().unwrap()).unwrap();
+    fs::write(&older, "a running older build still reads this").unwrap();
+    let sibling = temp.path().join("engine/1.0.0-000000000000/rules.md");
+    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    fs::write(&sibling, "another build's rules").unwrap();
+
+    let a = engine::install(temp.path(), "1.0.0", &[("rules.md", "build a")]).unwrap();
+    let b = engine::install(temp.path(), "1.0.0", &[("rules.md", "build b")]).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(fs::read_to_string(a.join("rules.md")).unwrap(), "build a");
+    assert_eq!(fs::read_to_string(b.join("rules.md")).unwrap(), "build b");
+    assert_eq!(
+        engine::install(temp.path(), "1.0.0", &[("rules.md", "build a")]).unwrap(),
+        a
+    );
+    assert_eq!(fs::read_to_string(a.join("rules.md")).unwrap(), "build a");
+    assert_eq!(
+        fs::read_to_string(&older).unwrap(),
+        "a running older build still reads this"
+    );
+    assert_eq!(
+        fs::read_to_string(&sibling).unwrap(),
+        "another build's rules"
+    );
+    let name = a.file_name().unwrap().to_str().unwrap();
+    assert!(
+        Regex::new(r"^1\.0\.0-[0-9a-f]{12}$")
+            .unwrap()
+            .is_match(name),
+        "{name}"
+    );
+}
+
+#[test]
+fn content_id_follows_every_path_and_byte() {
+    let id = engine::content_id;
+    assert_eq!(id(&[("a", "b")]), id(&[("a", "b")]));
+    assert_ne!(id(&[("a", "b")]), id(&[("a", "c")]));
+    assert_ne!(id(&[("a", "b")]), id(&[("c", "b")]));
+    assert_ne!(id(&[("ab", "c")]), id(&[("a", "bc")]));
+    assert_ne!(id(&[("a", "b"), ("c", "d")]), id(&[("a", "bcd")]));
+    assert_eq!(engine::build_id(), id(engine::FILES));
+}
+
+#[test]
+fn every_release_manifest_carries_the_crate_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(json_asset(".claude-plugin/plugin.json")["version"], version);
+    let marketplace: Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude-plugin/marketplace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marketplace["plugins"][0]["version"], version);
 }
