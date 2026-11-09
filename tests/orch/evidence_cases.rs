@@ -309,7 +309,12 @@ fn a_review_stands_until_later_evidence_saw_other_files() {
         ),
         (
             "another accept on the reviewed files",
-            vec![verify(0, same), accept(0, same), review(0, same), accept(0, same)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, same),
+            ],
             "verified",
         ),
         (
@@ -319,17 +324,32 @@ fn a_review_stands_until_later_evidence_saw_other_files() {
         ),
         (
             "accept saw other files",
-            vec![verify(0, same), accept(0, same), review(0, same), accept(0, other)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, other),
+            ],
             "built",
         ),
         (
             "accept without a snapshot proves nothing",
-            vec![verify(0, same), accept(0, same), review(0, same), accept(0, "")],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, ""),
+            ],
             "built",
         ),
         (
             "a failed accept outranks a standing review",
-            vec![verify(0, same), accept(0, same), review(0, same), accept(1, same)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(1, same),
+            ],
             "accept-failed",
         ),
         (
@@ -361,12 +381,22 @@ fn a_review_stands_until_later_evidence_saw_other_files() {
         ),
         (
             "a failed review on the same files is not erased",
-            vec![verify(0, same), accept(0, same), review(1, same), accept(0, same)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(1, same),
+                accept(0, same),
+            ],
             "review-failed",
         ),
         (
             "a failed review lapses when the files change",
-            vec![verify(0, same), accept(0, same), review(1, same), accept(0, other)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(1, same),
+                accept(0, other),
+            ],
             "built",
         ),
         (
@@ -380,7 +410,12 @@ fn a_review_stands_until_later_evidence_saw_other_files() {
         ),
         (
             "an unchanged re-verify needs a new accept",
-            vec![verify(0, same), accept(0, same), review(0, same), verify(0, same)],
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                verify(0, same),
+            ],
             "built",
         ),
         (
@@ -421,12 +456,18 @@ fn a_review_stands_until_later_evidence_saw_other_files() {
         assert_eq!(derive_state(&attempt(rows), true), expected, "{name}");
     }
     assert_eq!(
-        derive_state(&attempt(vec![verify(0, same), review(0, same), verify(0, same)]), false),
+        derive_state(
+            &attempt(vec![verify(0, same), review(0, same), verify(0, same)]),
+            false
+        ),
         "verified",
         "an unchanged re-verify outside a module"
     );
     assert_eq!(
-        derive_state(&attempt(vec![verify(0, same), review(0, same), verify(0, other)]), false),
+        derive_state(
+            &attempt(vec![verify(0, same), review(0, same), verify(0, other)]),
+            false
+        ),
         "built",
         "a re-verify on other files outside a module"
     );

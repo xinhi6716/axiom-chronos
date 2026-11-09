@@ -63,7 +63,7 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     }
     "verified".into()
 }
-use super::{parse_map, read_units, set_unit_state, unit_brief, with_lock};
+use super::{parse_map, read_units, set_unit_state, standing_unit, unit_brief, with_lock};
 use crate::base::{proc::ShellRun, Failure, Res};
 use std::{path::Path, process::Command, time::Duration};
 
@@ -251,7 +251,7 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .ok_or_else(|| Failure::new("not_found", format!("module {module} not found")))?;
     let units: Vec<_> = read_units(store)?
         .into_iter()
-        .filter(|u| u.track == module)
+        .filter(|u| u.track == module && u.superseded_by().is_none())
         .collect();
     let scopes = units
         .iter()
@@ -274,6 +274,9 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     Ok(result)
 }
 pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
+    if let Some(u) = read_units(store)?.iter().find(|u| u.id == unit) {
+        u.refuse_superseded()?;
+    }
     let rows = evidence(store, unit)?;
     if !rows
         .iter()
@@ -350,9 +353,11 @@ pub fn record_review(
     let mut commits = Vec::new();
     let mut stale = Vec::new();
     for unit in units {
-        if !existing.iter().any(|u| u.id == *unit) {
-            return Err(Failure::new("not_found", format!("unit {unit} not found")));
-        }
+        existing
+            .iter()
+            .find(|u| u.id == *unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?
+            .refuse_superseded()?;
         let rs = evidence(store, unit)?;
         if rs
             .iter()
@@ -445,7 +450,7 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
     }
     let unfinished: Vec<_> = units
         .iter()
-        .filter(|u| u.state != "verified")
+        .filter(|u| standing_unit(&units, u).is_none_or(|s| s.state != "verified"))
         .map(|u| format!("{}={}", u.id, u.state))
         .collect();
     if !unfinished.is_empty() {
