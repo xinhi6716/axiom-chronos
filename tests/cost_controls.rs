@@ -86,6 +86,28 @@ fn a_dispatcher_stays_on_one_module() {
 }
 
 #[test]
+fn an_empty_marker_does_not_refuse_a_parallel_dispatch() {
+    let d = tempfile::tempdir().unwrap();
+    change_goal(d.path());
+    store_with_units(d.path(), true);
+    let agents = orch::store_for(d.path(), "demo").unwrap().join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(agents.join("first"), "").unwrap();
+    assert!(!denied(d.path(), &agent(unit("a1", "terra"), "first")));
+    assert_eq!(fs::read_to_string(agents.join("first")).unwrap(), "m1");
+    assert!(denied(d.path(), &agent(unit("b1", "terra"), "first")));
+}
+
+#[test]
+fn a_module_dispatcher_leaves_the_full_test_to_the_last_one() {
+    let text = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/agents/dispatcher.md"),
+    )
+    .unwrap();
+    assert!(text.contains("Skip step 7 when you are named one module"));
+}
+
+#[test]
 fn without_a_map_one_dispatcher_may_run_every_unit() {
     let d = tempfile::tempdir().unwrap();
     change_goal(d.path());

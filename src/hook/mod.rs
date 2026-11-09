@@ -182,18 +182,19 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
         None => input.get("track")?.as_str()?,
     };
     let marker = store.join("agents").join(agent);
-    match std::fs::read_to_string(&marker) {
-        Ok(first) if first.trim() != track => Some(format!(
-            "This dispatcher already works on module {}; unit {unit} belongs to {track}. Report back: each module gets a fresh dispatcher.",
-            first.trim()
-        )),
-        Ok(_) => None,
-        Err(_) => {
-            std::fs::create_dir_all(marker.parent()?).ok()?;
-            std::fs::write(&marker, track).ok()?;
-            None
-        }
+    // Parallel hooks can see the marker before its writer finishes, so an empty one counts as absent.
+    let first = std::fs::read_to_string(&marker).unwrap_or_default();
+    let first = first.trim();
+    if first.is_empty() {
+        std::fs::create_dir_all(marker.parent()?).ok()?;
+        crate::base::atomic_write(&marker, track.as_bytes()).ok()?;
+        return None;
     }
+    (first != track).then(|| {
+        format!(
+            "This dispatcher already works on module {first}; unit {unit} belongs to {track}. Report back: each module gets a fresh dispatcher."
+        )
+    })
 }
 
 pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Value> {
