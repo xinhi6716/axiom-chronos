@@ -1,1 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="600" height="340" viewBox="0 0 600 340" role="img" aria-labelledby="title desc"><title id="title">Axiom Chronos 1.0 workflow</title><desc id="desc">Astra plans, the critic reviews the plan, the architect splits modules, Codex builds, Claude reviews the code, and full tests, CI and memory close the loop.</desc><rect x="0" y="0" width="600" height="340" fill="#f4efe3" /><path d="M100 45H500" stroke="#9d9788" stroke-width="3" stroke-linecap="round" /><path d="M500 45C580 45 580 205 500 205" fill="none" stroke="#9d9788" stroke-width="3" stroke-linecap="round" /><path d="M500 205H100" stroke="#9d9788" stroke-width="3" stroke-linecap="round" /><circle cx="100" cy="45" r="15" fill="#8d6b2d" /><circle cx="100" cy="45" r="5" fill="#f4efe3" /><text x="100" y="93" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Astra</text><text x="100" y="121" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">plans first</text><circle cx="300" cy="45" r="15" fill="#8d6b2d" /><circle cx="300" cy="45" r="5" fill="#f4efe3" /><text x="300" y="93" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Critic</text><text x="300" y="121" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">second review</text><circle cx="500" cy="45" r="15" fill="#8d6b2d" /><circle cx="500" cy="45" r="5" fill="#f4efe3" /><text x="500" y="93" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Architect</text><text x="500" y="121" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">splits modules</text><circle cx="500" cy="205" r="15" fill="#8d6b2d" /><circle cx="500" cy="205" r="5" fill="#f4efe3" /><text x="500" y="253" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Codex</text><text x="500" y="281" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">terra builds</text><circle cx="300" cy="205" r="15" fill="#8d6b2d" /><circle cx="300" cy="205" r="5" fill="#f4efe3" /><text x="300" y="253" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Claude review</text><text x="300" y="281" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">cross-family check</text><circle cx="100" cy="205" r="15" fill="#8d6b2d" /><circle cx="100" cy="205" r="5" fill="#f4efe3" /><text x="100" y="253" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="22" font-weight="600" fill="#101a22">Verify</text><text x="100" y="281" text-anchor="middle" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#5b5548">full test, CI, memory</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="992" viewBox="0 0 360 992" role="img" aria-labelledby="title desc" xml:lang="en">
+<title id="title">Axiom Chronos: From a wish to verified work</title>
+<desc id="desc">Astra plans, the critic reviews the plan, the architect splits modules, Codex builds, Claude reviews the exact files, then full tests, CI and memory close the loop.</desc>
+<rect width="360" height="992" fill="#f4efe3"/>
+<path d="M24 1H336M24 991H336" stroke="#cabc9e"/>
+<text x="20" y="32" font-size="15" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="start">AXIOM / CHRONOS</text>
+<text x="20" y="70" font-size="28" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">From a wish</text>
+<text x="20" y="103" font-size="28" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">to verified work</text>
+<g data-step="1">
+<rect x="20" y="126" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="157" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="163" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">01</text>
+<text x="76" y="164" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Astra</text>
+<text x="36" y="198" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Define the change</text>
+<text x="36" y="225" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Plan first</text>
+</g>
+<path d="M47 242v12m-4-4 4 4 4-4" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
+<g data-step="2">
+<rect x="20" y="258" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="289" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="295" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">02</text>
+<text x="76" y="296" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Critic</text>
+<text x="36" y="330" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Review the plan</text>
+<text x="36" y="357" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Core rules before build</text>
+</g>
+<path d="M47 374v12m-4-4 4 4 4-4" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
+<g data-step="3">
+<rect x="20" y="390" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="421" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="427" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">03</text>
+<text x="76" y="428" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Architect</text>
+<text x="36" y="462" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Split into modules</text>
+<text x="36" y="489" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Contracts + tests</text>
+</g>
+<path d="M47 506v12m-4-4 4 4 4-4" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
+<g data-step="4">
+<rect x="20" y="522" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="553" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="559" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">04</text>
+<text x="76" y="560" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Codex</text>
+<text x="36" y="594" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">terra builds each unit</text>
+<text x="36" y="621" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">sol integrates if needed</text>
+</g>
+<path d="M47 638v12m-4-4 4 4 4-4" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
+<g data-step="5">
+<rect x="20" y="654" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="685" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="691" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">05</text>
+<text x="76" y="692" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Claude review</text>
+<text x="36" y="726" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Review exact files</text>
+<text x="36" y="753" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Cross-family check</text>
+</g>
+<path d="M47 770v12m-4-4 4 4 4-4" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
+<g data-step="6">
+<rect x="20" y="786" width="320" height="116" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
+<circle cx="47" cy="817" r="17" fill="#f4efe3" stroke="#8d6b2d"/>
+<text x="47" y="823" font-size="16" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">06</text>
+<text x="76" y="824" font-size="25" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Verify</text>
+<text x="36" y="858" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Full tests + CI</text>
+<text x="36" y="885" font-size="20" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Record what changed</text>
+</g>
+<text x="20" y="951" font-size="18" fill="#7e5c22" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Review each diff</text>
+<text x="20" y="976" font-size="18" fill="#7e5c22" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">before committing.</text>
+</svg>
