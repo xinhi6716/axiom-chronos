@@ -3,4 +3,5 @@ pub mod run;
 pub mod wait;
 pub use render::*;
 pub use run::*;
-pub use wait::wait_and_resume;
+// A named import shadows the glob: `session::resume` is the version that waits on batches.
+pub use wait::{resume, run, wait_and_resume};

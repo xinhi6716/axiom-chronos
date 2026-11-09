@@ -1,5 +1,5 @@
 use super::{
-    run::{resume_once, until_interrupted},
+    run::{self, run_observed, until_interrupted},
     Config,
 };
 use crate::{
@@ -21,12 +21,12 @@ const RUN_END_CHECK: Duration = Duration::from_millis(100);
 
 /// Input shared by the consecutive runs of one process: one thread reads it, and each run gets a
 /// reader that ends with the run, so a finished run cannot swallow a line typed for the next one.
-pub(super) struct SharedInput {
+struct SharedInput {
     lines: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     ended: Arc<AtomicBool>,
 }
 impl SharedInput {
-    pub(super) fn new(mut input: Box<dyn BufRead + Send>) -> Self {
+    fn new(mut input: Box<dyn BufRead + Send>) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || loop {
             let mut line = Vec::new();
@@ -40,7 +40,7 @@ impl SharedInput {
             ended: Arc::new(AtomicBool::new(true)),
         }
     }
-    pub(super) fn for_run(&mut self) -> Box<dyn BufRead + Send> {
+    fn for_run(&mut self) -> Box<dyn BufRead + Send> {
         self.end_run();
         self.ended = Arc::new(AtomicBool::new(false));
         Box::new(RunInput {
@@ -131,8 +131,18 @@ fn watch(batch: &Batch, out: &mut dyn Write) -> Option<BatchEnd> {
     })
 }
 
+fn resume_run(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    lines: &mut SharedInput,
+    out: &mut dyn Write,
+) -> Res<i32> {
+    run::resume(config, session, max_turns, lines.for_run(), out)
+}
+
 /// While the session's goal waits on a batch: wait with no model running, then resume the session.
-pub(super) fn follow(
+fn follow(
     config: &Config,
     session: &str,
     mut code: i32,
@@ -173,9 +183,55 @@ pub(super) fn follow(
                 ),
             },
         );
-        code = resume_once(config, session, max_turns, lines.for_run(), out)?;
+        code = resume_run(config, session, max_turns, lines, out)?;
     }
     Ok(code)
+}
+
+/// Runs a skill, then waits and resumes for as long as the session's goal ends waiting on a batch.
+pub fn run(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+) -> Res<i32> {
+    let mut lines = SharedInput::new(input);
+    let mut session = None;
+    let code = run_observed(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        lines.for_run(),
+        out,
+        None,
+        &mut |event| {
+            if event["type"] == "system" && event["subtype"] == "init" {
+                session = event["session_id"].as_str().map(str::to_owned);
+            }
+        },
+    )?;
+    match session {
+        Some(id) => follow(config, &id, code, max_turns, &mut lines, out),
+        None => Ok(code),
+    }
+}
+
+/// Resumes a session, then waits and resumes for as long as its goal ends waiting on a batch.
+pub fn resume(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+) -> Res<i32> {
+    let mut lines = SharedInput::new(input);
+    let code = resume_run(config, session, max_turns, &mut lines, out)?;
+    follow(config, session, code, max_turns, &mut lines, out)
 }
 
 pub fn wait_and_resume(

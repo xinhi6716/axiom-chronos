@@ -160,7 +160,10 @@ fn progress_shows_small_json_whole_and_otherwise_the_last_line() {
     long_log.push_str("latest line\n\n");
     fs::write(&b.marker_file, "").unwrap();
     for (content, expected) in [
-        ("{\n  \"done\": 7,\n  \"total\": 10\n}\n", Some("{\"done\":7,\"total\":10}")),
+        (
+            "{\n  \"done\": 7,\n  \"total\": 10\n}\n",
+            Some("{\"done\":7,\"total\":10}"),
+        ),
         ("first\nsecond\n\n", Some("second")),
         (long_log.as_str(), Some("latest line")),
         ("  \n\n", None),
@@ -245,8 +248,14 @@ fn a_resumed_waiting_goal_is_told_what_it_waited_on_until_the_wish_moves_on() {
     let home = dir.path();
     let b = batch(home, 4321);
     goal::open(home, "s", "wish", None).unwrap();
-    goal::set_status_with_batch(home, "s", "waiting", Some("screening 7800 papers"), Some(b.clone()))
-        .unwrap();
+    goal::set_status_with_batch(
+        home,
+        "s",
+        "waiting",
+        Some("screening 7800 papers"),
+        Some(b.clone()),
+    )
+    .unwrap();
     let expected = goal::Waited {
         note: "screening 7800 papers".into(),
         batch: Some(b.clone()),
@@ -267,7 +276,9 @@ fn a_resumed_waiting_goal_is_told_what_it_waited_on_until_the_wish_moves_on() {
         assert!(reason.contains(fact), "{fact}: {reason}");
     }
 
-    goal::interrupt(home, "s", "claude crashed").unwrap().unwrap();
+    goal::interrupt(home, "s", "claude crashed")
+        .unwrap()
+        .unwrap();
     assert_eq!(on_disk(home).status, "blocked");
     assert_eq!(on_disk(home).waited.as_ref(), Some(&expected));
     let again = goal::reopen(home, "s").unwrap();
@@ -328,13 +339,17 @@ fn an_interjection_on_a_waiting_goal_keeps_what_it_waited_on() {
     assert_eq!(amended.waited.unwrap().batch.as_ref(), Some(&b));
 
     waiting();
-    goal::interrupt(home, "s", "claude crashed").unwrap().unwrap();
+    goal::interrupt(home, "s", "claude crashed")
+        .unwrap()
+        .unwrap();
     let g = on_disk(home);
     assert_eq!(g.status, "blocked");
     assert_eq!(g.waited.unwrap().batch.as_ref(), Some(&b));
 
     waiting();
-    goal::interject(home, "s", "another question").unwrap().unwrap();
+    goal::interject(home, "s", "another question")
+        .unwrap()
+        .unwrap();
     assert_eq!(on_disk(home).waited.unwrap().note, "the batch");
     assert_eq!(goal::classify(home, "s", "stop").unwrap().status, "blocked");
     assert_eq!(on_disk(home).waited.unwrap().note, "the batch");
@@ -349,8 +364,14 @@ fn batch_fields_are_saved_next_to_the_note_and_cleared_by_later_states() {
     let result =
         goal::set_status_with_batch(home, "s", "waiting", Some("note"), Some(b.clone())).unwrap();
     assert_eq!(result["goal"]["batch"]["pid"], 77);
-    assert_eq!(result["goal"]["batch"]["marker_file"], b.marker_file.as_str());
-    assert_eq!(result["goal"]["batch"]["progress_file"], b.progress_file.as_str());
+    assert_eq!(
+        result["goal"]["batch"]["marker_file"],
+        b.marker_file.as_str()
+    );
+    assert_eq!(
+        result["goal"]["batch"]["progress_file"],
+        b.progress_file.as_str()
+    );
     assert_eq!(result["goal"]["note"], "note");
     let g = goal::load(home, "s").unwrap().unwrap();
     assert_eq!(g.batch.as_ref(), Some(&b));
@@ -429,7 +450,12 @@ fn a_recorded_end_reopens_the_goal_once_and_reaches_the_continue_prompt() {
         let reason = hook::stop_reason("s", &g);
         assert!(reason.contains(expected), "{reason}");
         assert!(!reason.contains(excluded), "{reason}");
-        for fact in ["the note", b.marker_file.as_str(), b.progress_file.as_str(), "77"] {
+        for fact in [
+            "the note",
+            b.marker_file.as_str(),
+            b.progress_file.as_str(),
+            "77",
+        ] {
             assert!(reason.contains(fact), "{fact}: {reason}");
         }
         assert!(!goal::batch_ended(home, "s", &b, end).unwrap());
@@ -455,5 +481,10 @@ fn only_the_batch_the_goal_waits_on_can_end_it() {
     let g = goal::load(home, "s").unwrap().unwrap();
     assert_eq!(g.status, "waiting");
     assert!(g.waited.is_none());
-    assert_eq!(goal::batch_ended(home, "none", &first, BatchEnd::Died).unwrap_err().kind, "not_found");
+    assert_eq!(
+        goal::batch_ended(home, "none", &first, BatchEnd::Died)
+            .unwrap_err()
+            .kind,
+        "not_found"
+    );
 }

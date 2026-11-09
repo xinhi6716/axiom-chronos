@@ -62,6 +62,8 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 
 只在開頭提問。執行中你保有插話權（interjection）：在 `axiom wish` 輸入一行並按 Enter，就能追加指示、提問或喊停。
 
+剩下的工作若是一大批專案自己的程式，願望會在不呼叫任何模型的情況下等待，批次結束後自動接續。`axiom wish` 會自己等；`axiom wait <session-id>` 用來接手正在等待的願望，例如按過 Ctrl-C 之後。
+
 | 選項 | 用途 |
 |---|---|
 | `--project PATH` | 處理另一個專案。 |
@@ -70,8 +72,6 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 | `--max-turns N` | 限制核心 session 回合數。 |
 
 選項放在願望**前面**，後面的文字都是願望內容。`axiom research` 會把問題變成審查過的研究計畫。
-
-剩下的工作若是一大批專案自己的程式，願望會在不呼叫任何模型的情況下等待，批次結束後自動接續。`axiom wish` 會自己等；`axiom wait <session-id>` 用來接手正在等待的願望，例如按過 Ctrl-C 之後。
 
 <a id="record-review"></a>
 <a id="state--review"></a>

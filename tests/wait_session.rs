@@ -131,8 +131,7 @@ impl Fixture {
         goal::load(&self.config.home, SESSION).unwrap().unwrap()
     }
     fn logs(&self) -> usize {
-        std::fs::read_dir(self.config.home.join("logs"))
-            .map_or(0, |entries| entries.count())
+        std::fs::read_dir(self.config.home.join("logs")).map_or(0, |entries| entries.count())
     }
 }
 fn dead_pid() -> u32 {
@@ -161,7 +160,11 @@ fn headless_wish_waits_on_the_batch_then_resumes_with_what_happened() {
     let mut out = Vec::new();
     assert_eq!(f.run(&mut out), 0);
     let output = String::from_utf8(out).unwrap();
-    for expected in ["goal waiting: batch running", "batch: 7/10", "batch finished"] {
+    for expected in [
+        "goal waiting: batch running",
+        "batch: 7/10",
+        "batch finished",
+    ] {
         assert!(output.contains(expected), "{output}");
     }
     assert!(!f.resumed(0));
@@ -194,10 +197,17 @@ fn a_batch_that_died_is_resumed_as_a_failure() {
     let mut out = Vec::new();
     assert_eq!(f.run(&mut out), 0);
     let output = String::from_utf8(out).unwrap();
-    assert!(output.contains("batch died without its completion marker"), "{output}");
+    assert!(
+        output.contains("batch died without its completion marker"),
+        "{output}"
+    );
     assert!(f.resumed(1));
     let prompt = f.prompt(1);
-    for fact in ["died without writing", "Treat this as a failure", b.marker_file.as_str()] {
+    for fact in [
+        "died without writing",
+        "Treat this as a failure",
+        b.marker_file.as_str(),
+    ] {
         assert!(prompt.contains(fact), "{fact}: {prompt}");
     }
     assert!(!prompt.contains("the batch finished"), "{prompt}");
@@ -329,7 +339,10 @@ fn a_run_interrupted_while_the_goal_waits_does_not_start_watching() {
     trigger.join().unwrap();
     assert_eq!(code, 130);
     let output = String::from_utf8(out).unwrap();
-    assert!(output.contains(&format!("axiom wait {SESSION}")), "{output}");
+    assert!(
+        output.contains(&format!("axiom wait {SESSION}")),
+        "{output}"
+    );
     assert!(!output.contains("batch finished"), "{output}");
     assert_eq!(f.goal().status, "waiting");
     assert_eq!(f.logs(), 1);
@@ -417,7 +430,11 @@ fn axiom_wait_refuses_what_it_could_not_resume_before_waiting() {
     assert_eq!(attempt(&f.config, "missing").kind, "not_found");
     let active = attempt(&f.config, SESSION);
     assert_eq!(active.kind, "invalid_argument");
-    assert!(active.message.contains("is active, not waiting"), "{}", active.message);
+    assert!(
+        active.message.contains("is active, not waiting"),
+        "{}",
+        active.message
+    );
     goal::set_status(home, SESSION, "waiting", Some("old style")).unwrap();
     let note_only = attempt(&f.config, SESSION);
     assert_eq!(note_only.kind, "invalid_argument");
@@ -440,7 +457,11 @@ fn axiom_wait_refuses_what_it_could_not_resume_before_waiting() {
     f.wait_on(&b);
     let no_cwd = attempt(&f.config, SESSION);
     assert_eq!(no_cwd.kind, "invalid_argument");
-    assert!(no_cwd.message.contains("has no project directory"), "{}", no_cwd.message);
+    assert!(
+        no_cwd.message.contains("has no project directory"),
+        "{}",
+        no_cwd.message
+    );
     assert_eq!(f.goal().status, "waiting");
     assert!(!f.ran(0));
 }
@@ -456,8 +477,14 @@ fn wait_command_checks_its_arguments_and_the_goal() {
     let t = common::temp();
     for (args, message) in [
         (vec!["wait"], "axiom: wait takes only a session id"),
-        (vec!["wait", "a", "b"], "axiom: wait takes only a session id"),
-        (vec!["wait", "missing"], "axiom: no goal for session missing"),
+        (
+            vec!["wait", "a", "b"],
+            "axiom: wait takes only a session id",
+        ),
+        (
+            vec!["wait", "missing"],
+            "axiom: no goal for session missing",
+        ),
     ] {
         let o = axiom(t.path()).args(args).output().unwrap();
         assert_eq!(o.status.code(), Some(2));

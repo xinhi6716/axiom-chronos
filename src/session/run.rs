@@ -1,8 +1,4 @@
-use super::{
-    command, user_message,
-    wait::{follow, SharedInput},
-    Config, Renderer,
-};
+use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
     engine, goal, hook,
@@ -167,17 +163,6 @@ pub fn resume(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    let mut lines = SharedInput::new(input);
-    let code = resume_once(config, session, max_turns, lines.for_run(), out)?;
-    follow(config, session, code, max_turns, &mut lines, out)
-}
-pub(super) fn resume_once(
-    config: &Config,
-    session: &str,
-    max_turns: Option<u32>,
-    input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-) -> Res<i32> {
     let goal = goal::load(&config.home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     if goal.status == "done" {
@@ -209,11 +194,10 @@ pub(super) fn resume_once(
         input,
         out,
         Some(session),
-        &mut None,
     )
 }
 
-pub fn run(
+fn run_inner(
     config: &Config,
     skill: &str,
     text: &str,
@@ -221,26 +205,21 @@ pub fn run(
     max_turns: Option<u32>,
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
+    resume: Option<&str>,
 ) -> Res<i32> {
-    let mut lines = SharedInput::new(input);
-    let mut session = None;
-    let code = run_inner(
+    run_observed(
         config,
         skill,
         text,
         project,
         max_turns,
-        lines.for_run(),
+        input,
         out,
-        None,
-        &mut session,
-    )?;
-    match session {
-        Some(id) => follow(config, &id, code, max_turns, &mut lines, out),
-        None => Ok(code),
-    }
+        resume,
+        &mut |_| {},
+    )
 }
-fn run_inner(
+pub(super) fn run_observed(
     config: &Config,
     skill: &str,
     text: &str,
@@ -249,7 +228,7 @@ fn run_inner(
     mut input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
     resume: Option<&str>,
-    session_out: &mut Option<String>,
+    observe: &mut dyn FnMut(&serde_json::Value),
 ) -> Res<i32> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
@@ -378,6 +357,7 @@ fn run_inner(
                     session = event["session_id"].as_str().map(str::to_owned);
                 }
                 renderer.event(&event, out);
+                observe(&event);
                 if event["type"] != "result" {
                     continue;
                 }
@@ -454,7 +434,6 @@ fn run_inner(
             }
         }
     };
-    *session_out = session.clone();
     writer.lock().unwrap_or_else(|e| e.into_inner()).take();
     if final_result {
         renderer.summary(out);

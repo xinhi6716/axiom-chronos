@@ -59,6 +59,8 @@ The binary enforces the gates: no write without a claimed unit, no verified unit
 
 Questions are asked only at the start. While it runs you keep interjection: in `axiom wish`, type a line and press Enter to add instructions, ask, or stop.
 
+When what remains is a long batch of the project's own programs, the wish waits on it with no model running and continues when the batch ends. `axiom wish` does this by itself; `axiom wait <session-id>` picks up a wish that is waiting, for example after Ctrl-C.
+
 | Option | Purpose |
 |---|---|
 | `--project PATH` | Work on another project. |
@@ -67,8 +69,6 @@ Questions are asked only at the start. While it runs you keep interjection: in `
 | `--max-turns N` | Limit core-session turns. |
 
 Put options **before** the wish; everything after them is wish text. `axiom research` turns a question into a reviewed research plan.
-
-When what remains is a long batch of the project's own programs, the wish waits on it with no model running and continues when the batch ends. `axiom wish` does this by itself; `axiom wait <session-id>` picks up a wish that is waiting, for example after Ctrl-C.
 
 <a id="record-review"></a>
 <a id="state--review"></a>
