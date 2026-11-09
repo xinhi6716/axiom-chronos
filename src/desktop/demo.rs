@@ -53,6 +53,7 @@ pub fn sample_run() -> Run {
         status: RunStatus::Active,
         hosted: true,
         started: "Nov 3, 05:15".into(),
+        started_at: Some(1_793_654_100),
         stages: vec![
             stage("Astra", Phase::Done, Some("14 min")),
             stage("Critic", Phase::Done, Some("10 findings ruled")),
@@ -78,6 +79,13 @@ pub fn sample_run() -> Run {
                 ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: 0, cached: 36_001_210, output: 128_398 },
                 ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: 0, cached: 633_994, output: 26_655 },
                 ModelCost { model: "gpt-6.1-terra".into(), usd: None, input: 11_643_991, cached: 10_462_720, output: 195_816 },
+            ],
+            roles: vec![
+                RoleCost { role: "chronos:dispatcher".into(), usd: Some(78.41), input: 0, cached: 198_312_906, output: 612_044 },
+                RoleCost { role: "main".into(), usd: Some(23.82), input: 0, cached: 36_001_210, output: 128_398 },
+                RoleCost { role: "chronos:reviewer".into(), usd: Some(13.44), input: 0, cached: 27_713_616, output: 190_328 },
+                RoleCost { role: "chronos:memory-keeper".into(), usd: Some(0.45), input: 0, cached: 633_994, output: 26_655 },
+                RoleCost { role: "codex terra".into(), usd: None, input: 11_643_991, cached: 10_462_720, output: 195_816 },
             ],
             contexts: vec![
                 AgentContext { agent: "chronos:dispatcher".into(), peak_tokens: 965_312 },
@@ -134,6 +142,23 @@ pub fn sample_run() -> Run {
     run
 }
 
+/// Shrinks the sample's figures so runs differ. Peaks scale apart from cost: a cheap run can still hold a big context.
+fn scale_usage(usage: &mut Usage, cost: f64, context: f64) {
+    let tokens = |n: &mut u64| *n = (*n as f64 * cost) as u64;
+    usage.total_usd = usage.total_usd.map(|usd| usd * cost);
+    for model in &mut usage.models {
+        model.usd = model.usd.map(|usd| usd * cost);
+        [&mut model.input, &mut model.cached, &mut model.output].into_iter().for_each(tokens);
+    }
+    for role in &mut usage.roles {
+        role.usd = role.usd.map(|usd| usd * cost);
+        [&mut role.input, &mut role.cached, &mut role.output].into_iter().for_each(tokens);
+    }
+    for agent in &mut usage.contexts {
+        agent.peak_tokens = (agent.peak_tokens as f64 * context) as u64;
+    }
+}
+
 fn finished_run() -> Run {
     let mut run = sample_run();
     run.session = "9f360fac-b268-431e-abd7-9e792c58929e".into();
@@ -143,6 +168,7 @@ fn finished_run() -> Run {
     run.status = RunStatus::Done;
     run.hosted = false;
     run.started = "Nov 3, 00:42".into();
+    run.started_at = Some(1_793_637_720);
     run.modules.truncate(6);
     run.units.retain(|u| u.module < 6);
     let mut next = 0;
@@ -158,8 +184,9 @@ fn finished_run() -> Run {
         stage.phase = Phase::Done;
         stage.note = None;
     }
-    run.usage.total_usd = Some(6.89);
     run.usage.models.truncate(3);
+    run.usage.roles.truncate(4);
+    scale_usage(&mut run.usage, 6.89 / 116.12, 0.22);
     run.goals.truncate(2);
     for goal in &mut run.goals {
         goal.modules.retain(|m| *m < 6);
@@ -177,6 +204,8 @@ fn waiting_run() -> Run {
     run.status = RunStatus::Waiting;
     run.hosted = false;
     run.started = "Nov 4, 12:50".into();
+    run.started_at = Some(1_793_767_800);
+    scale_usage(&mut run.usage, 0.33, 0.4);
     for unit in &mut run.units {
         if unit.state == UnitState::Running {
             unit.state = UnitState::Built;
@@ -198,6 +227,11 @@ fn blocked_run() -> Run {
     run.status = RunStatus::Blocked;
     run.hosted = false;
     run.started = "Nov 2, 19:33".into();
+    run.started_at = Some(1_793_619_180);
+    run.usage.total_usd = None;
+    run.usage.models.iter_mut().for_each(|model| model.usd = None);
+    run.usage.roles.iter_mut().for_each(|role| role.usd = None);
+    run.usage.contexts.truncate(2);
     run.needs = vec![Need {
         kind: NeedKind::Blocked,
         title: "A production credential is needed".into(),
