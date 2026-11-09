@@ -313,8 +313,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                         "Questions are unavailable in this session or exceed the limit of four.",
                     );
                 }
-                if goal::mark_asked(home, session).is_err() {
-                    return deny("Could not record the question.");
+                match goal::mark_asked(home, session) {
+                    Ok(true) => (),
+                    Ok(false) => {
+                        return deny(
+                            "Questions are unavailable in this session or exceed the limit of four.",
+                        )
+                    }
+                    Err(_) => return deny("Could not record the question."),
                 }
             }
             if dispatcher

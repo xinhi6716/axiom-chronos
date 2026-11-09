@@ -79,11 +79,18 @@ fn save(home: &Path, session: &str, goal: &Goal) -> Res<()> {
     .map_err(io_error)?;
     base::atomic_write(&file, &bytes).map_err(io_error)
 }
+/// Every read-modify-write of a goal runs under this: hooks are separate processes.
+fn lock(home: &Path) -> Res<crate::orch::StoreLock> {
+    let dir = home.join("goals");
+    std::fs::create_dir_all(&dir).map_err(io_error)?;
+    crate::orch::lock_store(&dir)
+}
 fn required(home: &Path, session: &str) -> Res<Goal> {
     load(home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))
 }
 pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Goal> {
+    let _lock = lock(home)?;
     let goal = Goal {
         wish: wish.into(),
         cwd: cwd.map(str::to_owned),
@@ -103,6 +110,7 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     Ok(goal)
 }
 pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
+    let _lock = lock(home)?;
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
     };
@@ -119,6 +127,7 @@ pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
     Ok(Some(goal))
 }
 pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     if goal.status == "done" {
         return Err(Failure::new(
@@ -134,12 +143,13 @@ pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
     Ok(goal)
 }
 pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> {
+    if load(home, session)?.is_none() || prompt.trim_start().starts_with('<') {
+        return Ok(None);
+    }
+    let _lock = lock(home)?;
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
     };
-    if prompt.trim_start().starts_with('<') {
-        return Ok(None);
-    }
     let (prior_status, prior_note) = match goal.interjection.take() {
         Some(pending) => (pending.prior_status, pending.prior_note),
         None => (goal.status.clone(), goal.note.clone()),
@@ -157,6 +167,7 @@ pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> 
     Ok(Some(goal))
 }
 pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     let pending = goal
         .interjection
@@ -193,6 +204,7 @@ pub fn set_mode(home: &Path, session: &str, mode: &str) -> Res<Goal> {
             format!("invalid mode: {mode}"),
         ));
     }
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     if goal.mode_locked {
         return Err(Failure::new("mode_locked", "goal mode is locked"));
@@ -202,12 +214,19 @@ pub fn set_mode(home: &Path, session: &str, mode: &str) -> Res<Goal> {
     save(home, session, &goal)?;
     Ok(goal)
 }
-pub fn mark_asked(home: &Path, session: &str) -> Res<()> {
+/// Spends the goal's one round of questions; false when it is gone or work was dispatched.
+pub fn mark_asked(home: &Path, session: &str) -> Res<bool> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
+    if goal.asked || goal.dispatched {
+        return Ok(false);
+    }
     goal.asked = true;
-    save(home, session, &goal)
+    save(home, session, &goal)?;
+    Ok(true)
 }
 pub fn mark_dispatched(home: &Path, session: &str) -> Res<()> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     goal.dispatched = true;
     save(home, session, &goal)
@@ -231,7 +250,14 @@ pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) 
             "a blocked goal needs a note saying what only the user can provide",
         ));
     }
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
+    if goal.status == "done" && status != "done" {
+        return Err(Failure::new(
+            "invalid_argument",
+            format!("goal {session} is already done"),
+        ));
+    }
     if status == "done" {
         if let Some(project) = &goal.project {
             crate::orch::done_gate(
