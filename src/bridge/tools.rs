@@ -39,6 +39,30 @@ fn timeout(a: &Value, d: u64) -> u64 {
 fn store(b: &Bridge, project: &str) -> Res<std::path::PathBuf> {
     orch::store_for(b.home()?, project)
 }
+fn batch(a: &Value) -> Res<Option<goal::Batch>> {
+    let given = ["progress_file", "marker_file", "pid"]
+        .iter()
+        .filter(|k| a.get(**k).is_some_and(|v| !v.is_null()))
+        .count();
+    if given == 0 {
+        return Ok(None);
+    }
+    let pid = a
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok());
+    match (opt(a, "progress_file"), opt(a, "marker_file"), pid) {
+        (Some(progress_file), Some(marker_file), Some(pid)) => Ok(Some(goal::Batch {
+            progress_file: progress_file.into(),
+            marker_file: marker_file.into(),
+            pid,
+        })),
+        _ => Err(Failure::new(
+            "invalid_argument",
+            "progress_file, marker_file and pid go together: two paths and a process id",
+        )),
+    }
+}
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
@@ -108,7 +132,8 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             let home = b.home()?;
             let session = s(a, "session");
             let g = if let Some(v) = opt(a, "status") {
-                goal::set_status(home, session, v, opt(a, "note"))?["goal"].clone()
+                goal::set_status_with_batch(home, session, v, opt(a, "note"), batch(a)?)?["goal"]
+                    .clone()
             } else if let Some(v) = opt(a, "mode") {
                 json!(goal::set_mode(home, session, v)?)
             } else if let Some(v) = opt(a, "classify") {

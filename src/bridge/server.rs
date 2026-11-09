@@ -90,10 +90,13 @@ pub fn tools() -> Value {
             }
             "goal" => {
                 tool["description"] = json!(
-                    "Manage a session goal: set status, classify an interjection, or set mode."
+                    "Manage a session goal: set status, classify an interjection, or set mode. With status waiting, pass progress_file, marker_file and pid together so Axiom can wait on the detached batch with no model running and resume this session when it ends."
                 );
                 tool["inputSchema"]["properties"]["classify"] = json!({"type":"string"});
                 tool["inputSchema"]["properties"]["mode"] = json!({"type":"string"});
+                tool["inputSchema"]["properties"]["progress_file"] = json!({"type":"string","description":"Absolute path of the file the batch updates as it advances."});
+                tool["inputSchema"]["properties"]["marker_file"] = json!({"type":"string","description":"Absolute path of a file the batch creates only after all its work has succeeded."});
+                tool["inputSchema"]["properties"]["pid"] = json!({"type":"integer","minimum":1,"description":"Id of the process that lives until the batch ends."});
                 tool["inputSchema"]["required"] = json!(["session"]);
             }
             _ => {}
