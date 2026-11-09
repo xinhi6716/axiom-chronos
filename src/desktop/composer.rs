@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -178,7 +178,7 @@ fn check_folder(folder: &Path) -> FolderCheck {
     if !folder.is_dir() {
         return FolderCheck::Missing;
     }
-    let mut git = Command::new("git");
+    let mut git = crate::base::proc::cmd("git");
     git.args(["status", "--porcelain=v2", "--branch"])
         .current_dir(folder)
         .env("GIT_OPTIONAL_LOCKS", "0")

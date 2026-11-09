@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     io::Write,
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 struct Check {
@@ -57,7 +57,7 @@ fn tool(
     fix: &str,
 ) -> Check {
     let result = resolve(env, executable, fix).and_then(|command| {
-        let output = Command::new(&command[0])
+        let output = crate::base::proc::cmd(&command[0])
             .args(&command[1..])
             .arg("--version")
             .stdin(Stdio::null())
@@ -178,7 +178,7 @@ fn windows_shell() -> Check {
 #[cfg(windows)]
 fn linux() -> Check {
     let result = base::resolve_command("AXIOM_WSL_CMD", "wsl.exe").map_err(|e| if e.kind == "not_installed" { "no WSL; full suites run on Windows only, where POSIX-only tests are skipped".into() } else { e.message }).and_then(|command| {
-        let status = Command::new(&command[0]).args(&command[1..]).args(["-e", "sh", "-c", "test -x \"$HOME/.axiom/linux-venv/bin/python\""]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| format!("WSL did not answer: {e}"))?;
+        let status = crate::base::proc::cmd(&command[0]).args(&command[1..]).args(["-e", "sh", "-c", "test -x \"$HOME/.axiom/linux-venv/bin/python\""]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| format!("WSL did not answer: {e}"))?;
         if status.success() { Ok("WSL ~/.axiom/linux-venv (full suites also run on Linux)".into()) } else { Err("WSL has no ~/.axiom/linux-venv. Inside WSL: uv venv ~/.axiom/linux-venv, then install the project test dependencies into it".into()) }
     });
     match result {

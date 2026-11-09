@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -42,7 +41,7 @@ fn claims() -> &'static Mutex<HashMap<String, Claim>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
-    let out = Command::new("git")
+    let out = base::proc::cmd("git")
         .current_dir(repo)
         .args(["status", "--porcelain", "-z", "--untracked-files=all"])
         .output()

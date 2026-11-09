@@ -5,8 +5,28 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+/// The one place a child process is created; applies CREATE_NO_WINDOW when this process has no console.
+pub fn cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    if no_window(has_console()) {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+fn has_console() -> bool {
+    !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null()
+}
+#[cfg_attr(not(windows), allow(dead_code))]
+fn no_window(has_console: bool) -> bool {
+    !has_console
+}
 pub fn command(argv: &[String]) -> Command {
-    let mut c = Command::new(argv.first().map(String::as_str).unwrap_or(""));
+    let mut c = cmd(argv.first().map(String::as_str).unwrap_or(""));
     c.args(argv.iter().skip(1));
     #[cfg(unix)]
     {
@@ -37,7 +57,7 @@ pub fn terminate_tree(child: &mut Child) -> Result<(), Failure> {
     }
     #[cfg(windows)]
     {
-        let result = Command::new("taskkill")
+        let result = cmd("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .output();
         match result {
@@ -183,8 +203,32 @@ pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
     })
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn window_is_hidden_only_without_a_console() {
+        assert!(super::no_window(false));
+        assert!(!super::no_window(true));
+    }
+    #[test]
+    fn no_bare_command_new_outside_the_helper() {
+        fn walk(dir: &std::path::Path, bad: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, bad);
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("base/proc.rs") {
+                    if std::fs::read_to_string(&p).unwrap().contains("Command::new(") {
+                        bad.push(p.display().to_string());
+                    }
+                }
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
+        assert!(bad.is_empty(), "use base::proc::cmd instead of Command::new in: {bad:?}");
+    }
+    #[cfg(windows)]
     #[test]
     fn taskkill_failure_includes_details() {
         let error = super::taskkill_failure(123, Some(7), b"stdout", b"stderr");

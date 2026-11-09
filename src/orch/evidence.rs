@@ -68,7 +68,7 @@ use super::{
     with_lock,
 };
 use crate::base::{proc::ShellRun, Failure, Res};
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, time::Duration};
 
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts";
 fn io(e: std::io::Error) -> Failure {
@@ -168,7 +168,7 @@ pub fn append_evidence(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
     })
 }
 fn git(repo: &Path, args: &[&str]) -> String {
-    Command::new("git")
+    base::proc::cmd("git")
         .current_dir(repo)
         .args(args)
         .output()
@@ -187,7 +187,7 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         base::unique()
     ));
     let run = |args: &[&str]| {
-        Command::new("git")
+        base::proc::cmd("git")
             .current_dir(repo)
             .env("GIT_INDEX_FILE", &index)
             .args(args)

@@ -1452,12 +1452,12 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     #[test]
     fn a_holder_that_never_lets_go_ends_the_wait_with_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
         command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
         let mut holder = command
             .stdin(Stdio::piped())

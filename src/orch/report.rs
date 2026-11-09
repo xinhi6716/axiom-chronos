@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 const PACK_BYTES: usize = 80_000;
@@ -25,7 +24,7 @@ fn cut(text: &str, max: usize) -> (String, bool) {
     (head, more)
 }
 fn git(repo: &Path, args: &[&str]) -> Res<Vec<u8>> {
-    let out = Command::new("git")
+    let out = base::proc::cmd("git")
         .current_dir(repo)
         .args(args)
         .output()
