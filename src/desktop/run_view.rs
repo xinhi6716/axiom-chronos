@@ -52,7 +52,7 @@ const TEXT: Table = &[
     ("Make this folder writable, or set AXIOM_HOME to one that is.", "讓這個資料夾可以寫入，或把 AXIOM_HOME 設成可寫入的資料夾。"),
     ("Remove the Store build of PowerShell and install it with winget.", "移除 Microsoft Store 版的 PowerShell，改用 winget 安裝。"),
     ("Start with a wish", "從一個願望開始"),
-    ("Say what you want done. Chronos plans it, builds it and checks each piece while you watch.", "說出你想完成的事，Chronos 會規劃、施工並逐項驗收，過程都看得到。"),
+    ("Say what you want done. Chronos plans it, builds it and checks every piece.", "說出你想完成的事，Chronos 會規劃、施工並逐項驗收。"),
     ("Make a wish", "許個願"),
     ("No wish is open", "目前沒有開啟的願望"),
     ("Open one from Wishes, or make a new one.", "從「願望」開啟一個，或許一個新的。"),
@@ -370,7 +370,7 @@ fn stage_cell(index: usize, stage: &Stage, status: RunStatus, last: bool, animat
     };
     h_flex()
         .id(("stage", index))
-        .when(!last, |this| this.flex_1())
+        .map(|this| if last { this.max_w(px(128.)) } else { this.flex_1() })
         .min_w_0()
         .items_center()
         .gap_2()
@@ -627,7 +627,15 @@ impl RunView {
                 .max_h(px(132.))
                 .gap_1()
                 .overflow_y_scrollbar()
-                .child(div().w_full().whitespace_normal().child(SharedString::from(shown.to_owned())))
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_normal()
+                        .text_sm()
+                        .line_height(relative(1.6))
+                        .font_weight(FontWeight::NORMAL)
+                        .child(SharedString::from(shown.to_owned())),
+                )
                 .when(cut, |this| {
                     this.child(
                         div()
@@ -660,6 +668,7 @@ impl RunView {
                 .xsmall()
                 .flex_none()
                 .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
+                .accessibility_label(tr(cx, TEXT, if open { "Show one line" } else { "Show the whole wish" }))
                 .tooltip(tr(cx, TEXT, if open { "Show one line" } else { "Show the whole wish" }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.wish_open = !this.wish_open;
@@ -884,7 +893,7 @@ impl RunView {
         let (title, description) = if no_runs {
             (
                 "Start with a wish",
-                "Say what you want done. Chronos plans it, builds it and checks each piece while you watch.",
+                "Say what you want done. Chronos plans it, builds it and checks every piece.",
             )
         } else {
             ("No wish is open", "Open one from Wishes, or make a new one.")
@@ -939,6 +948,7 @@ impl RunView {
                                     .h(px(44.))
                                     .px_6()
                                     .disabled(blocked)
+                                    .when(!blocked, |this| this.bg(t.gold))
                                     .child(
                                         h_flex()
                                             .gap_2()
@@ -1097,7 +1107,6 @@ impl RunView {
                     .bg(t.surface)
                     .border_1()
                     .border_color(t.border)
-                    .shadow_lg()
                     .child(
                         h_flex()
                             .flex_none()
@@ -1193,7 +1202,7 @@ impl RunView {
                                                 .child(tr(cx, TEXT, "What needs attention")),
                                         )
                                     })
-                                    .when(attention_count == 0, |this| {
+                                    .when(summary.verdict == Verdict::Clean && attention_count == 0, |this| {
                                         this.child(
                                             h_flex()
                                                 .gap_2()
