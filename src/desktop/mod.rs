@@ -18,6 +18,7 @@ mod wishes;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::*;
 use model::Screen;
+pub use shell::Shell;
 use std::time::Duration;
 
 /// How the app starts. Demo options exist so every screen can be seen and captured without a live wish.
