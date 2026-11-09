@@ -24,18 +24,15 @@ struct Fixture {
 }
 
 #[cfg(windows)]
-fn install_fake(bin: &Path) -> PathBuf {
-    let path = bin.join("codegraph.cmd");
-    fs::write(&path, "@exit /b 0\r\n").unwrap();
-    path
+fn install_fake(bin: &Path) {
+    fs::write(bin.join("codegraph.cmd"), "@exit /b 0\r\n").unwrap();
 }
 #[cfg(unix)]
-fn install_fake(bin: &Path) -> PathBuf {
+fn install_fake(bin: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let path = bin.join("codegraph");
     fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 fn fixture(executable: bool, index: bool) -> Fixture {
     let temp = common::temp();
@@ -199,7 +196,10 @@ fn codex_worker_gets_the_server_when_both_conditions_hold() {
         assert_eq!(report["disabled"]["mcp_servers"], json!(["node_repl"]));
     }
     let (report, thread) = codex_call(&f, false, false);
-    assert_eq!(thread["config"], json!({"mcp_servers":{"codegraph":server}}));
+    assert_eq!(
+        thread["config"],
+        json!({"mcp_servers":{"codegraph":server}})
+    );
     assert!(report["disabled"].is_null());
 }
 
@@ -225,13 +225,13 @@ fn codex_thread_is_untouched_unless_both_conditions_hold() {
 
 fn doctor_line(f: &Fixture) -> String {
     let home = f.root.join("home");
-    let stand_in = stand_in("fake_claude");
+    let fake = stand_in("fake_claude");
     let output = axiom(f, &home)
         .arg("doctor")
         .current_dir(&f.project)
-        .env("AXIOM_CLAUDE_CMD", &stand_in)
-        .env("AXIOM_CODEX_CMD", &stand_in)
-        .env("AXIOM_WSL_CMD", &stand_in)
+        .env("AXIOM_CLAUDE_CMD", &fake)
+        .env("AXIOM_CODEX_CMD", &fake)
+        .env("AXIOM_WSL_CMD", &fake)
         .env(
             "AXIOM_PWSH_CMD",
             serde_json::to_string(&vec!["pwsh"]).unwrap(),
