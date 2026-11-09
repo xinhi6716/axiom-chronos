@@ -119,7 +119,10 @@ fn tail(text: &str) -> &str {
 pub fn assess_version(exit_code: i32, output: &str, tested: &TestedVersions) -> VersionCheck {
     let (minimum, last_tested) = (&tested.minimum, &tested.last_tested);
     if exit_code != 0 {
-        let message = format!("`codex --version` exited with {exit_code}: {}", tail(output));
+        let message = format!(
+            "`codex --version` exited with {exit_code}: {}",
+            tail(output)
+        );
         return finding(Verdict::Fail, None, message, tested);
     }
     let Some((installed, version)) = parse_version(output) else {
@@ -180,7 +183,11 @@ pub fn probe_version_within(command: &[String], timeout: Duration) -> Res<Versio
     } else {
         (stderr, stdout)
     };
-    let output = if first.trim().is_empty() { second } else { first };
+    let output = if first.trim().is_empty() {
+        second
+    } else {
+        first
+    };
     Ok(VersionProbe {
         exit_code: run.exit_code,
         last_line: output.trim().lines().last().map(str::to_owned),

@@ -218,7 +218,10 @@ fn codex_run_failure_from_a_protocol_change_names_both_versions() {
         message.contains(&axiom::codex::TESTED_CODEX.last_tested.to_string()),
         "{message}"
     );
-    assert!(message.starts_with("Codex app-server protocol mismatch"), "{message}");
+    assert!(
+        message.starts_with("Codex app-server protocol mismatch"),
+        "{message}"
+    );
 }
 #[test]
 fn goal_operations_and_mode_lock() {
@@ -319,10 +322,12 @@ fn serve_dispatches_tool_calls() {
     let temp = common::temp();
     let out = Sink(Arc::new(Mutex::new(vec![])));
     let capture = out.0.clone();
-    let requests = format!("{}\n{}\n{}\n",
+    let requests = format!(
+        "{}\n{}\n{}\n",
         json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}}),
         json!({"id":2,"method":"tools/call","params":{"name":"unknown","arguments":{}}}),
-        json!({"method":"tools/call","params":{"name":"bridge_status"}}));
+        json!({"method":"tools/call","params":{"name":"bridge_status"}})
+    );
     assert_eq!(serve(config(temp.path()), Cursor::new(requests), out), 0);
     let output = capture.lock().unwrap();
     let lines: Vec<Value> = std::str::from_utf8(&output)
@@ -366,8 +371,6 @@ fn descriptors_expose_codex_unit_inputs() {
         assert!(!stripped.contains(phrase));
     }
 }
-
-
 
 #[test]
 fn ping_precedes_slow_call_reply() {

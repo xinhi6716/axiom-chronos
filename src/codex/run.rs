@@ -128,7 +128,8 @@ impl AppServer {
                 self.interrupt(&thread_id, turn_id);
                 report["status"] = json!("timeout");
                 let message = format!("turn exceeded {}s and was interrupted", req.timeout_s);
-                report["error"] = json!({"kind":"timeout","message":self.note_untested_version(&message)});
+                report["error"] =
+                    json!({"kind":"timeout","message":self.note_untested_version(&message)});
                 break;
             }
             let event = match events.recv_timeout(remaining) {

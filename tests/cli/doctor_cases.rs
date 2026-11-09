@@ -103,10 +103,20 @@ fn doctor_and_bridge_status_report_the_same_codex_result() {
     let tested = common::tested_codex_flag();
     let cases: [(&[&str], &str, &str, i32); 6] = [
         (&[&tested], "ok   codex", "ok", 0),
-        (&["--fake-version=codex-cli 999.1.2"], "warn codex", "warn", 0),
+        (
+            &["--fake-version=codex-cli 999.1.2"],
+            "warn codex",
+            "warn",
+            0,
+        ),
         (&["--fake-version=codex-cli 0.0.1"], "ERR  codex", "fail", 1),
         (&["--fake-version=codex-cli fake"], "ERR  codex", "fail", 1),
-        (&["--fake-version=2.1.281 (Claude Code)"], "ERR  codex", "fail", 1),
+        (
+            &["--fake-version=2.1.281 (Claude Code)"],
+            "ERR  codex",
+            "fail",
+            1,
+        ),
         (&[&tested, "--fake-version-exit=3"], "ERR  codex", "fail", 1),
     ];
     for (flags, mark, verdict, exit) in cases {
@@ -154,7 +164,10 @@ fn newer_codex_is_a_clear_warning_and_older_codex_names_the_minimum() {
     let text = String::from_utf8_lossy(&output.stdout);
     let warning = text.lines().find(|l| l.starts_with("warn codex")).unwrap();
     assert!(warning.contains("999.1.2"), "{warning}");
-    assert!(warning.contains(&format!("newer than {last_tested}")), "{warning}");
+    assert!(
+        warning.contains(&format!("newer than {last_tested}")),
+        "{warning}"
+    );
     assert!(warning.contains("not blocked"), "{warning}");
     let output = doctor(temp.path())
         .env(

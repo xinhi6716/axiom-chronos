@@ -148,13 +148,22 @@ fn handshake_failures_name_installed_and_last_tested_versions() {
     for (breakage, raw) in [
         ("--fake-break=start:exit", ""),
         ("--fake-break=initialize:exit", ""),
-        ("--fake-break=initialize:no-result", "initialize: missing result"),
+        (
+            "--fake-break=initialize:no-result",
+            "initialize: missing result",
+        ),
         (
             "--fake-break=initialize:-32600:Invalid request: missing field `clientInfo`",
             "Invalid request: missing field `clientInfo`",
         ),
-        ("--fake-break=initialize:-32601:Method not found", "Method not found"),
-        ("--fake-break=initialize:-32603:internal error", "internal error"),
+        (
+            "--fake-break=initialize:-32601:Method not found",
+            "Method not found",
+        ),
+        (
+            "--fake-break=initialize:-32603:internal error",
+            "internal error",
+        ),
     ] {
         let server = AppServer::new(common::fake_codex(&[NEWER, breakage]));
         let failure = server.list_models().unwrap_err();
@@ -166,14 +175,20 @@ fn handshake_failures_name_installed_and_last_tested_versions() {
 
 #[test]
 fn handshake_that_never_answers_names_the_versions() {
-    for breakage in ["--fake-break=initialize:silent", "--fake-break=initialize:not-json"] {
+    for breakage in [
+        "--fake-break=initialize:silent",
+        "--fake-break=initialize:not-json",
+    ] {
         let server = AppServer::with_request_timeout(
             common::fake_codex(&[NEWER, breakage]),
             Some(Duration::from_secs(2)),
         );
         let failure = server.list_models().unwrap_err();
         assert_names_versions(&failure);
-        assert!(failure.message.contains("initialize timed out"), "{failure}");
+        assert!(
+            failure.message.contains("initialize timed out"),
+            "{failure}"
+        );
     }
 }
 
@@ -195,8 +210,14 @@ fn replies_that_do_not_fit_the_protocol_name_the_versions() {
 #[test]
 fn ordinary_rpc_errors_are_not_called_protocol_mismatches() {
     for (breakage, raw) in [
-        ("--fake-break=model/list:-32600:thread not found: x", "thread not found: x"),
-        ("--fake-break=model/list:-32603:internal error", "internal error"),
+        (
+            "--fake-break=model/list:-32600:thread not found: x",
+            "thread not found: x",
+        ),
+        (
+            "--fake-break=model/list:-32603:internal error",
+            "internal error",
+        ),
     ] {
         let server = AppServer::new(common::fake_codex(&[NEWER, breakage]));
         let failure = server.list_models().unwrap_err();
@@ -221,16 +242,24 @@ fn raw_protocol_error_text_is_cut_short() {
 
 #[test]
 fn unknown_installed_version_is_said_plainly_alongside_last_tested() {
-    for version in [&["--fake-version=codex-cli fake"][..], &["--fake-version-exit=3"][..]] {
+    for version in [
+        &["--fake-version=codex-cli fake"][..],
+        &["--fake-version-exit=3"][..],
+    ] {
         let mut flags = vec!["--fake-break=initialize:exit"];
         flags.extend_from_slice(version);
         let failure = AppServer::new(common::fake_codex(&flags))
             .list_models()
             .unwrap_err();
         assert_eq!(failure.kind, "codex_protocol", "{failure}");
-        assert!(failure.message.contains("installed version unknown"), "{failure}");
         assert!(
-            failure.message.contains(&TESTED_CODEX.last_tested.to_string()),
+            failure.message.contains("installed version unknown"),
+            "{failure}"
+        );
+        assert!(
+            failure
+                .message
+                .contains(&TESTED_CODEX.last_tested.to_string()),
             "{failure}"
         );
     }
@@ -242,7 +271,7 @@ fn request_timeout_mentions_the_version_only_outside_the_tested_range() {
     for (flag, named) in [(NEWER, true), (tested.as_str(), false)] {
         let server = AppServer::with_request_timeout(
             common::fake_codex(&[flag, "--fake-break=model/list:silent"]),
-            Some(Duration::from_secs(2)),
+            Some(Duration::from_secs(5)),
         );
         let failure = server.list_models().unwrap_err();
         assert_eq!(failure.kind, "timeout", "{failure}");

@@ -85,11 +85,23 @@ fn verdicts_follow_the_range_boundaries() {
 #[test]
 fn messages_say_what_to_expect() {
     let newer = assess_version(0, "codex-cli 1.5.0", &RANGE);
-    assert!(newer.message.contains("newer than 1.4.0"), "{}", newer.message);
+    assert!(
+        newer.message.contains("newer than 1.4.0"),
+        "{}",
+        newer.message
+    );
     assert!(newer.message.contains("not blocked"), "{}", newer.message);
     let older = assess_version(0, "codex-cli 1.2.2", &RANGE);
-    assert!(older.message.contains("older than 1.2.3"), "{}", older.message);
-    assert!(older.message.contains("last tested 1.4.0"), "{}", older.message);
+    assert!(
+        older.message.contains("older than 1.2.3"),
+        "{}",
+        older.message
+    );
+    assert!(
+        older.message.contains("last tested 1.4.0"),
+        "{}",
+        older.message
+    );
 }
 
 #[test]
@@ -97,12 +109,20 @@ fn unreadable_or_failing_probes_fail_without_an_installed_version() {
     let garbled = assess_version(0, "codex-cli fake\n", &RANGE);
     assert_eq!(garbled.verdict, Verdict::Fail);
     assert_eq!(garbled.installed, None);
-    assert!(garbled.message.contains("codex-cli fake"), "{}", garbled.message);
+    assert!(
+        garbled.message.contains("codex-cli fake"),
+        "{}",
+        garbled.message
+    );
     assert!(garbled.message.contains("1.2.3"), "{}", garbled.message);
     let crashed = assess_version(3, "codex-cli 1.3.0\nboom\n", &RANGE);
     assert_eq!(crashed.verdict, Verdict::Fail);
     assert_eq!(crashed.installed, None);
-    assert!(crashed.message.contains("exited with 3"), "{}", crashed.message);
+    assert!(
+        crashed.message.contains("exited with 3"),
+        "{}",
+        crashed.message
+    );
     let long = "x".repeat(5000);
     assert!(assess_version(0, &long, &RANGE).message.len() < 400);
 }
@@ -140,7 +160,13 @@ fn hung_or_missing_probe_is_a_probe_failure() {
     assert!(hung.message.contains("did not answer"), "{}", hung.message);
     assert!(start.elapsed() < Duration::from_secs(20));
     let dir = common::temp();
-    let missing = dir.path().join("no-such-codex").to_string_lossy().into_owned();
-    let error = probe_version_within(&[missing], Duration::from_secs(5)).err().unwrap();
+    let missing = dir
+        .path()
+        .join("no-such-codex")
+        .to_string_lossy()
+        .into_owned();
+    let error = probe_version_within(&[missing], Duration::from_secs(5))
+        .err()
+        .unwrap();
     assert_eq!(error.kind, "probe_failed");
 }

@@ -23,7 +23,7 @@ def option(name, default=''):
 
 if '--version' in sys.argv:
     if '--fake-version-hang' in sys.argv:
-        time.sleep(600)
+        time.sleep(60)
     print(option('version', 'codex-cli fake'))
     sys.exit(int(option('version-exit', '0')))
 broken_method, _, breakage = option('break').partition(':')

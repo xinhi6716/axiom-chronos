@@ -40,7 +40,10 @@ pub fn fake_codex(flags: &[&str]) -> Vec<String> {
     command
 }
 pub fn tested_codex_flag() -> String {
-    format!("--fake-version=codex-cli {}", axiom::codex::TESTED_CODEX.last_tested)
+    format!(
+        "--fake-version=codex-cli {}",
+        axiom::codex::TESTED_CODEX.last_tested
+    )
 }
 pub fn temp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()

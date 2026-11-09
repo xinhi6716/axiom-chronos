@@ -56,36 +56,35 @@ fn tool(
     purpose: &str,
     fix: &str,
 ) -> Check {
-    let result = resolve(env, executable, fix)
-        .and_then(|command| {
-            let output = Command::new(&command[0])
-                .args(&command[1..])
-                .arg("--version")
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("{} failed: {e}", command[0]))?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
-                let text = if stdout.is_empty() { &stderr } else { &stdout };
-                Ok(format!(
-                    "{} ({purpose})",
-                    text.trim().lines().last().unwrap_or("")
-                ))
-            } else {
-                let text = if stderr.is_empty() { &stdout } else { &stderr };
-                let tail: String = text
-                    .trim()
-                    .chars()
-                    .rev()
-                    .take(200)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                Err(format!("{} failed: {tail}", command[0]))
-            }
-        });
+    let result = resolve(env, executable, fix).and_then(|command| {
+        let output = Command::new(&command[0])
+            .args(&command[1..])
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("{} failed: {e}", command[0]))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            let text = if stdout.is_empty() { &stderr } else { &stdout };
+            Ok(format!(
+                "{} ({purpose})",
+                text.trim().lines().last().unwrap_or("")
+            ))
+        } else {
+            let text = if stderr.is_empty() { &stdout } else { &stderr };
+            let tail: String = text
+                .trim()
+                .chars()
+                .rev()
+                .take(200)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            Err(format!("{} failed: {tail}", command[0]))
+        }
+    });
     match result {
         Ok(detail) => Check {
             label,
