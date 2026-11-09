@@ -5,7 +5,7 @@ use std::path::Path;
 pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
     if ![
-        "ready", "accept", "fulltest", "review", "evidence", "release",
+        "ready", "verify", "accept", "fulltest", "review", "evidence", "release",
     ]
     .contains(&cmd)
     {
@@ -51,6 +51,37 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     0,
                     text,
                     serde_json::json!({"ready": ids, "waiting": waiting}),
+                ))
+            }
+            "verify" => {
+                let repo = Path::new(option("--repo")?);
+                let unit = args
+                    .get(1)
+                    .filter(|s| !s.starts_with("--"))
+                    .ok_or_else(|| invalid("missing unit"))?;
+                if !read_units(store)?.iter().any(|u| u.id == *unit) {
+                    return Err(Failure::new("not_found", format!("unit {unit} not found")));
+                }
+                let result = record_verify(store, unit, repo)?;
+                let next = next_step_for(store, unit)?;
+                let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+                let tail: String = result
+                    .output
+                    .chars()
+                    .rev()
+                    .take(2000)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                Ok((
+                    if result.exit_code == 0 { 0 } else { 1 },
+                    format!(
+                        "{unit}\texit={}\t{state}\t{next}\n{}",
+                        result.exit_code,
+                        tail.trim_end()
+                    ),
+                    serde_json::json!({"exit_code":result.exit_code,"state":state,"next":next,"output":tail}),
                 ))
             }
             "accept" | "fulltest" => {
@@ -110,8 +141,15 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 if units.len() > 1 {
                     return Err(invalid("review takes one unit per verdict file"));
                 }
-                let data =
-                    std::fs::read_to_string(path).map_err(|e| Failure::new("io", e.to_string()))?;
+                let data = std::fs::read_to_string(path).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        invalid(&format!(
+                            "verdict file {path} does not exist; save the reviewer's verdict there, then review"
+                        ))
+                    } else {
+                        Failure::new("io", e.to_string())
+                    }
+                })?;
                 let v: serde_json::Value =
                     serde_json::from_str(&data).map_err(|e| invalid(&e.to_string()))?;
                 let verdict = v

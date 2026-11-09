@@ -269,6 +269,37 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     }
     Ok(result)
 }
+pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
+    let rows = evidence(store, unit)?;
+    if !rows
+        .iter()
+        .rev()
+        .find(|r| r.kind == "run")
+        .is_some_and(|r| r.exit_code == 0)
+    {
+        return Err(invalid(format!(
+            "unit {unit} has no completed worker run to verify; dispatch it with codex_run"
+        )));
+    }
+    let brief = unit_brief(store, unit)?;
+    let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let tail: String = result.output.chars().rev().take(20000).collect::<String>().chars().rev().collect();
+    base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
+    append_evidence(
+        store,
+        unit,
+        &row(
+            "verify",
+            &brief.verify,
+            result.exit_code,
+            snapshot(repo, &brief.scope),
+        ),
+    )?;
+    update(store, unit)?;
+    Ok(result)
+}
 pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<ShellRun> {
     let command = match command {
         Some(c) if !c.trim().is_empty() => c.to_string(),
@@ -333,7 +364,10 @@ pub fn record_review(
     if !stale.is_empty() {
         return Err(Failure::new(
             "stale_review",
-            format!("stale review for units: {}", stale.join(", ")),
+            format!(
+                "stale review for units: {}; files in SCOPE changed after VERIFY ran (another unit or a test run wrote there); run orch verify <unit> --repo <dir>, then review again",
+                stale.join(", ")
+            ),
         ));
     }
     let mut result = Vec::new();
