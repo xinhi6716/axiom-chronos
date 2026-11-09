@@ -1,10 +1,12 @@
 use crate::base::{self, Failure, Res};
 use crate::codex::AppServer;
+use crate::{goal, provenance};
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
 };
 
@@ -27,12 +29,16 @@ impl Config {
 pub struct Bridge {
     pub config: Config,
     codex: Mutex<Option<Arc<AppServer>>>,
+    client_version: OnceLock<String>,
+    recorded: Mutex<HashSet<String>>,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
         Self {
             config,
             codex: Mutex::new(None),
+            client_version: OnceLock::new(),
+            recorded: Mutex::new(HashSet::new()),
         }
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {
@@ -54,6 +60,45 @@ impl Bridge {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map_or(false, |c| c.alive())
+    }
+    /// The handshake names the Claude Code that started this process; a hook has no such source.
+    pub fn note_client(&self, params: &Value) {
+        if params.pointer("/clientInfo/name").and_then(Value::as_str) == Some("claude-code") {
+            if let Some(version) = params
+                .pointer("/clientInfo/version")
+                .and_then(Value::as_str)
+            {
+                let _ = self.client_version.set(version.to_owned());
+            }
+        }
+    }
+    /// A wish must declare its mode with the goal tool before anything is dispatched, so the
+    /// first goal call of a run sees the project as the workers will find it.
+    pub fn record_provenance(&self, home: &Path, session: &str) -> Res<()> {
+        let mut recorded = self.recorded.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(goal) = goal::load(home, session)? else {
+            return Ok(());
+        };
+        if recorded.contains(session) && !goal.provenance.is_empty() {
+            return Ok(());
+        }
+        let block = provenance::inherited().unwrap_or_else(|| {
+            let plugin = std::env::var_os("CLAUDE_PLUGIN_ROOT")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
+            let binary = std::env::current_exe().ok();
+            provenance::collect(provenance::Sources {
+                binary: binary.as_deref(),
+                plugin: plugin.as_deref(),
+                claude: self.client_version.get().cloned(),
+                codex: self.config.codex.as_deref().ok(),
+                project: goal.cwd.as_deref().map(Path::new),
+            })
+            .to_value()
+        });
+        goal::add_provenance(home, session, block)?;
+        recorded.insert(session.to_owned());
+        Ok(())
     }
     pub fn cancel(&self) {
         if let Some(c) = self
@@ -173,6 +218,7 @@ pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 's
         }
         let result = match method.as_str() {
             "initialize" => {
+                bridge.note_client(&params);
                 json!({"protocolVersion":params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),"capabilities":{"tools":{}},"serverInfo":{"name":"chronos-bridge","version":env!("CARGO_PKG_VERSION")}})
             }
             "ping" => json!({}),

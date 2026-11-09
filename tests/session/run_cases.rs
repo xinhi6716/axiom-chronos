@@ -187,8 +187,68 @@ fn launch_progress_and_log() {
         Path::new(argv[flag("--plugin-dir") + 1].as_str().unwrap()),
         Path::new(record["home"].as_str().unwrap())
             .join("engine")
-            .join(env!("CARGO_PKG_VERSION"))
+            .join(format!(
+                "{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                axiom::engine::build_id()
+            ))
     );
+}
+#[test]
+fn provenance_leads_the_log_and_closes_the_output() {
+    let (code, out, record, lines) = execute("ok", empty(), false);
+    assert_eq!(code, 0);
+    let first: Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(first["type"], "provenance");
+    let block = &first["provenance"];
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(block["binary_version"], version);
+    assert_eq!(block["binary_build"], "unknown");
+    assert_eq!(block["engine_build"], axiom::engine::build_id());
+    assert_eq!(block["plugin_version"], version);
+    assert_eq!(block["plugin_rules"], "match");
+    assert_eq!(block["claude_version"], "2.1.281");
+    assert_eq!(block["git_commit"], "unknown");
+    assert_eq!(block["git_tree"], "unknown");
+    for line in &lines {
+        serde_json::from_str::<Value>(line).unwrap();
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| serde_json::from_str::<Value>(l).unwrap()["type"] == "provenance")
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&lines[1]).unwrap()["subtype"],
+        "init"
+    );
+    let handed: Value = serde_json::from_str(record["provenance_env"].as_str().unwrap()).unwrap();
+    assert_eq!(&handed, block);
+    let shown = out
+        .lines()
+        .find_map(|l| l.strip_prefix("provenance: "))
+        .unwrap();
+    for part in [
+        format!(
+            "axiom {version} (build unknown, engine {})",
+            block["engine_build"].as_str().unwrap()
+        ),
+        format!("plugin {version} (rules match)"),
+        "claude 2.1.281".to_owned(),
+        "git unknown (unknown)".to_owned(),
+    ] {
+        assert!(shown.contains(&part), "{shown}");
+    }
+}
+#[test]
+fn crashed_run_still_reports_what_produced_it() {
+    let (code, out, _, lines) = execute("crash", empty(), false);
+    assert_eq!(code, 3);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("\"type\":\"provenance\""));
+    assert!(out.lines().any(|l| l.starts_with("provenance: axiom ")));
 }
 #[test]
 fn error_exit() {

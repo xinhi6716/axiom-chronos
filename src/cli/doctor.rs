@@ -197,6 +197,71 @@ fn linux() -> Check {
     }
 }
 
+fn plugin() -> Vec<Check> {
+    let check = |ok, required, detail| Check {
+        label: "plugin",
+        ok,
+        required,
+        detail,
+    };
+    let listed = base::resolve_command("AXIOM_CLAUDE_CMD", "claude")
+        .ok()
+        .and_then(|mut command| {
+            command.extend(["plugin".to_owned(), "list".to_owned(), "--json".to_owned()]);
+            crate::provenance::run_bounded(&command, None, std::time::Duration::from_secs(30))
+        })
+        .filter(|output| output.success)
+        .and_then(|output| serde_json::from_str::<Vec<serde_json::Value>>(&output.stdout).ok());
+    let Some(listed) = listed else {
+        return vec![check(
+            false,
+            false,
+            "`claude plugin list --json` gave no usable answer, so the plugin behind /chronos:wish was not checked".into(),
+        )];
+    };
+    let installed: Vec<_> = listed
+        .iter()
+        .filter(|p| {
+            p["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("chronos@"))
+                && p["enabled"] != false
+        })
+        .collect();
+    if installed.is_empty() {
+        return vec![check(
+            true,
+            false,
+            "not installed in Claude Code; `axiom wish` runs on this build's own engine".into(),
+        )];
+    }
+    installed
+        .into_iter()
+        .map(|p| {
+            let Some(root) = p["readFromFolder"].as_str().or(p["installPath"].as_str()) else {
+                return check(false, false, "Claude Code did not say where the plugin loads from".into());
+            };
+            match crate::engine::check_plugin(std::path::Path::new(root)) {
+                Err(reason) => check(false, true, reason),
+                Ok(found) if found.differing.is_empty() => check(
+                    true,
+                    false,
+                    format!("chronos {} matches this axiom binary (engine {})", found.version, crate::engine::build_id()),
+                ),
+                Ok(found) => check(
+                    false,
+                    false,
+                    format!(
+                        "chronos {} has the version of this axiom binary, but these files differ from the ones built into it: {}",
+                        found.version,
+                        found.differing.join(", ")
+                    ),
+                ),
+            }
+        })
+        .collect()
+}
+
 pub fn doctor(out: &mut dyn Write) -> i32 {
     let mut checks = vec![
         tool(
@@ -212,6 +277,7 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
         state(),
         graph(),
     ];
+    checks.extend(plugin());
     #[cfg(windows)]
     {
         checks.extend([windows_shell(), linux()]);

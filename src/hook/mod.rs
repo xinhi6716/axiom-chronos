@@ -1,5 +1,5 @@
 use crate::{
-    base,
+    base, engine,
     goal::{self, Goal},
 };
 use serde_json::{json, Value};
@@ -197,6 +197,13 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
     })
 }
 
+fn wish_text(prompt: &str) -> Option<&str> {
+    static WISH: OnceLock<regex::Regex> = OnceLock::new();
+    let re = WISH.get_or_init(|| regex::Regex::new(r"(?s)^\s*/chronos:wish\b(.*)").unwrap());
+    re.captures(prompt)
+        .map(|c| c.get(1).map_or("", |m| m.as_str()))
+}
+
 pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Value> {
     let kind = event.get("hook_event_name")?.as_str()?;
     let session = event
@@ -207,14 +214,11 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
         "UserPromptSubmit" => {
             let home = home?;
             let prompt = event.get("prompt").and_then(Value::as_str).unwrap_or("");
-            static WISH: OnceLock<regex::Regex> = OnceLock::new();
-            let re =
-                WISH.get_or_init(|| regex::Regex::new(r"(?s)^\s*/chronos:wish\b(.*)").unwrap());
-            if let Some(c) = re.captures(prompt) {
+            if let Some(wish) = wish_text(prompt) {
                 let g = goal::open(
                     home,
                     session,
-                    c[1].trim(),
+                    wish.trim(),
                     event.get("cwd").and_then(Value::as_str),
                 )
                 .ok()?;
@@ -334,6 +338,42 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
     }
 }
 
+/// `handle` for a hook fired by a plugin: a wish opens only when that plugin belongs with this binary.
+pub fn handle_from_plugin(
+    event: &Value,
+    home: Option<&Path>,
+    headless: bool,
+    plugin_root: Option<&Path>,
+) -> Option<Value> {
+    let starts_wish = event.get("hook_event_name").and_then(Value::as_str)
+        == Some("UserPromptSubmit")
+        && wish_text(event.get("prompt").and_then(Value::as_str).unwrap_or("")).is_some();
+    let Some(root) = plugin_root.filter(|_| starts_wish) else {
+        return handle(event, home, headless);
+    };
+    let plugin = match engine::check_plugin(root) {
+        Ok(plugin) => plugin,
+        Err(reason) => {
+            return Some(
+                json!({"decision":"block","reason":format!("Chronos did not start this wish: {reason}")}),
+            )
+        }
+    };
+    let mut reply = handle(event, home, headless)?;
+    if !plugin.differing.is_empty() {
+        if let Some(Value::String(text)) =
+            reply.pointer_mut("/hookSpecificOutput/additionalContext")
+        {
+            text.push_str(&format!(
+                " Warning: the plugin and the axiom binary are both version {}, but these plugin files differ from the ones built into the binary: {}. The rules you read may not match the gates that enforce them; say so in your final report.",
+                plugin.version,
+                plugin.differing.join(", ")
+            ));
+        }
+    }
+    Some(reply)
+}
+
 pub fn main_stdin() -> i32 {
     let mut bytes = Vec::new();
     if std::io::stdin().read_to_end(&mut bytes).is_err() {
@@ -356,7 +396,12 @@ pub fn main_stdin() -> i32 {
     }
     let home = base::data_home().ok();
     let headless = std::env::var_os("AXIOM_HEADLESS").is_some_and(|v| !v.is_empty());
-    if let Some(reply) = handle(&event, home.as_deref(), headless) {
+    let plugin_root = std::env::var_os("CLAUDE_PLUGIN_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    if let Some(reply) =
+        handle_from_plugin(&event, home.as_deref(), headless, plugin_root.as_deref())
+    {
         let _ = write!(std::io::stdout(), "{reply}");
     }
     0

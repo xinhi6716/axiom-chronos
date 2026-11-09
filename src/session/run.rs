@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    codegraph, engine, goal, hook,
+    codegraph, engine, goal, hook, provenance,
 };
 use serde_json::{json, Value};
 use std::{
@@ -383,12 +383,21 @@ pub fn spawn(
             }
         })
         .unwrap()?;
+    let provenance = provenance::of_session(
+        config.claude.as_deref().unwrap_or(&[]),
+        &config.bin,
+        &plugin,
+        project,
+    );
+    log.write_all(provenance.log_line().as_bytes())
+        .map_err(failure)?;
     let mut child = base::proc::command(&argv)
         .current_dir(project)
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
         .envs(CACHE_TTL_ENV)
+        .env(provenance::ENV, provenance.to_value().to_string())
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -669,6 +678,7 @@ fn drive_once(
         }
     }
     let _ = writeln!(out, "\nlog: {}", log_path.display());
+    let _ = writeln!(out, "provenance: {}", provenance.line());
     let mut result = result;
     if let Some(e) = goal_error {
         let _ = writeln!(out, "goal error: {}: {}", e.kind, e.message);

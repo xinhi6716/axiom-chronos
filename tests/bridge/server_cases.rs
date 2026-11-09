@@ -464,3 +464,127 @@ fn panic_in_tool_body_is_bridge_error() {
     check(&bad, "bridge_error");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "panic");
 }
+
+fn goal_call(b: &Bridge, mode: &str) -> Value {
+    let result = invoke(b, "goal", json!({"session":"s","mode":mode}));
+    check(&result, "completed");
+    result["structuredContent"]["goal"].clone()
+}
+fn claude_client(b: &Bridge, version: &str) {
+    b.note_client(&json!({"clientInfo":{"name":"claude-code","version":version}}));
+}
+fn unlock(home: &std::path::Path) {
+    let file = home.join("goals/s.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("mode_locked");
+    fs::write(file, stored.to_string()).unwrap();
+}
+
+#[test]
+fn first_goal_call_records_the_run_once_with_the_handshake_version() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    axiom::goal::open(temp.path(), "s", "wish", project.to_str()).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    claude_client(&b, "2.1.311");
+    let goal = goal_call(&b, "change");
+    let entries = goal["provenance"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let block = &entries[0];
+    assert_eq!(block["binary_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(block["engine_build"], axiom::engine::build_id());
+    assert_eq!(block["claude_version"], "2.1.311");
+    assert_eq!(block["codex_version"], "codex-cli fake");
+    assert_eq!(block["plugin_version"], "unknown");
+    assert_eq!(block["plugin_rules"], "unknown");
+    assert_eq!(block["git_commit"], "unknown");
+    assert_eq!(block["git_tree"], "unknown");
+    assert_eq!(block["binary_build"].as_str().unwrap().len(), 12);
+    unlock(temp.path());
+    assert_eq!(
+        goal_call(&b, "review")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn only_claude_codes_handshake_is_believed_and_absence_stays_unknown() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    b.note_client(&json!({"clientInfo":{"name":"another-host","version":"9.9.9"}}));
+    assert_eq!(
+        goal_call(&b, "change")["provenance"][0]["claude_version"],
+        "unknown"
+    );
+}
+
+#[test]
+fn a_new_run_on_a_goal_adds_a_record_only_when_it_differs() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let first = Bridge::new(config(temp.path()));
+    claude_client(&first, "2.1.311");
+    goal_call(&first, "change");
+    unlock(temp.path());
+    let resumed_same = Bridge::new(config(temp.path()));
+    claude_client(&resumed_same, "2.1.311");
+    assert_eq!(
+        goal_call(&resumed_same, "change")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    unlock(temp.path());
+    let resumed_newer = Bridge::new(config(temp.path()));
+    claude_client(&resumed_newer, "2.1.320");
+    let goal = goal_call(&resumed_newer, "change");
+    let entries = goal["provenance"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["claude_version"], "2.1.311");
+    assert_eq!(entries[1]["claude_version"], "2.1.320");
+}
+
+#[test]
+fn a_second_wish_in_one_session_gets_its_own_record() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    claude_client(&b, "2.1.311");
+    axiom::goal::open(temp.path(), "s", "first", None).unwrap();
+    goal_call(&b, "change");
+    axiom::goal::open(temp.path(), "s", "second", None).unwrap();
+    assert_eq!(
+        goal_call(&b, "change")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn goal_files_without_provenance_stay_readable_and_keep_their_shape() {
+    let temp = common::temp();
+    let goals = temp.path().join("goals");
+    fs::create_dir_all(&goals).unwrap();
+    fs::write(
+        goals.join("s.json"),
+        r#"{"wish":"old","status":"active","custom":1}"#,
+    )
+    .unwrap();
+    let loaded = axiom::goal::load(temp.path(), "s").unwrap().unwrap();
+    assert!(loaded.provenance.is_empty());
+    axiom::goal::mark_asked(temp.path(), "s").unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(goals.join("s.json")).unwrap()).unwrap();
+    assert!(saved.get("provenance").is_none());
+    assert_eq!(saved["custom"], 1);
+}

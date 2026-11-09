@@ -11,5 +11,6 @@ pub mod host;
 pub mod linux;
 pub mod memory;
 pub mod orch;
+pub mod provenance;
 pub mod session;
 pub mod usage;
