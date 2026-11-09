@@ -46,6 +46,68 @@ fn dispatcher_must_run_in_the_foreground() {
     assert!(!denied(d.path(), &tool("Agent", foreground)));
 }
 
+fn stop_with(tasks: Value) -> Value {
+    json!({"hook_event_name":"Stop","session_id":"s","background_tasks":tasks})
+}
+fn blocks(home: &Path, event: &Value) -> bool {
+    hook::handle(event, Some(home), false).is_some_and(|v| v["decision"] == "block")
+}
+fn agent_task(agent_type: &str, status: &str) -> Value {
+    json!({"id":"t1","type":"subagent","status":status,"description":"d","agent_type":agent_type})
+}
+
+#[test]
+fn turn_may_end_while_a_chronos_agent_runs_in_the_background() {
+    let d = tempfile::tempdir().unwrap();
+    goal::open(d.path(), "s", "wish", None).unwrap();
+    for name in ["chronos:dispatcher", "chronos:astra", "chronos:critic"] {
+        for status in ["running", "pending"] {
+            assert!(!blocks(d.path(), &stop_with(json!([agent_task(name, status)]))));
+        }
+    }
+    for tasks in [
+        json!([]),
+        json!([agent_task("chronos:dispatcher", "completed")]),
+        json!([agent_task("general-purpose", "running")]),
+        json!([{"id":"b","type":"shell","status":"running","description":"d","command":"sleep 9"}]),
+    ] {
+        assert!(blocks(d.path(), &stop_with(tasks)));
+    }
+    assert!(blocks(d.path(), &json!({"hook_event_name":"Stop","session_id":"s"})));
+}
+
+#[test]
+fn a_pending_interjection_is_classified_before_the_turn_ends() {
+    let d = tempfile::tempdir().unwrap();
+    goal::open(d.path(), "s", "wish", None).unwrap();
+    goal::interject(d.path(), "s", "change the plan").unwrap();
+    let running = stop_with(json!([agent_task("chronos:dispatcher", "running")]));
+    assert!(blocks(d.path(), &running));
+    goal::classify(d.path(), "s", "amend").unwrap();
+    assert!(!blocks(d.path(), &running));
+}
+
+#[test]
+fn the_core_cannot_poll_with_powershell() {
+    let d = tempfile::tempdir().unwrap();
+    change_goal(d.path());
+    let ps = |command: &str| tool("PowerShell", json!({"command":command}));
+    for command in [
+        "while(-not (Test-Path x)){ Start-Sleep 30 }; Get-Content x",
+        "$t=0; while($t -lt 570){ sleep 10; $t+=10 }",
+        "Wait-Process -Id 12",
+        "START-SLEEP -s 5",
+    ] {
+        assert!(denied(d.path(), &ps(command)), "{command}");
+        assert!(!denied(d.path(), &agent(ps(command), "x")), "{command}");
+    }
+    for command in ["Get-Content units.tsv", "Start-Process python batch.py"] {
+        assert!(!denied(d.path(), &ps(command)), "{command}");
+    }
+    goal::set_status(d.path(), "s", "blocked", Some("note")).unwrap();
+    assert!(!denied(d.path(), &ps("Start-Sleep 5")));
+}
+
 #[test]
 fn large_files_cannot_be_read_whole() {
     let d = tempfile::tempdir().unwrap();

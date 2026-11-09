@@ -130,20 +130,39 @@ pub fn read_only_bash(command: &str) -> bool {
 }
 
 pub fn stop_reason(session: &str, goal: &Goal) -> String {
-    let mut chars = goal.wish.chars();
-    let mut wish: String = chars.by_ref().take(120).collect();
-    if chars.next().is_some() {
-        wish.push('…');
-    }
-    let mut text = format!("Chronos goal {session} is still active: {wish}. Take the next step through the chronos agents. When the wish is done and verified, call the bridge goal tool with status done. If it cannot go on without something only the user has, such as a credential, a payment or permission to delete their data, call it with status blocked and say what is needed.");
+    let mut text = format!("Chronos goal {session} is still active. Take the next step through the chronos agents, or close it with the bridge goal tool: status done once it is verified, status blocked with what only the user can provide.");
     if goal.interjection.is_some() {
         text.push_str(" Classify the pending interjection with the bridge goal tool as amend, answer or stop.");
     }
     text
 }
 
+/// True while a Chronos agent runs in the background: the harness calls the session back when it finishes.
+fn agent_running(event: &Value) -> bool {
+    event
+        .get("background_tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                matches!(
+                    task.get("status").and_then(Value::as_str),
+                    Some("running" | "pending")
+                ) && task
+                    .get("agent_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.starts_with("chronos:"))
+            })
+        })
+}
+
 const MAX_WHOLE_READ: u64 = 256 * 1024;
 const MAX_READ_LINES: u64 = 500;
+
+fn waiting_loop(input: &Value) -> bool {
+    static WAIT: OnceLock<regex::Regex> = OnceLock::new();
+    let re = WAIT.get_or_init(|| regex::Regex::new(r"(?i)\b(sleep|wait-(process|job|event))\b").unwrap());
+    re.is_match(input.get("command").and_then(Value::as_str).unwrap_or(""))
+}
 
 fn oversized_read(input: &Value) -> bool {
     let path = Path::new(input.get("file_path").and_then(Value::as_str).unwrap_or(""));
@@ -226,7 +245,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
         }
         "Stop" => {
             let g = goal::load(home?, session).ok()??;
-            (g.status == "active")
+            (g.status == "active" && (g.interjection.is_some() || !agent_running(event)))
                 .then(|| json!({"decision":"block", "reason":stop_reason(session, &g)}))
         }
         "PreToolUse" => {
@@ -263,6 +282,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             if g.status == "active" {
                 if tool == "Read" && oversized_read(input) {
                     return deny("This file is too large to read whole: use Grep, or Read with offset and a limit of at most 500 lines.");
+                }
+                if !agent && tool == "PowerShell" && waiting_loop(input) {
+                    return deny("Do not sleep or poll while a Chronos agent runs: end your turn. A background agent calls this session back when it finishes.");
                 }
                 if tool == CODEX {
                     if let Some(reason) = other_module(home, event, input) {

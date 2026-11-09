@@ -117,6 +117,7 @@ fn execute(
     assert_eq!(record["env"]["AXIOM_DATA_HOME"], home.to_str().unwrap());
     assert_eq!(record["env"]["AXIOM_HEADLESS"], "1");
     assert_eq!(record["env"]["AXIOM_BIN"], config.bin.to_str().unwrap());
+    assert_eq!(record["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
     assert!(record["env"]["AXIOM_PYTHON"].is_null());
     assert_eq!(
         record["messages"][0]["message"]["content"][0]["text"],

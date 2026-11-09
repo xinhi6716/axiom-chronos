@@ -211,6 +211,15 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         format!("tree:{result}")
     }
 }
+/// The tree of `scope` before a worker runs. Paths the worker has yet to create are left out.
+pub fn base_snapshot(repo: &Path, scope: &[String]) -> String {
+    let present: Vec<String> = scope
+        .iter()
+        .filter(|path| repo.join(path).exists())
+        .cloned()
+        .collect();
+    snapshot(repo, &present)
+}
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
     parse_map(&text).map_err(invalid)

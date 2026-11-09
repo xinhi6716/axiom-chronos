@@ -251,6 +251,7 @@ fn run_inner(
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
+        .env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
