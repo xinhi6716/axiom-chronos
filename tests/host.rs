@@ -2,12 +2,12 @@ mod common;
 use axiom::{
     goal,
     host::{Event, Options, Wish},
-    session::{Config, CONTINUE_TAG},
+    session::{Clock, Config, CONTINUE_TAG, LIMIT_MARGIN_SECS},
 };
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
-    sync::{mpsc::RecvTimeoutError, Mutex},
+    sync::{mpsc::RecvTimeoutError, Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -47,10 +47,14 @@ impl Setup {
         }
     }
     fn config(&self) -> Config {
+        self.config_with(Clock::system())
+    }
+    fn config_with(&self, clock: Clock) -> Config {
         Config {
             claude: Ok(common::fake("fake_claude")),
             home: self.home.clone(),
             bin: self.temp.path().join("axiom"),
+            clock,
         }
     }
     fn project(&self) -> &Path {
@@ -388,4 +392,116 @@ fn resume_continues_a_blocked_goal() {
             .kind,
         "not_found"
     );
+}
+
+const LIMIT_MESSAGE: &str = "You've hit your session limit · resets 4:40am (Asia/Taipei)";
+fn local_two_am() -> i64 {
+    let real = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let offset = i64::from(axiom::session::local_offset_secs(real));
+    (real + offset).div_euclid(86400) * 86400 + 2 * 3600 - offset
+}
+
+#[test]
+fn usage_limit_waits_then_resumes_into_the_same_wish() {
+    let setup = Setup::new("limit-reset");
+    goal::open(&setup.home, SESSION, "original", setup.project().to_str()).unwrap();
+    let start = local_two_am();
+    let now = Arc::new(Mutex::new(start));
+    let (reads, sleeps) = (Arc::clone(&now), Arc::clone(&now));
+    let clock = Clock {
+        now: Box::new(move || *reads.lock().unwrap()),
+        sleep: Box::new(move |d| *sleeps.lock().unwrap() += d.as_secs() as i64),
+    };
+    let wish = Wish::start(
+        setup.config_with(clock),
+        setup.project(),
+        "original",
+        &Options::default(),
+    )
+    .unwrap();
+    let until = start + 2 * 3600 + 40 * 60 + LIMIT_MARGIN_SECS;
+    assert_eq!(
+        collect(&wish),
+        [
+            Event::Started {
+                session: SESSION.into()
+            },
+            Event::Result {
+                text: LIMIT_MESSAGE.into(),
+                is_error: true,
+            },
+            Event::Waiting { until },
+            Event::Started {
+                session: SESSION.into()
+            },
+            Event::Result {
+                text: "done".into(),
+                is_error: false,
+            },
+            Event::Exited { code: 0 },
+        ]
+    );
+    assert_eq!(wish.wait().unwrap(), 0);
+    assert_eq!(*now.lock().unwrap(), until);
+    let record = setup.record();
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    assert_eq!(record["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h");
+    assert!(record["messages"][0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with(CONTINUE_TAG));
+    assert_eq!(
+        goal::load(&setup.home, SESSION).unwrap().unwrap().status,
+        "done"
+    );
+}
+
+#[test]
+fn stop_ends_the_usage_limit_wait() {
+    let setup = Setup::new("limit-reset");
+    goal::open(&setup.home, SESSION, "original", setup.project().to_str()).unwrap();
+    let start = local_two_am();
+    let clock = Clock {
+        now: Box::new(move || start),
+        sleep: Box::new(|_| std::thread::sleep(Duration::from_millis(20))),
+    };
+    let wish = Wish::start(
+        setup.config_with(clock),
+        setup.project(),
+        "original",
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        next(&wish),
+        Event::Started {
+            session: SESSION.into()
+        }
+    );
+    assert_eq!(
+        next(&wish),
+        Event::Result {
+            text: LIMIT_MESSAGE.into(),
+            is_error: true,
+        }
+    );
+    assert!(matches!(next(&wish), Event::Waiting { .. }));
+    assert!(wish.is_running());
+    assert_eq!(wish.interject("still there?").unwrap_err().kind, "waiting");
+    wish.stop();
+    assert_eq!(collect(&wish), [Event::Exited { code: 130 }]);
+    assert_eq!(wish.wait().unwrap(), 130);
+    let g = goal::load(&setup.home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "blocked");
+    assert!(g.note.unwrap().contains("session limit"));
+    assert!(!setup.record()["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "--resume"));
 }

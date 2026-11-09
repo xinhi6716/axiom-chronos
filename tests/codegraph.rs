@@ -3,7 +3,7 @@ mod common;
 use axiom::{
     codegraph,
     engine::FILES,
-    session::{command, Config, TOOLS},
+    session::{command, Clock, Config, TOOLS},
 };
 use serde_json::{json, Value};
 use std::{
@@ -104,6 +104,7 @@ fn today(f: &Fixture) -> Vec<String> {
         claude: Ok(vec!["claude".into()]),
         home: home.clone(),
         bin: PathBuf::new(),
+        clock: Clock::system(),
     };
     let plugin = home.join("engine").join(env!("CARGO_PKG_VERSION"));
     let mut argv = command(&config, &plugin, None, false).unwrap();

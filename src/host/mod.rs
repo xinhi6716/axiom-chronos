@@ -39,6 +39,11 @@ pub enum Event {
         text: String,
         is_error: bool,
     },
+    /// Claude hit its usage limit; the wish resumes by itself at `until` (unix seconds)
+    /// and reports `Started` again.
+    Waiting {
+        until: i64,
+    },
     Exited {
         code: i32,
     },
@@ -105,6 +110,9 @@ impl Translator {
                 text: text(&event["result"]).into(),
                 is_error: event["is_error"].as_bool().unwrap_or(false),
             }),
+            "chronos" if text(&event["subtype"]) == "limit_wait" => emit(Event::Waiting {
+                until: event["until"].as_i64().unwrap_or(0),
+            }),
             _ => {}
         }
     }
@@ -133,7 +141,7 @@ impl Wish {
         Ok(Self::drive(config, spawned))
     }
     pub fn resume(config: Config, session: &str, max_turns: Option<u32>) -> Res<Self> {
-        let (prompt, cwd) = session::resume_target(&config, session)?;
+        let (prompt, cwd) = session::resume_target(&config, session, None)?;
         let spawned = session::spawn(&config, "wish", &prompt, &cwd, max_turns, Some(session))?;
         Ok(Self::drive(config, spawned))
     }
@@ -175,7 +183,11 @@ impl Wish {
         }
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(stdin) = guard.as_mut() else {
-            return Err(Failure::new("finished", "the wish has finished"));
+            return Err(if self.is_running() {
+                Failure::new("waiting", "claude is waiting for its usage limit to reset")
+            } else {
+                Failure::new("finished", "the wish has finished")
+            });
         };
         session::send(stdin, line).map_err(|e| Failure::new("io", e.to_string()))
     }

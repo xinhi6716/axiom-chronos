@@ -1,4 +1,4 @@
-use axiom::session::{command, user_message, Config, Renderer, BRIDGE, TOOLS};
+use axiom::session::{command, user_message, Clock, Config, Renderer, BRIDGE, TOOLS};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,7 @@ fn command_and_message() {
         claude: Ok(vec!["claude".into()]),
         home: PathBuf::from("home"),
         bin: PathBuf::new(),
+        clock: Clock::system(),
     };
     let args = command(&config, Path::new("plugin"), Some(3), false).unwrap();
     let tools = [
@@ -67,6 +68,7 @@ fn not_installed_message() {
         claude: Err(axiom::base::Failure::new("not_installed", "missing")),
         home: PathBuf::new(),
         bin: PathBuf::new(),
+        clock: Clock::system(),
     };
     assert_eq!(
         command(&config, Path::new("plugin"), None, false)

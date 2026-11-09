@@ -3,7 +3,7 @@ use crate::{
     base::{self, Failure, Res},
     codegraph, engine, goal, hook,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     fs::File,
     io::{BufRead, BufReader, Write},
@@ -89,6 +89,63 @@ pub const CACHE_TTL_ENV: [(&str, &str); 2] = [
     ("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"),
     ("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h"),
 ];
+pub const LIMIT_MARGIN_SECS: i64 = 120;
+const LIMIT_JUST_PASSED_SECS: i64 = 15 * 60;
+
+pub struct Clock {
+    pub now: Box<dyn Fn() -> i64 + Send + Sync>,
+    pub sleep: Box<dyn Fn(Duration) + Send + Sync>,
+}
+impl Clock {
+    pub fn system() -> Self {
+        Self {
+            now: Box::new(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+            }),
+            sleep: Box::new(std::thread::sleep),
+        }
+    }
+}
+
+pub fn limit_reset(message: &str, now: i64, offset_secs: i32) -> Option<i64> {
+    static RESET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RESET.get_or_init(|| {
+        regex::Regex::new(r"(?i)\blimit\b.*\bresets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?")
+            .unwrap()
+    });
+    let c = re.captures(message)?;
+    let mut hour: i64 = c[1].parse().ok()?;
+    let minute: i64 = c.get(2).map_or(Some(0), |m| m.as_str().parse().ok())?;
+    match c.get(3).map(|m| m.as_str().to_ascii_lowercase()) {
+        Some(half) => {
+            if hour < 1 || hour > 12 {
+                return None;
+            }
+            hour %= 12;
+            if half == "pm" {
+                hour += 12;
+            }
+        }
+        None if hour > 23 => return None,
+        None => {}
+    }
+    if minute > 59 {
+        return None;
+    }
+    let local = now + i64::from(offset_secs);
+    let mut target = local.div_euclid(86400) * 86400 + hour * 3600 + minute * 60;
+    if target + LIMIT_JUST_PASSED_SECS < local {
+        target += 86400;
+    }
+    Some(target - i64::from(offset_secs))
+}
+fn clock_time(unix_secs: i64, offset_secs: i32) -> String {
+    let time = (unix_secs + i64::from(offset_secs)).rem_euclid(86400);
+    format!("{:02}:{:02}", time / 3600, time / 60 % 60)
+}
 
 pub fn log_stamp(unix_secs: i64, offset_secs: i32) -> String {
     let secs = unix_secs.saturating_add(i64::from(offset_secs));
@@ -175,8 +232,21 @@ pub fn wish_text(words: &str, creative: bool, no_architect: bool) -> String {
     }
 }
 
-/// The continuation prompt and project directory of a resumable goal.
-pub fn resume_target(config: &Config, session: &str) -> Res<(String, PathBuf)> {
+fn continue_prompt(config: &Config, session: &str) -> Res<String> {
+    let goal = goal::reopen(&config.home, session)?;
+    Ok(format!(
+        "{CONTINUE_TAG} {}",
+        hook::stop_reason(session, &goal)
+    ))
+}
+
+/// The first prompt and project directory of a resumable goal: the user's `message` when
+/// given, otherwise the continuation prompt.
+pub fn resume_target(
+    config: &Config,
+    session: &str,
+    message: Option<&str>,
+) -> Res<(String, PathBuf)> {
     let goal = goal::load(&config.home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     if goal.status == "done" {
@@ -197,21 +267,25 @@ pub fn resume_target(config: &Config, session: &str) -> Res<(String, PathBuf)> {
             )
         })?
         .to_path_buf();
-    let goal = goal::reopen(&config.home, session)?;
-    Ok((
-        format!("{CONTINUE_TAG} {}", hook::stop_reason(session, &goal)),
-        cwd,
-    ))
+    let prompt = match message {
+        Some(text) => {
+            goal::reopen(&config.home, session)?;
+            text.to_owned()
+        }
+        None => continue_prompt(config, session)?,
+    };
+    Ok((prompt, cwd))
 }
 
 pub fn resume(
     config: &Config,
     session: &str,
     max_turns: Option<u32>,
+    message: Option<&str>,
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    let (prompt, cwd) = resume_target(config, session)?;
+    let (prompt, cwd) = resume_target(config, session, message)?;
     run_inner(
         config,
         "wish",
@@ -267,6 +341,9 @@ pub struct Spawned {
     lines: mpsc::Receiver<Vec<u8>>,
     log: File,
     pub log_path: PathBuf,
+    skill: String,
+    project: PathBuf,
+    max_turns: Option<u32>,
 }
 
 pub fn spawn(
@@ -285,10 +362,7 @@ pub fn spawn(
     }
     let logs = config.home.join("logs");
     std::fs::create_dir_all(&logs).map_err(failure)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = (config.clock.now)();
     let stamp = log_stamp(now, local_offset_secs(now));
     let (log_path, log) = (0u64..)
         .find_map(|n| {
@@ -357,34 +431,66 @@ pub fn spawn(
         lines,
         log,
         log_path,
+        skill: skill.to_owned(),
+        project: project.to_path_buf(),
+        max_turns,
     })
 }
 
-/// Forwards each non-blank line of `input` to claude as a user message until EOF or the session ends.
+/// Forwards each non-blank line of `input` to claude as a user message until EOF. While the
+/// writer is empty because claude is waiting out a usage limit, the line waits for the resumed
+/// process; the thread ends once `drive` has let go of the writer.
 pub fn forward_input(writer: Writer, mut input: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
         let mut line = String::new();
         loop {
             line.clear();
             match input.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
             let line = line.trim_end_matches(['\r', '\n']);
             if line.trim().is_empty() {
                 continue;
             }
-            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(stdin) = guard.as_mut() else { break };
-            if send(stdin, line).is_err() {
-                break;
+            loop {
+                let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.as_mut() {
+                    Some(stdin) => {
+                        if send(stdin, line).is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    None if Arc::strong_count(&writer) == 1 => return,
+                    None => {
+                        drop(guard);
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
             }
         }
     });
 }
 
+fn wait_until(config: &Config, at: i64, stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = at - (config.clock.now)();
+        if remaining <= 0 {
+            return true;
+        }
+        (config.clock.sleep)(Duration::from_secs(remaining.min(1) as u64));
+    }
+}
+
 /// Runs the session to its end: renders to `out`, hands every parsed event to `observe`,
-/// keeps an active goal going, and kills the process tree once `stop` is set.
+/// keeps an active goal going, and kills the process tree once `stop` is set. When claude
+/// reports a usage limit with a reset time, waits for it (interruptible through `stop`),
+/// resumes the same session into the same writer, and tells `observe` with a
+/// `{"type":"chronos","subtype":"limit_wait","session":..,"until":..}` event.
 pub fn drive(
     spawned: Spawned,
     config: &Config,
@@ -392,18 +498,68 @@ pub fn drive(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
 ) -> Res<i32> {
+    let writer = Arc::clone(&spawned.writer);
+    let (skill, project, max_turns) = (
+        spawned.skill.clone(),
+        spawned.project.clone(),
+        spawned.max_turns,
+    );
+    let mut spawned = spawned;
+    loop {
+        let outcome = drive_once(spawned, config, out, stop, observe)?;
+        let Some((session, reset)) = outcome.limit else {
+            return Ok(outcome.code);
+        };
+        let now = (config.clock.now)();
+        let at = reset.max(now) + LIMIT_MARGIN_SECS;
+        let wait = at - now;
+        let _ = writeln!(
+            out,
+            "usage limit: continuing at {} (in {}h{:02}m); Ctrl-C to stop",
+            clock_time(at, local_offset_secs(at)),
+            wait / 3600,
+            wait / 60 % 60
+        );
+        let _ = out.flush();
+        observe(&json!({"type":"chronos","subtype":"limit_wait","session":session,"until":at}));
+        if !wait_until(config, at, stop) {
+            let _ = writeln!(out, "interrupted; resume: axiom wish --resume {session}");
+            let _ = out.flush();
+            return Ok(130);
+        }
+        let prompt = continue_prompt(config, &session)?;
+        let mut next = spawn(config, &skill, &prompt, &project, max_turns, Some(&session))?;
+        *writer.lock().unwrap_or_else(|e| e.into_inner()) =
+            next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
+        next.writer = Arc::clone(&writer);
+        spawned = next;
+    }
+}
+struct Outcome {
+    code: i32,
+    limit: Option<(String, i64)>,
+}
+fn drive_once(
+    spawned: Spawned,
+    config: &Config,
+    out: &mut dyn Write,
+    stop: &AtomicBool,
+    observe: &mut dyn FnMut(&Value),
+) -> Res<Outcome> {
     let Spawned {
         mut child,
         writer,
         lines: rx,
         mut log,
         log_path,
+        ..
     } = spawned;
     let mut renderer = Renderer::new();
     let mut session = None::<String>;
     let mut final_result = false;
     let mut goal_error = None;
     let mut cause = None;
+    let mut reset = None;
     let result: Res<i32> = loop {
         if stop.load(Ordering::SeqCst) {
             base::proc::kill_tree(&mut child);
@@ -428,14 +584,12 @@ pub fn drive(
                     continue;
                 }
                 if event["is_error"].as_bool().unwrap_or(false) {
+                    let message = event["result"].as_str().unwrap_or("");
+                    let now = (config.clock.now)();
+                    reset = limit_reset(message, now, local_offset_secs(now));
                     cause = Some(format!(
                         "claude reported an error: {}",
-                        event["result"]
-                            .as_str()
-                            .unwrap_or("")
-                            .chars()
-                            .take(200)
-                            .collect::<String>()
+                        message.chars().take(200).collect::<String>()
                     ));
                     final_result = true;
                 } else if let Some(id) = session.as_deref() {
@@ -498,26 +652,30 @@ pub fn drive(
     if final_result {
         renderer.summary(out);
     }
+    let mut limit = None;
     if let (Some(id), Some(cause)) = (session.as_deref(), cause.as_deref()) {
         match goal::interrupt(&config.home, id, cause) {
             Ok(Some(g)) => {
-                let _ = writeln!(
-                    out,
-                    "goal blocked: {}\nresume: axiom wish --resume {id}",
-                    g.note.unwrap_or_default()
-                );
+                let _ = writeln!(out, "goal blocked: {}", g.note.unwrap_or_default());
+                match reset {
+                    Some(at) => limit = Some((id.to_owned(), at)),
+                    None => {
+                        let _ = writeln!(out, "resume: axiom wish --resume {id}");
+                    }
+                }
             }
             Ok(None) => (),
             Err(e) => goal_error = Some(e),
         }
     }
     let _ = writeln!(out, "\nlog: {}", log_path.display());
+    let mut result = result;
     if let Some(e) = goal_error {
         let _ = writeln!(out, "goal error: {}: {}", e.kind, e.message);
         if matches!(result, Ok(0)) {
-            return Ok(1);
+            result = Ok(1);
         }
     }
     let _ = out.flush();
-    result
+    result.map(|code| Outcome { code, limit })
 }
