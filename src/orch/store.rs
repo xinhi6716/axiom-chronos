@@ -9,6 +9,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, release <unit> --attempt <id>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
     pub id: String,
@@ -821,7 +822,15 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     .transpose()?
                     .unwrap_or_default();
                 if !brief.is_empty() {
-                    let text = std::fs::read_to_string(&brief).map_err(io)?;
+                    let text = std::fs::read_to_string(&brief).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            fail(format!(
+                                "brief {brief} does not exist; write the brief file, then add the unit"
+                            ))
+                        } else {
+                            io(e)
+                        }
+                    })?;
                     let b = parse_brief(&text)
                         .map_err(|field| fail(format!("brief {brief} is missing {field}")))?;
                     let path = store.join("modules.md");
@@ -833,8 +842,9 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             for path in &b.scope {
                                 if !crate::orch::covers(&module.paths, path) {
                                     return Err(fail(format!(
-                                        "{path} is outside module {}",
-                                        module.id
+                                        "{path} is outside module {}; its PATHS are {}",
+                                        module.id,
+                                        module.paths.join(", ")
                                     )));
                                 }
                             }
@@ -858,11 +868,10 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     rows.push(row.clone());
                     save_units(store, &rows)
                 })?;
-                Ok(emit(
-                    serde_json::to_value(&row).unwrap(),
-                    unit_line(&row),
-                    json,
-                ))
+                let next = crate::orch::next_step_for(store, &row.id)?;
+                let mut value = serde_json::to_value(&row).unwrap();
+                value["next"] = serde_json::json!(next);
+                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
             }
             ("unit", "set") => {
                 let id = required(arg(args, 2)?, "unit id")?;
@@ -1222,7 +1231,10 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     extra_output = Some(out);
                     return Ok(String::new());
                 }
-                Err(fail("a valid command is required"))
+                Err(fail(format!(
+                    "unknown command {}; commands: {COMMANDS}",
+                    args.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+                )))
             }
         }
     })();

@@ -307,12 +307,22 @@ fn dependencies_require_verified_unit() {
     let (store, repo) = setup();
     add_unit(&store, "b", "n", "b.txt");
     fs::write(store.join("modules.md"), "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS b.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
-    let err = begin_unit(&store, "b", "worker", &repo, false)
-        .err()
-        .unwrap();
-    assert_eq!(err.kind, "not_ready");
-    assert!(err.message.contains('a'));
+    let not_ready = |unit: &str| {
+        let err = begin_unit(&store, unit, "worker", &repo, false)
+            .err()
+            .unwrap();
+        assert_eq!(err.kind, "not_ready");
+        err.message
+    };
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (pending; next run); ready now: a"
+    );
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (pending; next run); none ready"
+    );
     finish_unit(
         &store,
         "a",
@@ -323,7 +333,15 @@ fn dependencies_require_verified_unit() {
         &json!({"status":"completed","file_changes":[]}),
     )
     .unwrap();
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (built; next accept); none ready"
+    );
     record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(
+        not_ready("b"),
+        "b waits on a (built; next review); none ready"
+    );
     record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
     assert_eq!(
         derive_state(&evidence(&store, "a").unwrap(), true),
@@ -471,6 +489,27 @@ fn map_and_review_errors() {
     assert_eq!(call(&["evidence", "missing"], false).exit_code, 2);
     let verdict = store.join("verdict.json");
     let path = verdict.to_str().unwrap();
+    let out = call(
+        &[
+            "review",
+            "a",
+            "--reviewer",
+            "chronos:reviewer",
+            "--verdict-file",
+            path,
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+        false,
+    );
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "verdict file {path} does not exist; save the reviewer's verdict there"
+        )),
+        "{}",
+        out.stderr
+    );
     for (data, msg) in [("{", "error:"), ("{}", "missing verdict")] {
         fs::write(&verdict, data).unwrap();
         let out = call(
@@ -511,6 +550,117 @@ fn map_and_review_errors() {
         .exit_code,
         2
     );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn verify_command_refreshes_a_stale_unit() {
+    let (store, repo) = setup();
+    fs::write(
+        store.join("modules.md"),
+        "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
+    )
+    .unwrap();
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let verify = |json| {
+        run(
+            &store,
+            &["verify".into(), "a".into(), "--repo".into(), repo_arg.clone()],
+            json,
+            false,
+        )
+    };
+    let early = verify(false);
+    assert_eq!(early.exit_code, 1);
+    assert!(
+        early.stderr.contains("unit a has no completed worker run to verify"),
+        "{}",
+        early.stderr
+    );
+    assert!(evidence(&store, "a").unwrap().is_empty());
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    fs::write(repo.join("a.txt"), "changed by a neighbour").unwrap();
+    let stale = record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap_err();
+    assert_eq!(stale.kind, "stale_review");
+    assert!(
+        stale.message.contains("run orch verify <unit> --repo <dir>, then review again"),
+        "{}",
+        stale.message
+    );
+    let out = verify(false);
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\nok"), "{}", out.stdout);
+    assert_eq!(
+        fs::read_to_string(store.join("reports/a.verify.txt")).unwrap().trim(),
+        "ok"
+    );
+    record_accept(&store, "m", &repo).unwrap();
+    let rows = record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
+    assert_eq!(rows, vec![("a".to_string(), "verified".to_string())]);
+    fs::write(store.join("a.brief"), "GOAL test\nSCOPE a.txt\nVERIFY exit 3\n").unwrap();
+    let out = verify(true);
+    assert_eq!(out.exit_code, 1);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["exit_code"], 3);
+    assert_eq!(v["state"], "failed");
+    assert_eq!(v["next"], "ready");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn temp_dir_is_not_scope_and_is_removed() {
+    let (store, repo) = setup();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    let temp = repo.join(TEMP_DIR);
+    fs::create_dir_all(temp.join("a/pytest-0")).unwrap();
+    fs::write(temp.join("a/pytest-0/case.txt"), "scratch").unwrap();
+    fs::create_dir_all(temp.join("other")).unwrap();
+    fs::write(temp.join("other/keep.txt"), "another unit's scratch").unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[{"path":".axiom-tmp/a/pytest-0/case.txt"}]}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "built");
+    assert!(finished.outside_scope.is_empty(), "{:?}", finished.outside_scope);
+    assert!(!temp.join("a").exists());
+    assert!(temp.join("other/keep.txt").exists());
+    fs::remove_dir_all(&temp).unwrap();
+    fs::write(repo.join("a.txt"), "changed").unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    fs::create_dir_all(repo.join(".axiom-tmp-a")).unwrap();
+    fs::write(repo.join(".axiom-tmp-a/case.txt"), "scratch").unwrap();
+    fs::create_dir_all(temp.join("a")).unwrap();
+    fs::write(temp.join("a/case.txt"), "scratch").unwrap();
+    let finished = finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "failed");
+    assert_eq!(finished.outside_scope, vec![".axiom-tmp-a/case.txt"]);
+    assert!(!temp.exists());
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 
@@ -589,7 +739,7 @@ fn ready_lists_waiting_units_with_next_step() {
             ("d", "accept"),
             ("e", "review"),
             ("f", "blocked"),
-            ("g", "wait a,b,c,d,e,f")
+            ("g", "wait a (pending; next run), b (accept-failed; next fix), c (review-failed; next fix), d (built; next accept), e (built; next review), f (failed; next fix)")
         ]
     );
     let compact = run(&store, &["ready".into()], false, false);
@@ -692,8 +842,10 @@ fn tracks_dependencies_and_auto_accept() {
         .err()
         .unwrap();
     assert_eq!(err.kind, "not_ready");
-    assert!(err.message.contains("z (no units)"));
-    assert!(err.message.contains("a"));
+    assert_eq!(
+        err.message,
+        "dependent waits on a (pending; next run), fix (pending; next run), z (no units registered); ready now: a, fix"
+    );
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
     finish_unit(
         &store,
