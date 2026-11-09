@@ -1,4 +1,8 @@
-use super::{command, user_message, Config, Renderer};
+use super::{
+    command, user_message,
+    wait::{follow, SharedInput},
+    Config, Renderer,
+};
 use crate::{
     base::{self, Failure, Res},
     engine, goal, hook,
@@ -75,6 +79,12 @@ impl Drop for Signals {
             windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(interrupt), 0);
         }
     }
+}
+/// Runs `body` with Ctrl-C raising the stop flag it is given.
+pub(super) fn until_interrupted<T>(body: impl FnOnce(&AtomicBool) -> T) -> T {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _signals = Signals::install();
+    body(&INTERRUPTED)
 }
 fn failure(e: impl std::fmt::Display) -> Failure {
     Failure::new("io", e.to_string())
@@ -157,6 +167,17 @@ pub fn resume(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
+    let mut lines = SharedInput::new(input);
+    let code = resume_once(config, session, max_turns, lines.for_run(), out)?;
+    follow(config, session, code, max_turns, &mut lines, out)
+}
+pub(super) fn resume_once(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+) -> Res<i32> {
     let goal = goal::load(&config.home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     if goal.status == "done" {
@@ -188,6 +209,7 @@ pub fn resume(
         input,
         out,
         Some(session),
+        &mut None,
     )
 }
 
@@ -200,7 +222,23 @@ pub fn run(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    run_inner(config, skill, text, project, max_turns, input, out, None)
+    let mut lines = SharedInput::new(input);
+    let mut session = None;
+    let code = run_inner(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        lines.for_run(),
+        out,
+        None,
+        &mut session,
+    )?;
+    match session {
+        Some(id) => follow(config, &id, code, max_turns, &mut lines, out),
+        None => Ok(code),
+    }
 }
 fn run_inner(
     config: &Config,
@@ -211,6 +249,7 @@ fn run_inner(
     mut input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
     resume: Option<&str>,
+    session_out: &mut Option<String>,
 ) -> Res<i32> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
@@ -415,6 +454,7 @@ fn run_inner(
             }
         }
     };
+    *session_out = session.clone();
     writer.lock().unwrap_or_else(|e| e.into_inner()).take();
     if final_result {
         renderer.summary(out);
