@@ -570,7 +570,7 @@ fn resume_message_is_the_first_turn() {
 
 fn fake_clock(
     start: i64,
-    on_sleep: impl Fn() + 'static,
+    on_sleep: impl Fn() + Send + Sync + 'static,
 ) -> (Clock, std::sync::Arc<Mutex<(i64, u32)>>) {
     let state = std::sync::Arc::new(Mutex::new((start, 0u32)));
     let (now_state, sleep_state) = (state.clone(), state.clone());
