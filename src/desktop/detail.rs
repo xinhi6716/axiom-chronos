@@ -3,7 +3,7 @@ use super::i18n::{self, tr};
 use super::model::*;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -529,6 +529,15 @@ fn quiet_panel(icon: IconName, text: impl Into<SharedString>, detail: Option<Sha
         })
 }
 
+/// The app's gold, which `.primary()` would not pick up because the theme leaves the kit's button tokens alone.
+fn primary_button(t: &Tokens, cx: &App) -> ButtonCustomVariant {
+    ButtonCustomVariant::new(cx)
+        .color(t.gold)
+        .foreground(t.canvas)
+        .hover(t.gold.opacity(0.9))
+        .active(t.gold.opacity(0.8))
+}
+
 fn markdown_style() -> TextViewStyle {
     TextViewStyle::default()
         .paragraph_gap(rems(0.65))
@@ -791,11 +800,9 @@ impl Detail {
     }
 
     fn needs_section(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.tokens();
         let last = run.needs.len() - 1;
         v_flex()
             .gap_2()
-            .child(section_title("Needs you", &t, cx))
             .children(run.needs.iter().enumerate().map(|(i, need)| self.need_card(run, i, need, i == last, cx)))
     }
 
@@ -829,7 +836,7 @@ impl Detail {
                 this.child(
                     h_flex().justify_end().child(
                         Button::new(("need-resume", index))
-                            .primary()
+                            .custom(primary_button(&t, cx))
                             .small()
                             .label(tr(cx, TABLE, label))
                             .loading(resuming)
@@ -1092,6 +1099,8 @@ impl Detail {
             .child(
                 TabBar::new("unit-tabs")
                     .underline()
+                    .small()
+                    .prefix(div().w_4())
                     .selected_index(selected)
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         if let Some(tab) = DocTab::ALL.get(*ix) {
