@@ -1,4 +1,5 @@
 use crate::common;
+use axiom::goal;
 use serde_json::{json, Value};
 use std::{
     io::Write,
@@ -358,17 +359,78 @@ fn creative_and_resume_usage() {
         assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
     }
     for args in [
-        vec!["wish", "--resume", "id", "text"],
         vec!["wish", "text", "--resume", "id"],
         vec!["wish", "--resume", "id", "--project", "."],
         vec!["wish", "--creative", "--resume", "id"],
         vec!["wish", "--resume", "id", "--astra"],
         vec!["wish", "--resume", "id", "--no-architect"],
+        vec!["wish", "--resume", "id", "--resume", "id"],
+        vec!["wish", "--resume"],
+        vec!["wish", "--resume", "--max-turns", "3"],
     ] {
-        let o = command(t.path()).args(args).output().unwrap();
-        assert_eq!(o.status.code(), Some(2));
+        let o = command(t.path()).args(&args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&o.stderr).contains("axiom: --resume takes only a session id")
+            String::from_utf8_lossy(&o.stderr)
+                .contains("axiom: --resume takes a session id and an optional message"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn resume_with_message() {
+    let t = common::temp();
+    let record = t.path().join("record");
+    let session = "12345678-1234-1234-1234-123456789abc";
+    for (args, expected) in [
+        (
+            vec![
+                "wish",
+                "--resume",
+                session,
+                "the",
+                "binary",
+                "--max-turns",
+                "is fixed",
+            ],
+            "the binary --max-turns is fixed",
+        ),
+        (
+            vec![
+                "wish",
+                "--max-turns",
+                "3",
+                "--resume",
+                session,
+                "--",
+                "--go",
+            ],
+            "--go",
+        ),
+    ] {
+        goal::open(&t.path(), session, "wish", t.path().to_str()).unwrap();
+        goal::set_status(&t.path(), session, "blocked", Some("stopped")).unwrap();
+        let o = command(t.path())
+            .args(args)
+            .env(
+                "AXIOM_CLAUDE_CMD",
+                serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+            )
+            .env("FAKE_CLAUDE_RECORD", &record)
+            .env("FAKE_CLAUDE_SCENARIO", "resume")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["message"]["content"][0]["text"], expected);
+        let argv = v["argv"].as_array().unwrap();
+        let i = argv.iter().position(|v| v == "--resume").unwrap();
+        assert_eq!(argv[i + 1], session);
+        assert_eq!(
+            goal::load(t.path(), session).unwrap().unwrap().status,
+            "done"
         );
     }
 }

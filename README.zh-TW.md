@@ -65,11 +65,13 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 | 選項 | 用途 |
 |---|---|
 | `--project PATH` | 處理另一個專案。 |
-| `--resume <session-id>` | 接續中斷或卡住的願望。 |
+| `--resume <session-id> [訊息]` | 接續中斷或卡住的願望；若附上訊息，它會是接續後的第一句話。 |
 | `--creative` | 讓 Chronos 自己找一個有證據支持的小改進。 |
 | `--max-turns N` | 限制核心 session 回合數。 |
 
 選項放在願望**前面**，後面的文字都是願望內容。`axiom research` 會把問題變成審查過的研究計畫。
+
+Claude 回報用量上限並附上重置時間時，`axiom wish` 會印出接續時刻、等到重置後自動接續同一個 session；按 Ctrl-C 可中止等待。
 
 <a id="record-review"></a>
 <a id="state--review"></a>

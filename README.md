@@ -62,11 +62,13 @@ Questions are asked only at the start. While it runs you keep interjection: in `
 | Option | Purpose |
 |---|---|
 | `--project PATH` | Work on another project. |
-| `--resume <session-id>` | Continue a stopped or blocked wish. |
+| `--resume <session-id> [message]` | Continue a stopped or blocked wish; the message, if given, is its first turn. |
 | `--creative` | Let Chronos find one small, evidence-backed improvement. |
 | `--max-turns N` | Limit core-session turns. |
 
 Put options **before** the wish; everything after them is wish text. `axiom research` turns a question into a reviewed research plan.
+
+When Claude reports a usage limit with a reset time, `axiom wish` prints when it will continue, waits for the reset and resumes the same session by itself; Ctrl-C stops the wait.
 
 <a id="record-review"></a>
 <a id="state--review"></a>

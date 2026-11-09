@@ -465,7 +465,15 @@ fn interrupted_and_resume() {
     std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
     let mut resume_output = Vec::new();
     assert_eq!(
-        axiom::session::resume(&config, SESSION, Some(17), None, empty(), &mut resume_output).unwrap(),
+        axiom::session::resume(
+            &config,
+            SESSION,
+            Some(17),
+            None,
+            empty(),
+            &mut resume_output
+        )
+        .unwrap(),
         0
     );
     let output = String::from_utf8(resume_output).unwrap();
@@ -509,6 +517,239 @@ fn interrupted_and_resume() {
             .kind,
         "invalid_json"
     );
+}
+
+#[test]
+fn resume_message_is_the_first_turn() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let record = temp.path().join("record");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
+    std::env::remove_var("FAKE_CLAUDE_SESSION");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+        clock: Clock::system(),
+    };
+    goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
+    goal::interrupt(&home, SESSION, "claude exited 1 without a result").unwrap();
+    let mut out = Vec::new();
+    let message = "the binary is fixed; the denied action is now allowed";
+    assert_eq!(
+        axiom::session::resume(&config, SESSION, None, Some(message), empty(), &mut out).unwrap(),
+        0
+    );
+    let record: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    let messages = record["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    let prompt = messages[0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(prompt, message);
+    let g = goal::load(&home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "done");
+    assert_eq!(g.reason, None);
+    goal::open(&home, "other", "original", None).unwrap();
+    axiom::hook::handle(
+        &serde_json::json!({"hook_event_name":"UserPromptSubmit", "session_id":"other", "prompt":prompt}),
+        Some(&home),
+        true,
+    )
+    .unwrap();
+    let g = goal::load(&home, "other").unwrap().unwrap();
+    assert_eq!(g.amendments, [message]);
+    assert_eq!(g.interjection.unwrap().prompt, message);
+}
+
+fn fake_clock(
+    start: i64,
+    on_sleep: impl Fn() + 'static,
+) -> (Clock, std::sync::Arc<Mutex<(i64, u32)>>) {
+    let state = std::sync::Arc::new(Mutex::new((start, 0u32)));
+    let (now_state, sleep_state) = (state.clone(), state.clone());
+    let clock = Clock {
+        now: Box::new(move || now_state.lock().unwrap().0),
+        sleep: Box::new(move |d| {
+            let mut s = sleep_state.lock().unwrap();
+            s.0 += d.as_secs() as i64;
+            s.1 += 1;
+            on_sleep();
+        }),
+    };
+    (clock, state)
+}
+fn local_two_am() -> (i64, i32) {
+    let real = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let offset = axiom::session::local_offset_secs(real);
+    let day = (real + i64::from(offset)).div_euclid(86400) * 86400;
+    (day + 2 * 3600 - i64::from(offset), offset)
+}
+fn limit_run(clock: Clock) -> (i32, String, Value, tempfile::TempDir) {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let record = temp.path().join("record");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "limit-reset");
+    std::env::remove_var("FAKE_CLAUDE_SESSION");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+        clock,
+    };
+    goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
+    let mut out = Vec::new();
+    let code = run(
+        &config,
+        "wish",
+        "original",
+        temp.path(),
+        None,
+        empty(),
+        &mut out,
+    )
+    .unwrap();
+    let record: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    (code, String::from_utf8(out).unwrap(), record, temp)
+}
+#[test]
+fn usage_limit_waits_for_the_reset_and_resumes() {
+    let (start, offset) = local_two_am();
+    let (clock, state) = fake_clock(start, || ());
+    let (code, out, record, temp) = limit_run(clock);
+    let home = temp.path().join("home");
+    assert_eq!(code, 0, "{out}");
+    let expected = 2 * 3600 + 40 * 60 + axiom::session::LIMIT_MARGIN_SECS;
+    let (now, sleeps) = *state.lock().unwrap();
+    assert_eq!(now - start, expected);
+    assert_eq!(sleeps, expected as u32);
+    assert!(
+        out.lines()
+            .any(|l| l == "usage limit: continuing at 04:42 (in 2h42m); Ctrl-C to stop"),
+        "{out}"
+    );
+    assert!(out.lines().any(|l| l.starts_with(
+        "goal blocked: claude reported an error: You've hit your session limit · resets 4:40am"
+    )));
+    assert!(!out.contains("resume: axiom wish --resume"), "{out}");
+    assert_eq!(out.matches("\nlog: ").count(), 2);
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    let prompt = record["messages"][0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.starts_with(axiom::session::CONTINUE_TAG));
+    assert_eq!(goal::load(&home, SESSION).unwrap().unwrap().status, "done");
+    let stamp = axiom::session::log_stamp(start + expected, offset);
+    assert!(home
+        .join("logs")
+        .join(format!("{stamp}-wish.jsonl"))
+        .is_file());
+}
+#[test]
+fn usage_limit_already_past_waits_only_the_margin() {
+    let (two_am, _) = local_two_am();
+    let start = two_am + 2 * 3600 + 50 * 60;
+    let (clock, state) = fake_clock(start, || ());
+    let (code, out, record, _temp) = limit_run(clock);
+    assert_eq!(code, 0, "{out}");
+    let (now, sleeps) = *state.lock().unwrap();
+    assert_eq!(now - start, axiom::session::LIMIT_MARGIN_SECS);
+    assert_eq!(i64::from(sleeps), axiom::session::LIMIT_MARGIN_SECS);
+    assert!(
+        out.contains("usage limit: continuing at 04:52 (in 0h02m)"),
+        "{out}"
+    );
+    assert!(record["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "--resume"));
+}
+#[test]
+fn usage_limit_wait_stops_on_interrupt() {
+    let (start, _) = local_two_am();
+    let (clock, state) = fake_clock(start, axiom::session::trigger_interrupt);
+    let (code, out, record, temp) = limit_run(clock);
+    let home = temp.path().join("home");
+    assert_eq!(code, 130, "{out}");
+    assert_eq!(state.lock().unwrap().1, 1);
+    assert!(out
+        .lines()
+        .any(|l| l == format!("interrupted; resume: axiom wish --resume {SESSION}")));
+    assert!(!record["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "--resume"));
+    let g = goal::load(&home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "blocked");
+    assert!(g
+        .note
+        .unwrap()
+        .starts_with("claude reported an error: You've hit your session limit"));
+    assert_eq!(std::fs::read_dir(home.join("logs")).unwrap().count(), 1);
+}
+#[test]
+fn limit_reset_parsing() {
+    use axiom::session::limit_reset;
+    let offset: i32 = 8 * 3600;
+    let day = 1_793_232_000; // 2026-10-29 00:00 UTC
+    let local = |h: i64, m: i64| day + h * 3600 + m * 60 - i64::from(offset);
+    let taipei = "You've hit your session limit · resets 4:40am (Asia/Taipei)";
+    assert_eq!(limit_reset(taipei, local(2, 0), offset), Some(local(4, 40)));
+    assert_eq!(
+        limit_reset(taipei, local(4, 50), offset),
+        Some(local(4, 40))
+    );
+    assert_eq!(
+        limit_reset(taipei, local(5, 0), offset),
+        Some(local(28, 40))
+    );
+    assert_eq!(
+        limit_reset("limit reached, resets 12:30pm", local(1, 0), offset),
+        Some(local(12, 30))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 12am", local(1, 0), offset),
+        Some(local(24, 0))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 3pm", local(1, 0), offset),
+        Some(local(15, 0))
+    );
+    assert_eq!(
+        limit_reset("limit · resets at 16:05", local(1, 0), offset),
+        Some(local(16, 5))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 23:59", day, 0),
+        Some(day + 23 * 3600 + 59 * 60)
+    );
+    for message in [
+        "You've hit your usage limit",
+        "limit · resets 25:00",
+        "limit · resets 13pm",
+        "limit · resets 0am",
+        "limit · resets 4:60am",
+        "weekly limit · resets Nov 12, 4am",
+        "the timer resets 4:40am",
+    ] {
+        assert_eq!(limit_reset(message, local(1, 0), offset), None, "{message}");
+    }
 }
 
 #[test]

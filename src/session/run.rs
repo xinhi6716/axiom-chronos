@@ -85,8 +85,8 @@ pub const LIMIT_MARGIN_SECS: i64 = 120;
 const LIMIT_JUST_PASSED_SECS: i64 = 15 * 60;
 
 pub struct Clock {
-    pub now: Box<dyn Fn() -> i64>,
-    pub sleep: Box<dyn Fn(Duration)>,
+    pub now: Box<dyn Fn() -> i64 + Send + Sync>,
+    pub sleep: Box<dyn Fn(Duration) + Send + Sync>,
 }
 impl Clock {
     pub fn system() -> Self {
@@ -267,7 +267,10 @@ pub fn run(
 }
 fn continue_prompt(config: &Config, session: &str) -> Res<String> {
     let goal = goal::reopen(&config.home, session)?;
-    Ok(format!("{CONTINUE_TAG} {}", hook::stop_reason(session, &goal)))
+    Ok(format!(
+        "{CONTINUE_TAG} {}",
+        hook::stop_reason(session, &goal)
+    ))
 }
 fn send(pipe: &mut ChildStdin, text: &str) -> std::io::Result<()> {
     pipe.write_all(user_message(text).as_bytes())?;
@@ -285,7 +288,6 @@ fn wait_until(config: &Config, at: i64) -> bool {
         (config.clock.sleep)(Duration::from_secs(remaining.min(1) as u64));
     }
 }
-#[allow(clippy::too_many_arguments)]
 fn run_loop(
     config: &Config,
     skill: &str,
@@ -329,8 +331,9 @@ fn run_loop(
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
-        let at = reset + LIMIT_MARGIN_SECS;
-        let wait = at - (config.clock.now)();
+        let now = (config.clock.now)();
+        let at = reset.max(now) + LIMIT_MARGIN_SECS;
+        let wait = at - now;
         let _ = writeln!(
             out,
             "usage limit: continuing at {} (in {}h{:02}m); Ctrl-C to stop",
@@ -352,7 +355,6 @@ struct Outcome {
     code: i32,
     limit: Option<(String, i64)>,
 }
-#[allow(clippy::too_many_arguments)]
 fn run_inner(
     config: &Config,
     skill: &str,
@@ -444,7 +446,10 @@ fn run_inner(
             break Ok(130);
         }
         while let Ok(line) = lines.try_recv() {
-            if stdin.as_mut().is_some_and(|pipe| send(pipe, &line).is_err()) {
+            if stdin
+                .as_mut()
+                .is_some_and(|pipe| send(pipe, &line).is_err())
+            {
                 stdin = None;
             }
         }
