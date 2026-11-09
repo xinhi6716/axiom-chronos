@@ -126,6 +126,17 @@ pub struct ModelCost {
     pub output: u64,
 }
 
+/// Spend attributed to one role. Left empty when a run has no per-role record.
+#[derive(Clone, Debug)]
+pub struct RoleCost {
+    pub role: SharedString,
+    /// `None` when the run has not reported a figure.
+    pub usd: Option<f64>,
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentContext {
     pub agent: SharedString,
@@ -136,6 +147,7 @@ pub struct AgentContext {
 pub struct Usage {
     pub total_usd: Option<f64>,
     pub models: Vec<ModelCost>,
+    pub roles: Vec<RoleCost>,
     pub contexts: Vec<AgentContext>,
 }
 
@@ -165,6 +177,8 @@ pub struct Run {
     /// Started from this app, so it can be interjected or stopped from here.
     pub hosted: bool,
     pub started: SharedString,
+    /// Unix seconds, for ordering runs; `started` is display text with no year.
+    pub started_at: Option<u64>,
     pub stages: Vec<Stage>,
     pub goals: Vec<GoalItem>,
     pub modules: Vec<Module>,
