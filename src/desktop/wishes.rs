@@ -385,7 +385,6 @@ impl ListDelegate for RunList {
     ) -> Option<ListItem> {
         let index = *self.rows.get(ix.row)?;
         let t = cx.tokens();
-        let mono = cx.theme().mono_font_family.clone();
         let lang = *cx.global::<Lang>();
         let run = self.state.read(cx).runs.get(index)?;
         let selected = self.selected == Some(ix.row);
@@ -416,19 +415,31 @@ impl ListDelegate for RunList {
                 .accessibility_label(name)
                 .h(ROW_HEIGHT)
                 .py_0()
-                .px_3()
-                .border_l_2()
+                .px_0()
                 .border_b_1()
                 .border_color(t.border.opacity(0.45))
-                .when(focused, |this| this.border_l_2().border_color(t.gold))
                 .cursor_pointer()
                 .child(
                     h_flex()
                         .id(("wish-row", ix.row))
+                        .relative()
                         .w_full()
-                        .h(ROW_HEIGHT)
+                        .h(ROW_HEIGHT - px(1.))
+                        .px_3()
                         .gap_3()
                         .context_menu(move |menu, _, cx| context_actions.add_to(menu, cx))
+                        .when(focused, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_2()
+                                    .bottom_2()
+                                    .w(px(3.))
+                                    .rounded_full()
+                                    .bg(t.gold),
+                            )
+                        })
                         .child(cell(STATUS_WIDTH).child(status_cell(status, cx)))
                         .child(
                             cell(PROJECT_WIDTH)
@@ -477,7 +488,6 @@ impl ListDelegate for RunList {
                             cell(PROGRESS_WIDTH)
                                 .text_right()
                                 .text_sm()
-                                .font_family(mono.clone())
                                 .text_color(progress_color(status, verified, total, &t))
                                 .child(progress_label(verified, total)),
                         )
@@ -485,8 +495,7 @@ impl ListDelegate for RunList {
                             cell(COST_WIDTH)
                                 .text_right()
                                 .text_sm()
-                                .font_family(mono)
-                                .text_color(if cost.is_some() { t.text } else { t.muted })
+                                .text_color(t.muted)
                                 .child(cost_label(cost)),
                         )
                         .child(
@@ -709,6 +718,8 @@ impl WishesView {
                         .ghost()
                         .small()
                         .selected(active)
+                        .text_color(if active { t.text } else { t.muted })
+                        .when(active, |this| this.bg(t.raised))
                         .label(tr(cx, T, filter.label()))
                         .child(
                             div()

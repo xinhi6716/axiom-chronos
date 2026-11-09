@@ -141,6 +141,8 @@ fn stale_tag(cx: &App) -> Tag {
     let t = cx.tokens();
     Tag::custom(t.review.opacity(0.14), t.review, t.review.opacity(0.4))
         .xsmall()
+        .text_xs()
+        .px_2()
         .flex_none()
         .rounded_full()
         .child(tr(cx, T, "Stale"))
@@ -184,14 +186,28 @@ impl ListDelegate for MemoryList {
                 .accessibility_label(title.clone())
                 .h(ROW_HEIGHT)
                 .py_0()
-                .px_3()
+                .px_0()
                 .rounded(px(6.))
-                .border_l_2()
-                .border_color(if focused { t.gold } else { t.canvas.opacity(0.) })
                 .child(
                     v_flex()
+                        .relative()
                         .w_full()
+                        .h(ROW_HEIGHT)
+                        .px_3()
+                        .justify_center()
                         .gap_0p5()
+                        .when(focused, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_2()
+                                    .bottom_2()
+                                    .w(px(3.))
+                                    .rounded_full()
+                                    .bg(t.gold),
+                            )
+                        })
                         .child(
                             h_flex()
                                 .gap_2()
