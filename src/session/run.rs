@@ -284,7 +284,7 @@ pub fn spawn(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let stamp = log_stamp(now, local_offset_secs(now));
-    let (log_path, mut log) = (0u64..)
+    let (log_path, log) = (0u64..)
         .find_map(|n| {
             let suffix = if n == 0 {
                 String::new()

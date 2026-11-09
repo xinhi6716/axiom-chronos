@@ -7,7 +7,7 @@ use std::{
 };
 pub mod proc;
 pub mod schema;
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Failure {
     pub kind: String,
     pub message: String,
