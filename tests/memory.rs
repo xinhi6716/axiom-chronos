@@ -104,7 +104,7 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
 END;
 ";
 #[test]
-fn existing_database_is_not_changed() {
+fn existing_database_migrates_without_changing_entries() {
     let (temp, r) = fixture();
     let home = temp.path().join("home");
     fs::create_dir_all(home.join("memory")).unwrap();
@@ -161,11 +161,28 @@ fn existing_database_is_not_changed() {
     ] {
         assert_eq!(
             memory.get(id).unwrap()["entry"],
-            serde_json::json!({"id":id,"project":"p","unit":"u","title":"統計","summary":"summary","body":"body","symbols":["one","two"],"wish":"統計","files":serde_json::from_str::<serde_json::Value>(stored_files).unwrap(),"project_dir":dir,"created":id as f64,"stale":stale})
+            serde_json::json!({"id":id,"project":"p","unit":"u","title":"統計","summary":"summary","body":"body","symbols":["one","two"],"wish":"統計","files":serde_json::from_str::<serde_json::Value>(stored_files).unwrap(),"project_dir":dir,"created":id as f64,"confirmed":id as f64,"corrected":null,"stale":stale})
         );
     }
     assert_eq!(memory.record(&r).unwrap()["id"], 4);
-    assert_eq!(schema(), before);
+    // Migration only appends the two new columns and adds the two new triggers.
+    let after = schema();
+    let name = |row: &(String, String, Option<String>)| row.1.clone();
+    for old in &before {
+        let new = after.iter().find(|r| name(r) == old.1).unwrap();
+        if old.1 == "entries" {
+            let old_sql = old.2.as_ref().unwrap().trim_end().trim_end_matches(')');
+            assert!(new.2.as_ref().unwrap().starts_with(old_sql));
+        } else {
+            assert_eq!(new, old);
+        }
+    }
+    let added: Vec<_> = after
+        .iter()
+        .filter(|r| !before.iter().any(|b| b.1 == r.1))
+        .map(name)
+        .collect();
+    assert_eq!(added, vec!["entries_ad", "entries_au"]);
 }
 
 #[test]

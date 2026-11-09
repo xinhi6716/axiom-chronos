@@ -14,10 +14,21 @@ use std::{
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY, project TEXT NOT NULL, unit TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
-    body TEXT NOT NULL, symbols TEXT NOT NULL, wish TEXT NOT NULL, files TEXT NOT NULL, project_dir TEXT NOT NULL, created REAL NOT NULL);
+    body TEXT NOT NULL, symbols TEXT NOT NULL, wish TEXT NOT NULL, files TEXT NOT NULL, project_dir TEXT NOT NULL, created REAL NOT NULL,
+    confirmed REAL, corrected REAL);
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
     title, summary, body, symbols, wish, content='entries', content_rowid='id', tokenize='trigram');
 CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+    INSERT INTO entries_fts(rowid, title, summary, body, symbols, wish)
+    VALUES (new.id, new.title, new.summary, new.body, new.symbols, new.wish);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, summary, body, symbols, wish)
+    VALUES ('delete', old.id, old.title, old.summary, old.body, old.symbols, old.wish);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF title, summary, body, symbols, wish ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, summary, body, symbols, wish)
+    VALUES ('delete', old.id, old.title, old.summary, old.body, old.symbols, old.wish);
     INSERT INTO entries_fts(rowid, title, summary, body, symbols, wish)
     VALUES (new.id, new.title, new.summary, new.body, new.symbols, new.wish);
 END;
@@ -72,11 +83,46 @@ impl Memory {
             db_path: root.join("memory.db"),
             root,
         };
-        m.connect()?.execute_batch(SCHEMA).map_err(err)?;
+        m.migrate()?;
         Ok(m)
     }
+    /// Creates or upgrades the schema under one write lock, so concurrent opens
+    /// (several processes, old or new database) serialize instead of racing.
+    fn migrate(&self) -> Res<()> {
+        let mut db = self.connect()?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(err)?;
+        tx.execute_batch(SCHEMA).map_err(err)?;
+        let have: HashSet<String> = {
+            let mut stmt = tx
+                .prepare("SELECT name FROM pragma_table_info('entries')")
+                .map_err(err)?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(err)?
+                .collect::<Result<_, _>>()
+                .map_err(err)?;
+            names
+        };
+        for column in ["confirmed", "corrected"] {
+            if !have.contains(column) {
+                tx.execute(&format!("ALTER TABLE entries ADD COLUMN {column} REAL"), [])
+                    .map_err(err)?;
+            }
+        }
+        tx.execute(
+            "UPDATE entries SET confirmed = created WHERE confirmed IS NULL",
+            [],
+        )
+        .map_err(err)?;
+        tx.commit().map_err(err)
+    }
     fn connect(&self) -> Res<Connection> {
-        Connection::open(&self.db_path).map_err(err)
+        let db = Connection::open(&self.db_path).map_err(err)?;
+        db.busy_timeout(std::time::Duration::from_secs(30))
+            .map_err(err)?;
+        Ok(db)
     }
     pub fn record(&self, args: &Record) -> Res<Value> {
         base::require_slug("project", &args.project)?;
@@ -161,27 +207,36 @@ impl Memory {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(err)?;
         let wanted = file_set(&files)?;
-        {
+        let duplicate = {
             let mut stmt = tx
                 .prepare("SELECT id, files FROM entries WHERE project = ? AND unit = ? ORDER BY id")
                 .map_err(err)?;
             let mut rows = stmt.query(params![args.project, args.unit]).map_err(err)?;
+            let mut found = None;
             while let Some(row) = rows.next().map_err(err)? {
                 let stored: String = row.get(1).map_err(err)?;
                 let stored: Vec<Value> = serde_json::from_str(&stored).map_err(err)?;
                 if file_set(&stored)? == wanted {
-                    let id: i64 = row.get(0).map_err(err)?;
-                    return Ok(
-                        json!({"status":"completed", "id":id, "files":files, "duplicate":true, "error":null}),
-                    );
+                    found = Some(row.get::<_, i64>(0).map_err(err)?);
+                    break;
                 }
             }
+            found
+        };
+        if let Some(id) = duplicate {
+            // Recording the same verified files again re-confirms the entry.
+            tx.execute(
+                "UPDATE entries SET confirmed = ? WHERE id = ?",
+                params![now(), id],
+            )
+            .map_err(err)?;
+            tx.commit().map_err(err)?;
+            return Ok(
+                json!({"status":"completed", "id":id, "files":files, "duplicate":true, "error":null}),
+            );
         }
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        tx.execute("INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created) VALUES (?,?,?,?,?,?,?,?,?,?)", params![args.project, args.unit, args.title.trim(), args.summary.trim(), args.body.trim(), args.symbols.join(" "), args.wish.trim(), serde_json::to_string(&files).map_err(err)?, args.project_dir, created]).map_err(err)?;
+        let created = now();
+        tx.execute("INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created, confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)", params![args.project, args.unit, args.title.trim(), args.summary.trim(), args.body.trim(), args.symbols.join(" "), args.wish.trim(), serde_json::to_string(&files).map_err(err)?, args.project_dir, created, created]).map_err(err)?;
         let id = tx.last_insert_rowid();
         tx.commit().map_err(err)?;
         Ok(json!({"status":"completed", "id":id, "files":files, "duplicate":false, "error":null}))
@@ -227,8 +282,85 @@ impl Memory {
             .ok_or_else(|| Failure::new("not_found", format!("no memory entry {id}")))?;
         let files: String = row.get("files").map_err(err)?;
         let symbols: String = row.get("symbols").map_err(err)?;
-        let entry = json!({"id":id, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "body":row.get::<_, String>("body").map_err(err)?, "symbols":symbols.split_whitespace().collect::<Vec<_>>(), "wish":row.get::<_, String>("wish").map_err(err)?, "files":serde_json::from_str::<Value>(&files).map_err(err)?, "project_dir":row.get::<_, String>("project_dir").map_err(err)?, "created":row.get::<_, f64>("created").map_err(err)?, "stale":stale(row)?});
+        let entry = json!({"id":id, "project":row.get::<_, String>("project").map_err(err)?, "unit":row.get::<_, String>("unit").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "body":row.get::<_, String>("body").map_err(err)?, "symbols":symbols.split_whitespace().collect::<Vec<_>>(), "wish":row.get::<_, String>("wish").map_err(err)?, "files":serde_json::from_str::<Value>(&files).map_err(err)?, "project_dir":row.get::<_, String>("project_dir").map_err(err)?, "created":row.get::<_, f64>("created").map_err(err)?, "confirmed":confirmed(row)?, "corrected":row.get::<_, Option<f64>>("corrected").map_err(err)?, "stale":stale(row)?});
         Ok(json!({"status":"completed", "entry":entry, "error":null}))
+    }
+    /// Entries newest first, in full, for browsing and managing what was learned.
+    pub fn list(&self, project: Option<&str>, limit: i64) -> Res<Value> {
+        let filter = project.filter(|p| !p.is_empty());
+        let sql = format!(
+            "SELECT * FROM entries{} ORDER BY created DESC, id DESC LIMIT ?",
+            if filter.is_some() {
+                " WHERE project = ?"
+            } else {
+                ""
+            }
+        );
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(p) = filter {
+            values.push(p.to_string().into());
+        }
+        values.push(limit.max(0).into());
+        let db = self.connect()?;
+        let mut stmt = db.prepare(&sql).map_err(err)?;
+        let mut rows = stmt.query(params_from_iter(values)).map_err(err)?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().map_err(err)? {
+            entries.push(json!({"id":row.get::<_, i64>("id").map_err(err)?, "project":row.get::<_, String>("project").map_err(err)?, "title":row.get::<_, String>("title").map_err(err)?, "summary":row.get::<_, String>("summary").map_err(err)?, "body":row.get::<_, String>("body").map_err(err)?, "wish":row.get::<_, String>("wish").map_err(err)?, "created":row.get::<_, f64>("created").map_err(err)?, "confirmed":confirmed(row)?, "corrected":row.get::<_, Option<f64>>("corrected").map_err(err)?, "stale":stale(row)?}));
+        }
+        Ok(json!({"status":"completed", "entries":entries, "error":null}))
+    }
+    /// Removes the entry; the delete trigger removes its search row.
+    pub fn delete(&self, id: i64) -> Res<Value> {
+        let mut db = self.connect()?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(err)?;
+        if tx
+            .execute("DELETE FROM entries WHERE id = ?", [id])
+            .map_err(err)?
+            == 0
+        {
+            return Err(Failure::new("not_found", format!("no memory entry {id}")));
+        }
+        tx.commit().map_err(err)?;
+        Ok(json!({"status":"completed", "id":id, "error":null}))
+    }
+    /// Replaces the entry's text: `text` becomes the body and its first line the
+    /// summary, so neither search nor briefs can surface the old text. The title is kept.
+    pub fn correct(&self, id: i64, text: &str) -> Res<Value> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(Failure::new("invalid_argument", "text is required"));
+        }
+        if text.lines().count() > 12 {
+            return Err(Failure::new("invalid_argument", "text exceeds 12 lines"));
+        }
+        let summary: String = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or(text)
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        let at = now();
+        let mut db = self.connect()?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(err)?;
+        if tx
+            .execute(
+                "UPDATE entries SET body = ?, summary = ?, corrected = ?, confirmed = ? WHERE id = ?",
+                params![text, summary, at, at, id],
+            )
+            .map_err(err)?
+            == 0
+        {
+            return Err(Failure::new("not_found", format!("no memory entry {id}")));
+        }
+        tx.commit().map_err(err)?;
+        Ok(json!({"status":"completed", "id":id, "corrected":at, "error":null}))
     }
     pub fn digest(&self, project: &str, add: Option<&str>) -> Res<Value> {
         base::require_slug("project", project)?;
@@ -241,9 +373,15 @@ impl Memory {
                 .open(&path)
                 .map_err(err)?;
             // One write per line: appends from separate processes stay whole.
-            f.write_all(format!("- {} {line}
-", base::today()).as_bytes())
-                .map_err(err)?;
+            f.write_all(
+                format!(
+                    "- {} {line}
+",
+                    base::today()
+                )
+                .as_bytes(),
+            )
+            .map_err(err)?;
         }
         let digest = match std::fs::read_to_string(path) {
             Ok(s) => s.replace("\r\n", "\n"),
@@ -252,6 +390,18 @@ impl Memory {
         };
         Ok(json!({"status":"completed", "digest":digest, "error":null}))
     }
+}
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+fn confirmed(row: &Row<'_>) -> Res<f64> {
+    Ok(row
+        .get::<_, Option<f64>>("confirmed")
+        .map_err(err)?
+        .unwrap_or(row.get::<_, f64>("created").map_err(err)?))
 }
 fn file_set(files: &[Value]) -> Res<BTreeSet<(&str, &str)>> {
     files
