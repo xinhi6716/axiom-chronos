@@ -1,4 +1,7 @@
-use crate::{base, codegraph};
+use crate::{
+    base, codegraph,
+    codex::{self, Verdict},
+};
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -11,6 +14,40 @@ struct Check {
     detail: String,
 }
 
+fn resolve(env: &str, executable: &str, fix: &str) -> Result<Vec<String>, String> {
+    base::resolve_command(env, executable).map_err(|e| {
+        if e.kind == "not_installed" {
+            format!("not on PATH. {fix}")
+        } else {
+            e.message
+        }
+    })
+}
+
+fn codex_cli() -> Check {
+    let (ok, required, detail) = match resolve(
+        "AXIOM_CODEX_CMD",
+        "codex",
+        "Install the Codex CLI and sign in.",
+    ) {
+        Err(detail) => (false, true, detail),
+        Ok(command) => {
+            let check = codex::check_installed_version(&command);
+            (
+                check.verdict == Verdict::Ok,
+                check.verdict != Verdict::Warn,
+                format!("{} (terra and sol workers)", check.message),
+            )
+        }
+    };
+    Check {
+        label: "codex",
+        ok,
+        required,
+        detail,
+    }
+}
+
 fn tool(
     label: &'static str,
     env: &str,
@@ -19,43 +56,35 @@ fn tool(
     purpose: &str,
     fix: &str,
 ) -> Check {
-    let result = base::resolve_command(env, executable)
-        .map_err(|e| {
-            if e.kind == "not_installed" {
-                format!("not on PATH. {fix}")
-            } else {
-                e.message
-            }
-        })
-        .and_then(|command| {
-            let output = Command::new(&command[0])
-                .args(&command[1..])
-                .arg("--version")
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("{} failed: {e}", command[0]))?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
-                let text = if stdout.is_empty() { &stderr } else { &stdout };
-                Ok(format!(
-                    "{} ({purpose})",
-                    text.trim().lines().last().unwrap_or("")
-                ))
-            } else {
-                let text = if stderr.is_empty() { &stdout } else { &stderr };
-                let tail: String = text
-                    .trim()
-                    .chars()
-                    .rev()
-                    .take(200)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                Err(format!("{} failed: {tail}", command[0]))
-            }
-        });
+    let result = resolve(env, executable, fix).and_then(|command| {
+        let output = Command::new(&command[0])
+            .args(&command[1..])
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("{} failed: {e}", command[0]))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            let text = if stdout.is_empty() { &stderr } else { &stdout };
+            Ok(format!(
+                "{} ({purpose})",
+                text.trim().lines().last().unwrap_or("")
+            ))
+        } else {
+            let text = if stderr.is_empty() { &stdout } else { &stderr };
+            let tail: String = text
+                .trim()
+                .chars()
+                .rev()
+                .take(200)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            Err(format!("{} failed: {tail}", command[0]))
+        }
+    });
     match result {
         Ok(detail) => Check {
             label,
@@ -178,14 +207,7 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
             "runs every session",
             "Install Claude Code and sign in with `claude`.",
         ),
-        tool(
-            "codex",
-            "AXIOM_CODEX_CMD",
-            "codex",
-            true,
-            "terra and sol workers",
-            "Install the Codex CLI and sign in.",
-        ),
+        codex_cli(),
         sqlite(),
         state(),
         graph(),

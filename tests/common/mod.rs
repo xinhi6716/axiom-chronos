@@ -34,6 +34,17 @@ pub fn fake(name: &str) -> Vec<String> {
             .into_owned(),
     ]
 }
+pub fn fake_codex(flags: &[&str]) -> Vec<String> {
+    let mut command = fake("fake_codex");
+    command.extend(flags.iter().map(|flag| flag.to_string()));
+    command
+}
+pub fn tested_codex_flag() -> String {
+    format!(
+        "--fake-version=codex-cli {}",
+        axiom::codex::TESTED_CODEX.last_tested
+    )
+}
 pub fn temp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }

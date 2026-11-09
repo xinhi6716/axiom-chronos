@@ -1,4 +1,11 @@
-"""Scripted stand-in for `codex app-server`; the brief text selects the scenario."""
+"""Scripted stand-in for `codex app-server`.
+
+The brief text selects the turn scenario. Command-line options reshape the CLI itself:
+--fake-version=<line> is what `--version` prints, --fake-version-exit=<n> sets its exit code,
+--fake-version-hang never answers, and --fake-break=<method>:<effect> makes that request misbehave
+with exit, silent, not-json, no-result, empty-result or <code>:<message>. Method `start` exits
+before reading anything, as when the `app-server` command line is rejected.
+"""
 import json
 import os
 import sys
@@ -7,9 +14,21 @@ import threading
 
 sys.stdin.reconfigure(encoding='utf-8')
 sys.stdout.reconfigure(encoding='utf-8')
+
+
+def option(name, default=''):
+    prefix = f'--fake-{name}='
+    return next((arg[len(prefix):] for arg in sys.argv if arg.startswith(prefix)), default)
+
+
 if '--version' in sys.argv:
-    print('codex-cli fake')
-    sys.exit(0)
+    if '--fake-version-hang' in sys.argv:
+        time.sleep(60)
+    print(option('version', 'codex-cli fake'))
+    sys.exit(int(option('version-exit', '0')))
+broken_method, _, breakage = option('break').partition(':')
+if broken_method == 'start':
+    sys.exit(2)
 
 pending_turns = {}
 send_lock = threading.Lock()
@@ -64,6 +83,20 @@ for line in sys.stdin:
     method, params = message.get('method'), message.get('params') or {}
     if method:
         log_record(method, params)
+    if method and method == broken_method:
+        if breakage == 'exit':
+            sys.exit(2)
+        if breakage == 'no-result':
+            send({'id': message['id']})
+        elif breakage == 'empty-result':
+            send({'id': message['id'], 'result': {}})
+        elif breakage == 'not-json':
+            sys.stdout.write('Content-Length: 2\n')
+            sys.stdout.flush()
+        elif breakage != 'silent':
+            code, _, text = breakage.partition(':')
+            send({'id': message['id'], 'error': {'code': int(code), 'message': text}})
+        continue
     if method is None:
         if 'error' in message:
             thread_id, turn_id = pending_turns.pop('approval')
@@ -141,6 +174,15 @@ for line in sys.stdin:
         if 'APPROVAL' in text:
             pending_turns['approval'] = (thread_id, turn_id)
             send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
+            continue
+        if 'ODDSTATUS' in text:
+            complete(thread_id, turn_id, 'succeeded')
+            continue
+        if 'NOSTATUS' in text:
+            complete(thread_id, turn_id, None)
+            continue
+        if 'ODDFAILURE' in text:
+            complete(thread_id, turn_id, 'cancelled', {'message': 'kept', 'codexErrorInfo': 'other'})
             continue
         if 'BADMODEL' in text:
             body = json.dumps({'type': 'error', 'status': 400, 'error': {'type': 'invalid_request_error', 'message': 'not supported', 'code': 'model_not_found'}})

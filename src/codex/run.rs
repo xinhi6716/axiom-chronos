@@ -91,7 +91,7 @@ impl AppServer {
         let thread_id = started
             .pointer("/thread/id")
             .and_then(Value::as_str)
-            .ok_or_else(|| Failure::new("codex_rpc", "thread/start: missing thread id"))?
+            .ok_or_else(|| self.protocol_failure("thread/start: missing thread id"))?
             .to_owned();
         let events = self.subscribe(&thread_id);
         let mut turn = json!({"threadId":thread_id,"input":[{"type":"text","text":req.brief}]});
@@ -126,7 +126,7 @@ impl AppServer {
         };
         let Some(turn_id) = started.pointer("/turn/id").and_then(Value::as_str) else {
             self.unsubscribe(&thread_id);
-            return Err(Failure::new("codex_rpc", "turn/start: missing turn id"));
+            return Err(self.protocol_failure("turn/start: missing turn id"));
         };
         self.register_turn(&thread_id, turn_id);
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
@@ -138,7 +138,9 @@ impl AppServer {
             if remaining.is_zero() {
                 self.interrupt(&thread_id, turn_id);
                 report["status"] = json!("timeout");
-                report["error"] = json!({"kind":"timeout","message":format!("turn exceeded {}s and was interrupted", req.timeout_s)});
+                let message = format!("turn exceeded {}s and was interrupted", req.timeout_s);
+                report["error"] =
+                    json!({"kind":"timeout","message":self.note_untested_version(&message)});
                 break;
             }
             let event = match events.recv_timeout(remaining) {
@@ -194,6 +196,20 @@ impl AppServer {
                     report["status"] = params["turn"]["status"].clone();
                     if !params["turn"]["error"].is_null() {
                         report["error"] = turn_error(&params["turn"]["error"]);
+                    }
+                    if !matches!(
+                        report["status"].as_str(),
+                        Some("completed" | "failed" | "interrupted")
+                    ) {
+                        let status = report["status"].take();
+                        report["status"] = json!("failed");
+                        if report["error"].is_null() {
+                            report["error"] = self
+                                .protocol_failure(&format!(
+                                    "turn/completed: unexpected status {status}"
+                                ))
+                                .to_json();
+                        }
                     }
                     if report["status"] == "completed" {
                         report["error"] = Value::Null;

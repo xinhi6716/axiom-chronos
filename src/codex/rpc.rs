@@ -1,3 +1,6 @@
+use super::version::{
+    mismatch_failure, note_untested_version, suggests_mismatch, PROTOCOL_MISMATCH,
+};
 use crate::base::{proc, Failure, Res};
 use serde_json::{json, Value};
 use std::{
@@ -152,7 +155,7 @@ impl AppServer {
                 }
             }
         });
-        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
+        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(self.protocol_failure(&format!("handshake: {}", e.message))); }
         Ok(c)
     }
     fn send(c: &Connection, message: Value) -> Res<()> {
@@ -196,25 +199,36 @@ impl AppServer {
             }
         };
         if let Some(error) = msg.get("error") {
-            return Err(Failure::new(
-                "codex_rpc",
-                format!(
-                    "{method}: {}: {}",
-                    error.get("code").unwrap_or(&Value::Null),
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                ),
-            ));
+            let code = error.get("code").unwrap_or(&Value::Null);
+            let text = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            let kind = if suggests_mismatch(code.as_i64(), text) {
+                PROTOCOL_MISMATCH
+            } else {
+                "codex_rpc"
+            };
+            return Err(Failure::new(kind, format!("{method}: {code}: {text}")));
         }
         msg.get("result")
             .cloned()
-            .ok_or_else(|| Failure::new("codex_rpc", format!("{method}: missing result")))
+            .ok_or_else(|| Failure::new(PROTOCOL_MISMATCH, format!("{method}: missing result")))
     }
     pub(crate) fn request(&self, method: &str, params: Value) -> Res<Value> {
         let c = self.ensure_started()?;
         self.request_on(&c, method, params)
+            .map_err(|e| match e.kind.as_str() {
+                PROTOCOL_MISMATCH => self.protocol_failure(&e.message),
+                "timeout" => Failure::new("timeout", self.note_untested_version(&e.message)),
+                _ => e,
+            })
+    }
+    pub(crate) fn protocol_failure(&self, detail: &str) -> Failure {
+        mismatch_failure(&self.command, detail)
+    }
+    pub(crate) fn note_untested_version(&self, message: &str) -> String {
+        note_untested_version(&self.command, message)
     }
     pub(crate) fn subscribe(&self, thread_id: &str) -> Receiver<Value> {
         let Some(c) = self.connection.lock().unwrap().clone() else {
@@ -290,7 +304,7 @@ impl AppServer {
             let data = page
                 .get("data")
                 .and_then(Value::as_array)
-                .ok_or_else(|| Failure::new("codex_rpc", "model/list: missing data"))?;
+                .ok_or_else(|| self.protocol_failure("model/list: missing data"))?;
             for model in data {
                 if let Some(id) = model
                     .get("id")

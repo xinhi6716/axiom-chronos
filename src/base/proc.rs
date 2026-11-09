@@ -125,13 +125,30 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
         use std::os::windows::process::CommandExt;
         shell.raw_arg(format!("\"{cmd}\""));
     }
-    let mut child = shell
+    let child = shell
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
+    let run = capture(child, timeout)?;
+    let mut bytes = run.stdout;
+    bytes.extend(run.stderr);
+    let output = String::from_utf8_lossy(&bytes).replace('\0', "");
+    Ok(ShellRun {
+        exit_code: run.exit_code,
+        output,
+        timed_out: run.timed_out,
+    })
+}
+pub struct Captured {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+}
+pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
     let reader = |mut r: Box<dyn Read + Send>| {
@@ -144,7 +161,7 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
     let a = reader(Box::new(out));
     let b = reader(Box::new(err));
     let start = Instant::now();
-    let (code, timed_out) = loop {
+    let (exit_code, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(s)) => break (s.code().unwrap_or(-1), false),
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
@@ -158,12 +175,10 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
             }
         }
     };
-    let mut bytes = a.join().unwrap_or_default();
-    bytes.extend(b.join().unwrap_or_default());
-    let output = String::from_utf8_lossy(&bytes).replace('\0', "");
-    Ok(ShellRun {
-        exit_code: code,
-        output,
+    Ok(Captured {
+        exit_code,
+        stdout: a.join().unwrap_or_default(),
+        stderr: b.join().unwrap_or_default(),
         timed_out,
     })
 }

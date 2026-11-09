@@ -15,7 +15,7 @@
 | `codex_run` | one long-lived `codex app-server` (JSON-RPC over stdio), one ephemeral thread per call | Send a brief to a `terra` worker or a `sol` integrator; the role resolves to a model the signed-in account lists |
 | `orch` | in process | Units, inbox, gates and status for one program; the store lives under `CLAUDE_PLUGIN_DATA` (or `AXIOM_DATA_HOME`) so it survives plugin updates |
 | `memory_record`, `memory_search`, `memory_get`, `memory_digest` | SQLite FTS5 (trigram) in the same data directory | Long-run memory: verified units distilled for later briefs, and a one-line-per-wish history per project. Original-wish text remains searchable even when summaries are English. CJK query runs become bigrams; matching uses stored terms, not translation. Each entry hashes its files and reports `stale` once they change |
-| `bridge_status` | `--version` probes | Resolved Codex executable and whether the app-server is up |
+| `bridge_status` | `--version` probe | Resolved Codex executable, whether the app-server is up, and how the installed Codex compares with the versions Chronos has been tested with (`codex.version_check`) |
 
 `axiom wish` runs the [wish skill](../engine/skills/wish/SKILL.md) in a headless Claude Code session. The [dispatcher agent](../engine/agents/dispatcher.md) (`chronos:dispatcher`, Sonnet) splits the wish into units, pastes relevant memory into each brief, dispatches terra workers, verifies from the command record, and only calls a sol integrator when the full suite fails. The [memory keeper](../engine/agents/memory-keeper.md) (`chronos:memory-keeper`, Haiku) then records what later units can reuse.
 
@@ -23,7 +23,7 @@ Every wish runs Astra first; no option or marker skips it.
 
 Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; the core writes the final report itself.
 
-Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`).
+Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`, `codex_protocol`).
 
 <a id="contracts"></a>
 
@@ -72,6 +72,20 @@ The bridge resolves `codex` from `PATH`. Override it with a JSON array, e.g. `AX
 - The server runs with `CODEGRAPH_TELEMETRY=0`. A daemon CodeGraph already started for the project without it keeps its own setting until it exits; `codegraph telemetry off` covers every process.
 
 `chronos:architect`, `chronos:dispatcher` and `chronos:reviewer` list that tool; Claude Code drops the entry when the server is absent. If either condition is missing, launch arguments and thread settings are exactly what they were without this feature. `axiom doctor` reports what it found and never fails because of it. A server that does not start only leaves its tool unavailable; the run continues without it. No benchmark has measured a saving inside Chronos yet.
+
+### Codex versions
+
+Chronos is not tied to one Codex build, but it speaks that build's app-server protocol. [`src/codex/version.rs`](../src/codex/version.rs) holds the one record of what has been tested: a minimum and a last-tested version. Raise `last_tested` only after running Chronos on that release.
+
+`axiom doctor` and `bridge_status` read `codex --version` and give the same result:
+
+| Installed Codex | Result |
+| --- | --- |
+| From the minimum through the last-tested version | ok |
+| Newer than the last-tested version | warning; runs are not blocked |
+| Older than the minimum, or the version cannot be read | failure |
+
+A failed app-server handshake, a request Codex rejects as malformed, a reply missing a field Chronos needs, and a turn that ends with an unknown status all fail with `error.kind` `codex_protocol`. The message names the installed version and the last-tested version, followed by the start of the raw error. A timeout keeps the kind `timeout` and gains the same note when the installed version is outside the tested range.
 
 ### Windows · PowerShell
 
