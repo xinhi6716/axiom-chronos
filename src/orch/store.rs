@@ -1233,7 +1233,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 }
                 Err(fail(format!(
                     "unknown command {}; commands: {COMMANDS}",
-                    args.join(" ")
+                    args.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
                 )))
             }
         }

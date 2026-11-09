@@ -842,8 +842,10 @@ fn tracks_dependencies_and_auto_accept() {
         .err()
         .unwrap();
     assert_eq!(err.kind, "not_ready");
-    assert!(err.message.contains("z (no units)"));
-    assert!(err.message.contains("a"));
+    assert_eq!(
+        err.message,
+        "dependent waits on a (pending; next run), fix (pending; next run), z (no units registered); ready now: a, fix"
+    );
     assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
     finish_unit(
         &store,

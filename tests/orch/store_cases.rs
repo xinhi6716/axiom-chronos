@@ -402,6 +402,12 @@ fn errors_name_the_missing_file_and_the_commands() {
         "{}",
         out.stderr
     );
+    let out = call(&t.0, &["unit", "drop", "x", "--force"], false, false);
+    assert!(
+        out.stderr.starts_with("error: unknown command unit drop; commands: "),
+        "{}",
+        out.stderr
+    );
     assert_eq!(
         call(&t.0, &[], false, false).stderr,
         "error: a valid command is required\n"

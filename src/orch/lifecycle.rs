@@ -91,7 +91,7 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
     for dep in deps {
         let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
         if registered.is_empty() {
-            missing.push(format!("{dep} (no units)"));
+            missing.push(format!("{dep} (no units registered)"));
         }
         for other in registered {
             let rows = evidence(store, &other.id)?;
