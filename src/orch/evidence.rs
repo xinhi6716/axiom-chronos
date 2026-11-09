@@ -25,21 +25,25 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if rest[v].exit_code != 0 {
         return "failed".into();
     }
-    let mut start = v + 1;
+    let mut checks = vec![v];
     if needs_accept {
-        match rest[start..].iter().rposition(|r| r.kind == "accept") {
-            None => return "built".into(),
-            Some(a) => {
-                start += a + 1;
-                if rest[start - 1].exit_code != 0 {
-                    return "accept-failed".into();
-                }
-            }
+        let Some(a) = rest[v + 1..].iter().rposition(|r| r.kind == "accept") else {
+            return "built".into();
+        };
+        let a = v + 1 + a;
+        if rest[a].exit_code != 0 {
+            return "accept-failed".into();
         }
+        checks.push(a);
     }
-    let reviews: Vec<_> = rest[start..]
+    // A review stands until a later VERIFY or ACCEPT saw different files.
+    let reviews: Vec<_> = rest
         .iter()
-        .filter(|r| r.kind == "review")
+        .enumerate()
+        .filter(|&(n, r)| {
+            r.kind == "review" && checks.iter().all(|&c| n > c || rest[c].commit == r.commit)
+        })
+        .map(|(_, r)| r)
         .collect();
     let Some(last) = reviews.last() else {
         return "built".into();
@@ -59,7 +63,7 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     }
     "verified".into()
 }
-use super::{parse_map, read_units, set_unit_state, unit_brief, with_lock};
+use super::{parse_map, read_units, set_unit_state, standing_unit, unit_brief, with_lock};
 use crate::base::{proc::ShellRun, Failure, Res};
 use std::{path::Path, process::Command, time::Duration};
 
@@ -247,7 +251,7 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .ok_or_else(|| Failure::new("not_found", format!("module {module} not found")))?;
     let units: Vec<_> = read_units(store)?
         .into_iter()
-        .filter(|u| u.track == module)
+        .filter(|u| u.track == module && u.superseded_by().is_none())
         .collect();
     let scopes = units
         .iter()
@@ -270,6 +274,9 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     Ok(result)
 }
 pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
+    if let Some(u) = read_units(store)?.iter().find(|u| u.id == unit) {
+        u.refuse_superseded()?;
+    }
     let rows = evidence(store, unit)?;
     if !rows
         .iter()
@@ -409,9 +416,11 @@ pub fn record_review(
     let mut commits = Vec::new();
     let mut stale = Vec::new();
     for unit in units {
-        if !existing.iter().any(|u| u.id == *unit) {
-            return Err(Failure::new("not_found", format!("unit {unit} not found")));
-        }
+        existing
+            .iter()
+            .find(|u| u.id == *unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?
+            .refuse_superseded()?;
         let rs = evidence(store, unit)?;
         if rs
             .iter()
@@ -504,7 +513,7 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
     }
     let unfinished: Vec<_> = units
         .iter()
-        .filter(|u| u.state != "verified")
+        .filter(|u| standing_unit(&units, u).is_none_or(|s| s.state != "verified"))
         .map(|u| format!("{}={}", u.id, u.state))
         .collect();
     if !unfinished.is_empty() {

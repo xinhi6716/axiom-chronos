@@ -17,6 +17,7 @@ fn contract_sentences_are_embedded() {
         ("DISPATCH.md", unit_mode),
         ("DISPATCH.md", "Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit."),
         ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
+        ("agents/dispatcher.md", "When a fix or later unit of the same module takes over from a unit for good, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`: the old unit keeps its history and stops blocking `done` and dependent modules once `<new>` is verified."),
         ("agents/dispatcher.md", "A `stale review` error means files in the unit's SCOPE changed after its VERIFY ran: call `orch` `[\"verify\", <unit>, \"--repo\", <dir>]`, follow the ACCEPT reply rule, then review again."),
         ("DISPATCH.md", "`EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model."),
         ("DISPATCH.md", "The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them."),

@@ -1135,3 +1135,557 @@ fn tracks_dependencies_and_auto_accept() {
     abort_unit(&store, "unknown", &attempt(&store, "unknown"));
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
+
+fn build(store: &Path, repo: &Path, unit: &str) {
+    assert!(matches!(
+        begin_unit(store, unit, "worker", repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    let finished = finish_unit(
+        store,
+        unit,
+        &attempt(store, unit),
+        repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "built");
+}
+fn column(store: &Path, unit: &str) -> String {
+    read_units(store)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.id == unit)
+        .unwrap()
+        .state
+}
+fn pass_review(store: &Path, repo: &Path, unit: &str) -> Vec<(String, String)> {
+    record_review(store, &[unit.into()], "claude-review", true, repo).unwrap()
+}
+fn review_rows(store: &Path, unit: &str) -> usize {
+    evidence(store, unit)
+        .unwrap()
+        .iter()
+        .filter(|r| r.kind == "review")
+        .count()
+}
+fn module(store: &Path, paths: &str, accept: &str) {
+    fs::write(
+        store.join("modules.md"),
+        format!(
+            "## m\nPURPOSE x\nPATHS {paths}\nDEPENDS none\nCONTRACT x\nACCEPT test `{accept}`\n"
+        ),
+    )
+    .unwrap();
+}
+fn cli(store: &Path, args: &[&str]) -> Output {
+    run(
+        store,
+        &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        false,
+        false,
+    )
+}
+fn supersede(store: &Path, unit: &str, by: &str) -> Output {
+    cli(store, &["unit", "supersede", unit, "--by", by])
+}
+
+#[test]
+fn a_new_accept_keeps_the_review_of_unchanged_files() {
+    let (store, repo) = setup();
+    fs::write(repo.join("b.txt"), "b").unwrap();
+    add_unit(&store, "b", "m", "b.txt");
+    module(&store, "a.txt b.txt", "echo ok");
+    build(&store, &repo, "a");
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(
+        pass_review(&store, &repo, "a"),
+        vec![("a".to_string(), "verified".to_string())]
+    );
+    build(&store, &repo, "b");
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(
+        column(&store, "a"),
+        "verified",
+        "nothing a reviewed changed"
+    );
+    assert_eq!(column(&store, "b"), "built");
+    assert_eq!(review_rows(&store, "a"), 1);
+    assert_eq!(next_step_for(&store, "a").unwrap(), "verified");
+    fs::write(repo.join("a.txt"), "really changed").unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(column(&store, "a"), "built", "a reviewed file changed");
+    assert_eq!(derive_state(&evidence(&store, "a").unwrap(), true), "built");
+    assert_eq!(
+        record_review(&store, &["a".into()], "claude-review", true, &repo)
+            .unwrap_err()
+            .kind,
+        "stale_review"
+    );
+    let repo_arg = repo.to_string_lossy().into_owned();
+    assert_eq!(
+        cli(&store, &["verify", "a", "--repo", &repo_arg]).exit_code,
+        0
+    );
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(column(&store, "a"), "built", "the new files are unreviewed");
+    assert_eq!(
+        pass_review(&store, &repo, "a"),
+        vec![("a".to_string(), "verified".to_string())]
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_failed_accept_blocks_a_unit_without_consuming_its_review() {
+    let (store, repo) = setup();
+    module(&store, "a.txt", "echo ok");
+    build(&store, &repo, "a");
+    record_accept(&store, "m", &repo).unwrap();
+    pass_review(&store, &repo, "a");
+    assert_eq!(column(&store, "a"), "verified");
+    module(&store, "a.txt", "exit 3");
+    assert_eq!(record_accept(&store, "m", &repo).unwrap().exit_code, 3);
+    assert_eq!(column(&store, "a"), "accept-failed");
+    assert_eq!(next_step_for(&store, "a").unwrap(), "fix");
+    module(&store, "a.txt", "echo ok");
+    assert_eq!(record_accept(&store, "m", &repo).unwrap().exit_code, 0);
+    assert_eq!(
+        column(&store, "a"),
+        "verified",
+        "same files, ACCEPT green again"
+    );
+    assert_eq!(review_rows(&store, "a"), 1);
+    module(&store, "a.txt", "exit 3");
+    fs::write(repo.join("a.txt"), "changed while red").unwrap();
+    assert_eq!(record_accept(&store, "m", &repo).unwrap().exit_code, 3);
+    assert_eq!(column(&store, "a"), "accept-failed");
+    module(&store, "a.txt", "echo ok");
+    assert_eq!(record_accept(&store, "m", &repo).unwrap().exit_code, 0);
+    assert_eq!(
+        column(&store, "a"),
+        "built",
+        "the review was of other files"
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_failed_review_is_not_erased_by_another_accept() {
+    let (store, repo) = setup();
+    module(&store, "a.txt", "echo ok");
+    build(&store, &repo, "a");
+    record_accept(&store, "m", &repo).unwrap();
+    record_review(&store, &["a".into()], "claude-review", false, &repo).unwrap();
+    assert_eq!(column(&store, "a"), "review-failed");
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(column(&store, "a"), "review-failed");
+    assert_eq!(next_step_for(&store, "a").unwrap(), "fix");
+    fs::write(repo.join("a.txt"), "fixed").unwrap();
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(column(&store, "a"), "built");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+fn fail_run(store: &Path, repo: &Path, unit: &str) {
+    assert!(matches!(
+        begin_unit(store, unit, "worker", repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    let finished = finish_unit(
+        store,
+        unit,
+        &attempt(store, unit),
+        repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"failed"}),
+    )
+    .unwrap();
+    assert_eq!(finished.state, "failed");
+}
+fn not_ready(store: &Path, repo: &Path, unit: &str) -> String {
+    let err = begin_unit(store, unit, "worker", repo, false)
+        .err()
+        .unwrap();
+    assert_eq!(err.kind, "not_ready");
+    err.message
+}
+const TWO_MODULES: &str = "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS c.txt\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n";
+fn replacement_setup() -> (std::path::PathBuf, std::path::PathBuf) {
+    let (store, repo) = setup();
+    fs::write(repo.join("c.txt"), "c").unwrap();
+    add_unit(&store, "fix", "m", "a.txt");
+    add_unit(&store, "c", "n", "c.txt");
+    fs::write(store.join("modules.md"), TWO_MODULES).unwrap();
+    (store, repo)
+}
+fn future_full_test(store: &Path) {
+    append_evidence(
+        store,
+        "_full",
+        &Evidence {
+            kind: "full".into(),
+            command: "test".into(),
+            exit_code: 0,
+            commit: String::new(),
+            ts: "9999".into(),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_superseded_unit_keeps_its_history_and_stands_on_its_replacement() {
+    let (store, repo) = replacement_setup();
+    fail_run(&store, &repo, "a");
+    let before = evidence(&store, "a").unwrap().len();
+    assert!(before > 0);
+    let out = supersede(&store, "a", "fix");
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    let brief = store.join("a.brief");
+    assert_eq!(
+        out.stdout,
+        format!("a\tm\tsuperseded:fix\t\t\t\t{}\nready\n", brief.display())
+    );
+    assert_eq!(column(&store, "a"), "superseded:fix");
+    let units = fs::read_to_string(store.join("units.tsv")).unwrap();
+    assert_eq!(
+        units.lines().next(),
+        Some("id\ttrack\tstate\tbranch\tpr\tsha\tbrief")
+    );
+    assert_eq!(evidence(&store, "a").unwrap().len(), before);
+    assert!(cli(&store, &["evidence", "a"])
+        .stdout
+        .contains("run\tgpt-worker\t1"));
+    assert_eq!(ready_units(&store).unwrap(), vec!["fix"]);
+    assert!(waiting_units(&store).unwrap().iter().all(|w| w.unit != "a"));
+    assert_eq!(
+        not_ready(&store, &repo, "c"),
+        "c waits on fix (pending; next run); ready now: fix"
+    );
+    build(&store, &repo, "fix");
+    assert!(
+        matches!(accept_if_ready(&store, "fix", &repo).unwrap(),
+            AutoAccept::Ran { exit_code: 0, states, .. } if states == vec![("fix".to_string(), "built".to_string())]),
+        "a superseded unit must not hold ACCEPT back"
+    );
+    assert_eq!(
+        evidence(&store, "a").unwrap().len(),
+        before,
+        "no accept row"
+    );
+    assert_eq!(column(&store, "a"), "superseded:fix");
+    assert_eq!(
+        not_ready(&store, &repo, "c"),
+        "c waits on fix (built; next review); none ready"
+    );
+    let err = done_gate(&store, false).unwrap_err();
+    assert_eq!(err.kind, "not_done");
+    assert!(err.message.contains("a=superseded:fix"), "{}", err.message);
+    pass_review(&store, &repo, "fix");
+    assert_eq!(column(&store, "fix"), "verified");
+    assert!(matches!(
+        begin_unit(&store, "c", "worker", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    finish_unit(
+        &store,
+        "c",
+        &attempt(&store, "c"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    record_accept(&store, "n", &repo).unwrap();
+    pass_review(&store, &repo, "c");
+    future_full_test(&store);
+    done_gate(&store, false).unwrap();
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_superseded_unit_blocks_done_until_its_replacement_is_verified() {
+    let (store, repo) = replacement_setup();
+    let units = fs::read_to_string(store.join("units.tsv")).unwrap();
+    fs::write(
+        store.join("units.tsv"),
+        units
+            .lines()
+            .filter(|l| !l.starts_with("c\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    fail_run(&store, &repo, "a");
+    assert_eq!(supersede(&store, "a", "fix").exit_code, 0);
+    future_full_test(&store);
+    let blocked = done_gate(&store, false).unwrap_err();
+    assert_eq!(blocked.kind, "not_done");
+    assert!(
+        blocked.message.contains("a=superseded:fix"),
+        "{}",
+        blocked.message
+    );
+    assert!(
+        blocked.message.contains("fix=pending"),
+        "{}",
+        blocked.message
+    );
+    set_unit_state(&store, "fix", "built").unwrap();
+    let blocked = done_gate(&store, false).unwrap_err();
+    assert!(
+        blocked.message.contains("a=superseded:fix"),
+        "{}",
+        blocked.message
+    );
+    set_unit_state(&store, "fix", "verified").unwrap();
+    done_gate(&store, false).unwrap();
+    let rows = fs::read_to_string(store.join("units.tsv")).unwrap();
+    fs::write(
+        store.join("units.tsv"),
+        rows.lines()
+            .filter(|l| !l.starts_with("fix\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let blocked = done_gate(&store, false).unwrap_err();
+    assert_eq!(
+        blocked.message, "a=superseded:fix",
+        "a lost replacement is not a pass"
+    );
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn replacement_chains_resolve_to_their_last_unit() {
+    let (store, repo) = replacement_setup();
+    add_unit(&store, "fix2", "m", "a.txt");
+    fail_run(&store, &repo, "a");
+    assert_eq!(supersede(&store, "a", "fix").exit_code, 0);
+    assert_eq!(supersede(&store, "fix", "fix2").exit_code, 0);
+    assert_eq!(
+        not_ready(&store, &repo, "c"),
+        "c waits on fix2 (pending; next run); ready now: fix2"
+    );
+    build(&store, &repo, "fix2");
+    record_accept(&store, "m", &repo).unwrap();
+    pass_review(&store, &repo, "fix2");
+    assert!(matches!(
+        begin_unit(&store, "c", "worker", &repo, false).unwrap(),
+        Begin::Run { .. }
+    ));
+    abort_unit(&store, "c", &attempt(&store, "c"));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn hand_edited_replacement_chains_fail_explicitly() {
+    let (store, repo) = replacement_setup();
+    let path = store.join("units.tsv");
+    let original = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        original.replace("a\tm\tpending", "a\tm\tsuperseded:gone"),
+    )
+    .unwrap();
+    assert!(
+        not_ready(&store, &repo, "c").contains("a (superseded:gone; replacement chain is broken)")
+    );
+    assert_eq!(done_gate(&store, false).unwrap_err().kind, "not_done");
+    fs::write(
+        &path,
+        original
+            .replace("a\tm\tpending", "a\tm\tsuperseded:fix")
+            .replace("fix\tm\tpending", "fix\tm\tsuperseded:a"),
+    )
+    .unwrap();
+    assert!(not_ready(&store, &repo, "c").contains("replacement chain is broken"));
+    assert_eq!(done_gate(&store, false).unwrap_err().kind, "not_done");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn supersede_rejects_nonsense() {
+    let (store, repo) = setup();
+    add_unit(&store, "b", "m", "a.txt");
+    add_unit(&store, "c", "m", "a.txt");
+    add_unit(&store, "other", "n", "a.txt");
+    add_unit(&store, "apart", "m", "z.txt");
+    let path = store.join("units.tsv");
+    let mut rows = fs::read_to_string(&path).unwrap();
+    rows.push_str("blank\tm\tpending\t\t\t\t\n");
+    fs::write(&path, rows).unwrap();
+    let rejected = |unit: &str, by: &str, code: i32, phrase: &str| {
+        let before = fs::read(store.join("units.tsv")).unwrap();
+        let out = supersede(&store, unit, by);
+        assert_eq!(out.exit_code, code, "{unit} by {by}: {}", out.stderr);
+        assert!(
+            out.stderr.contains(phrase),
+            "{unit} by {by}: {}",
+            out.stderr
+        );
+        assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
+    };
+    rejected("a", "missing", 2, "unit missing not found");
+    rejected("missing", "a", 2, "unit missing not found");
+    rejected("a", "a", 1, "cannot supersede itself");
+    rejected("a", "other", 1, "belongs to n");
+    rejected("a", "apart", 1, "shares no file");
+    rejected("a", "blank", 1, "has no brief");
+    assert!(cli(&store, &["unit", "supersede", "a"])
+        .stderr
+        .contains("--by is required"));
+
+    assert!(matches!(begin(&store, &repo), Begin::Run { .. }));
+    rejected("a", "b", 1, "has a running claim");
+    finish_unit(
+        &store,
+        "a",
+        &attempt(&store, "a"),
+        &repo,
+        "worker",
+        "gpt-worker",
+        &json!({"status":"completed","file_changes":[]}),
+    )
+    .unwrap();
+    pass_review(&store, &repo, "a");
+    assert_eq!(column(&store, "a"), "verified");
+    rejected("a", "b", 1, "is verified");
+    set_unit_state(&store, "a", "built").unwrap();
+    rejected("a", "b", 1, "is verified");
+    set_unit_state(&store, "b", "verified").unwrap();
+    rejected("b", "c", 1, "is verified");
+    set_unit_state(&store, "b", "pending").unwrap();
+
+    assert_eq!(supersede(&store, "b", "c").exit_code, 0);
+    rejected("b", "a", 1, "already superseded by c");
+    rejected("c", "b", 1, "would form a cycle");
+    rejected("apart", "b", 1, "name c instead");
+    set_unit_state(&store, "c", "pending").unwrap();
+    assert_eq!(column(&store, "b"), "superseded:c");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_cycle_through_a_longer_chain_is_rejected() {
+    let (store, _repo) = setup();
+    add_unit(&store, "b", "m", "a.txt");
+    add_unit(&store, "c", "m", "a.txt");
+    assert_eq!(supersede(&store, "a", "b").exit_code, 0);
+    assert_eq!(supersede(&store, "b", "c").exit_code, 0);
+    let out = supersede(&store, "c", "a");
+    assert_eq!(out.exit_code, 1);
+    assert!(out.stderr.contains("would form a cycle"), "{}", out.stderr);
+    assert_eq!(column(&store, "c"), "pending");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn superseded_is_terminal() {
+    let (store, repo) = setup();
+    add_unit(&store, "fix", "m", "a.txt");
+    module(&store, "a.txt", "echo ok");
+    build(&store, &repo, "a");
+    assert_eq!(supersede(&store, "a", "fix").exit_code, 0);
+    let refused = begin_unit(&store, "a", "worker", &repo, false)
+        .err()
+        .unwrap();
+    assert_eq!(refused.kind, "superseded");
+    assert!(
+        refused.message.contains("superseded by fix"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        record_verify(&store, "a", &repo).err().unwrap().kind,
+        "superseded"
+    );
+    assert_eq!(
+        record_review(&store, &["a".into()], "claude-review", true, &repo)
+            .unwrap_err()
+            .kind,
+        "superseded"
+    );
+    assert_eq!(
+        evidence(&store, "a")
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == "review")
+            .count(),
+        0
+    );
+    let before = evidence(&store, "a").unwrap().len();
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(evidence(&store, "a").unwrap().len(), before);
+    set_unit_state(&store, "a", "built").unwrap();
+    assert_eq!(
+        column(&store, "a"),
+        "superseded:fix",
+        "a late writer cannot reopen it"
+    );
+    let out = cli(&store, &["unit", "set", "a", "--state", "pending"]);
+    assert_eq!(out.exit_code, 1);
+    assert!(out.stderr.contains("superseded by fix"), "{}", out.stderr);
+    for state in ["superseded", "superseded:fix"] {
+        let out = cli(&store, &["unit", "set", "fix", "--state", state]);
+        assert_eq!(out.exit_code, 1, "{state}");
+        assert!(out.stderr.contains("orch unit supersede"), "{}", out.stderr);
+    }
+    assert_eq!(column(&store, "fix"), "pending");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_rebuilt_unit_can_be_superseded_once_its_files_really_changed() {
+    let (store, repo) = setup();
+    add_unit(&store, "later", "m", "a.txt");
+    module(&store, "a.txt", "echo ok");
+    build(&store, &repo, "a");
+    record_accept(&store, "m", &repo).unwrap();
+    pass_review(&store, &repo, "a");
+    fs::write(repo.join("a.txt"), "rebuilt by a later unit").unwrap();
+    let out = supersede(&store, "a", "later");
+    assert_eq!(out.exit_code, 1);
+    assert!(out.stderr.contains("is verified"), "{}", out.stderr);
+    assert!(out.stderr.contains("orch accept"), "{}", out.stderr);
+    build(&store, &repo, "later");
+    record_accept(&store, "m", &repo).unwrap();
+    assert_eq!(column(&store, "a"), "built");
+    assert_eq!(supersede(&store, "a", "later").exit_code, 0);
+    pass_review(&store, &repo, "later");
+    future_full_test(&store);
+    done_gate(&store, false).unwrap();
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn superseded_units_are_counted_under_one_name() {
+    let (store, _repo) = setup();
+    assert_eq!(cli(&store, &["init"]).exit_code, 0);
+    add_unit(&store, "b", "m", "a.txt");
+    add_unit(&store, "c", "m", "a.txt");
+    assert_eq!(supersede(&store, "a", "c").exit_code, 0);
+    assert_eq!(supersede(&store, "b", "c").exit_code, 0);
+    assert_eq!(
+        cli(&store, &["unit", "counts"]).stdout,
+        "pending=1, superseded=2\n"
+    );
+    let listed = cli(&store, &["unit", "list", "--state", "superseded"]).stdout;
+    assert!(listed.contains("a\tm\tsuperseded:c"), "{listed}");
+    assert!(listed.contains("b\tm\tsuperseded:c"), "{listed}");
+    assert!(cli(&store, &["unit", "list", "--state", "superseded:c"])
+        .stdout
+        .contains("a\tm\tsuperseded:c"));
+    assert!(cli(&store, &["status"])
+        .stdout
+        .contains("states=pending=1, superseded=2"));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}

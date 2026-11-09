@@ -93,14 +93,25 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
         if registered.is_empty() {
             missing.push(format!("{dep} (no units registered)"));
         }
+        let mut seen = BTreeSet::new();
         for other in registered {
-            let rows = evidence(store, &other.id)?;
-            let needs = needs_accept(store, &other.id)?;
+            let Some(standing) = standing_unit(units, other) else {
+                missing.push(format!(
+                    "{} ({}; replacement chain is broken)",
+                    other.id, other.state
+                ));
+                continue;
+            };
+            if !seen.insert(&standing.id) {
+                continue;
+            }
+            let rows = evidence(store, &standing.id)?;
+            let needs = needs_accept(store, &standing.id)?;
             let state = derive_state(&rows, needs);
             if state != "verified" {
                 missing.push(format!(
                     "{} ({state}; next {})",
-                    other.id,
+                    standing.id,
                     next_step(&rows, &state, needs)
                 ));
             }
@@ -139,6 +150,7 @@ pub fn begin_unit(
             .iter()
             .find(|u| u.id == unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        u.refuse_superseded()?;
         let brief = unit_brief(store, unit)?;
         let rows = evidence(store, unit)?;
         let mut disk = read_claims(store)?;
@@ -284,7 +296,7 @@ pub fn ready_units(store: &Path) -> Res<Vec<String>> {
     let disk = read_claims(store)?;
     let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
     let mut result = vec![];
-    for u in &units {
+    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
         let rows = evidence(store, &u.id)?;
         let state = derive_state(&rows, needs_accept(store, &u.id)?);
         if !known_track(store, u)?
@@ -321,7 +333,7 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
     let units = read_units(store)?;
     let disk = read_claims(store)?;
     let mut waiting = Vec::new();
-    for u in &units {
+    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
         let rows = evidence(store, &u.id)?;
         let needs = needs_accept(store, &u.id)?;
         let state = derive_state(&rows, needs);
@@ -414,7 +426,10 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         .clone();
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let units = read_units(store)?;
-    let module_units: Vec<_> = units.iter().filter(|u| u.track == trigger.track).collect();
+    let module_units: Vec<_> = units
+        .iter()
+        .filter(|u| u.track == trigger.track && u.superseded_by().is_none())
+        .collect();
     let claims = read_claims(store)?;
     let claimed: Vec<_> = module_units
         .iter()

@@ -9,7 +9,8 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, release <unit> --attempt <id>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, release <unit> --attempt <id>, unit supersede <unit> --by <unit>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
     pub id: String,
@@ -19,6 +20,41 @@ pub struct Unit {
     pub pr: String,
     pub sha: String,
     pub brief: String,
+}
+impl Unit {
+    pub fn superseded_by(&self) -> Option<&str> {
+        self.state.strip_prefix(SUPERSEDED)?.strip_prefix(':')
+    }
+    fn state_name(&self) -> &str {
+        if self.superseded_by().is_some() {
+            SUPERSEDED
+        } else {
+            &self.state
+        }
+    }
+    pub(crate) fn refuse_superseded(&self) -> Res<()> {
+        match self.superseded_by() {
+            Some(by) => Err(Failure::new(
+                "superseded",
+                format!(
+                    "unit {} was superseded by {by}; work on {by} instead",
+                    self.id
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+}
+/// The unit whose result counts for `unit`: itself, or the end of its replacement chain. `None` when that chain is broken.
+pub fn standing_unit<'a>(units: &'a [Unit], unit: &'a Unit) -> Option<&'a Unit> {
+    let mut current = unit;
+    for _ in 0..=units.len() {
+        let Some(by) = current.superseded_by() else {
+            return Some(current);
+        };
+        current = units.iter().find(|u| u.id == by)?;
+    }
+    None
 }
 #[derive(Debug, Clone)]
 pub struct Output {
@@ -240,9 +276,74 @@ pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
             .iter_mut()
             .find(|u| u.id == unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        if row.superseded_by().is_some() {
+            return Ok(());
+        }
         row.state = required(state, "state")?;
         save_units(store, &rows)
     })
+}
+fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
+    let mut rows = read_units(store)?;
+    let find = |name: &str| {
+        rows.iter()
+            .find(|u| u.id == name)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {name} not found")))
+    };
+    let (old, new) = (find(id)?, find(by)?);
+    if id == by {
+        return Err(fail(format!("unit {id} cannot supersede itself")));
+    }
+    if let Some(current) = old.superseded_by() {
+        return Err(fail(format!(
+            "unit {id} is already superseded by {current}"
+        )));
+    }
+    if new.superseded_by().is_some() {
+        return Err(fail(match standing_unit(&rows, new) {
+            Some(end) if end.id == id => format!("superseding {id} by {by} would form a cycle"),
+            Some(end) => format!("unit {by} is already superseded; name {} instead", end.id),
+            None => format!("unit {by} is already superseded and its replacement chain is broken"),
+        }));
+    }
+    if read_claims(store)?.iter().any(|c| c.unit == id) {
+        return Err(Failure::new(
+            "busy",
+            format!("unit {id} has a running claim; wait for its result or release it, then supersede it"),
+        ));
+    }
+    let derived = crate::orch::derive_state(
+        &crate::orch::evidence(store, id)?,
+        crate::orch::needs_accept(store, id)?,
+    );
+    if old.state == "verified" || derived == "verified" {
+        return Err(fail(format!(
+            "unit {id} is verified and cannot be superseded; if its files changed, run orch accept <module> --repo <dir> first"
+        )));
+    }
+    if old.track != new.track {
+        return Err(fail(format!(
+            "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
+            new.track, old.track
+        )));
+    }
+    let scope = match unit_brief(store, id) {
+        Ok(brief) => brief.scope,
+        Err(e) if e.kind == "no_brief" => vec![],
+        Err(e) => return Err(e),
+    };
+    let replacement = unit_brief(store, by)?.scope;
+    if !scope.is_empty() && !crate::orch::overlaps(&scope, &replacement) {
+        return Err(fail(format!(
+            "unit {by} shares no file with {id}; its SCOPE must cover some of {}",
+            scope.join(", ")
+        )));
+    }
+    let row = rows.iter_mut().find(|u| u.id == id).unwrap();
+    row.state = format!("{SUPERSEDED}:{by}");
+    let out = row.clone();
+    save_units(store, &rows)?;
+    Ok(out)
 }
 fn push(
     store: &Path,
@@ -613,7 +714,7 @@ fn status(store: &Path) -> Res<(serde_json::Value, String)> {
     let ledger = ledger(store)?;
     let frontier = frontier(store)?;
     let gates = gates(store)?;
-    let states = counts(units.iter().map(|r| r.state.clone()));
+    let states = counts(units.iter().map(|r| r.state_name().to_string()));
     let verdicts = counts(ledger.iter().map(|r| cell(r, "verdict")));
     let mut ids: Vec<_> = gates
         .iter()
@@ -884,12 +985,18 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         "state {state} is derived from evidence; it cannot be set"
                     )));
                 }
+                if state.starts_with(SUPERSEDED) {
+                    return Err(fail(
+                        "state superseded is recorded by orch unit supersede <unit> --by <unit>",
+                    ));
+                }
                 let row = locked(store, force, &mut note, || {
                     let mut rows = read_units(store)?;
                     let u = rows
                         .iter_mut()
                         .find(|u| u.id == id)
                         .ok_or_else(|| Failure::new("not_found", format!("unit {id} not found")))?;
+                    u.refuse_superseded()?;
                     u.state = state;
                     if let Some(v) = option(args, "--branch")? {
                         u.branch = required(v, "branch")?;
@@ -913,6 +1020,15 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     json,
                 ))
             }
+            ("unit", "supersede") => {
+                let id = required(arg(args, 2)?, "unit id")?;
+                let by = required(&required_option(args, "--by")?, "--by")?;
+                let row = locked(store, force, &mut note, || supersede(store, &id, &by))?;
+                let next = crate::orch::next_step_for(store, &by)?;
+                let mut value = serde_json::to_value(&row).unwrap();
+                value["next"] = serde_json::json!(next);
+                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
+            }
             ("unit", "get") => {
                 let id = required(arg(args, 2)?, "unit id")?;
                 let row = read_units(store)?
@@ -931,7 +1047,8 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 let rows: Vec<_> = read_units(store)?
                     .into_iter()
                     .filter(|u| {
-                        state.is_none_or(|s| u.state == s) && track.is_none_or(|s| u.track == s)
+                        state.is_none_or(|s| u.state == s || u.state_name() == s)
+                            && track.is_none_or(|s| u.track == s)
                     })
                     .collect();
                 let mut lines: Vec<_> = rows.iter().take(4).map(unit_line).collect();
@@ -948,7 +1065,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("unit", "counts") => {
                 let mut counts = std::collections::BTreeMap::<String, usize>::new();
                 for u in read_units(store)? {
-                    *counts.entry(u.state).or_default() += 1;
+                    *counts.entry(u.state_name().to_string()).or_default() += 1;
                 }
                 let compact = if counts.is_empty() {
                     "none".into()
