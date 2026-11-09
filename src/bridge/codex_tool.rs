@@ -73,7 +73,11 @@ fn register(store: &Path, unit: &str, track: &str, brief_file: &str) -> Res<bool
         .collect();
     let out = orch::run(store, &args, false, false);
     if out.exit_code != 0 {
-        let text = if out.stderr.is_empty() { out.stdout } else { out.stderr };
+        let text = if out.stderr.is_empty() {
+            out.stdout
+        } else {
+            out.stderr
+        };
         return Err(Failure::new("orch_failed", text.trim().to_string()));
     }
     Ok(true)
@@ -116,7 +120,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let track = string(a, "track");
     let brief_file = string(a, "brief_file");
     if (track.is_some() || brief_file.is_some()) && unit.is_none() {
-        return Err(invalid("track and brief_file register a unit; they need unit mode"));
+        return Err(invalid(
+            "track and brief_file register a unit; they need unit mode",
+        ));
     }
     if track.is_some() != brief_file.is_some() {
         return Err(invalid("track and brief_file go together"));
