@@ -31,6 +31,8 @@ pub struct Goal {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interjection: Option<Interjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<Value>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -97,6 +99,7 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         dispatched: false,
         reason: None,
         interjection: None,
+        provenance: vec![],
         other: Map::new(),
     };
     save(home, session, &goal)?;
@@ -210,6 +213,15 @@ pub fn mark_asked(home: &Path, session: &str) -> Res<()> {
 pub fn mark_dispatched(home: &Path, session: &str) -> Res<()> {
     let mut goal = required(home, session)?;
     goal.dispatched = true;
+    save(home, session, &goal)
+}
+/// A resumed run that matches the last record adds nothing; one that differs is a new entry.
+pub fn add_provenance(home: &Path, session: &str, block: Value) -> Res<()> {
+    let mut goal = required(home, session)?;
+    if goal.provenance.last() == Some(&block) {
+        return Ok(());
+    }
+    goal.provenance.push(block);
     save(home, session, &goal)
 }
 pub fn set_status(home: &Path, session: &str, status: &str, note: Option<&str>) -> Res<Value> {

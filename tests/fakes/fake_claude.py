@@ -23,6 +23,8 @@ def save():
 def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
+record['provenance_env'] = os.environ.get('AXIOM_PROVENANCE')
+
 incoming = queue.Queue()
 def read_input():
     for line in sys.stdin:

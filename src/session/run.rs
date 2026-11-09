@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    engine, goal, hook,
+    engine, goal, hook, provenance,
 };
 use std::{
     io::{BufRead, BufReader, Write},
@@ -244,6 +244,14 @@ fn run_inner(
             }
         })
         .unwrap()?;
+    let provenance = provenance::of_session(
+        config.claude.as_deref().unwrap_or(&[]),
+        &config.bin,
+        &plugin,
+        project,
+    );
+    log.write_all(provenance.log_line().as_bytes())
+        .map_err(failure)?;
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();
     let mut child = base::proc::command(&argv)
@@ -251,6 +259,7 @@ fn run_inner(
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
+        .env(provenance::ENV, provenance.to_value().to_string())
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -433,6 +442,7 @@ fn run_inner(
         }
     }
     let _ = writeln!(out, "\nlog: {}", log_path.display());
+    let _ = writeln!(out, "provenance: {}", provenance.line());
     if let Some(e) = goal_error {
         let _ = writeln!(out, "goal error: {}: {}", e.kind, e.message);
         if matches!(result, Ok(0)) {

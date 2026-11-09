@@ -39,6 +39,7 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "Write the report yourself, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for the user."),
         ("skills/wish/SKILL.md", "output path `<store>/astra/plan.json`"),
         ("skills/wish/SKILL.md", "`## Coverage`"),
+        ("skills/wish/SKILL.md", "End the report with one `Provenance:` line"),
         ("skills/wish/SKILL.md", "`review-failed`, or `unreviewed`"),
         ("skills/research/SKILL.md", "output path `<store>/research/plan.json`"),
         ("skills/research/SKILL.md", "Give the `chronos:critic` agent the review schema, the plan path"),

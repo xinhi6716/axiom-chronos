@@ -1,4 +1,5 @@
 use crate::base;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,12 @@ pub fn build_id() -> String {
     content_id(FILES)
 }
 
+pub fn binary_id(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| short_hash(&Sha256::digest(bytes)))
+}
+
 /// Each build gets its own directory and none is ever removed, so a build cannot change or delete
 /// the rules another running build is reading.
 #[doc(hidden)]
@@ -106,4 +113,34 @@ pub fn install(home: &Path, version: &str, files: &[(&str, &str)]) -> std::io::R
 
 pub fn plugin_dir(home: &Path) -> std::io::Result<PathBuf> {
     install(home, env!("CARGO_PKG_VERSION"), FILES)
+}
+
+pub fn plugin_version(root: &Path) -> Result<String, String> {
+    let manifest = root.join(".claude-plugin/plugin.json");
+    let bytes =
+        std::fs::read(&manifest).map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("{} is not valid JSON: {e}", manifest.display()))?;
+    value["version"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} declares no version", manifest.display()))
+}
+
+fn normalized(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// Embedded files the plugin at `root` lacks or holds with other contents. Line endings do not
+/// count: a Windows checkout of the same commit differs from the build only in those.
+pub fn differing_files(root: &Path) -> Vec<&'static str> {
+    FILES
+        .iter()
+        .filter(|(path, contents)| {
+            std::fs::read(root.join(path)).map_or(true, |bytes| {
+                normalized(&bytes) != normalized(contents.as_bytes())
+            })
+        })
+        .map(|(path, _)| *path)
+        .collect()
 }

@@ -8,4 +8,5 @@ pub mod hook;
 pub mod linux;
 pub mod memory;
 pub mod orch;
+pub mod provenance;
 pub mod session;

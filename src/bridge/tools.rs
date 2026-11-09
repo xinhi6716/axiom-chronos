@@ -107,6 +107,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             }
             let home = b.home()?;
             let session = s(a, "session");
+            b.record_provenance(home, session)?;
             let g = if let Some(v) = opt(a, "status") {
                 goal::set_status(home, session, v, opt(a, "note"))?["goal"].clone()
             } else if let Some(v) = opt(a, "mode") {
