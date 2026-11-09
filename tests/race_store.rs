@@ -386,3 +386,124 @@ fn a_verified_unit_cannot_be_set_back_by_hand() {
     assert_eq!(states, ["verified", "pending"]);
     assert_eq!(set("open", "review-failed").exit_code, 0);
 }
+
+fn inbox(store: &Path, args: &[&str]) -> orch::Output {
+    let mut command = vec!["inbox".to_string()];
+    command.extend(args.iter().map(|a| a.to_string()));
+    orch::run(store, &command, true, false)
+}
+
+#[test]
+fn inbox_readers_survive_a_concurrent_drain() {
+    let t = tempfile::tempdir().unwrap();
+    let store = empty_store(t.path());
+    fs::write(store.join("units.tsv"), HEADER).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let failures = std::thread::scope(|s| {
+        let mut jobs = vec![];
+        for _ in 0..2 {
+            jobs.push(s.spawn(|| {
+                let mut failures = vec![];
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for args in [&["drain", "--peek"][..], &["count"]] {
+                        let out = inbox(&store, args);
+                        if out.exit_code != 0 {
+                            failures.push(out.stderr);
+                        }
+                    }
+                }
+                failures
+            }));
+        }
+        let mut failures = vec![];
+        for n in 0..150 {
+            let unit = format!("u{n}");
+            for args in [&["push", "worker", &unit, "done"][..], &["drain"]] {
+                let out = inbox(&store, args);
+                if out.exit_code != 0 {
+                    failures.push(out.stderr);
+                }
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        failures.extend(jobs.into_iter().flat_map(|j| j.join().unwrap()));
+        failures
+    });
+    assert!(failures.is_empty(), "{} failed: {:?}", failures.len(), failures[0]);
+}
+
+#[test]
+fn no_inbox_pointer_is_lost_between_processes_and_a_drain() {
+    const PUSHERS: usize = 6;
+    const EACH: usize = 25;
+    if let Some((dir, i)) = child() {
+        for n in 0..EACH {
+            let pushed = inbox(
+                &dir.join("store"),
+                &["push", "worker", &format!("u{i}-{n}"), "done"],
+            );
+            assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
+        }
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let store = empty_store(t.path());
+    let seen = std::sync::Mutex::new(Vec::new());
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut last_pass = false;
+            loop {
+                let drained = inbox(&store, &["drain"]);
+                assert_eq!(drained.exit_code, 0, "{}", drained.stderr);
+                let rows: serde_json::Value = serde_json::from_str(&drained.stdout).unwrap();
+                seen.lock().unwrap().extend(
+                    rows.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|r| r["unit"].as_str().unwrap().to_owned()),
+                );
+                if last_pass {
+                    break;
+                }
+                last_pass = finished.load(std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        children(
+            "no_inbox_pointer_is_lost_between_processes_and_a_drain",
+            t.path(),
+            PUSHERS,
+        );
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let seen = seen.into_inner().unwrap();
+    let distinct: HashSet<_> = seen.iter().collect();
+    assert_eq!(seen.len(), PUSHERS * EACH, "pointers lost or duplicated");
+    assert_eq!(distinct.len(), PUSHERS * EACH);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_pointer_held_open_does_not_fail_a_drain() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    let t = tempfile::tempdir().unwrap();
+    let store = empty_store(t.path());
+    assert_eq!(inbox(&store, &["push", "worker", "u", "done"]).exit_code, 0);
+    let pointer = fs::read_dir(store.join("inbox")).unwrap().next().unwrap().unwrap().path();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&pointer)
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let drained = inbox(&store, &["drain"]);
+    release.join().unwrap();
+    assert_eq!(drained.exit_code, 0, "{}", drained.stderr);
+    let left: serde_json::Value =
+        serde_json::from_str(&inbox(&store, &["count"]).stdout).unwrap();
+    assert_eq!(left["count"], 0);
+}

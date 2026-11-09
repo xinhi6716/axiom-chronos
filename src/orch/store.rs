@@ -553,7 +553,35 @@ fn count_line(v: &serde_json::Value) -> String {
         xs.join(", ")
     }
 }
+/// `None` when the pointer has gone. On Windows a file being deleted refuses readers for a moment.
+fn read_pointer(path: &Path) -> Res<Option<String>> {
+    for _ in 0..40 {
+        match std::fs::read_to_string(path) {
+            Ok(text) => return Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            Err(e) => return Err(io(e)),
+        }
+    }
+    std::fs::read_to_string(path).map(Some).map_err(io)
+}
+/// Another process may hold the pointer open for a moment, so a failed delete is retried.
+fn remove_pointer(path: &Path) -> Res<()> {
+    for _ in 0..250 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    std::fs::remove_file(path).map_err(io)
+}
 fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
+    Ok(pointer_files(store)?.into_iter().map(|(_, row)| row).collect())
+}
+fn pointer_files(store: &Path) -> Res<Vec<(PathBuf, serde_json::Value)>> {
     let dir = store.join("inbox");
     let mut files = std::fs::read_dir(&dir)
         .map_err(|e| {
@@ -576,7 +604,9 @@ fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
         {
             continue;
         }
-        let mut raw = std::fs::read_to_string(f.path()).map_err(io)?;
+        let Some(mut raw) = read_pointer(&f.path())? else {
+            continue;
+        };
         if raw.ends_with('\n') {
             raw.pop();
             if raw.ends_with('\r') {
@@ -590,9 +620,10 @@ fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
                 f.file_name().to_string_lossy()
             )));
         }
-        rows.push(
+        rows.push((
+            f.path(),
             serde_json::json!({"ts":c[0],"agent":c[1],"unit":c[2],"status":c[3],"report":c[4]}),
-        );
+        ));
     }
     Ok(rows)
 }
@@ -1218,20 +1249,12 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("inbox", "drain") => {
                 let peek = args.iter().any(|a| a == "--peek");
                 let read = || -> Res<Vec<serde_json::Value>> {
-                    let rows = pointers(store)?;
-                    if !peek {
-                        let dir = store.join("inbox");
-                        let tmp = store.join(format!(
-                            ".inbox-drain-{}-{}",
-                            std::process::id(),
-                            base::unique()
-                        ));
-                        std::fs::rename(&dir, &tmp).map_err(io)?;
-                        if let Err(e) = std::fs::create_dir(&dir) {
-                            let _ = std::fs::rename(&tmp, &dir);
-                            return Err(io(e));
+                    let mut rows = Vec::new();
+                    for (path, row) in pointer_files(store)? {
+                        if !peek {
+                            remove_pointer(&path)?;
                         }
-                        std::fs::remove_dir_all(tmp).map_err(io)?;
+                        rows.push(row);
                     }
                     Ok(rows)
                 };

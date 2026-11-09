@@ -240,7 +240,10 @@ impl Memory {
                 .append(true)
                 .open(&path)
                 .map_err(err)?;
-            writeln!(f, "- {} {line}", base::today()).map_err(err)?;
+            // One write per line: appends from separate processes stay whole.
+            f.write_all(format!("- {} {line}
+", base::today()).as_bytes())
+                .map_err(err)?;
         }
         let digest = match std::fs::read_to_string(path) {
             Ok(s) => s.replace("\r\n", "\n"),
