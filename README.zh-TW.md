@@ -62,6 +62,8 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 
 只在開頭提問。執行中你保有插話權（interjection）：在 `axiom wish` 輸入一行並按 Enter，就能追加指示、提問或喊停。
 
+剩下的工作若是一大批專案自己的程式，願望會在不呼叫任何模型的情況下等待，批次結束後自動接續。`axiom wish` 會自己等；`axiom wait <session-id>` 用來接手正在等待的願望，例如按過 Ctrl-C 之後。
+
 | 選項 | 用途 |
 |---|---|
 | `--project PATH` | 處理另一個專案。 |
@@ -87,7 +89,7 @@ Claude 回報用量上限並附上重置時間時，`axiom wish` 會印出接續
 
 ## 狀態
 
-目前提供：`axiom wish`、`axiom research`、`axiom doctor`。測試用腳本替身模擬 Claude 與 Codex 來檢查協定；真實模型的表現依專案而異。
+目前提供：`axiom wish`、`axiom wait`、`axiom research`、`axiom doctor`。測試用腳本替身模擬 Claude 與 Codex 來檢查協定；真實模型的表現依專案而異。
 
 [Bridge 技術文件](docs/bridge.md) · [派工規則](engine/DISPATCH.md) · [Wish 流程](engine/skills/wish/SKILL.md) · [版本說明](docs/releases/1.0.0.md)
 

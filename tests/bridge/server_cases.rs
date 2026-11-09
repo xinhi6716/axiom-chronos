@@ -258,6 +258,104 @@ fn goal_operations_and_mode_lock() {
     assert_eq!(status["structuredContent"]["goal"]["status"], "blocked");
 }
 #[test]
+fn goal_tool_takes_the_batch_a_waiting_goal_depends_on() {
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    let progress = temp.path().join("progress.json");
+    let marker = temp.path().join("done.flag");
+    let (progress, marker) = (progress.to_str().unwrap(), marker.to_str().unwrap());
+    for (args, expected) in [
+        (json!({"pid":12}), "go together"),
+        (
+            json!({"progress_file":progress,"marker_file":marker}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":"12"}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":4294967296u64}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":0}),
+            "pid",
+        ),
+        (
+            json!({"progress_file":"p.json","marker_file":marker,"pid":12}),
+            "absolute",
+        ),
+    ] {
+        let mut full = json!({"session":"s","status":"waiting","note":"n"});
+        full.as_object_mut()
+            .unwrap()
+            .extend(args.as_object().unwrap().clone());
+        let bad = invoke(&b, "goal", full);
+        check(&bad, "bridge_error");
+        let error = &bad["structuredContent"]["error"];
+        assert_eq!(error["kind"], "invalid_argument", "{args}");
+        assert!(
+            error["message"].as_str().unwrap().contains(expected),
+            "{error}"
+        );
+        assert_eq!(
+            axiom::goal::load(temp.path(), "s").unwrap().unwrap().status,
+            "active"
+        );
+    }
+    let done = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"blocked","note":"n","progress_file":progress,"marker_file":marker,"pid":12}),
+    );
+    check(&done, "bridge_error");
+    let waiting = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"waiting","note":"n","progress_file":progress,"marker_file":marker,"pid":12}),
+    );
+    check(&waiting, "completed");
+    assert_eq!(
+        waiting["structuredContent"]["goal"]["batch"],
+        json!({"progress_file":progress,"marker_file":marker,"pid":12})
+    );
+    assert_eq!(
+        axiom::goal::load(temp.path(), "s").unwrap().unwrap().batch,
+        Some(axiom::goal::Batch {
+            progress_file: progress.into(),
+            marker_file: marker.into(),
+            pid: 12
+        })
+    );
+    let note_only = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"waiting","note":"n"}),
+    );
+    check(&note_only, "completed");
+    assert!(note_only["structuredContent"]["goal"]
+        .get("batch")
+        .is_none());
+    let descriptors = tools();
+    let goal = descriptors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "goal")
+        .unwrap();
+    let properties = &goal["inputSchema"]["properties"];
+    assert_eq!(properties["progress_file"]["type"], "string");
+    assert_eq!(properties["marker_file"]["type"], "string");
+    assert_eq!(properties["pid"]["type"], "integer");
+    assert_eq!(goal["inputSchema"]["required"], json!(["session"]));
+    assert!(goal["description"]
+        .as_str()
+        .unwrap()
+        .contains("status waiting"));
+}
+#[test]
 fn failed_tools_are_errors() {
     let temp = common::temp();
     let b = Bridge::new(config(temp.path()));

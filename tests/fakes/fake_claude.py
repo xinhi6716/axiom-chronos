@@ -58,6 +58,20 @@ if scenario in ('resume', 'limit-reset'):
     path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
     emit({'type': 'result', 'is_error': False, 'result': 'done'})
     sys.exit(0)
+if scenario == 'batch':
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    batches = json.loads(os.environ['FAKE_CLAUDE_BATCHES'])
+    run = goal.get('fake_runs', 0)
+    Path(f"{os.environ['FAKE_CLAUDE_RECORD']}.{run}").write_text(json.dumps(record, ensure_ascii=False), encoding='utf-8')
+    goal['fake_runs'] = run + 1
+    if run < len(batches):
+        goal.update(status='waiting', note='batch running', batch=batches[run])
+    else:
+        goal['status'] = 'done'
+    path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': goal['status']})
+    sys.exit(0)
 if scenario == 'crash':
     sys.exit(3)
 if scenario in ('interrupt', 'interrupt_orphan'):

@@ -13,6 +13,8 @@ When you are named one module, dispatch only that module's units and report once
 
 With a module map, its boundaries and contracts are fixed. Units split a module, never cross one; a unit that cannot meet its module's CONTRACT is a conflict to report, not a contract to change.
 
+Only when the core asks you to launch a long batch that passed its pilot, start it detached in its own process group, confirm its progress file advances once, report its progress file, completion marker and pid, and stop.
+
 Read `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` before writing any brief. Every brief follows it.
 
 ## Steps

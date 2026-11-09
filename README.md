@@ -59,6 +59,8 @@ The binary enforces the gates: no write without a claimed unit, no verified unit
 
 Questions are asked only at the start. While it runs you keep interjection: in `axiom wish`, type a line and press Enter to add instructions, ask, or stop.
 
+When what remains is a long batch of the project's own programs, the wish waits on it with no model running and continues when the batch ends. `axiom wish` does this by itself; `axiom wait <session-id>` picks up a wish that is waiting, for example after Ctrl-C.
+
 | Option | Purpose |
 |---|---|
 | `--project PATH` | Work on another project. |
@@ -82,7 +84,7 @@ State lives in `~/.axiom` (set `AXIOM_HOME` to move it): work records and briefs
 
 ## Status
 
-Available: `axiom wish`, `axiom research`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
+Available: `axiom wish`, `axiom wait`, `axiom research`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
 
 [Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Release notes](docs/releases/1.0.0.md)
 

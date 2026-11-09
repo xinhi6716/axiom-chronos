@@ -78,6 +78,12 @@ impl Drop for Signals {
         }
     }
 }
+/// Runs `body` with Ctrl-C raising the stop flag it is given.
+pub(super) fn until_interrupted<T>(body: impl FnOnce(&AtomicBool) -> T) -> T {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _signals = Signals::install();
+    body(&INTERRUPTED)
+}
 fn failure(e: impl std::fmt::Display) -> Failure {
     Failure::new("io", e.to_string())
 }
@@ -298,17 +304,6 @@ pub fn resume(
     )
 }
 
-pub fn run(
-    config: &Config,
-    skill: &str,
-    text: &str,
-    project: &Path,
-    max_turns: Option<u32>,
-    input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-) -> Res<i32> {
-    run_inner(config, skill, text, project, max_turns, input, out, None)
-}
 fn run_inner(
     config: &Config,
     skill: &str,
@@ -318,6 +313,29 @@ fn run_inner(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
     resume: Option<&str>,
+) -> Res<i32> {
+    run_observed(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        input,
+        out,
+        resume,
+        &mut |_| {},
+    )
+}
+pub(super) fn run_observed(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+    resume: Option<&str>,
+    observe: &mut dyn FnMut(&serde_json::Value),
 ) -> Res<i32> {
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();

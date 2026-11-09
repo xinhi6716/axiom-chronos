@@ -127,6 +127,20 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         Err(e) => usage(e.message),
     }
 }
+fn wait_command(args: &[String]) -> i32 {
+    let [id] = args else {
+        return usage("wait takes only a session id");
+    };
+    match session::wait_and_resume(
+        &session::Config::from_env(),
+        id,
+        Box::new(io::BufReader::new(io::stdin())),
+        &mut io::stdout(),
+    ) {
+        Ok(code) => code,
+        Err(e) => usage(e.message),
+    }
+}
 fn orch_command(args: &[String]) -> i32 {
     let mut store = std::env::var_os("ORCH_STORE")
         .filter(|s| !s.is_empty())
@@ -271,6 +285,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        "wait" => wait_command(rest),
         "doctor" if rest.is_empty() => doctor::doctor(&mut io::stdout()),
         "bridge" if rest.is_empty() => bridge::serve(
             bridge::Config::from_env(),
