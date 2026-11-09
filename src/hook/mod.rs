@@ -143,7 +143,7 @@ pub fn stop_reason(session: &str, goal: &Goal) -> String {
 }
 
 const MAX_WHOLE_READ: u64 = 256 * 1024;
-const MAX_READ_LINES: u64 = 500;
+pub(crate) const MAX_READ_LINES: u64 = 500;
 
 fn oversized_read(input: &Value) -> bool {
     let path = Path::new(input.get("file_path").and_then(Value::as_str).unwrap_or(""));

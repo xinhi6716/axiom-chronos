@@ -226,6 +226,35 @@ fn memory_command(args: &[String]) -> i32 {
         }
     }
 }
+fn usage_command(args: &[String]) -> i32 {
+    let (mut session, mut as_json, mut i) = (None, false, 0);
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session" => match value(args, &mut i, "--session") {
+                Ok(v) => session = Some(v),
+                Err(e) => return usage(e),
+            },
+            "--json" => as_json = true,
+            s => return usage(format!("unrecognized option: {s}")),
+        }
+        i += 1;
+    }
+    match crate::usage::ledger(&crate::usage::Locations::from_env(), session.as_deref()) {
+        Ok(ledger) if as_json => {
+            println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            0
+        }
+        Ok(ledger) => {
+            print!("{}", crate::usage::render(&ledger));
+            0
+        }
+        Err(e) if e.kind == "invalid_argument" => usage(e.message),
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -261,6 +290,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "hook" if rest.is_empty() => hook::main_stdin(),
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),
+        "usage" => usage_command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
 }
