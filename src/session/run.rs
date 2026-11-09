@@ -3,10 +3,12 @@ use crate::{
     base::{self, Failure, Res},
     engine, goal, hook,
 };
+use serde_json::Value;
 use std::{
+    fs::File,
     io::{BufRead, BufReader, Write},
-    path::Path,
-    process::Stdio,
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -150,13 +152,25 @@ pub fn local_offset_secs(unix_secs: i64) -> i32 {
     }
 }
 
-pub fn resume(
-    config: &Config,
-    session: &str,
-    max_turns: Option<u32>,
-    input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-) -> Res<i32> {
+pub fn wish_text(words: &str, creative: bool, no_architect: bool) -> String {
+    if creative {
+        format!(
+            "[creative]{}",
+            if words.is_empty() {
+                String::new()
+            } else {
+                format!(" {words}")
+            }
+        )
+    } else if no_architect {
+        format!("[no-architect] {words}")
+    } else {
+        words.to_owned()
+    }
+}
+
+/// The continuation prompt and project directory of a resumable goal.
+pub fn resume_target(config: &Config, session: &str) -> Res<(String, PathBuf)> {
     let goal = goal::load(&config.home, session)?
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     if goal.status == "done" {
@@ -178,7 +192,20 @@ pub fn resume(
         })?
         .to_path_buf();
     let goal = goal::reopen(&config.home, session)?;
-    let prompt = format!("{CONTINUE_TAG} {}", hook::stop_reason(session, &goal));
+    Ok((
+        format!("{CONTINUE_TAG} {}", hook::stop_reason(session, &goal)),
+        cwd,
+    ))
+}
+
+pub fn resume(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+) -> Res<i32> {
+    let (prompt, cwd) = resume_target(config, session)?;
     run_inner(
         config,
         "wish",
@@ -208,10 +235,42 @@ fn run_inner(
     text: &str,
     project: &Path,
     max_turns: Option<u32>,
-    mut input: Box<dyn BufRead + Send>,
+    input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
     resume: Option<&str>,
 ) -> Res<i32> {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _signals = Signals::install();
+    let spawned = spawn(config, skill, text, project, max_turns, resume)?;
+    forward_input(Arc::clone(&spawned.writer), input);
+    drive(spawned, config, out, &INTERRUPTED, &mut |_| {})
+}
+
+pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
+
+pub fn send(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
+    stdin
+        .write_all(user_message(text).as_bytes())
+        .and_then(|_| stdin.flush())
+}
+
+/// A running claude with its first message sent; `drive` takes it from here.
+pub struct Spawned {
+    child: Child,
+    pub writer: Writer,
+    lines: mpsc::Receiver<Vec<u8>>,
+    log: File,
+    pub log_path: PathBuf,
+}
+
+pub fn spawn(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    resume: Option<&str>,
+) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
     let mut argv = command(config, &plugin, max_turns)?;
@@ -225,7 +284,7 @@ fn run_inner(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let stamp = log_stamp(now, local_offset_secs(now));
-    let (log_path, mut log) = (0u64..)
+    let (log_path, log) = (0u64..)
         .find_map(|n| {
             let suffix = if n == 0 {
                 String::new()
@@ -244,8 +303,6 @@ fn run_inner(
             }
         })
         .unwrap()?;
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _signals = Signals::install();
     let mut child = base::proc::command(&argv)
         .current_dir(project)
         .env("AXIOM_DATA_HOME", &config.home)
@@ -257,49 +314,21 @@ fn run_inner(
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
     let mut stdin = child.stdin.take().unwrap();
-    if let Err(e) = stdin
-        .write_all(
-            user_message(&if resume.is_some() {
-                text.to_owned()
-            } else if text.is_empty() {
-                format!("/chronos:{skill}")
-            } else {
-                format!("/chronos:{skill} {text}")
-            })
-            .as_bytes(),
-        )
-        .and_then(|_| stdin.flush())
-    {
+    if let Err(e) = send(
+        &mut stdin,
+        &if resume.is_some() {
+            text.to_owned()
+        } else if text.is_empty() {
+            format!("/chronos:{skill}")
+        } else {
+            format!("/chronos:{skill} {text}")
+        },
+    ) {
         base::proc::kill_tree(&mut child);
         return Err(failure(e));
     }
-    let writer = Arc::new(Mutex::new(Some(stdin)));
-    let input_writer = Arc::clone(&writer);
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match input.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut guard = input_writer.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(stdin) = guard.as_mut() else { break };
-            if stdin
-                .write_all(user_message(line).as_bytes())
-                .and_then(|_| stdin.flush())
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
     let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
+    let (tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -315,13 +344,61 @@ fn run_inner(
             }
         }
     });
+    Ok(Spawned {
+        child,
+        writer: Arc::new(Mutex::new(Some(stdin))),
+        lines,
+        log,
+        log_path,
+    })
+}
+
+/// Forwards each non-blank line of `input` to claude as a user message until EOF or the session ends.
+pub fn forward_input(writer: Writer, mut input: Box<dyn BufRead + Send>) {
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match input.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(stdin) = guard.as_mut() else { break };
+            if send(stdin, line).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Runs the session to its end: renders to `out`, hands every parsed event to `observe`,
+/// keeps an active goal going, and kills the process tree once `stop` is set.
+pub fn drive(
+    spawned: Spawned,
+    config: &Config,
+    out: &mut dyn Write,
+    stop: &AtomicBool,
+    observe: &mut dyn FnMut(&Value),
+) -> Res<i32> {
+    let Spawned {
+        mut child,
+        writer,
+        lines: rx,
+        mut log,
+        log_path,
+    } = spawned;
     let mut renderer = Renderer::new();
     let mut session = None::<String>;
     let mut final_result = false;
     let mut goal_error = None;
     let mut cause = None;
     let result: Res<i32> = loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) {
             base::proc::kill_tree(&mut child);
             cause = Some("interrupted by the user".to_string());
             break Ok(130);
@@ -332,13 +409,14 @@ fn run_inner(
                     base::proc::kill_tree(&mut child);
                     break Err(failure(e));
                 }
-                let Ok(event) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                let Ok(event) = serde_json::from_slice::<Value>(&bytes) else {
                     continue;
                 };
                 if event["type"] == "system" && event["subtype"] == "init" {
                     session = event["session_id"].as_str().map(str::to_owned);
                 }
                 renderer.event(&event, out);
+                observe(&event);
                 if event["type"] != "result" {
                     continue;
                 }
@@ -358,16 +436,10 @@ fn run_inner(
                         Ok(Some(g)) if g.status == "active" => {
                             let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(stdin) = guard.as_mut() {
-                                if let Err(e) = stdin
-                                    .write_all(
-                                        user_message(&format!(
-                                            "{CONTINUE_TAG} {}",
-                                            hook::stop_reason(id, &g)
-                                        ))
-                                        .as_bytes(),
-                                    )
-                                    .and_then(|_| stdin.flush())
-                                {
+                                if let Err(e) = send(
+                                    stdin,
+                                    &format!("{CONTINUE_TAG} {}", hook::stop_reason(id, &g)),
+                                ) {
                                     base::proc::kill_tree(&mut child);
                                     break Err(failure(e));
                                 }

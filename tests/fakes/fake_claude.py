@@ -91,7 +91,7 @@ if scenario == 'continue':
     while incoming.get() is not None:
         pass
     sys.exit(0)
-emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
+emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})
 emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': scenario == 'error', 'result': '統計功能已完成。', 'duration_ms': 4200, 'total_cost_usd': 0.36, 'modelUsage': {'claude-opus-5-5': {'costUSD': 0.25}}})

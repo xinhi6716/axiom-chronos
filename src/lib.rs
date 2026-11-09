@@ -5,6 +5,7 @@ pub mod codex;
 pub mod engine;
 pub mod goal;
 pub mod hook;
+pub mod host;
 pub mod linux;
 pub mod memory;
 pub mod orch;
