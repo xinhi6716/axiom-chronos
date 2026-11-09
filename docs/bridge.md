@@ -37,6 +37,7 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 - `sandbox` is `read-only` or `workspace-write`. The bridge never exposes `danger-full-access`, and `approvalPolicy` is fixed to `never`; stray approval requests are refused and listed in `refused_requests`.
 - Codex threads are ephemeral, so workers keep no memory between calls.
 - `lean` (default on) changes that thread only: it asks the app-server which plugins and configured MCP servers are enabled and turns them all off, along with the apps connector, goals, the skills catalog, the personality section and the web search tool (`web_search: true` keeps it). `keep_plugins` exempts named plugins. Remote plugins (marketplaces such as `openai-curated-remote`) ignore that config switch, so lean mode also sends their ids as the turn's `disabledPluginIds`; on an account with one remote MCP server this cut a one-word call from 10,410 to 9,630 input tokens. The report lists what was disabled, which MCP servers actually started, and the thread's token `usage`.
+- When the [optional code graph](#code-graph) is active, lean mode leaves that one server running; every other configured server is still turned off.
 - Upstream API rejections that Codex labels `other` are reported by their provider code, such as `model_not_found`. Available models depend on the signed-in account; `model/list` is the source of truth.
 
 Codex's base instructions (~3.5k tokens) stay in place because they teach the shell and patch tools.
@@ -58,6 +59,18 @@ Measured with `gpt-5.6-terra` at low effort:
 ## III · Configuration
 
 The bridge resolves `codex` from `PATH`. Override it with a JSON array, e.g. `AXIOM_CODEX_CMD='["/opt/codex/bin/codex"]'`. A missing executable fails the call with `not_installed`. Memory needs SQLite with FTS5 trigram support, which `axiom doctor` checks.
+
+<a id="code-graph"></a>
+
+### Optional code graph
+
+[CodeGraph](https://github.com/colbymchenry/codegraph) stays outside Chronos: nothing is bundled or installed, and no Claude or Codex configuration is written. A run uses it only when a `codegraph` executable is on `PATH` and the project has a `.codegraph/` directory (`codegraph init` creates it). Then, for that run:
+
+- The Claude session gets `codegraph serve --mcp` through `--mcp-config`, with `alwaysLoad` as CodeGraph's setup documents, and `--allowedTools` gains `mcp__codegraph__codegraph_explore`, the one tool the server lists by default.
+- Each Codex thread gets the same server with `cwd` set to the thread's directory, and lean mode does not disable it.
+- The server runs with `CODEGRAPH_TELEMETRY=0`. A daemon CodeGraph already started for the project without it keeps its own setting until it exits; `codegraph telemetry off` covers every process.
+
+`chronos:architect`, `chronos:dispatcher` and `chronos:reviewer` list that tool; Claude Code drops the entry when the server is absent. If either condition is missing, launch arguments and thread settings are exactly what they were without this feature. `axiom doctor` reports what it found and never fails because of it. A server that does not start only leaves its tool unavailable; the run continues without it. No benchmark has measured a saving inside Chronos yet.
 
 ### Windows · PowerShell
 
