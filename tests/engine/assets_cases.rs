@@ -310,14 +310,17 @@ fn plugin_without_a_readable_version_is_refused() {
 fn plugin_files_are_compared_by_content_but_not_line_endings() {
     let temp = tempfile::tempdir().unwrap();
     let root = engine::plugin_dir(temp.path()).unwrap();
-    for (path, text) in engine::FILES {
-        let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
-        fs::write(root.join(path), crlf).unwrap();
+    for line_ending in ["\n", "\r\n"] {
+        for (path, text) in engine::FILES {
+            let copy = text.replace("\r\n", "\n").replace('\n', line_ending);
+            fs::write(root.join(path), copy).unwrap();
+        }
+        assert_eq!(
+            engine::check_plugin(&root).unwrap().differing,
+            Vec::<&str>::new(),
+            "{line_ending:?}"
+        );
     }
-    assert_eq!(
-        engine::check_plugin(&root).unwrap().differing,
-        Vec::<&str>::new()
-    );
     fs::write(root.join("DISPATCH.md"), "other rules").unwrap();
     fs::remove_file(root.join("agents/critic.md")).unwrap();
     assert_eq!(

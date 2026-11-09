@@ -154,7 +154,7 @@ fn a_program_that_hangs_is_killed_at_the_limit() {
         Duration::from_millis(300),
     );
     assert!(output.is_none());
-    assert!(start.elapsed() < Duration::from_secs(20));
+    assert!(start.elapsed() < Duration::from_secs(10));
 }
 
 #[test]
