@@ -119,6 +119,8 @@ fn system_locale() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
 
     #[test]
     fn english_locales_are_recognized_in_every_spelling() {

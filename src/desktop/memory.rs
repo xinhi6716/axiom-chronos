@@ -717,6 +717,8 @@ impl Render for MemoryView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
 
     fn entry(id: i64, project: &str, title: &str, body: &str, stale: bool) -> MemoryEntry {
         MemoryEntry {

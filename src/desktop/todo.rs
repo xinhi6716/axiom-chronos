@@ -1642,6 +1642,8 @@ fn placeholder(mark: Option<AnyElement>, text: &str, detail: Option<SharedString
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
 
     fn unit(module: usize, state: UnitState) -> Unit {
         Unit {
@@ -1665,6 +1667,7 @@ mod tests {
 
     fn run_of(goals: Vec<GoalItem>, modules: Vec<Module>, units: Vec<Unit>) -> Run {
         Run {
+            started_at: None,
             session: "s".into(),
             project: "p".into(),
             cwd: None,

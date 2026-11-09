@@ -395,6 +395,8 @@ pub fn opening_bounds(settings: &Settings, default: Size<Pixels>, min: Size<Pixe
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
 
     fn sample() -> Settings {
         Settings {

@@ -1338,6 +1338,8 @@ impl Render for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
 
     #[test]
     fn running_here_offers_send_and_stop() {

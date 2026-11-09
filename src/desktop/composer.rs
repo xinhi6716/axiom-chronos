@@ -807,6 +807,8 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named, because the glob above also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
     use crate::desktop::demo;
 
     fn repo() -> FolderCheck {

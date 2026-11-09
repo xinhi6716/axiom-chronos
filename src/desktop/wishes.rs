@@ -13,7 +13,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _,
+    h_flex, v_flex, Disableable as _, Icon, IconName, IndexPath, Selectable as _,
     Sizable as _, StyledExt as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -934,6 +934,8 @@ impl Render for WishesView {
 
 #[cfg(test)]
 mod tests {
+    // Named, because a glob import also brings in gpui's own `test` macro.
+    use std::prelude::v1::test;
     use super::super::demo::sample_run;
     use super::*;
 
