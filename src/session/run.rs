@@ -81,6 +81,12 @@ fn failure(e: impl std::fmt::Display) -> Failure {
 }
 
 pub const CONTINUE_TAG: &str = "<chronos-continue/>";
+/// Long `codex_run` calls outlast the five-minute prompt cache; the one-hour
+/// TTL keeps the dispatcher's prefix warm across them (Claude Code 2.1.242+).
+pub const CACHE_TTL_ENV: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"),
+    ("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h"),
+];
 
 pub fn log_stamp(unix_secs: i64, offset_secs: i32) -> String {
     let secs = unix_secs.saturating_add(i64::from(offset_secs));
@@ -251,6 +257,7 @@ fn run_inner(
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
+        .envs(CACHE_TTL_ENV)
         .env_remove("AXIOM_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
