@@ -678,6 +678,52 @@ fn a_format_without_request_records_warns_that_copies_may_be_included() {
 }
 
 #[test]
+fn tool_records_of_zeroed_copies_are_excluded_with_their_calls() {
+    let report = json!({"model": "gpt-terra", "usage": {"inputTokens": 999, "outputTokens": 9}})
+        .to_string();
+    let big = "x".repeat(LARGE_READ_BYTES as usize);
+    let run = Run::new();
+    run.transcript(&[
+        line_with(
+            "old",
+            OPUS,
+            &at(0, 0, 0),
+            counts(0, 0, 0, 0),
+            json!([
+                tool_use("old-codex", "mcp__plugin_chronos_bridge__codex_run", json!({})),
+                tool_use("old-read", "Read", json!({"file_path": "big.txt"})),
+            ]),
+        ),
+        tool_result("old-codex", json!(report)),
+        tool_result("old-read", json!(big)),
+        assistant("new", OPUS, &at(0, 1, 0), counts(1, 1, 1, 1)),
+    ]);
+    let l = run.ledger();
+    assert_eq!(l.totals.calls, 1);
+    assert_eq!(l.copied_calls, 1);
+    assert!(l.codex.is_empty(), "{:?}", l.codex);
+    assert_eq!(l.codex_runs_without_usage, 0);
+    assert!(
+        l.warnings
+            .iter()
+            .all(|w| !matches!(w, Warning::LargeFileRead { .. })),
+        "{:?}",
+        l.warnings
+    );
+}
+
+#[test]
+fn a_timestamp_with_a_multibyte_character_is_unreadable_not_fatal() {
+    let run = Run::new();
+    run.transcript(&[
+        assistant("a", OPUS, "2026-01-01T00:00:\u{20ac}Z", counts(1, 1, 1, 1)),
+        assistant("b", OPUS, "2026-01-01T00:00:0\u{20ac}Z", counts(1, 1, 1, 1)),
+        assistant("c", OPUS, &at(0, 1, 0), counts(1, 1, 1, 1)),
+    ]);
+    assert_eq!(run.ledger().totals.calls, 3);
+}
+
+#[test]
 fn a_single_agent_above_the_context_threshold_is_warned_about_once() {
     let run = Run::new();
     run.transcript(&[

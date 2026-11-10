@@ -170,6 +170,42 @@ fn a_background_process_holding_the_streams_cannot_stall_the_probe() {
 }
 
 #[test]
+fn the_process_left_holding_the_streams_is_ended_with_the_probe() {
+    let temp = common::temp();
+    let pid_file = temp.path().join("holder.pid");
+    let mut argv = python(
+        "import subprocess, sys; p = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'], stdin=subprocess.DEVNULL, close_fds=False); open(sys.argv[1], 'w').write(str(p.pid))",
+    );
+    argv.push(pid_file.to_string_lossy().into_owned());
+    let start = Instant::now();
+    assert!(run_bounded(&argv, None, Duration::from_secs(2)).is_none());
+    assert!(start.elapsed() < Duration::from_secs(10));
+    let holder: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while axiom::base::proc::pid_alive(holder) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !axiom::base::proc::pid_alive(holder),
+        "pid {holder} still holds the probe's streams"
+    );
+}
+
+#[test]
+fn captured_output_keeps_only_its_tail_up_to_the_cap() {
+    let cap = axiom::base::proc::OUTPUT_CAP;
+    let mut argv = python(
+        "import sys; n = int(sys.argv[1]); sys.stdout.buffer.write(b'h' * 1000 + b'x' * n + b'END')",
+    );
+    argv.push(cap.to_string());
+    let output = run_bounded(&argv, None, Duration::from_secs(60)).unwrap();
+    assert!(output.success);
+    assert_eq!(output.stdout.len(), cap);
+    assert!(output.stdout.ends_with("xEND"));
+    assert!(!output.stdout.contains('h'));
+}
+
+#[test]
 fn binary_build_identifies_the_executable_itself() {
     let temp = common::temp();
     let build = |bytes: &[u8]| {

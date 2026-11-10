@@ -148,6 +148,35 @@ fn probe_reads_the_fake_and_keeps_the_raw_line() {
 }
 
 #[test]
+fn a_child_left_holding_the_streams_cannot_hold_the_probe_past_its_timeout() {
+    let dir = common::temp();
+    let pid_file = dir.path().join("holder.pid");
+    let flag = format!("--fake-version-holder={}", pid_file.display());
+    let start = Instant::now();
+    let probe = probe_version_within(
+        &common::fake_codex(&["--fake-version=codex-cli 999.1.2", &flag]),
+        Duration::from_secs(2),
+    );
+    let elapsed = start.elapsed();
+    let holder: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while axiom::base::proc::pid_alive(holder) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(elapsed < Duration::from_secs(10), "the probe took {elapsed:?}");
+    let error = probe.err().unwrap();
+    assert_eq!(error.kind, "probe_failed");
+    assert!(error.message.contains("did not answer"), "{}", error.message);
+    assert!(
+        !axiom::base::proc::pid_alive(holder),
+        "pid {holder} still holds the probe's streams"
+    );
+}
+
+#[test]
 fn hung_or_missing_probe_is_a_probe_failure() {
     let start = Instant::now();
     let hung = probe_version_within(

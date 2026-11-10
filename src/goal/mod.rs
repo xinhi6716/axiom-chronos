@@ -357,6 +357,7 @@ pub fn set_status_with_batch(
 /// Records how the batch this goal waits on ended and makes the goal active for the resumed session.
 /// False when the goal no longer waits on that batch, so the caller must not resume it.
 pub fn batch_ended(home: &Path, session: &str, batch: &Batch, end: BatchEnd) -> Res<bool> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     if goal.status != "waiting" || goal.batch.as_ref() != Some(batch) {
         return Ok(false);

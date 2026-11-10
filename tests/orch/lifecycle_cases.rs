@@ -1582,7 +1582,7 @@ fn supersede_rejects_nonsense() {
     rejected("missing", "a", 2, "unit missing not found");
     rejected("a", "a", 1, "cannot supersede itself");
     rejected("a", "other", 1, "belongs to n");
-    rejected("a", "apart", 1, "shares no file");
+    rejected("a", "apart", 1, "does not cover a.txt");
     rejected("a", "blank", 1, "has no brief");
     assert!(cli(&store, &["unit", "supersede", "a"])
         .stderr
@@ -1629,6 +1629,50 @@ fn a_cycle_through_a_longer_chain_is_rejected() {
     assert_eq!(out.exit_code, 1);
     assert!(out.stderr.contains("would form a cycle"), "{}", out.stderr);
     assert_eq!(column(&store, "c"), "pending");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_replacement_must_cover_every_file_it_takes_over() {
+    let (store, _repo) = setup();
+    add_unit(&store, "wide", "m", "a.txt b.txt");
+    add_unit(&store, "narrow", "m", "a.txt");
+    add_unit(&store, "dir", "m", "src/");
+    add_unit(&store, "file", "m", "src/x.rs");
+    let refused = |unit: &str, by: &str, missing: &str| {
+        let before = fs::read(store.join("units.tsv")).unwrap();
+        let out = supersede(&store, unit, by);
+        assert_eq!(out.exit_code, 1, "{unit} by {by}: {}", out.stdout);
+        assert!(
+            out.stderr.contains(&format!("does not cover {missing}")),
+            "{unit} by {by}: {}",
+            out.stderr
+        );
+        assert_eq!(fs::read(store.join("units.tsv")).unwrap(), before);
+    };
+    refused("wide", "narrow", "b.txt");
+    refused("dir", "file", "src/");
+    assert_eq!(supersede(&store, "file", "dir").exit_code, 0);
+    assert_eq!(supersede(&store, "narrow", "wide").exit_code, 0);
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_replacement_covers_the_files_of_the_whole_chain_it_takes_over() {
+    let (store, _repo) = setup();
+    add_unit(&store, "wide", "m", "a.txt b.txt");
+    add_unit(&store, "fix", "m", "a.txt b.txt");
+    add_unit(&store, "narrow", "m", "a.txt");
+    assert_eq!(supersede(&store, "wide", "fix").exit_code, 0);
+    fs::write(
+        store.join("fix.brief"),
+        "GOAL test\nSCOPE a.txt\nVERIFY echo ok\n",
+    )
+    .unwrap();
+    let out = supersede(&store, "fix", "narrow");
+    assert_eq!(out.exit_code, 1, "{}", out.stdout);
+    assert!(out.stderr.contains("does not cover b.txt"), "{}", out.stderr);
+    assert_eq!(column(&store, "fix"), "pending");
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }
 

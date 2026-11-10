@@ -7,6 +7,7 @@ use crate::{
     goal::{self, Batch, BatchEnd, Goal},
 };
 use std::{
+    collections::VecDeque,
     io::{self, BufRead, Cursor, Read, Write},
     path::Path,
     sync::{
@@ -19,10 +20,16 @@ use std::{
 const INTERRUPTED_EXIT: i32 = 130;
 const RUN_END_CHECK: Duration = Duration::from_millis(100);
 
+/// Lines read from the input, plus those an ended run received and handed back, which come first.
+struct Lines {
+    read: mpsc::Receiver<Vec<u8>>,
+    kept: VecDeque<Vec<u8>>,
+}
+
 /// Input shared by the consecutive runs of one process: one thread reads it, and each run gets a
 /// reader that ends with the run, so a finished run cannot swallow a line typed for the next one.
 struct SharedInput {
-    lines: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    lines: Arc<Mutex<Lines>>,
     ended: Arc<AtomicBool>,
 }
 impl SharedInput {
@@ -36,7 +43,10 @@ impl SharedInput {
             }
         });
         Self {
-            lines: Arc::new(Mutex::new(rx)),
+            lines: Arc::new(Mutex::new(Lines {
+                read: rx,
+                kept: VecDeque::new(),
+            })),
             ended: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -59,7 +69,7 @@ impl Drop for SharedInput {
     }
 }
 struct RunInput {
-    lines: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    lines: Arc<Mutex<Lines>>,
     ended: Arc<AtomicBool>,
     line: Cursor<Vec<u8>>,
 }
@@ -75,12 +85,17 @@ impl BufRead for RunInput {
         while self.line.position() >= self.line.get_ref().len() as u64
             && !self.ended.load(Ordering::SeqCst)
         {
-            let next = self
-                .lines
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .recv_timeout(RUN_END_CHECK);
+            let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+            let next = match lines.kept.pop_front() {
+                Some(line) => Ok(line),
+                None => lines.read.recv_timeout(RUN_END_CHECK),
+            };
             match next {
+                // The run ended while this reader waited, so the line is the next run's.
+                Ok(line) if self.ended.load(Ordering::SeqCst) => {
+                    lines.kept.push_front(line);
+                    break;
+                }
                 Ok(line) => self.line = Cursor::new(line),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -323,6 +338,40 @@ mod tests {
         std::thread::spawn(move || tx.send(read(&mut reader)));
         lines.end_run();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "");
+    }
+
+    /// Input whose lines arrive when the test sends them.
+    struct Fed(mpsc::Receiver<Vec<u8>>);
+    impl Read for Fed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Ok(line) = self.0.recv() else {
+                return Ok(0);
+            };
+            buf[..line.len()].copy_from_slice(&line);
+            Ok(line.len())
+        }
+    }
+    fn read_within(mut reader: Box<dyn BufRead + Send>) -> String {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || tx.send(read(&mut reader)));
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the reader did not return")
+    }
+
+    #[test]
+    fn a_line_typed_while_the_ended_run_is_receiving_goes_to_the_next_run() {
+        for _ in 0..10 {
+            let (feed, fed) = mpsc::channel();
+            let mut lines = SharedInput::new(Box::new(io::BufReader::new(Fed(fed))));
+            let one = lines.for_run();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || tx.send(read_within(one)));
+            std::thread::sleep(RUN_END_CHECK / 4);
+            lines.end_run();
+            feed.send(b"for the next run\n".to_vec()).unwrap();
+            assert_eq!(rx.recv().unwrap(), "", "the ended run took the line");
+            assert_eq!(read_within(lines.for_run()), "for the next run\n");
+        }
     }
 
     #[test]

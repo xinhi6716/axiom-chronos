@@ -2,7 +2,9 @@
 
 The brief text selects the turn scenario. Command-line options reshape the CLI itself:
 --fake-version=<line> is what `--version` prints, --fake-version-exit=<n> sets its exit code,
---fake-version-hang never answers, and --fake-break=<method>:<effect> makes that request misbehave
+--fake-version-hang never answers, --fake-version-holder=<pid file> answers and exits but leaves a
+child holding its output streams (as a wrapper whose child outlives it), writing that child's pid
+to the file, and --fake-break=<method>:<effect> makes that request misbehave
 with exit, silent, not-json, no-result, empty-result or <code>:<message>. Method `start` exits
 before reading anything, as when the `app-server` command line is rejected.
 """
@@ -25,7 +27,13 @@ def option(name, default=''):
 if '--version' in sys.argv:
     if '--fake-version-hang' in sys.argv:
         time.sleep(60)
-    print(option('version', 'codex-cli fake'))
+    print(option('version', 'codex-cli fake'), flush=True)
+    if option('version-holder'):
+        import subprocess
+        holder = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'],
+                                  stdin=subprocess.DEVNULL, close_fds=False)
+        with open(option('version-holder'), 'w') as f:
+            f.write(str(holder.pid))
     sys.exit(int(option('version-exit', '0')))
 broken_method, _, breakage = option('break').partition(':')
 if broken_method == 'start':

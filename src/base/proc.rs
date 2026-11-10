@@ -3,6 +3,7 @@ use std::{
     io::Read,
     path::Path,
     process::{Child, Command, Stdio},
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 /// The one place a child process is created; applies CREATE_NO_WINDOW when this process has no console.
@@ -97,6 +98,9 @@ pub fn kill_tree(child: &mut Child) {
         eprintln!("axiom: {}", error.message);
     }
     let _ = child.kill();
+    reap(child);
+}
+fn reap(child: &mut Child) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if !matches!(child.try_wait(), Ok(None)) {
@@ -162,44 +166,146 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
         timed_out: run.timed_out,
     })
 }
+/// The most of each stream `capture` keeps: its tail, where results and failures are printed.
+pub const OUTPUT_CAP: usize = 8 << 20;
+/// How long the streams may take to close once everything holding them has been killed.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub struct Captured {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub timed_out: bool,
 }
-pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
-    let out = child.stdout.take().unwrap();
-    let err = child.stderr.take().unwrap();
-    let reader = |mut r: Box<dyn Read + Send>| {
+
+/// Reads one stream to its end on its own thread, keeping at most the last `OUTPUT_CAP` bytes.
+struct Drain {
+    kept: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+impl Drain {
+    fn start(mut stream: impl Read + Send + 'static) -> Self {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let (tx, done) = mpsc::channel();
+        let shared = Arc::clone(&kept);
         std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = r.read_to_end(&mut b);
-            b
-        })
-    };
-    let a = reader(Box::new(out));
-    let b = reader(Box::new(err));
-    let start = Instant::now();
-    let (exit_code, timed_out) = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break (s.code().unwrap_or(-1), false),
-            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                kill_tree(&mut child);
-                break (-1, true);
+            let mut chunk = vec![0; 64 << 10];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut kept = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        kept.extend_from_slice(&chunk[..n]);
+                        if kept.len() > 2 * OUTPUT_CAP {
+                            let excess = kept.len() - OUTPUT_CAP;
+                            kept.drain(..excess);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
             }
+            let _ = tx.send(());
+        });
+        Self { kept, done }
+    }
+    /// True once the stream has ended.
+    fn ended_by(&self, deadline: Instant) -> bool {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        !matches!(self.done.recv_timeout(wait), Err(mpsc::RecvTimeoutError::Timeout))
+    }
+    fn take(self) -> Vec<u8> {
+        let mut kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(|e| e.into_inner()));
+        if kept.len() > OUTPUT_CAP {
+            kept.drain(..kept.len() - OUTPUT_CAP);
+        }
+        kept
+    }
+}
+
+/// Everything a child started, including what outlives it: its process group on Unix (`command`
+/// makes one), a job object on Windows. A process started in the moment before the child joins
+/// its job, or one that leaves its group or job, is out of reach.
+struct Group {
+    #[cfg(windows)]
+    job: Option<Job>,
+}
+impl Group {
+    fn of(_child: &Child) -> Self {
+        Self {
+            #[cfg(windows)]
+            job: Job::holding(_child),
+        }
+    }
+    fn kill(&self, child: &mut Child) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        if self.job.as_ref().is_some_and(Job::terminate) {
+            reap(child);
+            return;
+        }
+        kill_tree(child);
+    }
+}
+#[cfg(windows)]
+struct Job(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+impl Job {
+    fn holding(child: &Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return None;
+        }
+        let job = Self(handle);
+        (unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } != 0).then_some(job)
+    }
+    fn terminate(&self) -> bool {
+        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1) != 0 }
+    }
+}
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// Runs `child`, which `command` built with piped stdout and stderr, to its end or `timeout`.
+/// The deadline covers the streams too: a process the child leaves behind can hold them open, and
+/// at the deadline everything the child started is killed. A run that has not closed its
+/// streams by then is `timed_out`, with exit code -1 and whatever output arrived.
+pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
+    let group = Group::of(&child);
+    let out = Drain::start(child.stdout.take().unwrap());
+    let err = Drain::start(child.stderr.take().unwrap());
+    let deadline = Instant::now() + timeout;
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s.code().unwrap_or(-1)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => break None,
             Err(e) => {
-                kill_tree(&mut child);
+                group.kill(&mut child);
                 return Err(Failure::new("process", e.to_string()));
             }
         }
     };
+    let finished = exited.filter(|_| out.ended_by(deadline) && err.ended_by(deadline));
+    if finished.is_none() {
+        group.kill(&mut child);
+        let grace = Instant::now() + DRAIN_GRACE;
+        // Only a holder out of the group's reach can keep a drain thread past this.
+        let _ = out.ended_by(grace) && err.ended_by(grace);
+    }
     Ok(Captured {
-        exit_code,
-        stdout: a.join().unwrap_or_default(),
-        stderr: b.join().unwrap_or_default(),
-        timed_out,
+        exit_code: finished.unwrap_or(-1),
+        stdout: out.take(),
+        stderr: err.take(),
+        timed_out: finished.is_none(),
     })
 }
 
