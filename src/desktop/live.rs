@@ -375,10 +375,13 @@ struct LedgerEntry {
     at: Instant,
 }
 
+type EvolveJob = dyn Fn(&evolve::Inputs, &Path, &Config) -> Res<evolve::StartOutcome> + Send + Sync;
+
 /// Everything that is owned by the worker thread.
 struct Engine {
     evolve_digest: Option<Digest>,
     evolve_starting: bool,
+    evolve_job: Arc<EvolveJob>,
     home: PathBuf,
     projects: PathBuf,
     config: Box<dyn Fn() -> Config + Send>,
@@ -416,6 +419,7 @@ impl Engine {
         Self {
             evolve_digest: None,
             evolve_starting: false,
+            evolve_job: Arc::new(|inputs, repo, config| evolve::start(inputs, Some(repo), config, Box::new(std::io::empty()), &mut std::io::sink())),
             poller: Poller::new(&home),
             home,
             projects,
@@ -747,11 +751,14 @@ impl Engine {
         let config = (self.config)();
         let digest = self.evolve_digest.clone();
         let commands = self.commands.clone();
+        let job = self.evolve_job.clone();
         std::thread::spawn(move || {
-            let result = evolve::start(&inputs, Some(&repo), &config, Box::new(std::io::empty()), &mut std::io::sink()).map(|outcome| match outcome {
-                evolve::StartOutcome::NoOp { reason } => EvolveOutcome::NoOp { reason: reason.into() },
-                evolve::StartOutcome::Ran { exit_code, .. } => EvolveOutcome::Ran { exit_code },
-            });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&inputs, &repo, &config)))
+                .unwrap_or_else(|_| Err(Failure::new("engine_stopped", "evolve start worker panicked")))
+                .map(|outcome| match outcome {
+                    evolve::StartOutcome::NoOp { reason } => EvolveOutcome::NoOp { reason: reason.into() },
+                    evolve::StartOutcome::Ran { exit_code, .. } => EvolveOutcome::Ran { exit_code },
+                });
             let runs = (|| {
                 let digest = match digest { Some(digest) => digest, None => evolve::preview(&inputs)?.digest };
                 evolve_runs(&inputs.home, &digest)
@@ -1880,6 +1887,25 @@ mod tests {
     }
 
     #[test]
+    fn full_terra_model_and_role_have_equal_nonzero_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let contents: String = codex_events(session, "gpt-6.1-terra", 1_000_000, 400_000, 200_000)
+            .iter().map(|e| format!("{e}\n")).collect();
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let wish = Poller::new(&home).poll().wishes.remove(0);
+        let usage = usage_of(&wish, Some(&ledger));
+        let model = usage.models.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap().usd.unwrap();
+        let role = usage.roles.iter().find(|r| r.role.as_ref() == "codex gpt-6.1-terra").unwrap().usd.unwrap();
+        assert!(model > 0.0 && role > 0.0);
+        assert_eq!(model, role);
+    }
+
+    #[test]
     fn ledger_distinguishes_missing_claude_fields_from_zero() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -2265,6 +2291,33 @@ mod tests {
         assert!(!state.evolve.starting);
         assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "not_git_repo");
         assert!(state.evolve.outcome.is_none());
+    }
+
+    #[test]
+    fn evolve_start_panic_clears_starting_and_allows_retry() {
+        let mut rig = rig();
+        rig.engine.evolve_job = Arc::new(|_, _, _| panic!("injected evolve panic"));
+        let mut state = state_with(vec![]);
+        state.evolve.starting = true;
+        let repo = rig._dir.path().to_path_buf();
+        rig.engine.handle(Command::EvolveStart(repo.clone()));
+        let reply = rig._receiver.recv_timeout(Duration::from_secs(3)).expect("panicked start replies");
+        rig.engine.handle(reply);
+        apply(&mut state, rig.updates());
+        assert!(!state.evolve.starting);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "engine_stopped");
+
+        rig.engine.evolve_job = Arc::new(|_, _, _| Err(Failure::new("test_reply", "retry reached job")));
+        state.evolve.starting = true;
+        state.evolve.error = None;
+        rig.engine.handle(Command::EvolveStart(repo));
+        apply(&mut state, rig.updates());
+        assert!(state.evolve.error.is_none(), "retry must not be busy");
+        let reply = rig._receiver.recv_timeout(Duration::from_secs(3)).expect("retry replies");
+        rig.engine.handle(reply);
+        apply(&mut state, rig.updates());
+        assert!(!state.evolve.starting);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "test_reply");
     }
 
     #[test]
