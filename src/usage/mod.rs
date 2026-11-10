@@ -16,7 +16,7 @@ use scan::{Call, FileScan};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -54,7 +54,9 @@ impl Tally {
     fn add(&mut self, call: &Call) {
         let u = &call.usage;
         self.calls += 1;
-        for (missing, reported) in self.missing.iter_mut().zip(call.reported) { *missing |= !reported; }
+        for (missing, reported) in self.missing.iter_mut().zip(call.reported) {
+            *missing |= !reported;
+        }
         self.input += u.input;
         self.cache_write += u.cache_write;
         self.cache_write_5m += u.cache_write_5m();
@@ -115,7 +117,8 @@ impl CodexTokens {
             output: n("outputTokens"),
             reasoning_output: n("reasoningOutputTokens"),
             total: n("totalTokens"),
-            missing: ["inputTokens", "cachedInputTokens", "outputTokens"].map(|key| usage[key].as_u64().is_none()),
+            missing: ["inputTokens", "cachedInputTokens", "outputTokens"]
+                .map(|key| usage[key].as_u64().is_none()),
         })
     }
 }
@@ -333,7 +336,26 @@ fn find_transcript(projects: &Path, session: &str, cwd: Option<&str>) -> Res<Opt
         .find(|p| p.is_file()))
 }
 
-fn discover(locations: &Locations) -> Res<BTreeMap<String, Run>> {
+/// Session identities recorded by Chronos goals and wish logs, regardless of age.
+pub fn chronos_sessions(home: &Path) -> Res<BTreeSet<String>> {
+    let mut sessions = BTreeSet::new();
+    for goal in entries_with_suffix(&home.join("goals"), ".json")?
+        .into_iter()
+        .filter(|path| path.is_file())
+    {
+        if let Some(session) = goal.file_stem().and_then(|s| s.to_str()) {
+            sessions.insert(session.to_owned());
+        }
+    }
+    for log in entries_with_suffix(&home.join("logs"), ".jsonl")? {
+        if let Some((session, _)) = scan::log_identity(&log) {
+            sessions.insert(session);
+        }
+    }
+    Ok(sessions)
+}
+
+fn discover(locations: &Locations, scoped: bool) -> Res<BTreeMap<String, Run>> {
     let mut runs = BTreeMap::<String, Run>::new();
     for log in entries_with_suffix(&locations.home.join("logs"), ".jsonl")? {
         let Some((session, cwd)) = scan::log_identity(&log) else {
@@ -345,6 +367,9 @@ fn discover(locations: &Locations) -> Res<BTreeMap<String, Run>> {
         run.logs.push(log);
     }
     for goal in entries_with_suffix(&locations.home.join("goals"), ".json")? {
+        if scoped && !goal.is_file() {
+            continue;
+        }
         let Some(session) = goal.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -369,7 +394,7 @@ fn locate(locations: &Locations, session: Option<&str>) -> Res<(String, Run)> {
     if let Some(session) = session {
         base::require_slug("session", session)?;
     }
-    let mut runs = discover(locations)?;
+    let mut runs = discover(locations, false)?;
     let Some(session) = session else {
         return runs
             .into_iter()
@@ -784,6 +809,15 @@ fn log_skill(run: &Run) -> Option<String> {
 }
 
 pub fn period(locations: &Locations, now_ms: i64, since_days: u32) -> Res<Period> {
+    period_impl(locations, now_ms, since_days, false)
+}
+
+/// Usage for sessions identified by Chronos goals and wish logs only.
+pub fn chronos_period(locations: &Locations, now_ms: i64, since_days: u32) -> Res<Period> {
+    period_impl(locations, now_ms, since_days, true)
+}
+
+fn period_impl(locations: &Locations, now_ms: i64, since_days: u32, scoped: bool) -> Res<Period> {
     if since_days == 0 {
         return Err(Failure::new(
             "invalid_argument",
@@ -793,29 +827,31 @@ pub fn period(locations: &Locations, now_ms: i64, since_days: u32) -> Res<Period
     let start_ms = now_ms
         .checked_sub(i64::from(since_days) * DAY_MS)
         .ok_or_else(|| Failure::new("invalid_argument", "period start is out of range"))?;
-    let mut runs = discover(locations)?;
-    let dirs = match std::fs::read_dir(&locations.projects) {
-        Ok(dirs) => Some(dirs),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(io_failure(&locations.projects, e)),
-    };
-    if let Some(dirs) = dirs {
-        let mut dirs = dirs
-            .map(|entry| {
-                entry
-                    .map(|e| e.path())
-                    .map_err(|e| io_failure(&locations.projects, e))
-            })
-            .collect::<Res<Vec<_>>>()?;
-        dirs.sort();
-        for dir in dirs.into_iter().filter(|path| path.is_dir()) {
-            for path in entries_with_suffix(&dir, ".jsonl")? {
-                let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let run = runs.entry(session.to_owned()).or_default();
-                if run.transcript.is_none() {
-                    run.transcript = Some(path);
+    let mut runs = discover(locations, scoped)?;
+    if !scoped {
+        let dirs = match std::fs::read_dir(&locations.projects) {
+            Ok(dirs) => Some(dirs),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io_failure(&locations.projects, e)),
+        };
+        if let Some(dirs) = dirs {
+            let mut dirs = dirs
+                .map(|entry| {
+                    entry
+                        .map(|e| e.path())
+                        .map_err(|e| io_failure(&locations.projects, e))
+                })
+                .collect::<Res<Vec<_>>>()?;
+            dirs.sort();
+            for dir in dirs.into_iter().filter(|path| path.is_dir()) {
+                for path in entries_with_suffix(&dir, ".jsonl")? {
+                    let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let run = runs.entry(session.to_owned()).or_default();
+                    if run.transcript.is_none() {
+                        run.transcript = Some(path);
+                    }
                 }
             }
         }
