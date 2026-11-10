@@ -165,6 +165,32 @@ fn graph() -> Check {
     }
 }
 
+fn agy() -> Check {
+    let detail = match base::resolve_command("AXIOM_AGY_CMD", "agy") {
+        Ok(command) => format!(
+            "{} (optional; `axiom review` falls back to it when Codex is out of quota or logged out)",
+            command[0]
+        ),
+        Err(e) if e.kind == "not_installed" => {
+            "not on PATH (optional; `axiom review` then has Codex only)".to_string()
+        }
+        Err(e) => {
+            return Check {
+                label: "agy",
+                ok: false,
+                required: false,
+                detail: e.message,
+            }
+        }
+    };
+    Check {
+        label: "agy",
+        ok: true,
+        required: false,
+        detail,
+    }
+}
+
 #[cfg(windows)]
 fn windows_shell() -> Check {
     match base::resolve_command("AXIOM_PWSH_CMD", "pwsh") {
@@ -276,6 +302,7 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
         sqlite(),
         state(),
         graph(),
+        agy(),
     ];
     checks.extend(plugin());
     #[cfg(windows)]

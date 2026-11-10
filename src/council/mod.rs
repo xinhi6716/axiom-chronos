@@ -193,6 +193,39 @@ pub struct CrossReply {
     pub detail: Option<String>,
 }
 
+/// One agy call outside a council: `axiom review` asks Argon for a verdict on a diff. The
+/// invocation and output parsing are the council's own, so the two cannot drift apart.
+pub fn ask_agy(
+    command: &Res<Vec<String>>,
+    prompt: &str,
+    cwd: &Path,
+    schema: &Value,
+    schema_path: &Path,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> CrossReply {
+    let answer = ask_argon(
+        command,
+        Ask {
+            prompt: prompt.to_owned(),
+            cwd,
+            schema,
+            timeout,
+            stop,
+        },
+        schema_path,
+    );
+    CrossReply {
+        status: answer.status,
+        output: answer.output,
+        tokens: answer.tokens,
+        model: Some(ARGON_MODEL.to_owned()),
+        detail: answer.detail,
+    }
+}
+/// The longest prompt `ask_agy` accepts, in UTF-16 units; it travels on the command line.
+pub const AGY_PROMPT_LIMIT: usize = member::ARGV_LIMIT_UTF16;
+
 fn io(e: impl std::fmt::Display) -> Failure {
     Failure::new("io", e.to_string())
 }

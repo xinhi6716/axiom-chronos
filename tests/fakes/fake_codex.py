@@ -208,7 +208,9 @@ for line in sys.stdin:
         if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
             ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
             final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
-        if params.get('outputSchema') and 'BADJSON' in text:
+        if params.get('outputSchema') and 'DIFF REVIEW' in text:
+            final = json.dumps({'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'codex reviewed this diff'}]}) if 'BLOCKME' in text else json.dumps({'verdict': 'pass', 'findings': []})
+        elif params.get('outputSchema') and 'BADJSON' in text:
             final = 'not json'
         elif params.get('outputSchema') and 'WRONGSHAPE' in text:
             final = json.dumps({'wrong': 'shape'})

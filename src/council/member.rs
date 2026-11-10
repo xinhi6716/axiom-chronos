@@ -18,7 +18,7 @@ use std::{
 };
 
 const STDERR_KEEP: usize = 64 * 1024;
-const ARGV_LIMIT_UTF16: usize = 30_000;
+pub(super) const ARGV_LIMIT_UTF16: usize = 30_000;
 /// Parent settings that would change a nested claude: the one-hour cache TTL bills cache
 /// writes at a higher rate, and the rest mark it as a child of the wish.
 const FABLE_ENV_CLEARED: [&str; 8] = [
