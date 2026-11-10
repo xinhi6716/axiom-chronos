@@ -23,7 +23,7 @@ fn cut(text: &str, max: usize) -> (String, bool) {
     let more = chars.next().is_some();
     (head, more)
 }
-fn git(repo: &Path, args: &[&str]) -> Res<Vec<u8>> {
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Res<Vec<u8>> {
     let out = base::proc::cmd("git")
         .current_dir(repo)
         .args(args)
@@ -93,6 +93,39 @@ fn file_diff(repo: &Path, base: &str, tree: &str, path: &str) -> Res<String> {
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
+/// List each changed file, smallest change first, and append its diff while the whole pack
+/// stays within `budget` bytes; the rest are named for a direct read. Returns those omitted.
+pub(crate) fn pack_diffs(
+    budget: usize,
+    head_len: usize,
+    files: &mut [(String, u64, u64)],
+    listing: &mut String,
+    diffs: &mut String,
+    mut diff_of: impl FnMut(&str) -> Res<String>,
+) -> Res<Vec<String>> {
+    files.sort_by_key(|(path, added, removed)| (added + removed, path.clone()));
+    let mut omitted = Vec::new();
+    for (path, added, removed) in files.iter() {
+        let diff = diff_of(path)?;
+        let fits = head_len + diffs.len() + diff.len() <= budget;
+        listing.push_str(&format!(
+            "- {path}  +{added} -{removed}{}
+",
+            if fits {
+                ""
+            } else {
+                "  (read this file directly)"
+            }
+        ));
+        if fits {
+            diffs.push_str(&diff);
+        } else {
+            omitted.push(path.clone());
+        }
+    }
+    Ok(omitted)
+}
+
 pub fn pack_path(store: &Path, unit: &str) -> PathBuf {
     store.join("reports").join(format!("{unit}.review.md"))
 }
@@ -149,28 +182,19 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
     let changed: BTreeSet<String> = match base {
         Some(base) => {
             let mut files = changed_files(repo, base, &tree)?;
-            files.sort_by_key(|(path, added, removed)| (added + removed, path.clone()));
             file_count = files.len();
             if files.is_empty() {
-                listing.push_str("The worker changed no file in the unit's SCOPE.\n");
+                listing.push_str("The worker changed no file in the unit's SCOPE.
+");
             }
-            for (path, added, removed) in &files {
-                let diff = file_diff(repo, base, &tree, path)?;
-                let fits = head.len() + diffs.len() + diff.len() <= PACK_BYTES;
-                listing.push_str(&format!(
-                    "- {path}  +{added} -{removed}{}\n",
-                    if fits {
-                        ""
-                    } else {
-                        "  (read this file directly)"
-                    }
-                ));
-                if fits {
-                    diffs.push_str(&diff);
-                } else {
-                    omitted.push(path.clone());
-                }
-            }
+            omitted = pack_diffs(
+                PACK_BYTES,
+                head.len(),
+                &mut files,
+                &mut listing,
+                &mut diffs,
+                |path| file_diff(repo, base, &tree, path),
+            )?;
             files.into_iter().map(|(path, _, _)| path).collect()
         }
         None => {

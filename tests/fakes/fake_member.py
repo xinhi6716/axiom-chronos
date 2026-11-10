@@ -69,6 +69,8 @@ def stances():
 
 
 answer = stances() if round2 else position()
+if 'DIFF REVIEW' in prompt:
+    answer = {'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'agy reviewed this diff'}]} if 'BLOCKME' in prompt else {'verdict': 'pass', 'findings': []}
 if 'wrong-shape' in scenario:
     answer = {'wrong': 'shape'}
 garbage = 'garbage' in scenario or (round2 and 'r2-garbage' in scenario)

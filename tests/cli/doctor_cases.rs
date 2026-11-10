@@ -63,7 +63,8 @@ fn optional_and_required_failures() {
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(!text.contains("agy"));
+    // agy is an optional backup reviewer: listed, and never a failure.
+    assert!(text.lines().any(|l| l.contains("agy") && l.contains("optional")));
     assert!(!text.contains("Antigravity"));
     let output = doctor(temp.path())
         .env("AXIOM_CLAUDE_CMD", &missing)

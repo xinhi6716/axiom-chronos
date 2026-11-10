@@ -309,6 +309,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),
         "usage" => usage_command(rest),
+        "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
 }
