@@ -599,26 +599,73 @@ impl AppState {
 /// A wish as the screens show it: the markup a prompt arrives wrapped in is taken off and the
 /// words inside stay. The stored wish is never changed, only what is drawn.
 ///
-/// A tag counts as wrapper markup when it is one of the known wrappers, or is written in
-/// snake_case or kebab-case (`<pasted_content id="a0d5">`, `</user-query>`). Plain words such as
-/// `<div>` or `Vec<T>` are text and stay.
+/// Only the known wrapper tags come off (`<pasted_content id="a0d5">`, `</user-query>`). Any other
+/// tag, snake_case or kebab-case included (`<my-widget>`, `<some_block>`), is the user's own text
+/// and stays, as does everything inside code spans and fenced code.
 pub fn clean_wish(wish: &str) -> String {
-    const WRAPPERS: [&str; 6] = ["pasted_content", "pasted_text", "pasted_image", "attachment", "system-reminder", "user_query"];
+    const WRAPPERS: [&str; 8] = [
+        "pasted_content",
+        "pasted_text",
+        "pasted_image",
+        "attachment",
+        "system-reminder",
+        "system_reminder",
+        "user_query",
+        "user-query",
+    ];
     let mut out = String::with_capacity(wish.len());
-    let mut rest = wish;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let tail = &rest[open..];
-        match wrapper_tag_len(tail, &WRAPPERS) {
-            Some(len) => rest = &tail[len..],
-            None => {
-                out.push('<');
-                rest = &tail[1..];
-            }
-        }
+    let mut at = 0;
+    while at < wish.len() {
+        let rest = &wish[at..];
+        let step = match rest.as_bytes()[0] {
+            b'`' => code_len(wish, at).unwrap_or_else(|| rest.bytes().take_while(|b| *b == b'`').count()),
+            b'<' => match wrapper_tag_len(rest, &WRAPPERS) {
+                Some(len) => {
+                    at += len;
+                    continue;
+                }
+                None => 1,
+            },
+            _ => rest.find(['`', '<']).unwrap_or(rest.len()),
+        };
+        out.push_str(&wish[at..at + step]);
+        at += step;
     }
-    out.push_str(rest);
     out.trim().to_owned()
+}
+
+/// The byte length of the code at `at` (a backtick): a fenced block when the backticks start a
+/// line and number three or more and a line of at least as many closes it, else an inline span
+/// closed by a run of the same length. `None` when it is never closed.
+fn code_len(text: &str, at: usize) -> Option<usize> {
+    let ticks = text[at..].bytes().take_while(|b| *b == b'`').count();
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    if ticks >= 3 && text[line_start..at].chars().all(|c| c == ' ') {
+        let mut pos = text[at..].find('\n').map(|i| at + i + 1)?;
+        while pos <= text.len() {
+            let line_end = text[pos..].find('\n').map_or(text.len(), |i| pos + i);
+            let line = text[pos..line_end].trim_start_matches(' ');
+            let run = line.bytes().take_while(|b| *b == b'`').count();
+            if run >= ticks && line[run..].trim().is_empty() {
+                return Some(line_end - at);
+            }
+            if line_end >= text.len() {
+                break;
+            }
+            pos = line_end + 1;
+        }
+        return None;
+    }
+    let mut from = at + ticks;
+    while let Some(found) = text[from..].find('`') {
+        let start = from + found;
+        let run = text[start..].bytes().take_while(|b| *b == b'`').count();
+        if run == ticks {
+            return Some(start + run - at);
+        }
+        from = start + run;
+    }
+    None
 }
 
 /// The length of the wrapper tag at the start of `text`, if it begins with one.
@@ -630,15 +677,12 @@ fn wrapper_tag_len(text: &str, known: &[&str]) -> Option<usize> {
     }
     let inner = inner.strip_prefix('/').unwrap_or(inner);
     let name_end = inner.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(inner.len());
-    let name = &inner[..name_end];
-    let tag_like = name.starts_with(|c: char| c.is_ascii_lowercase())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-    let wrapper = known.contains(&name) || name.contains('_') || name.contains('-');
-    (tag_like && wrapper).then_some(close + 1)
+    known.contains(&&inner[..name_end]).then_some(close + 1)
 }
 
 /// A line of a markdown file as plain text for a list that draws no markdown: headings are
-/// dropped, bullet and number markers and bold marks come off.
+/// dropped, bullet and number markers come off, and so do real bold marks. Code spans, `a ** b`,
+/// `**kwargs` and identifiers such as `__init__` are not bold and stay as written.
 pub fn plain_line(line: &str) -> Option<String> {
     let line = line.trim();
     if line.starts_with('#') {
@@ -651,9 +695,81 @@ pub fn plain_line(line: &str) -> Option<String> {
     } else {
         ["- ", "* ", "+ "].iter().find_map(|marker| line.strip_prefix(marker)).unwrap_or(line)
     };
-    let body = body.replace("**", "").replace("__", "");
+    let body = strip_bold(body);
     let body = body.trim();
     (!body.is_empty()).then(|| body.to_owned())
+}
+
+/// `text` without its bold marks. A `**` pair is bold when the opener is followed and the closer
+/// preceded by a non-space, and the opener does not sit inside a word (`2**3`). A `__` pair is
+/// bold under the same rules when what it wraps is more than one plain identifier: it holds a
+/// space or a non-ASCII character, so `__init__` stays. Code spans are never touched.
+fn strip_bold(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut code = vec![false; chars.len()];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '`' {
+            i += 1;
+            continue;
+        }
+        let ticks = chars[i..].iter().take_while(|c| **c == '`').count();
+        let mut j = i + ticks;
+        let mut close = None;
+        while j < chars.len() {
+            if chars[j] == '`' {
+                let run = chars[j..].iter().take_while(|c| **c == '`').count();
+                if run == ticks {
+                    close = Some(j + run);
+                    break;
+                }
+                j += run;
+            } else {
+                j += 1;
+            }
+        }
+        let end = close.unwrap_or(i + ticks);
+        code[i..end].iter_mut().for_each(|c| *c = true);
+        i = end;
+    }
+    let mut drop = vec![false; chars.len()];
+    let mut open: Vec<(char, usize)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if code[i] || (c != '*' && c != '_') {
+            i += 1;
+            continue;
+        }
+        let run = chars[i..].iter().take_while(|x| **x == c).count();
+        let at = i;
+        i += run;
+        if run != 2 {
+            continue;
+        }
+        let before = at.checked_sub(1).map(|p| chars[p]);
+        let after = chars.get(at + 2).copied();
+        let can_close = before.is_some_and(|b| !b.is_whitespace());
+        let can_open = after.is_some_and(|a| !a.is_whitespace())
+            && !before.is_some_and(|b| b.is_ascii_alphanumeric() || b == '_');
+        if can_close && !after.is_some_and(|a| c == '_' && a.is_ascii_alphanumeric()) {
+            if let Some(slot) = open.iter().rposition(|(k, _)| *k == c) {
+                let from = open[slot].1;
+                let inner: String = chars[from + 2..at].iter().collect();
+                let bold = c == '*' || inner.chars().any(|x| x.is_whitespace() || !x.is_ascii());
+                if bold {
+                    drop[from..from + 2].iter_mut().for_each(|d| *d = true);
+                    drop[at..at + 2].iter_mut().for_each(|d| *d = true);
+                    open.truncate(slot);
+                    continue;
+                }
+            }
+        }
+        if can_open {
+            open.push((c, at));
+        }
+    }
+    chars.iter().zip(&drop).filter(|(_, d)| !**d).map(|(c, _)| *c).collect()
 }
 
 /// A warning the usage ledger raised, kept as facts so each screen can word it for its reader.
@@ -813,8 +929,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_component_tags_in_prose_and_code_stay() {
+        for text in [
+            "修復 <my-widget>",
+            "render <my-widget id=\"a\">x</my-widget> here",
+            "use <snake_case_tag> and </kebab-tag>",
+            "see `<my-widget>` and\n```\n<some_block>\n```",
+        ] {
+            assert_eq!(clean_wish(text), text);
+        }
+        assert_eq!(clean_wish("`<attachment>` stays <attachment>but this goes</attachment>"), "`<attachment>` stays but this goes");
+    }
+
+    #[test]
     fn an_unclosed_bracket_keeps_the_rest() {
         assert_eq!(clean_wish("<pasted_content id=\"a"), "<pasted_content id=\"a");
+    }
+
+    #[test]
+    fn plain_line_keeps_identifiers_and_code() {
+        assert_eq!(plain_line("- call `__init__` first"), Some("call `__init__` first".into()));
+        assert_eq!(plain_line("- rename __init__ and __main__"), Some("rename __init__ and __main__".into()));
+        assert_eq!(plain_line("- compute a ** b and 2**3"), Some("compute a ** b and 2**3".into()));
+        assert_eq!(plain_line("- pass **kwargs through"), Some("pass **kwargs through".into()));
+        assert_eq!(plain_line("- keep `**x**` as code"), Some("keep `**x**` as code".into()));
+        assert_eq!(plain_line("- __two words__ and **強調** here"), Some("two words and 強調 here".into()));
+        assert_eq!(plain_line("1. **Fix:** the `a ** b` case"), Some("Fix: the `a ** b` case".into()));
     }
 
     fn reads(agent: &str, path: &str, reads: u64, largest: u64) -> Note {

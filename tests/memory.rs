@@ -303,6 +303,30 @@ fn record_requires_files_and_deduplicates_by_file_set() {
     );
 }
 
+#[test]
+fn a_duplicate_record_reconfirms_the_entry_and_changes_nothing_else() {
+    let (_temp, memory, mut r) = setup();
+    let first = memory.record(&r).unwrap();
+    let id = first["id"].as_i64().unwrap();
+    let before = memory.get(id).unwrap()["entry"].clone();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Same unit and files, other words: the stored entry is the one that counts.
+    r.body = "a different body".into();
+    r.summary = "a different summary".into();
+    r.title = "a different title".into();
+    let again = memory.record(&r).unwrap();
+    assert_eq!(again["id"], first["id"]);
+    assert_eq!(again["duplicate"], true);
+    let after = memory.get(id).unwrap()["entry"].clone();
+    assert!(
+        after["confirmed"].as_f64().unwrap() > before["confirmed"].as_f64().unwrap(),
+        "confirmed moved: {before} -> {after}"
+    );
+    for field in ["created", "corrected", "title", "summary", "body", "symbols", "wish", "files"] {
+        assert_eq!(after[field], before[field], "{field} must stay");
+    }
+}
+
 mod lint_cases {
     use super::*;
     use axiom::memory::lint;
@@ -346,6 +370,69 @@ mod lint_cases {
         let e = memory.correct(id, "> \"made up\" - a.py").unwrap_err();
         assert_eq!(e.kind, "fabricated_quote");
         memory.correct(id, "> \"real  text\" - a.py").unwrap();
+    }
+    #[test]
+    fn a_source_path_with_spaces_is_checked_whole() {
+        let (_t, memory, mut r) = with_source(b"x");
+        let dir = std::path::Path::new(&r.project_dir).join("docs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("source notes.md"), "the real words").unwrap();
+        r.body = "> \"the real words\" - docs/source notes.md".into();
+        memory.record(&r).unwrap();
+        r.body = "> \"made up words\" - docs/source notes.md".into();
+        assert_eq!(memory.record(&r).unwrap_err().kind, "fabricated_quote");
+        r.body = "> \"the real words\" - docs/no such file.md".into();
+        assert_eq!(memory.record(&r).unwrap_err().kind, "missing_source");
+        r.body = "> \"x\" - ../my notes.md".into();
+        assert_eq!(memory.record(&r).unwrap_err().kind, "invalid_source");
+    }
+    #[test]
+    fn a_rooted_source_path_is_refused() {
+        let (_t, memory, mut r) = with_source(b"x");
+        let mut sources = vec!["/outside.txt"];
+        if cfg!(windows) {
+            sources.extend(["\\outside.txt","C:outside.txt"]);
+        }
+        for source in sources {
+            r.body = format!("> \"x\" - {source}");
+            let e = memory.record(&r).unwrap_err();
+            assert_eq!(e.kind, "invalid_source", "{source}: {}", e.message);
+        }
+    }
+    /// A directory link `link` in `dir` that points at `target`: a symbolic link, or on Windows
+    /// without Developer Mode a junction. `None` when neither can be made.
+    fn dir_link(dir: &std::path::Path, target: &std::path::Path) -> Option<std::path::PathBuf> {
+        let link = dir.join("link");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+        made.then_some(link)
+    }
+    #[test]
+    fn a_link_inside_the_project_cannot_lead_a_quote_source_outside() {
+        let (temp, memory, mut r) = with_source(b"x");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "top secret words").unwrap();
+        let project = std::path::PathBuf::from(&r.project_dir);
+        if dir_link(&project, &outside).is_none() {
+            eprintln!("SKIPPED: neither a symbolic link nor a junction can be created here");
+            return;
+        }
+        r.body = "> \"top secret words\" - link/secret.txt".into();
+        let e = memory.record(&r).unwrap_err();
+        assert_eq!(e.kind, "invalid_source", "{}", e.message);
+        // The same text inside the project is still fine.
+        fs::write(project.join("a.py"), "top secret words").unwrap();
+        r.body = "> \"top secret words\" - a.py".into();
+        memory.record(&r).unwrap();
     }
     fn kinds(memory: &Memory, r: &Record) -> Vec<&'static str> {
         memory

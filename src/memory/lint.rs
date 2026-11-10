@@ -17,7 +17,7 @@ pub fn normalize(text: &str) -> String {
 /// Checks every quote line of `text` against its source under `root`.
 /// `label` names the text in messages, e.g. `body` gives `body line 3`.
 pub fn check_quotes(text: &str, root: &Path, label: &str) -> Vec<Problem> {
-    let re = Regex::new(r#"^\s*>\s*["\u{201c}](.+)["\u{201d}]\s+[-\u{2013}\u{2014}]\s+(\S+)\s*$"#)
+    let re = Regex::new(r#"^\s*>\s*["\u{201c}](.+)["\u{201d}]\s+[-\u{2013}\u{2014}]\s+(.+?)\s*$"#)
         .expect("constant regex");
     let mut problems = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -28,7 +28,7 @@ pub fn check_quotes(text: &str, root: &Path, label: &str) -> Vec<Problem> {
         if rel.is_absolute()
             || rel
                 .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+                .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
         {
             problems.push(Problem {
                 kind: "invalid_source",
@@ -37,7 +37,22 @@ pub fn check_quotes(text: &str, root: &Path, label: &str) -> Vec<Problem> {
             continue;
         }
         let path = root.join(rel);
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(real) = std::fs::canonicalize(&path) else {
+            problems.push(Problem {
+                kind: "missing_source",
+                message: format!("{place}: quote source not found: {source}"),
+            });
+            continue;
+        };
+        // A link inside the project may lead out of it: the real file must still be inside.
+        if !std::fs::canonicalize(root).is_ok_and(|root| real.starts_with(root)) {
+            problems.push(Problem {
+                kind: "invalid_source",
+                message: format!("{place}: quote source must be a relative path inside the project: {source}"),
+            });
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&real) else {
             problems.push(Problem {
                 kind: "missing_source",
                 message: format!("{place}: quote source not found: {source}"),

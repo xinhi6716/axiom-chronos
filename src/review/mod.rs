@@ -24,6 +24,11 @@ const DIFF_ONLY_BUDGET: usize = 320_000;
 /// instructions inside the command-line limit. Bytes are never fewer than UTF-16 units.
 const AGY_BUDGET: usize = AGY_PROMPT_LIMIT - 4_000;
 const MAX_LISTED: usize = 200;
+/// The most bytes the changed-file listing may take; paths can be long, so lines alone do not
+/// bound it.
+const LISTING_BYTES: usize = 8_000;
+/// Room kept for the text between the listing and the diffs, and the note on a cut listing.
+const FIXED_TEXT: usize = 400;
 const CONTEXT: &str = "-U20";
 const TOKEN_CAP: u64 = 400_000;
 const TOKEN_CAP_ENV: &str = "AXIOM_REVIEW_TOKEN_CAP";
@@ -221,6 +226,27 @@ fn file_diff(repo: &Path, range: &str, path: &str) -> Res<String> {
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
+/// The listing cut to `MAX_LISTED` lines and `LISTING_BYTES` bytes, saying how many it dropped.
+fn bounded_listing(listing: &str) -> String {
+    let lines: Vec<&str> = listing.lines().collect();
+    // The scratch listing opens with a blank line, the heading and a blank line.
+    let entries = &lines[3.min(lines.len())..];
+    let mut out = String::from("\n## Changed files\n\n");
+    let mut kept = 0;
+    for line in entries.iter().take(MAX_LISTED) {
+        if out.len() + line.len() + 1 > LISTING_BYTES {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        kept += 1;
+    }
+    if kept < entries.len() {
+        out.push_str(&format!("... and {} more changed files\n", entries.len() - kept));
+    }
+    out
+}
+
 pub struct Prompt {
     pub text: String,
     pub omitted: Vec<String>,
@@ -236,28 +262,19 @@ remarks are minor or nit. Reply with the JSON object the schema asks for: verdic
 there is no blocker or major finding, otherwise revise or reject; each finding has a \
 severity, a location (path and line) and a reason.\n";
     let mut files = files.clone();
-    let mut listing = String::from("\n## Changed files\n\n");
+    let mut scratch = String::from("\n## Changed files\n\n");
     let mut diffs = String::new();
+    // The diffs get what is left of `budget` after the instructions, the closing text and the
+    // most the listing may take, so the whole prompt stays within `budget`.
     let omitted = pack_diffs(
         budget,
-        head.len() + 200,
+        head.len() + LISTING_BYTES + FIXED_TEXT,
         &mut files,
-        &mut listing,
+        &mut scratch,
         &mut diffs,
         |path| file_diff(repo, range, path),
     )?;
-    // The listing grows with the file count: keep it bounded as well.
-    let lines: Vec<&str> = listing.lines().collect();
-    let keep = MAX_LISTED + 2;
-    let listing = if lines.len() > keep {
-        format!(
-            "{}\n... and {} more changed files\n",
-            lines[..keep].join("\n"),
-            lines.len() - keep
-        )
-    } else {
-        listing
-    };
+    let listing = bounded_listing(&scratch);
     Ok(Prompt {
         text: format!(
             "{head}{listing}\n## Diffs\n\nEvery changed file follows with 20 lines of surrounding code; a new file appears in full.\n\n{diffs}"

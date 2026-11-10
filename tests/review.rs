@@ -275,6 +275,26 @@ fn the_prompt_is_bounded_and_holds_only_repository_text() {
 }
 
 #[test]
+fn many_files_with_long_paths_still_fit_the_agy_command_line() {
+    let case = Case::new();
+    // 250 changed files: the listing alone is far larger than the command-line limit.
+    let files: Vec<(String, String)> = (0..250)
+        .map(|n| (format!("pkg/{}{n:03}.txt", "p".repeat(110)), format!("content {n}
+")))
+        .collect();
+    let files: Vec<(&str, String)> = files.iter().map(|(p, t)| (p.as_str(), t.clone())).collect();
+    let temp = repo(&files);
+    let r = reviewed(run(&case.config(false, Some("")), &temp).unwrap());
+    assert_eq!(r.reviewer, "agy", "the backup must still run");
+    assert_eq!(r.files.len(), 250);
+    let prompt = &case.agy_prompts()[0];
+    let units = prompt.encode_utf16().count();
+    assert!(units <= axiom::council::AGY_PROMPT_LIMIT, "prompt is {units} UTF-16 units");
+    assert!(prompt.contains("## Diffs"), "the fixed text is still there");
+    assert!(prompt.contains("more changed files"), "the cut listing says how many were left out");
+}
+
+#[test]
 fn a_bad_range_is_refused() {
     let case = Case::new();
     let temp = repo(&source("plain"));

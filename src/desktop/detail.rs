@@ -1018,25 +1018,50 @@ fn markdown_style() -> TextViewStyle {
 
 /// CommonMark does not end bold when the closing `**` follows punctuation and a letter comes right
 /// after it, which is how Chinese is written: `**建議：**把` shows its asterisks. A space is put
-/// after such a closing `**`. Code spans and fenced code are left alone.
+/// after such a closing `**`. Code spans (of any delimiter length) and fenced code (backtick or
+/// tilde) are left alone.
 fn mend_bold(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 8);
-    let mut fenced = false;
+    let mut fence: Option<(char, usize)> = None;
     for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
+        let marker = fence_marker(line);
+        match (fence, marker) {
+            (Some((ch, len)), Some((c, n, rest))) if c == ch && n >= len && rest.trim().is_empty() => {
+                fence = None;
+                out.push_str(line);
+                continue;
+            }
+            (Some(_), _) => {
+                out.push_str(line);
+                continue;
+            }
+            (None, Some((c, n, rest))) if c != '`' || !rest.contains('`') => {
+                fence = Some((c, n));
+                out.push_str(line);
+                continue;
+            }
+            _ => {}
         }
-        if fenced || !line.contains("**") {
+        if !line.contains("**") {
             out.push_str(line);
             continue;
         }
         let chars: Vec<char> = line.chars().collect();
-        let (mut open, mut code, mut i) = (false, false, 0);
+        let (mut open, mut i) = (false, 0);
         while i < chars.len() {
             if chars[i] == '`' {
-                code = !code;
+                let ticks = chars[i..].iter().take_while(|c| **c == '`').count();
+                let close = (i + ticks..chars.len()).find(|&j| {
+                    chars[j] == '`'
+                        && (j == 0 || chars[j - 1] != '`')
+                        && chars[j..].iter().take_while(|c| **c == '`').count() == ticks
+                });
+                let end = close.map_or(i + ticks, |j| j + ticks);
+                out.extend(&chars[i..end]);
+                i = end;
+                continue;
             }
-            if !code && chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
+            if chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
                 out.push_str("**");
                 if open {
                     let punctuated = i > 0 && !chars[i - 1].is_alphanumeric() && !chars[i - 1].is_whitespace() && chars[i - 1] != '*';
@@ -1053,6 +1078,19 @@ fn mend_bold(text: &str) -> String {
         }
     }
     out
+}
+
+/// A fence line: its character, how many of them, and the rest of the line. Up to three spaces
+/// of indentation are allowed.
+fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let body = &line[indent..];
+    let c = body.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = body.chars().take_while(|x| *x == c).count();
+    (n >= 3).then(|| (c, n, &body[n..]))
 }
 
 /// Markdown, with web links opened in the browser and file references in the editor.
@@ -2184,5 +2222,21 @@ mod bold_tests {
         for text in ["**建議：** 把", "**done**，ok", "**a:**\nnext", "`**x：**y`", "```\n**x：**y\n```\n"] {
             assert_eq!(mend_bold(text), text);
         }
+    }
+
+    #[test]
+    fn double_backtick_spans_and_tilde_fences_are_code() {
+        for text in [
+            "``**x：**y``",
+            "a ``code ` **x：**y`` b",
+            "~~~\n**x：**y\n~~~\n",
+            "````\n```\n**x：**y\n````\n",
+            "~~~~\n~~~\n**x：**y\n~~~~\n",
+        ] {
+            assert_eq!(mend_bold(text), text, "{text:?}");
+        }
+        assert_eq!(mend_bold("``a`` **建議：**把"), "``a`` **建議：** 把");
+        assert_eq!(mend_bold("~~~\ncode\n~~~\n**建議：**把"), "~~~\ncode\n~~~\n**建議：** 把");
+        assert_eq!(mend_bold("```\n~~~\n```\n**建議：**把"), "```\n~~~\n```\n**建議：** 把");
     }
 }

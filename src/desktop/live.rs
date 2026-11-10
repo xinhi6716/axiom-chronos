@@ -548,7 +548,7 @@ impl Engine {
             Err(failure) => {
                 self.hosted.remove(&key);
                 // The dialog has closed; the details are the only copy of what was typed.
-                self.fail(Action::StartWish, None, format!("{}\n\nYour wish: {}", failure.message, clean_wish(&request.wish)));
+                self.fail(Action::StartWish, None, format!("{}\n\nYour wish: {}", failure.message, request.wish));
             }
         }
     }
@@ -1866,6 +1866,28 @@ mod tests {
         assert_eq!(open.as_deref(), Some("pending-1"));
         assert!(updates.iter().any(|u| matches!(u, Update::Failed { action: Action::StartWish, .. })));
         assert!(rig.engine.compose().is_empty());
+    }
+
+    #[test]
+    fn a_failed_start_keeps_the_wish_exactly_as_typed() {
+        let mut rig = rig();
+        let wish = "<attachment>fix <my-widget></attachment> now";
+        rig.engine.handle(Command::Start(WishRequest {
+            cwd: rig._dir.path().join("missing"),
+            wish: wish.into(),
+            creative: false,
+            max_turns: None,
+            advanced_research: false,
+        }));
+        let message = rig
+            .updates()
+            .into_iter()
+            .find_map(|u| match u {
+                Update::Failed { action: Action::StartWish, message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("the failure is reported");
+        assert!(message.ends_with(&format!("Your wish: {wish}")), "{message}");
     }
 
     #[test]
