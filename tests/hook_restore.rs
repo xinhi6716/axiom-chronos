@@ -177,7 +177,7 @@ fn boundaries_restore_verbatim_each_time_and_session_start_marks_seen() {
 }
 
 #[test]
-fn seen_boundary_with_invalid_handoff_returns_none() {
+fn invalid_handoff_skips_seen_boundary_but_restores_new_boundary() {
     let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let _vars = Vars::defaults();
     let r = run("wish");
@@ -194,6 +194,18 @@ fn seen_boundary_with_invalid_handoff_returns_none() {
         fs::read_to_string(r.store.join("agents/d1.compact")).unwrap(),
         "c1"
     );
+
+    let mut lines = fs::read_to_string(&r.own).unwrap();
+    lines.push_str(&boundary(2));
+    fs::write(&r.own, lines).unwrap();
+    let out = call(&r, &read).expect("new boundary must restore despite invalid handoff");
+    assert_anchor(&r, &out);
+    assert!(text(&out).contains("No work state is recorded yet"));
+    assert_eq!(
+        fs::read_to_string(r.store.join("agents/d1.compact")).unwrap(),
+        "c2"
+    );
+    assert!(call(&r, &read).is_none());
 }
 
 #[test]

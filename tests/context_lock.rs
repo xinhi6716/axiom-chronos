@@ -1,12 +1,30 @@
 use axiom::{goal, hook, hook::context};
 use serde_json::{json, Value};
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
 
 use context::ORCH;
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
+
+struct EnvRestore(&'static str, Option<OsString>);
+impl EnvRestore {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self(key, previous)
+    }
+}
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => std::env::set_var(self.0, value),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
 
 struct Run {
     _dir: tempfile::TempDir,
@@ -98,8 +116,7 @@ fn cases() -> Vec<(&'static str, Value, bool)> {
 
 #[test]
 fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
-    let previous_warn = std::env::var_os(context::WARN_ENV);
-    std::env::set_var(context::WARN_ENV, "0");
+    let _warn = EnvRestore::set(context::WARN_ENV, "0");
     let r = run();
     transcript(&r.own, &[30_000, 150_000]);
     let mut failures = Vec::new();
@@ -163,8 +180,7 @@ fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
         );
     }
 
-    let previous = std::env::var_os(context::HANDOFF_ENV);
-    std::env::set_var(context::HANDOFF_ENV, "0");
+    let handoff = EnvRestore::set(context::HANDOFF_ENV, "0");
     transcript(&r.own, &[30_000, 160_000]);
     let disabled: Vec<_> = cases()
         .into_iter()
@@ -173,11 +189,7 @@ fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
             (event.clone(), hook::handle(&event, Some(&r.home), false))
         })
         .collect();
-    if let Some(value) = previous {
-        std::env::set_var(context::HANDOFF_ENV, value);
-    } else {
-        std::env::remove_var(context::HANDOFF_ENV);
-    }
+    drop(handoff);
     transcript(&r.own, &[30_000, 149_999]);
     for (event, result) in disabled {
         assert_eq!(
@@ -185,11 +197,6 @@ fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
             hook::handle(&event, Some(&r.home), false),
             "disabled {event}"
         );
-    }
-    if let Some(value) = previous_warn {
-        std::env::set_var(context::WARN_ENV, value);
-    } else {
-        std::env::remove_var(context::WARN_ENV);
     }
 }
 
