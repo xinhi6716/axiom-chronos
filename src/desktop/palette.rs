@@ -711,6 +711,25 @@ fn score_item(item: &Item, terms: &[&str]) -> Option<Hit> {
     Some(hit)
 }
 
+/// `hits`, which index `old`, moved onto `new` by target: a result whose item moved follows it,
+/// one whose item is gone is dropped. Marks survive only where the shown text is unchanged.
+pub(super) fn remap_hits(old: &[Item], hits: &[Hit], new: &[Item]) -> Vec<Hit> {
+    hits.iter()
+        .filter_map(|hit| {
+            let before = old.get(hit.item)?;
+            let (at, after) = new.iter().enumerate().find(|(_, item)| item.target == before.target)?;
+            let mut moved = Hit { item: at, ..hit.clone() };
+            if after.title != before.title {
+                moved.title_marks.clear();
+            }
+            if after.detail != before.detail {
+                moved.detail_marks.clear();
+            }
+            Some(moved)
+        })
+        .collect()
+}
+
 /// The results for `query`, best first. Every word of the query must be found. Equal scores keep
 /// the index order, so results never shuffle between keystrokes. An empty query lists the
 /// commands and the most recent wishes.
@@ -880,7 +899,11 @@ impl Palette {
         let lang = *cx.global::<Lang>();
         let dark = cx.theme().is_dark();
         self.keep = self.selected_target();
-        self.items = Arc::new(index(self.state.read(cx), lang, dark));
+        let items = Arc::new(index(self.state.read(cx), lang, dark));
+        // The shown results index the old list until the search answers, so they move with it now.
+        self.hits = remap_hits(&self.items, &self.hits, &items);
+        self.selected = self.selected.min(self.hits.len().saturating_sub(1));
+        self.items = items;
         self.run_search(cx);
     }
 
@@ -892,6 +915,8 @@ impl Palette {
         let text = self.query.read(cx).value().to_string();
         let items = self.items.clone();
         if items.len() <= SYNC_LIMIT {
+            // A search still running for an older list or query must not answer over this one.
+            self.searching = None;
             let hits = search(&items, &text, LIMIT);
             self.show(hits, text, cx);
             return;
@@ -1047,6 +1072,7 @@ impl Palette {
             .hits
             .clone()
             .iter()
+            .filter(|hit| hit.item < self.items.len())
             .enumerate()
             .map(|(ix, hit)| self.result_row(ix, hit, &t, cx).into_any_element())
             .collect();
@@ -1239,6 +1265,40 @@ mod tests {
 
     fn score(query: &str, text: &str) -> i32 {
         fuzzy(query, text).map_or(i32::MIN, |m| m.score)
+    }
+
+    fn run_item(id: &str, title: &str) -> Item {
+        let mut item = command("New wish", Command::NewWish, IconKind::Plus, None, Lang::En);
+        item.kind = Kind::Wish;
+        item.title = title.to_owned().into();
+        item.target = Target::Run(id.to_owned().into());
+        item
+    }
+
+    fn hit(item: usize) -> Hit {
+        Hit { item, score: 0, title_marks: vec![0], detail_marks: vec![] }
+    }
+
+    #[test]
+    fn results_follow_their_items_when_the_index_reorders_or_shrinks() {
+        let old = vec![run_item("a", "alpha"), run_item("b", "beta"), run_item("c", "gamma")];
+        let hits = vec![hit(0), hit(1), hit(2)];
+        // Reordered: each result still points at its own run.
+        let new = vec![run_item("c", "gamma"), run_item("a", "alpha"), run_item("b", "beta")];
+        let moved = remap_hits(&old, &hits, &new);
+        let targets: Vec<&Target> = moved.iter().map(|h| &new[h.item].target).collect();
+        assert_eq!(targets, [&old[0].target, &old[1].target, &old[2].target]);
+        // Shrunk: the removed run's result is dropped and nothing points past the end.
+        let new = vec![run_item("b", "beta")];
+        let shrunk = remap_hits(&old, &hits, &new);
+        assert_eq!(shrunk.len(), 1);
+        assert!(shrunk.iter().all(|h| h.item < new.len()));
+        assert_eq!(new[shrunk[0].item].target, old[1].target);
+        // A retitled item keeps its place but loses marks that no longer fit its text.
+        let new = vec![run_item("a", "renamed")];
+        let retitled = remap_hits(&old, &hits[..1], &new);
+        assert_eq!(retitled.len(), 1);
+        assert!(retitled[0].title_marks.is_empty());
     }
 
     #[test]

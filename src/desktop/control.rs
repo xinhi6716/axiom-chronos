@@ -219,34 +219,13 @@ pub(super) fn address_text(subject: &Subject, cx: &App) -> String {
     address_line(subject, *cx.global::<Lang>())
 }
 
-/// `draft` with an earlier address of ours taken off the front, so a second click replaces the
-/// first instead of stacking on it. Text the person wrote is never cut.
-pub(super) fn without_address(draft: &str) -> &str {
-    for lang in [Lang::En, Lang::ZhTw] {
-        let opening = translate(lang, T, "About {}: ");
-        let Some((head, tail)) = opening.split_once("{}") else { continue };
-        let Some(rest) = draft.strip_prefix(head) else { continue };
-        if let Some(end) = rest.find(tail) {
-            let body = &rest[..end];
-            // Only an address Chronos wrote: one line, made of the known parts.
-            let ours = !body.contains('\n')
-                && body.split(" · ").all(|part| {
-                    ["goal {}", "module {}", "unit {}"].iter().any(|key| {
-                        let (before, after) = translate(lang, T, key).split_once("{}").unwrap_or(("", ""));
-                        part.starts_with(before) && part.ends_with(after)
-                    })
-                });
-            if ours {
-                return &rest[end + tail.len()..];
-            }
-        }
-    }
-    draft
-}
-
-/// The box's new text: the address first, then whatever the person had already typed.
-pub(super) fn addressed_draft(draft: &str, address: &str) -> String {
-    format!("{address}{}", without_address(draft))
+/// The box's new text: the address first, then whatever the person had already typed. The
+/// `inserted` address is the one this box was last given; only that exact text is taken off the
+/// front, so a second click replaces the first, while words the person typed are never cut, even
+/// when they look like an address.
+pub(super) fn addressed_draft(draft: &str, address: &str, inserted: Option<&str>) -> String {
+    let rest = inserted.filter(|prefix| !prefix.is_empty()).and_then(|prefix| draft.strip_prefix(prefix)).unwrap_or(draft);
+    format!("{address}{rest}")
 }
 
 fn you_line(text: &str, time: SharedString, you: &'static str) -> LogLine {
@@ -499,6 +478,8 @@ pub struct Control {
     session: Option<SharedString>,
     entry: Entry,
     drafts: HashMap<SharedString, String>,
+    /// The address this box was last given, so a later one can replace exactly that.
+    inserted: Option<String>,
     notice: Option<Notice>,
     pending: Option<Pending>,
     pending_timeout: Option<Task<()>>,
@@ -539,6 +520,7 @@ impl Control {
             session: None,
             entry: Entry::Hidden,
             drafts: HashMap::new(),
+            inserted: None,
             notice: None,
             pending: None,
             pending_timeout: None,
@@ -599,6 +581,7 @@ impl Control {
             }
             let restored = session.as_ref().and_then(|s| self.drafts.get(s)).cloned().unwrap_or_default();
             self.input.update(cx, |s, cx| s.set_value(restored, window, cx));
+            self.inserted = None;
             self.session = session;
             self.notice = None;
             self.pending = None;
@@ -636,7 +619,8 @@ impl Control {
         if self.entry != Entry::Interjection {
             return;
         }
-        let text = addressed_draft(&self.input.read(cx).value(), &address.text);
+        let text = addressed_draft(&self.input.read(cx).value(), &address.text, self.inserted.as_deref());
+        self.inserted = Some(address.text.to_string());
         self.input.update(cx, |input, cx| input.set_value(text, window, cx));
         self.input.read(cx).focus_handle(cx).focus(window, cx);
     }
@@ -687,6 +671,7 @@ impl Control {
 
     fn clear_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.inserted = None;
         if let Some(session) = &self.session {
             self.drafts.remove(session);
         }
@@ -1666,18 +1651,28 @@ mod tests {
     fn a_second_address_replaces_the_first_and_keeps_what_was_typed() {
         let first = "About module m1: ";
         let second = "About unit u4: ";
-        assert_eq!(addressed_draft("", first), first);
-        let typed = addressed_draft("use the cache", first);
+        assert_eq!(addressed_draft("", first, None), first);
+        let typed = addressed_draft("use the cache", first, None);
         assert_eq!(typed, "About module m1: use the cache");
-        assert_eq!(addressed_draft(&typed, second), "About unit u4: use the cache");
-        assert_eq!(addressed_draft("關於 單元 u1：先停下", "關於 模組 m2："), "關於 模組 m2：先停下");
+        assert_eq!(addressed_draft(&typed, second, Some(first)), "About unit u4: use the cache");
+        assert_eq!(addressed_draft("關於 單元 u1：先停下", "關於 模組 m2：", Some("關於 單元 u1：")), "關於 模組 m2：先停下");
     }
 
     #[test]
     fn text_that_only_looks_like_an_address_is_not_cut() {
-        assert_eq!(without_address("About the cache: use less"), "About the cache: use less");
-        assert_eq!(without_address("About module m1\nand more: x"), "About module m1\nand more: x");
-        assert_eq!(without_address("plain"), "plain");
+        let ours = "About unit u4: ";
+        // The person's own subject, written in the same shape, stays.
+        for typed in ["About module initialization: preserve ordering", "About the cache: use less", "About module m1
+and more: x"] {
+            assert_eq!(addressed_draft(typed, ours, None), format!("{ours}{typed}"));
+            // Even with an address inserted earlier, text that does not begin with it is kept whole.
+            assert_eq!(addressed_draft(typed, ours, Some("About module m1: ")), format!("{ours}{typed}"));
+        }
+        // A person who typed the same words as the inserted address before it was recorded keeps them.
+        let first = "About module m1: ";
+        let typed = addressed_draft("About module m1: keep", ours, None);
+        assert_eq!(typed, "About unit u4: About module m1: keep");
+        assert_eq!(addressed_draft(&typed, first, Some(ours)), "About module m1: About module m1: keep");
     }
 
     #[test]

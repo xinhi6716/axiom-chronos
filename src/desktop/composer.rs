@@ -106,6 +106,16 @@ fn mention_rows_height(room: f32) -> f32 {
     (room - MENTION_CHROME - MENTION_EDGE).clamp(MENTION_ROW_H, MENTION_ROW_H * MENTION_ROWS)
 }
 
+/// Stores a fresh measurement of the room below the wish box, and says whether it differs from
+/// the one the list was last drawn with, so a redraw is needed. Sub-pixel jitter does not count.
+fn note_room(room: &Cell<f32>, measured: f32) -> bool {
+    if (room.get() - measured).abs() < 0.5 {
+        return false;
+    }
+    room.set(measured);
+    true
+}
+
 /// What a git probe found about the chosen folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FolderCheck {
@@ -280,6 +290,12 @@ pub(super) fn mention_at(text: &str, cursor: usize) -> Option<(Range<usize>, &st
     let rest = &text[cursor..];
     let end = cursor + rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some((at..end, query))
+}
+
+/// The range an accepted path replaces, but only when the `@word` at the cursor is still the one
+/// the list was ranked for. Once the cursor sits in another word, the list is stale.
+pub(super) fn mention_span_for(text: &str, cursor: usize, query: &str) -> Option<Range<usize>> {
+    mention_at(text, cursor).filter(|(_, typed)| *typed == query).map(|(span, _)| span)
 }
 
 /// What replaces the `@word`: the path, quoted when it holds spaces, and a space after it unless
@@ -594,6 +610,13 @@ impl Composer {
                 }
             }),
             cx.subscribe_in(&turns, window, move |this, _, event, _, cx| changed(this, event, cx)),
+            // Moving the cursor by mouse or arrow keys changes no text, but it can leave the `@word`
+            // or enter another, so the list follows the cursor too.
+            cx.observe_in(&wish, window, |this, wish, window, cx| {
+                if this.mention.is_some() && wish.read(cx).focus_handle(cx).is_focused(window) {
+                    this.update_mention(cx);
+                }
+            }),
         ];
         cx.defer_in(window, |this, window, cx| this.apply_scene(window, cx));
         Self {
@@ -816,7 +839,7 @@ impl Composer {
             let wish = self.wish.read(cx);
             (wish.value().to_string(), wish.cursor())
         };
-        let Some((span, _)) = mention_at(&text, cursor) else {
+        let Some(span) = mention_span_for(&text, cursor, &mention.query) else {
             self.close_mention(cx);
             return false;
         };
@@ -1154,9 +1177,14 @@ impl Composer {
                     .child({
                         // Measures how far down the window the wish box ends, so the list can stay inside it.
                         let room = self.mention_room.clone();
+                        let this = cx.entity();
                         canvas(
-                            move |bounds, window, _| {
-                                room.set(f32::from(window.viewport_size().height - bounds.bottom()));
+                            move |bounds, window, cx| {
+                                // The list read the old measurement while drawing, so a changed one needs another frame.
+                                if note_room(&room, f32::from(window.viewport_size().height - bounds.bottom())) {
+                                    let this = this.clone();
+                                    cx.defer(move |cx| this.update(cx, |_, cx| cx.notify()));
+                                }
                             },
                             |_, _, _, _| {},
                         )
@@ -1690,6 +1718,28 @@ mod tests {
         assert_eq!(mention_at("no at sign", 5), None);
         assert_eq!(mention_at("@@x", 3), None);
         assert_eq!(mention_at("abc", 99), None, "a cursor past the end is ignored");
+    }
+
+    #[test]
+    fn a_changed_measurement_asks_for_a_redraw_and_a_steady_one_does_not() {
+        let room = Cell::new(f32::MAX);
+        assert!(note_room(&room, 500.0), "the first measurement replaces the unmeasured default");
+        assert!(!note_room(&room, 500.0), "the same size draws nothing again");
+        assert!(!note_room(&room, 500.3), "sub-pixel jitter is ignored");
+        assert!(note_room(&room, 220.0), "a window that shrank");
+        assert_eq!(room.get(), 220.0);
+        assert!(note_room(&room, 640.0), "a window that grew");
+    }
+
+    #[test]
+    fn a_list_ranked_for_one_word_does_not_replace_another() {
+        let text = "see @src/li and @docs/ma now";
+        assert_eq!(mention_span_for(text, 11, "src/li"), Some(4..11));
+        // The cursor moved into the second word: the old query no longer applies.
+        assert_eq!(mention_span_for(text, 24, "src/li"), None);
+        assert_eq!(mention_span_for(text, 24, "docs/ma"), Some(16..24));
+        // Out of any mention altogether.
+        assert_eq!(mention_span_for(text, 2, "src/li"), None);
     }
 
     #[test]
