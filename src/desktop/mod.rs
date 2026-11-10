@@ -10,6 +10,7 @@ mod memory;
 mod mesh;
 pub mod model;
 mod ornament;
+mod palette;
 mod run_view;
 mod settings;
 mod shell;
