@@ -159,6 +159,8 @@ pub struct Settings {
     pub last_screen: Screen,
     /// Most recent first.
     pub recent_projects: Vec<PathBuf>,
+    /// The first-day checklist was completed once; it never comes back.
+    pub first_day_done: bool,
 }
 
 impl Default for Settings {
@@ -170,6 +172,7 @@ impl Default for Settings {
             window: None,
             last_screen: Screen::Run,
             recent_projects: vec![],
+            first_day_done: false,
         }
     }
 }
@@ -198,6 +201,7 @@ impl Settings {
                         .collect()
                 })
                 .unwrap_or_default(),
+            first_day_done: root.get("first_day_done").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 
@@ -213,6 +217,7 @@ impl Settings {
             "window": window,
             "last_screen": key_of(&SCREEN_KEYS, self.last_screen),
             "recent_projects": recent,
+            "first_day_done": self.first_day_done,
         });
         serde_json::to_string_pretty(&body).unwrap_or_default()
     }
@@ -379,6 +384,19 @@ pub fn remember_project(path: PathBuf, cx: &mut App) {
     Store::edit(cx, |s| push_recent(&mut s.recent_projects, path));
 }
 
+/// Records that the first-day checklist is complete, for good.
+pub fn finish_first_day(cx: &mut App) {
+    Store::edit(cx, |s| s.first_day_done = true);
+}
+
+pub fn first_day_done(cx: &App) -> bool {
+    Store::current(cx).first_day_done
+}
+
+pub fn has_recent_project(cx: &App) -> bool {
+    !Store::current(cx).recent_projects.is_empty()
+}
+
 pub fn recent_projects(cx: &App) -> &[PathBuf] {
     &Store::current(cx).recent_projects
 }
@@ -406,6 +424,7 @@ mod tests {
             window: Some(WindowPlacement { x: -40.0, y: 12.5, width: 1280.0, height: 800.0, maximized: true }),
             last_screen: Screen::Doctor,
             recent_projects: vec![PathBuf::from("E:\\codex\\one"), PathBuf::from("/home/me/two")],
+            first_day_done: true,
         }
     }
 
@@ -431,6 +450,16 @@ mod tests {
         for text in ["", "not json", "[1, 2]", "{\"language\":", "null"] {
             assert_eq!(Settings::parse(text), Settings::default(), "{text}");
         }
+    }
+
+    #[test]
+    fn the_first_day_list_stays_gone_once_completed_and_a_bad_value_does_not_retire_it() {
+        assert!(!Settings::default().first_day_done);
+        assert!(Settings::parse(r#"{"first_day_done": true}"#).first_day_done);
+        assert!(!Settings::parse(r#"{"first_day_done": "yes"}"#).first_day_done);
+        let mut settings = Settings::default();
+        settings.first_day_done = true;
+        assert!(Settings::parse(&settings.to_json()).first_day_done);
     }
 
     #[test]

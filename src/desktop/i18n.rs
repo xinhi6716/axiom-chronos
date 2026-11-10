@@ -50,7 +50,7 @@ pub fn tr(cx: &App, table: Table, en: &'static str) -> &'static str {
     translate(*cx.global::<Lang>(), table, en)
 }
 
-fn translate(lang: Lang, table: Table, en: &'static str) -> &'static str {
+pub(super) fn translate(lang: Lang, table: Table, en: &'static str) -> &'static str {
     if lang == Lang::En {
         return en;
     }

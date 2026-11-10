@@ -1,9 +1,15 @@
 //! The Run screen: the wish, the stage rail, three resizable columns and the control bar,
 //! plus what surrounds them: setup problems, no runs yet, and the summary when a run ends.
-use super::i18n::{tr, Table};
+use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::theme::{Tokened as _, Tokens};
-use super::{control::Control, detail::Detail, mesh::Mesh, todo::Todo};
+use super::{
+    control::{self, Control},
+    detail::Detail,
+    mesh::Mesh,
+    settings,
+    todo::Todo,
+};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle};
 use gpui_kit::component::notification::Notification;
@@ -75,6 +81,41 @@ const TEXT: Table = &[
     ("The report is longer than this. Only its beginning is shown.", "報告比這裡顯示的更長，這裡只列出開頭。"),
     ("See the graph", "查看執行圖"),
     ("Show the summary", "顯示摘要"),
+    ("Say something about this", "對這項說句話"),
+    ("Opens the message box with this item named at the start.", "開啟訊息框，開頭會註明是針對這一項。"),
+    ("Your first day with Chronos", "初次與 Chronos 同行"),
+    ("{} of {} done", "完成 {} / {}"),
+    ("Tools found", "找到所需工具"),
+    ("Signed in", "已登入"),
+    ("A project is chosen", "選好專案資料夾"),
+    ("First wish finished", "第一個願望已完成"),
+    ("Claude Code and Codex are both installed.", "Claude Code 與 Codex 都已安裝。"),
+    ("Neither tool reports a sign-in problem.", "兩個工具都沒有回報登入問題。"),
+    ("A project folder has been used with Chronos.", "已經用 Chronos 選過專案資料夾。"),
+    ("A wish has run to its end.", "已有一個願望執行到結束。"),
+    ("Not yet.", "還沒有。"),
+    ("Chronos is starting. Nothing needs you for now.", "Chronos 正在啟動，暫時不需要你動手。"),
+    ("Chronos is working. Nothing needs you for now.", "Chronos 正在進行，暫時不需要你動手。"),
+    ("Astra is planning. Nothing needs you for now; building starts once the plan is reviewed.", "Astra 正在規劃，暫時不需要你動手；計畫審過後才會開始施工。"),
+    ("The plan is being reviewed. Nothing needs you for now; the work is split into modules next.", "計畫正在審查，暫時不需要你動手；接著會切成模組。"),
+    ("The plan is being split into modules. Nothing needs you for now; building starts next.", "正在把計畫切成模組，暫時不需要你動手；接著開始施工。"),
+    ("Getting the next units ready. Nothing needs you for now.", "正在準備下一批單元，暫時不需要你動手。"),
+    ("Building 1 unit. Nothing needs you for now; it is checked once it is built.", "正在建造 1 個單元，暫時不需要你動手；建好後會驗收。"),
+    ("Building {} units. Nothing needs you for now; each is checked once it is built.", "正在建造 {} 個單元，暫時不需要你動手；建好後會逐項驗收。"),
+    ("Running the full test. Nothing needs you for now; it decides whether the wish counts as finished.", "正在跑完整測試，暫時不需要你動手；結果會決定這個願望算不算完成。"),
+    ("Writing down what was learned. Nothing needs you for now; the report comes next.", "正在記下這次學到的事，暫時不需要你動手；接著會寫報告。"),
+    ("Writing the report. Nothing needs you for now; it will be here when it is done.", "正在寫報告，暫時不需要你動手；寫好後會出現在這裡。"),
+    ("A background batch is running. Nothing needs you for now; you will be told when it finishes, and waiting uses no model quota.", "背景批次正在執行，暫時不需要你動手；結束時會通知你，等待期間不消耗模型額度。"),
+    ("The usage limit was reached. Nothing needs you; it continues by itself when the limit resets.", "用量額度用完了，不需要你動手；額度恢復後會自動繼續。"),
+    ("The session stopped before it finished. Resume it to continue where it left off.", "工作階段在完成前就停止了，請按「接續」從中斷處繼續。"),
+    ("Stopped and waiting for you: {}. Deal with it, then resume.", "已暫停，等你處理：{}。處理後請按「接續」。"),
+    ("Stopped and waiting for you. Read the note below, then resume.", "已暫停，等你處理。請看下方說明，再按「接續」。"),
+    ("Finished: all {} units are verified and the full test passed. Nothing is left for you to do.", "已完成：{} 個單元都已驗收，完整測試通過，沒有需要你做的事。"),
+    ("Ended with 1 unit not verified. Read the summary, then decide what to do next.", "已結束，有 1 個單元尚未驗收。請看摘要，再決定下一步。"),
+    ("Ended with {} units not verified. Read the summary, then decide what to do next.", "已結束，有 {} 個單元尚未驗收。請看摘要，再決定下一步。"),
+    ("Ended: every unit is verified, but the full test failed. Read the summary before relying on it.", "已結束：單元都已驗收，但完整測試失敗。採用前請先看摘要。"),
+    ("Ended: every unit is verified, but the full test has no passing result. Read the summary before relying on it.", "已結束：單元都已驗收，但完整測試沒有通過的結果。採用前請先看摘要。"),
+    ("Ended with no units recorded, so nothing is confirmed as built.", "已結束，沒有記錄到任何單元，所以沒有任何東西確認已建好。"),
 ];
 
 const STAGE_NAMES: [&str; 7] = ["Astra", "Critic", "Architect", "Build", "Full test", "Memory", "Report"];
@@ -469,6 +510,171 @@ fn status_pill(run: &Run, cx: &App) -> impl IntoElement {
     )
 }
 
+/// How the top line should look: calm when Chronos is simply working, urgent when it needs a person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Working,
+    Waiting,
+    NeedsYou,
+    Finished,
+    Unsettled,
+}
+
+/// The one sentence at the top of the Run screen: what is happening, whether the person must act,
+/// and what comes next. `key` is an English template in `TEXT`, `args` fill its `{}` slots.
+#[derive(Clone, Debug, PartialEq)]
+struct Brief {
+    key: &'static str,
+    args: Vec<String>,
+    tone: Tone,
+}
+
+impl Brief {
+    fn plain(key: &'static str, tone: Tone) -> Self {
+        Self { key, args: vec![], tone }
+    }
+
+    fn text(&self, lang: Lang) -> String {
+        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        fill(translate(lang, TEXT, self.key), &args)
+    }
+}
+
+fn clipped_title(text: &str) -> String {
+    const LIMIT: usize = 80;
+    let line = text.lines().next().unwrap_or("").trim();
+    match line.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}…", line[..end].trim_end()),
+        None => line.to_owned(),
+    }
+}
+
+/// Reads only what the run reports. A state it cannot tell apart gets the plainest true sentence.
+fn brief_of(run: &Run) -> Brief {
+    let working = |key| Brief::plain(key, Tone::Working);
+    match run.status {
+        RunStatus::Active => {
+            let building = run.count(UnitState::Running);
+            if building == 1 {
+                return working("Building 1 unit. Nothing needs you for now; it is checked once it is built.");
+            }
+            if building > 1 {
+                return Brief {
+                    key: "Building {} units. Nothing needs you for now; each is checked once it is built.",
+                    args: vec![building.to_string()],
+                    tone: Tone::Working,
+                };
+            }
+            match run.stages.iter().find(|s| s.phase == Phase::Running).map(|s| s.name.as_ref()) {
+                Some("Astra") => working("Astra is planning. Nothing needs you for now; building starts once the plan is reviewed."),
+                Some("Critic") => working("The plan is being reviewed. Nothing needs you for now; the work is split into modules next."),
+                Some("Architect") => working("The plan is being split into modules. Nothing needs you for now; building starts next."),
+                Some("Build") => working("Getting the next units ready. Nothing needs you for now."),
+                Some("Full test") => working("Running the full test. Nothing needs you for now; it decides whether the wish counts as finished."),
+                Some("Memory") => working("Writing down what was learned. Nothing needs you for now; the report comes next."),
+                Some("Report") => working("Writing the report. Nothing needs you for now; it will be here when it is done."),
+                _ if run.units.is_empty() => working("Chronos is starting. Nothing needs you for now."),
+                _ => working("Chronos is working. Nothing needs you for now."),
+            }
+        }
+        RunStatus::Waiting => Brief::plain(
+            "A background batch is running. Nothing needs you for now; you will be told when it finishes, and waiting uses no model quota.",
+            Tone::Waiting,
+        ),
+        RunStatus::LimitWait => Brief::plain(
+            "The usage limit was reached. Nothing needs you; it continues by itself when the limit resets.",
+            Tone::Waiting,
+        ),
+        RunStatus::Interrupted => Brief::plain(
+            "The session stopped before it finished. Resume it to continue where it left off.",
+            Tone::NeedsYou,
+        ),
+        RunStatus::Blocked => match run.needs.iter().find(|n| n.kind != NeedKind::Interjection) {
+            Some(need) if !clipped_title(&need.title).is_empty() => Brief {
+                key: "Stopped and waiting for you: {}. Deal with it, then resume.",
+                args: vec![clipped_title(&need.title)],
+                tone: Tone::NeedsYou,
+            },
+            _ => Brief::plain("Stopped and waiting for you. Read the note below, then resume.", Tone::NeedsYou),
+        },
+        RunStatus::Done => {
+            let summary = Summary::of(run);
+            if run.verified_end() {
+                return Brief {
+                    key: "Finished: all {} units are verified and the full test passed. Nothing is left for you to do.",
+                    args: vec![summary.total.to_string()],
+                    tone: Tone::Finished,
+                };
+            }
+            let unsettled = |key| Brief::plain(key, Tone::Unsettled);
+            match summary.verdict {
+                Verdict::NotVerified if summary.unverified.len() == 1 => {
+                    unsettled("Ended with 1 unit not verified. Read the summary, then decide what to do next.")
+                }
+                Verdict::NotVerified => Brief {
+                    key: "Ended with {} units not verified. Read the summary, then decide what to do next.",
+                    args: vec![summary.unverified.len().to_string()],
+                    tone: Tone::Unsettled,
+                },
+                Verdict::TestFailed => {
+                    unsettled("Ended: every unit is verified, but the full test failed. Read the summary before relying on it.")
+                }
+                Verdict::NoUnits => unsettled("Ended with no units recorded, so nothing is confirmed as built."),
+                Verdict::TestNotRun | Verdict::Clean => unsettled(
+                    "Ended: every unit is verified, but the full test has no passing result. Read the summary before relying on it.",
+                ),
+            }
+        }
+    }
+}
+
+/// The first-day checklist. Every item is read from state the app already holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FirstDay {
+    tools: bool,
+    signed_in: bool,
+    project: bool,
+    wish: bool,
+}
+
+impl FirstDay {
+    /// `has_project` is whether a project folder has been chosen before, outside any run.
+    fn of(checks: &[Check], runs: &[Run], has_project: bool) -> Self {
+        let tool = |name: &str| checks.iter().find(|c| c.name.eq_ignore_ascii_case(name));
+        let pair = [tool("claude"), tool("codex")];
+        // A tool the doctor could not find says so with "not on PATH".
+        let found = |c: Option<&Check>| c.is_some_and(|c| !c.detail.contains("not on PATH"));
+        let tools = pair.iter().all(|c| found(*c));
+        // The doctor has no sign-in probe of its own: a tool that is found and not failing is
+        // taken as signed in, and a failure such as "not logged in" is what unticks it.
+        let signed_in = tools && pair.iter().all(|c| c.is_some_and(|c| c.status != CheckStatus::Fail));
+        Self {
+            tools,
+            signed_in,
+            project: has_project || runs.iter().any(|r| r.cwd.is_some()),
+            wish: runs.iter().any(|r| r.status == RunStatus::Done),
+        }
+    }
+
+    fn complete(self) -> bool {
+        self.items().iter().all(|(_, done, _)| *done)
+    }
+
+    fn done_count(self) -> usize {
+        self.items().iter().filter(|(_, done, _)| *done).count()
+    }
+
+    /// Label, ticked, and what ticking it means.
+    fn items(self) -> [(&'static str, bool, &'static str); 4] {
+        [
+            ("Tools found", self.tools, "Claude Code and Codex are both installed."),
+            ("Signed in", self.signed_in, "Neither tool reports a sign-in problem."),
+            ("A project is chosen", self.project, "A project folder has been used with Chronos."),
+            ("First wish finished", self.wish, "A wish has run to its end."),
+        ]
+    }
+}
+
 fn column(content: impl IntoElement) -> Div {
     div().size_full().min_w_0().overflow_hidden().child(content)
 }
@@ -512,6 +718,20 @@ fn apply_scene(state: &mut AppState, scene: &str) {
             state.checks.extend(scene_setup_checks());
         }
         "run-none" => state.current = None,
+        "run-select-unit" => state.selection = Selection::Unit(1),
+        // A first day: no wish has ended yet.
+        "run-first-day" => {
+            state.runs.retain(|r| r.status != RunStatus::Done);
+            state.current = state.runs.iter().position(|r| r.status == RunStatus::Active).or(Some(0));
+            state.checks.iter_mut().filter(|c| c.name.as_ref() == "codex").for_each(|c| {
+                c.status = CheckStatus::Fail;
+                c.detail = "codex failed: not logged in".into();
+            });
+        }
+        "run-first-day-empty" => {
+            state.runs.clear();
+            state.current = None;
+        }
         "run-partial" | "run-partial-graph" => {
             state.current = finished;
             let Some(run) = current_run(state) else { return };
@@ -582,11 +802,15 @@ pub struct RunView {
 
 impl RunView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&state, |this, _, cx| {
+            this.settle_first_day(cx);
+            cx.notify();
+        })
+        .detach();
         let scene = state.read(cx).scene.clone().unwrap_or_default();
         state.update(cx, |s, _| apply_scene(s, &scene));
         let viewing = state.read(cx).run().map(|r| r.session.clone());
-        Self {
+        let this = Self {
             todo: cx.new(|cx| Todo::new(state.clone(), window, cx)),
             mesh: cx.new(|cx| Mesh::new(state.clone(), window, cx)),
             detail: cx.new(|cx| Detail::new(state.clone(), window, cx)),
@@ -597,7 +821,134 @@ impl RunView {
             wish_open: scene.ends_with("-open"),
             report_open: false,
             state,
+        };
+        this.settle_first_day(cx);
+        this
+    }
+
+    fn first_day(&self, cx: &App) -> FirstDay {
+        let state = self.state.read(cx);
+        FirstDay::of(&state.checks, &state.runs, settings::has_recent_project(cx))
+    }
+
+    /// Once every item is ticked the list is retired for good, through the settings store.
+    fn settle_first_day(&self, cx: &mut App) {
+        if !settings::first_day_done(cx) && self.first_day(cx).complete() {
+            settings::finish_first_day(cx);
         }
+    }
+
+    /// The checklist, or nothing once it has been completed.
+    fn first_day_card(&self, cx: &App) -> Option<AnyElement> {
+        if settings::first_day_done(cx) {
+            return None;
+        }
+        let t = cx.tokens();
+        let day = self.first_day(cx);
+        let count = fill(tr(cx, TEXT, "{} of {} done"), &[&day.done_count().to_string(), "4"]);
+        Some(
+            h_flex()
+                .id("first-day")
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .gap_x_5()
+                .gap_y_1()
+                .px_4()
+                .py_2()
+                .rounded(px(10.))
+                .bg(t.gold.opacity(0.06))
+                .border_1()
+                .border_color(t.gold.opacity(0.3))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_baseline()
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(t.text).child(tr(cx, TEXT, "Your first day with Chronos")))
+                        .child(div().text_xs().text_color(t.muted).child(count)),
+                )
+                .children(day.items().into_iter().enumerate().map(|(i, (label, done, meaning))| {
+                    let tip = if done { meaning } else { "Not yet." };
+                    h_flex()
+                        .id(("first-day-item", i))
+                        .gap_1p5()
+                        .items_center()
+                        .text_xs()
+                        .text_color(if done { t.muted } else { t.text })
+                        .child(if done {
+                            Icon::new(IconName::CircleCheck).size(px(14.)).text_color(t.ok).into_any_element()
+                        } else {
+                            div().size(px(12.)).m(px(1.)).rounded_full().border_1().border_color(t.muted).into_any_element()
+                        })
+                        .child(tr(cx, TEXT, label))
+                        .tooltip(tooltip(tr(cx, TEXT, tip)))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The top line: what is happening, whether anything is needed, and what follows.
+    fn brief(&self, run: &Run, cx: &App) -> impl IntoElement {
+        let t = cx.tokens();
+        let brief = brief_of(run);
+        let (icon, color) = match brief.tone {
+            Tone::Working => (IconName::LoaderCircle, t.run),
+            Tone::Waiting => (IconName::Pause, t.review),
+            Tone::NeedsYou => (IconName::CircleAlert, t.fail),
+            Tone::Finished => (IconName::CircleCheck, t.ok),
+            Tone::Unsettled => (IconName::TriangleAlert, t.review),
+        };
+        let text = brief.text(*cx.global::<Lang>());
+        h_flex()
+            .id("run-brief")
+            .flex_none()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_5()
+            .py_2()
+            .bg(color.opacity(0.08))
+            .border_b_1()
+            .border_color(t.border)
+            .child(Icon::new(icon).size(px(16.)).text_color(color))
+            .child(div().min_w_0().text_sm().font_weight(FontWeight::MEDIUM).text_color(t.text).child(text))
+    }
+
+    /// The details panel, with its "say something about this" action when a message can reach the run.
+    fn details_column(&self, run: &Run, selection: &Selection, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let can_say = control::offer(run.status, run.hosted, run.cwd.is_some(), run.report.is_some()).entry
+            == control::Entry::Interjection;
+        let subject = control::subject_of(run, selection).filter(|_| can_say);
+        let state = self.state.clone();
+        column(
+            v_flex()
+                .size_full()
+                .child(div().flex_1().min_h_0().w_full().child(self.detail.clone()))
+                .when_some(subject, |this, subject| {
+                    this.child(
+                        h_flex()
+                            .flex_none()
+                            .w_full()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(t.border)
+                            .child(
+                                Button::new("say-about-this")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::ArrowUp)
+                                    .label(tr(cx, TEXT, "Say something about this"))
+                                    .tooltip(tr(cx, TEXT, "Opens the message box with this item named at the start."))
+                                    .on_click(move |_, _, cx| {
+                                        let text = control::address_text(&subject, cx);
+                                        state.update(cx, |s, cx| s.address_interjection(text, cx));
+                                    }),
+                            ),
+                    )
+                }),
+        )
     }
 
     /// Opens a file or folder through the OS, on a background thread, and says so if it is gone.
@@ -907,6 +1258,9 @@ impl RunView {
             .gap_6()
             .p_8()
             .overflow_y_scrollbar()
+            .when_some(self.first_day_card(cx), |this, card| {
+                this.child(div().w_full().max_w(px(640.)).child(card))
+            })
             .when(blocked, |this| {
                 this.child(div().w_full().max_w(px(640.)).child(self.setup_card(failures, cx)))
             })
@@ -1348,6 +1702,10 @@ impl Render for RunView {
         let animate = run.status == RunStatus::Active && !state.reduce_motion;
         v_flex()
             .size_full()
+            .child(self.brief(run, cx))
+            .when_some(self.first_day_card(cx), |this, card| {
+                this.child(div().flex_none().w_full().px_5().pt_3().child(card))
+            })
             .when(!failures.is_empty(), |this| {
                 this.child(div().flex_none().w_full().px_5().py_3().child(self.setup_card(&failures, cx)))
             })
@@ -1372,7 +1730,7 @@ impl Render for RunView {
                             resizable_panel()
                                 .size(DETAILS_WIDTH)
                                 .size_range(DETAILS_RANGE)
-                                .child(column(self.detail.clone()).bg(t.surface)),
+                                .child(self.details_column(run, &state.selection, cx)),
                         ),
                 ),
             )
@@ -1399,6 +1757,8 @@ mod tests {
         beginning, cost_text, fix_hint, one_line, required_failures, stage_key, unpriced_models, without_fix, FullTest,
         StageState, Summary, Verdict, FULL_TEST, STAGE_NAMES, TEXT,
     };
+    use super::super::i18n::Lang;
+    use super::{brief_of, Brief, FirstDay, Tone};
     use gpui_kit::SharedString;
 
     fn run_with(states: &[UnitState]) -> Run {
@@ -1583,6 +1943,195 @@ mod tests {
         for key in unit_words.iter().chain(stage_words.iter()) {
             assert!(COMMON.iter().chain(TEXT.iter()).any(|(k, _)| k == key), "no translation for {key}");
         }
+    }
+
+
+    fn running_run(running_units: usize) -> Run {
+        let mut run = sample_run();
+        run.status = RunStatus::Active;
+        for unit in &mut run.units {
+            unit.state = UnitState::Pending;
+        }
+        for unit in run.units.iter_mut().take(running_units) {
+            unit.state = UnitState::Running;
+        }
+        run
+    }
+
+    #[test]
+    fn building_units_is_said_with_the_real_count_and_no_action_asked() {
+        let brief = brief_of(&running_run(2));
+        assert_eq!(brief.tone, Tone::Working);
+        assert_eq!(brief.text(Lang::ZhTw), "正在建造 2 個單元，暫時不需要你動手；建好後會逐項驗收。");
+        assert!(brief.text(Lang::En).starts_with("Building 2 units."));
+        let one = brief_of(&running_run(1));
+        assert!(one.text(Lang::En).starts_with("Building 1 unit."), "{}", one.text(Lang::En));
+    }
+
+    #[test]
+    fn with_no_unit_running_the_running_stage_decides_the_sentence() {
+        let mut run = running_run(0);
+        for stage in &mut run.stages {
+            stage.phase = Phase::Waiting;
+        }
+        run.stages.iter_mut().find(|s| s.name == "Astra").unwrap().phase = Phase::Running;
+        assert!(brief_of(&run).text(Lang::En).starts_with("Astra is planning."));
+        run.stages.iter_mut().find(|s| s.name == "Astra").unwrap().phase = Phase::Done;
+        run.stages.iter_mut().find(|s| s.name == "Full test").unwrap().phase = Phase::Running;
+        assert!(brief_of(&run).text(Lang::En).starts_with("Running the full test."));
+        for stage in &mut run.stages {
+            stage.phase = Phase::Waiting;
+        }
+        assert!(brief_of(&run).text(Lang::En).starts_with("Chronos is working."), "unknown stage says no more than that");
+        run.units.clear();
+        assert!(brief_of(&run).text(Lang::En).starts_with("Chronos is starting."));
+    }
+
+    #[test]
+    fn a_blocked_run_says_it_needs_the_person_and_quotes_its_own_note() {
+        let mut run = sample_run();
+        run.status = RunStatus::Blocked;
+        run.needs = vec![Need { kind: NeedKind::Blocked, title: "A credential is needed".into(), note: "x".into() }];
+        let brief = brief_of(&run);
+        assert_eq!(brief.tone, Tone::NeedsYou);
+        assert_eq!(brief.args, vec!["A credential is needed".to_owned()]);
+        assert!(!brief.text(Lang::En).contains("Nothing needs you"));
+        run.needs.clear();
+        let bare = brief_of(&run);
+        assert_eq!(bare.tone, Tone::NeedsYou);
+        assert!(bare.args.is_empty());
+    }
+
+    #[test]
+    fn waiting_and_interrupted_runs_are_told_apart() {
+        let mut run = sample_run();
+        run.status = RunStatus::Waiting;
+        assert_eq!(brief_of(&run).tone, Tone::Waiting);
+        run.status = RunStatus::LimitWait;
+        assert!(brief_of(&run).text(Lang::En).contains("usage limit"));
+        run.status = RunStatus::Interrupted;
+        assert_eq!(brief_of(&run).tone, Tone::NeedsYou);
+    }
+
+    #[test]
+    fn finished_is_claimed_only_when_everything_is_verified_and_the_test_passed() {
+        let mut run = run_with(&[UnitState::Verified, UnitState::Verified]);
+        let brief = brief_of(&run);
+        assert_eq!(brief.tone, Tone::Finished);
+        assert_eq!(brief.args, vec!["2".to_owned()]);
+        set_full_test(&mut run, Phase::Failed);
+        assert_eq!(brief_of(&run).tone, Tone::Unsettled);
+        assert!(brief_of(&run).text(Lang::En).contains("full test failed"));
+        let mut partial = run_with(&[UnitState::Verified, UnitState::Failed, UnitState::Built]);
+        let brief = brief_of(&partial);
+        assert_eq!(brief.tone, Tone::Unsettled);
+        assert_eq!(brief.args, vec!["2".to_owned()]);
+        partial.units.clear();
+        assert_eq!(brief_of(&partial).tone, Tone::Unsettled, "no units is never finished");
+    }
+
+    #[test]
+    fn every_sentence_the_brief_can_say_is_translated() {
+        let mut briefs: Vec<Brief> = vec![];
+        let mut run = running_run(1);
+        briefs.push(brief_of(&run));
+        run.units[1].state = UnitState::Running;
+        briefs.push(brief_of(&run));
+        for name in ["Astra", "Critic", "Architect", "Build", "Full test", "Memory", "Report", "none"] {
+            let mut r = running_run(0);
+            for stage in &mut r.stages {
+                stage.phase = if stage.name == name { Phase::Running } else { Phase::Waiting };
+            }
+            briefs.push(brief_of(&r));
+            r.units.clear();
+            briefs.push(brief_of(&r));
+        }
+        for status in [RunStatus::Waiting, RunStatus::LimitWait, RunStatus::Interrupted, RunStatus::Blocked] {
+            let mut r = sample_run();
+            r.status = status;
+            r.needs.clear();
+            briefs.push(brief_of(&r));
+            r.needs = vec![Need { kind: NeedKind::Blocked, title: "t".into(), note: String::new().into() }];
+            briefs.push(brief_of(&r));
+        }
+        let verified = run_with(&[UnitState::Verified]);
+        briefs.push(brief_of(&verified));
+        let mut failed_test = verified.clone();
+        set_full_test(&mut failed_test, Phase::Failed);
+        briefs.push(brief_of(&failed_test));
+        let mut not_run = verified.clone();
+        set_full_test(&mut not_run, Phase::Waiting);
+        briefs.push(brief_of(&not_run));
+        briefs.push(brief_of(&run_with(&[UnitState::Failed])));
+        briefs.push(brief_of(&run_with(&[UnitState::Failed, UnitState::Built])));
+        briefs.push(brief_of(&run_with(&[])));
+        for brief in briefs {
+            let zh = TEXT.iter().find(|(en, _)| *en == brief.key);
+            assert!(zh.is_some(), "no translation for {:?}", brief.key);
+            assert_eq!(brief.key.matches("{}").count(), brief.args.len(), "{:?}", brief.key);
+            assert_eq!(zh.unwrap().1.matches("{}").count(), brief.args.len(), "{:?}", brief.key);
+            assert!(!brief.text(Lang::ZhTw).contains("{}"));
+        }
+    }
+
+    fn ok_check(name: &str) -> Check {
+        Check { name: name.to_owned().into(), status: CheckStatus::Ok, detail: "1.0".into() }
+    }
+
+    #[test]
+    fn the_first_day_ticks_only_from_what_is_true() {
+        let day = FirstDay::of(&[], &[], false);
+        assert_eq!(day, FirstDay { tools: false, signed_in: false, project: false, wish: false });
+        assert!(!day.complete());
+        assert_eq!(day.done_count(), 0);
+
+        let checks = [ok_check("claude"), ok_check("codex")];
+        let day = FirstDay::of(&checks, &[], false);
+        assert!(day.tools && day.signed_in && !day.project && !day.wish);
+        assert_eq!(day.done_count(), 2);
+    }
+
+    #[test]
+    fn a_missing_tool_and_a_signed_out_tool_untick_different_items() {
+        let missing = Check {
+            name: "codex".into(),
+            status: CheckStatus::Fail,
+            detail: "not on PATH. Install the Codex CLI and sign in.".into(),
+        };
+        let day = FirstDay::of(&[ok_check("claude"), missing], &[], false);
+        assert!(!day.tools && !day.signed_in);
+
+        let signed_out =
+            Check { name: "codex".into(), status: CheckStatus::Fail, detail: "codex failed: not logged in".into() };
+        let day = FirstDay::of(&[ok_check("claude"), signed_out], &[], false);
+        assert!(day.tools, "found on PATH");
+        assert!(!day.signed_in, "but failing");
+        let day = FirstDay::of(&[ok_check("claude")], &[], false);
+        assert!(!day.tools, "codex is not reported at all");
+    }
+
+    #[test]
+    fn a_project_counts_from_the_recent_list_or_from_a_run_with_a_folder() {
+        assert!(FirstDay::of(&[], &[], true).project);
+        let mut run = sample_run();
+        run.cwd = Some("E:/work".into());
+        assert!(FirstDay::of(&[], &[run.clone()], false).project);
+        run.cwd = None;
+        assert!(!FirstDay::of(&[], &[run], false).project);
+    }
+
+    #[test]
+    fn only_a_wish_that_ended_ticks_the_last_item_and_all_four_complete_the_list() {
+        let checks = [ok_check("claude"), ok_check("codex")];
+        let mut run = sample_run();
+        run.cwd = Some("E:/work".into());
+        for status in [RunStatus::Active, RunStatus::Waiting, RunStatus::Blocked, RunStatus::Interrupted] {
+            run.status = status;
+            assert!(!FirstDay::of(&checks, &[run.clone()], true).wish, "{status:?}");
+        }
+        run.status = RunStatus::Done;
+        let day = FirstDay::of(&checks, &[run], false);
+        assert!(day.wish && day.complete());
     }
 
     #[test]

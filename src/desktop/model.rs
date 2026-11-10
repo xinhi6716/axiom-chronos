@@ -251,6 +251,12 @@ pub struct MemoryEntry {
     pub body: SharedString,
     /// True only when the files it was learned from are known to have changed.
     pub stale: bool,
+    /// The wish it was learned from, in the user's words. Empty when none was recorded.
+    pub wish: SharedString,
+    /// When it was last confirmed, as `Run::started` is written. Empty when not known.
+    pub confirmed: SharedString,
+    /// A person rewrote the text, so it is no longer what the engine first wrote.
+    pub corrected: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,6 +382,13 @@ pub trait Backend: 'static {
     fn follow(&self, session: &str) -> Res<()>;
 }
 
+/// Words to put in the interjection box of one run, naming what the person is talking about.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Address {
+    pub session: SharedString,
+    pub text: SharedString,
+}
+
 /// The single shared model. Screens read it and call its command methods.
 pub struct AppState {
     pub view: Screen,
@@ -394,6 +407,8 @@ pub struct AppState {
     pub next_error: u64,
     /// A run's real session id to the provisional id it had before `Event::Started`.
     pub renames: HashMap<SharedString, SharedString>,
+    /// Set by the details panel; the control bar takes it and opens its box with the text in it.
+    pub address: Option<Address>,
 }
 
 /// The run to open when none is selected: live work first, otherwise the newest.
@@ -536,9 +551,23 @@ impl AppState {
         cx.notify();
     }
 
-    /// `text` becomes the entry's new body, which is what later briefs see.
+    /// `text` becomes the entry's new body, which is what later briefs see. With an engine
+    /// connected the entry changes when the engine reports it; without one it changes here.
     pub fn correct_memory(&mut self, id: i64, text: &str, cx: &mut Context<Self>) {
-        self.command(Action::CorrectMemory, None, |backend| backend.correct_memory(id, text));
+        if self.backend.is_some() {
+            self.command(Action::CorrectMemory, None, |backend| backend.correct_memory(id, text));
+        } else if let Some(entry) = self.memory.iter_mut().find(|m| m.id == id) {
+            entry.body = text.trim().to_owned().into();
+            entry.corrected = true;
+        }
+        cx.notify();
+    }
+
+    /// Asks the control bar to open its box for the current run, starting with `text`.
+    pub fn address_interjection(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        if let Some(session) = self.run().map(|run| run.session.clone()) {
+            self.address = Some(Address { session, text: text.into() });
+        }
         cx.notify();
     }
 
