@@ -242,6 +242,10 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         units[0]
                     )));
                 }
+                let reviewed_tree = v
+                    .get("tree")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid("missing tree"))?;
                 let pass = verdict.eq_ignore_ascii_case("pass")
                     && !findings.iter().any(|f| {
                         f.get("severity").and_then(|s| s.as_str()).is_some_and(|s| {
@@ -260,6 +264,15 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         "no_review_pack",
                         format!(
                             "the review pack of {} is missing or older than its VERIFY; run orch review-pack first",
+                            units[0]
+                        ),
+                    ));
+                }
+                if !verified.is_empty() && reviewed_tree != verified {
+                    return Err(Failure::new(
+                        "stale_verdict",
+                        format!(
+                            "the verdict reviewed {reviewed_tree}, but the last VERIFY of {} is {verified}; have chronos:reviewer review its current pack",
                             units[0]
                         ),
                     ));

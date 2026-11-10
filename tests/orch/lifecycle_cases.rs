@@ -616,7 +616,8 @@ fn extra_commands_preserve_output_and_failures() {
     let verdict = store.join("verdict.json");
     fs::write(
         &verdict,
-        r#"{"unit":"a","verdict":"pass","findings":[{"severity":"major"}]}"#,
+        json!({"unit":"a","tree":verify_commit,"verdict":"pass","findings":[{"severity":"major"}]})
+            .to_string(),
     )
     .unwrap();
     assert_eq!(
@@ -759,7 +760,7 @@ OUT OF SCOPE P2 later
     }
     fs::write(
         &verdict,
-        r#"{"unit":"missing","verdict":"pass","findings":[]}"#,
+        r#"{"unit":"missing","tree":"tree:0","verdict":"pass","findings":[]}"#,
     )
     .unwrap();
     assert_eq!(
@@ -1038,6 +1039,20 @@ fn review_is_bound_to_unit_and_reviewer() {
         .contains("missing unit"));
     assert_eq!(evidence(&store, "a").unwrap().len(), before);
     fs::write(&verdict, r#"{"unit":"a","verdict":"pass","findings":[]}"#).unwrap();
+    assert!(call(&["a"], "chronos:reviewer", false)
+        .stderr
+        .contains("missing tree"));
+    let tree = evidence(&store, "a")
+        .unwrap()
+        .into_iter()
+        .rfind(|r| r.kind == "verify")
+        .unwrap()
+        .commit;
+    fs::write(
+        &verdict,
+        json!({"unit":"a","tree":tree,"verdict":"pass","findings":[]}).to_string(),
+    )
+    .unwrap();
     assert!(call(&["a"], "chronos:reviewer", false)
         .stderr
         .contains("run orch review-pack first"));
@@ -1716,5 +1731,29 @@ fn superseded_units_are_counted_under_one_name() {
     assert!(cli(&store, &["status"])
         .stdout
         .contains("states=pending=1, superseded=2"));
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn map_fails_when_the_plan_cannot_be_read() {
+    let (store, repo) = setup();
+    fs::write(
+        store.join("modules.md"),
+        "## m\nPURPOSE x\nPATHS a.txt\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
+    )
+    .unwrap();
+    let map = || run(&store, &["map".to_string()], false, false);
+    let report = || {
+        let args = ["report", "--repo", repo.to_str().unwrap()];
+        run(&store, &args.map(String::from), false, false)
+    };
+    assert_eq!(map().exit_code, 0);
+    assert_eq!(report().exit_code, 0);
+    fs::create_dir_all(store.join("astra")).unwrap();
+    fs::write(store.join("astra/plan-final.md"), b"### C1 \xff\xfe broken\n").unwrap();
+    for out in [map(), report()] {
+        assert_ne!(out.exit_code, 0, "{}", out.stdout);
+        assert!(out.stderr.contains("plan-final.md"), "{}", out.stderr);
+    }
     fs::remove_dir_all(store.parent().unwrap()).unwrap();
 }

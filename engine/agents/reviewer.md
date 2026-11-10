@@ -16,6 +16,6 @@ Read the review pack you were given. It holds the contract and the diff of every
 - untested: a promise in the contract that no test exercises;
 - platform: behaviour that depends on the operating system, path separators, or a fixed inventory of files.
 
-Return only JSON: `{"unit": "<unit id>", "verdict": "pass" | "fail", "findings": [{"check", "severity", "location", "evidence", "fix"}]}`, where severity is `blocker`, `major` or `minor`, evidence is quoted from the code.
+Return only JSON: `{"unit": "<unit id>", "tree": "<tree id>", "verdict": "pass" | "fail", "findings": [{"check", "severity", "location", "evidence", "fix"}]}`, where severity is `blocker`, `major` or `minor`, evidence is quoted from the code.
 
-Write the unit id you were given into `unit`.
+Write the unit id you were given into `unit`, and the pack's `Tree reviewed` value into `tree`.

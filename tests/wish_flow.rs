@@ -200,6 +200,9 @@ fn dispatcher_reports_the_digest_and_reviews_through_the_pack() {
     assert!(!report.contains("each decided choice"));
     let reviewer = asset("agents/reviewer.md");
     assert!(reviewer.contains("Read the review pack you were given."));
+    assert!(reviewer.contains("\"tree\": \"<tree id>\""));
+    assert!(reviewer.contains("the pack's `Tree reviewed` value into `tree`"));
+    assert!(dispatcher.contains("save its verdict unedited"));
     assert!(reviewer.contains("tests included"));
     assert!(!reviewer.contains("Read every file you were given"));
     for check in ["contract_mismatch", "vacuous_check", "untested", "platform"] {

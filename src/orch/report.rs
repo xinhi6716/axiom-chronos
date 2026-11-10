@@ -101,29 +101,55 @@ pub(crate) fn pack_diffs(
     files: &mut [(String, u64, u64)],
     listing: &mut String,
     diffs: &mut String,
+    diff_of: impl FnMut(&str) -> Res<String>,
+) -> Res<Vec<String>> {
+    pack_diffs_noting(budget, head_len, files, listing, diffs, diff_of, |_| {
+        Ok("read this file directly".into())
+    })
+}
+/// `pack_diffs`, with `omitted_note` saying where the reviewer finds each file left out.
+fn pack_diffs_noting(
+    budget: usize,
+    head_len: usize,
+    files: &mut [(String, u64, u64)],
+    listing: &mut String,
+    diffs: &mut String,
     mut diff_of: impl FnMut(&str) -> Res<String>,
+    mut omitted_note: impl FnMut(&str) -> Res<String>,
 ) -> Res<Vec<String>> {
     files.sort_by_key(|(path, added, removed)| (added + removed, path.clone()));
     let mut omitted = Vec::new();
     for (path, added, removed) in files.iter() {
         let diff = diff_of(path)?;
         let fits = head_len + diffs.len() + diff.len() <= budget;
-        listing.push_str(&format!(
-            "- {path}  +{added} -{removed}{}
-",
-            if fits {
-                ""
-            } else {
-                "  (read this file directly)"
-            }
-        ));
+        listing.push_str(&format!("- {path}  +{added} -{removed}"));
         if fits {
+            listing.push('\n');
             diffs.push_str(&diff);
         } else {
+            listing.push_str(&format!("  ({})\n", omitted_note(path)?));
             omitted.push(path.clone());
         }
     }
     Ok(omitted)
+}
+/// Where a file deleted between `base` and `tree` keeps its last version, written on first use.
+fn deleted_copy(repo: &Path, dir: &Path, base: &str, tree: &str, path: &str) -> Res<Option<PathBuf>> {
+    let present = git(
+        repo,
+        &["--literal-pathspecs", "ls-tree", "--name-only", "-z", tree_id(tree), "--", path],
+    )?;
+    if !present.is_empty() {
+        return Ok(None);
+    }
+    let text = git(repo, &["cat-file", "blob", &format!("{}:{path}", tree_id(base))])?;
+    let mut out = dir.to_path_buf();
+    out.extend(path.split('/'));
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    base::atomic_write(&out, &text).map_err(io)?;
+    Ok(Some(out))
 }
 
 pub fn pack_path(store: &Path, unit: &str) -> PathBuf {
@@ -179,6 +205,11 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         .iter()
         .find(|r| r.kind == "run" && r.commit.starts_with("tree:"))
         .map(|r| r.commit.as_str());
+    let deleted_dir = store.join("reports").join(format!("{unit}.deleted"));
+    match std::fs::remove_dir_all(&deleted_dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(e)),
+        _ => {}
+    }
     let changed: BTreeSet<String> = match base {
         Some(base) => {
             let mut files = changed_files(repo, base, &tree)?;
@@ -187,13 +218,21 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
                 listing.push_str("The worker changed no file in the unit's SCOPE.
 ");
             }
-            omitted = pack_diffs(
+            omitted = pack_diffs_noting(
                 PACK_BYTES,
                 head.len(),
                 &mut files,
                 &mut listing,
                 &mut diffs,
                 |path| file_diff(repo, base, &tree, path),
+                |path| {
+                    Ok(match deleted_copy(repo, &deleted_dir, base, &tree, path)? {
+                        Some(copy) => {
+                            format!("deleted; its last version is at {}", copy.display())
+                        }
+                        None => "read this file directly".into(),
+                    })
+                },
             )?;
             files.into_iter().map(|(path, _, _)| path).collect()
         }
@@ -244,14 +283,36 @@ fn label(state: &str) -> &str {
         state
     }
 }
-fn unit_paths(store: &Path, unit: &str, repo: &Path) -> Res<Vec<String>> {
-    match std::fs::read_to_string(store.join("reports").join(format!("{unit}.json"))) {
-        Ok(text) => Ok(serde_json::from_str::<Value>(&text)
-            .map(|v| report_paths(&v, repo))
-            .unwrap_or_default()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
-        Err(e) => Err(io(e)),
+/// The files a unit changed: git's difference between the SCOPE snapshot taken before its first
+/// run and its latest snapshot, merged with the worker's `file_changes`, which also names files
+/// git cannot show. When git cannot compare the snapshots, `notes` says so.
+fn unit_paths(
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+    notes: &mut Vec<String>,
+) -> Res<BTreeSet<String>> {
+    let mut paths: BTreeSet<String> =
+        match std::fs::read_to_string(store.join("reports").join(format!("{unit}.json"))) {
+            Ok(text) => serde_json::from_str::<Value>(&text)
+                .map(|v| report_paths(&v, repo).into_iter().collect())
+                .unwrap_or_default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(e) => return Err(io(e)),
+        };
+    let rows = evidence(store, unit)?;
+    let tree = |r: &&Evidence| r.commit.starts_with("tree:");
+    let base = rows.iter().filter(|r| r.kind == "run").find(tree);
+    if let (Some(base), Some(last)) = (base, rows.iter().rev().find(tree)) {
+        match changed_files(repo, &base.commit, &last.commit) {
+            Ok(files) => paths.extend(files.into_iter().map(|(path, _, _)| path)),
+            Err(e) => notes.push(format!(
+                "  {unit}: git cannot compare its snapshots ({}); its files come from the worker's report only\n",
+                e.message.lines().next().unwrap_or("").trim()
+            )),
+        }
     }
+    Ok(paths)
 }
 /// A bounded digest for the core or a dispatcher, in place of reading `reports/`.
 pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
@@ -352,12 +413,16 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
         });
     }
     let mut changed = BTreeSet::new();
+    let mut notes = Vec::new();
     for u in &units {
-        changed.extend(unit_paths(store, &u.id, repo)?);
+        changed.extend(unit_paths(store, &u.id, repo, &mut notes)?);
     }
     out.push_str(&format!("changed files ({}):\n", changed.len()));
     for path in changed.iter().take(MAX_PATHS) {
         out.push_str(&format!("  {path}\n"));
+    }
+    for note in &notes {
+        out.push_str(note);
     }
     if changed.len() > MAX_PATHS {
         out.push_str(&format!(
@@ -428,7 +493,17 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
             }
             Err(e) => return Err(io(e)),
         }
-        if let Ok(plan) = std::fs::read_to_string(store.join("astra").join("plan-final.md")) {
+        let plan = match std::fs::read_to_string(store.join("astra").join("plan-final.md")) {
+            Ok(plan) => Some(plan),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(Failure::new(
+                    "io",
+                    format!("cannot read astra/plan-final.md: {e}"),
+                ))
+            }
+        };
+        if let Some(plan) = plan {
             let coverage = plan.split("\n## ").find(|s| s.starts_with("Coverage"));
             if let Some(section) = coverage {
                 let (head, more) = cut(section.trim_end(), MAX_COVERAGE);
