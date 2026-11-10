@@ -523,7 +523,7 @@ impl Engine {
             Err(failure) => {
                 self.hosted.remove(&key);
                 // The dialog has closed; the details are the only copy of what was typed.
-                self.fail(Action::StartWish, None, format!("{}\n\nYour wish: {}", failure.message, request.wish));
+                self.fail(Action::StartWish, None, format!("{}\n\nYour wish: {}", failure.message, clean_wish(&request.wish)));
             }
         }
     }
@@ -881,7 +881,7 @@ fn read_memory(home: &Path) -> Res<Vec<MemoryEntry>> {
                 body: text(entry, "body"),
                 // `null` means the project is gone, so nothing is known to have changed.
                 stale: entry["stale"].as_bool() == Some(true),
-                wish: text(entry, "wish"),
+                wish: clean_wish(entry["wish"].as_str().unwrap_or("")).into(),
                 confirmed: entry["confirmed"].as_f64().map(confirmed_text).unwrap_or_default().into(),
                 corrected: entry["corrected"].as_f64().is_some(),
             })
@@ -1330,20 +1330,18 @@ fn usage_of(wish: &app::Wish, ledger: Option<&Ledger>) -> Usage {
     }
 }
 
-fn warning_text(warning: &Warning) -> String {
+fn note_of(warning: &Warning) -> Note {
     match warning {
         Warning::ContextHigh { agent_type, model, peak_context, .. } => {
-            format!("{agent_type} reached {peak_context} tokens of context on {model}.")
+            Note::ContextHigh { agent: agent_type.clone(), model: model.clone(), peak: *peak_context }
         }
         Warning::CacheRewritesAfterGap { agent_type, count, tokens, usd, .. } => {
-            format!("{agent_type} rewrote its cache {count} times after long waits ({tokens} tokens, about ${usd:.2}).")
+            Note::CacheRewrites { agent: agent_type.clone(), count: *count, tokens: *tokens, usd: *usd }
         }
         Warning::LargeFileRead { agent_type, path, reads, largest_bytes, .. } => {
-            format!("{agent_type} read {path} {reads} times, up to {largest_bytes} bytes.")
+            Note::FileReads { agent: agent_type.clone(), path: path.clone(), reads: *reads, largest: *largest_bytes }
         }
-        Warning::CopiedHistoryNotSeparable { file, zeroed_calls } => {
-            format!("{zeroed_calls} calls in {file} could not be told apart from copied history and were not counted.")
-        }
+        Warning::CopiedHistoryNotSeparable { file, zeroed_calls } => Note::CopiedHistory { file: file.clone(), calls: *zeroed_calls },
     }
 }
 
@@ -1353,9 +1351,9 @@ fn map_wish(wish: &app::Wish, sources: &Sources<'_>, titles: &mut HashMap<PathBu
     if let Some(prefix) = store_prefix(wish) {
         warnings.extend(sources.warnings.iter().filter(|w| w.starts_with(&prefix)).map(|w| w.clone().into()));
     }
-    if let Some(ledger) = sources.ledger {
-        warnings.extend(ledger.warnings.iter().map(|w| warning_text(w).into()));
-    }
+    let notes = sources.ledger.map(|ledger| group_notes(ledger.warnings.iter().map(note_of))).unwrap_or_default();
+    let lang = super::i18n::data_lang();
+    warnings.extend(notes.iter().map(|note| SharedString::from(note.text(lang))));
     let (modules, units) = structure(wish, titles, &mut warnings);
     let goals = goal_items(&wish.goals, &modules);
     let mut stages: Vec<Stage> = wish.stages.iter().map(stage_of).collect();
@@ -1402,7 +1400,7 @@ fn map_wish(wish: &app::Wish, sources: &Sources<'_>, titles: &mut HashMap<PathBu
         session: wish.session.clone().into(),
         project: project.into(),
         cwd,
-        wish: app::unmarked(&wish.goal.wish).to_owned().into(),
+        wish: app::unmarked(&clean_wish(&wish.goal.wish)).to_owned().into(),
         status,
         hosted,
         started: first_stamp.map(started_text).unwrap_or_default().into(),
@@ -1414,10 +1412,11 @@ fn map_wish(wish: &app::Wish, sources: &Sources<'_>, titles: &mut HashMap<PathBu
         usage: usage_of(wish, sources.ledger),
         needs,
         log: sources.hosted.map(|h| h.log.to_vec()).unwrap_or_default(),
-        decisions: wish.decisions.iter().map(|d| d.clone().into()).collect(),
+        decisions: wish.decisions.iter().filter_map(|d| plain_line(d)).map(SharedString::from).collect(),
         report,
         elapsed,
         warnings,
+        notes,
     }
 }
 
@@ -1427,7 +1426,7 @@ fn early_run(key: &str, entry: &Hosted) -> Run {
         session: key.to_owned().into(),
         project: entry.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().into(),
         cwd: Some(entry.cwd.clone()).filter(|cwd| !cwd.as_os_str().is_empty()),
-        wish: entry.text.clone().into(),
+        wish: clean_wish(&entry.text).into(),
         status: if entry.ended_at.is_some() { RunStatus::Interrupted } else { RunStatus::Active },
         hosted: true,
         started: started_text(&stamp_of(entry.started as i64)).into(),
@@ -1446,6 +1445,7 @@ fn early_run(key: &str, entry: &Hosted) -> Run {
         report: None,
         elapsed: None,
         warnings: vec![],
+        notes: vec![],
     }
 }
 
@@ -1495,6 +1495,34 @@ mod tests {
         let wish = &snapshot.wishes[0];
         let sources = Sources { needs: &snapshot.needs_you, warnings: &snapshot.warnings, hosted, ledger: None, now };
         map_wish(wish, &sources, &mut HashMap::new())
+    }
+
+    #[test]
+    fn the_wish_is_shown_without_its_wrapper_markup_and_stays_as_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path());
+        let raw = "<pasted_content id=\"a0d5\"> 工作目錄在：[E:/x] 做完整測試 </pasted_content>";
+        goal_file(dir.path(), "s1", json!({"wish":raw,"status":"active","project":"proj","cwd":"E:/codex/proj"}));
+        let run = map_one(dir.path(), None, SystemTime::now());
+        assert_eq!(run.wish.as_ref(), "工作目錄在：[E:/x] 做完整測試");
+        let stored = std::fs::read_to_string(dir.path().join("goals").join("s1.json")).unwrap();
+        assert!(stored.contains("pasted_content"), "the file on disk is untouched");
+    }
+
+    #[test]
+    fn ledger_warnings_for_one_file_map_to_one_note() {
+        let read = |instance: &str, reads, largest_bytes| Warning::LargeFileRead {
+            agent_type: "chronos:reviewer".into(),
+            instance: instance.into(),
+            path: "p/schema.json".into(),
+            reads,
+            largest_bytes,
+        };
+        let notes = group_notes([read("a", 1, 10), read("b", 1, 30), read("c", 3, 20)].iter().map(note_of));
+        assert_eq!(
+            notes,
+            vec![Note::FileReads { agent: "chronos:reviewer".into(), path: "p/schema.json".into(), reads: 5, largest: 30 }]
+        );
     }
 
     #[test]

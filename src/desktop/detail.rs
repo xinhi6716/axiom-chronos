@@ -553,8 +553,47 @@ fn markdown_style() -> TextViewStyle {
         .code_block(StyleRefinement::default().text_size(px(12.)).px_3().py_2())
 }
 
+/// CommonMark does not end bold when the closing `**` follows punctuation and a letter comes right
+/// after it, which is how Chinese is written: `**建議：**把` shows its asterisks. A space is put
+/// after such a closing `**`. Code spans and fenced code are left alone.
+fn mend_bold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        if fenced || !line.contains("**") {
+            out.push_str(line);
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let (mut open, mut code, mut i) = (false, false, 0);
+        while i < chars.len() {
+            if chars[i] == '`' {
+                code = !code;
+            }
+            if !code && chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
+                out.push_str("**");
+                if open {
+                    let punctuated = i > 0 && !chars[i - 1].is_alphanumeric() && !chars[i - 1].is_whitespace() && chars[i - 1] != '*';
+                    if punctuated && chars.get(i + 2).is_some_and(|c| c.is_alphanumeric()) {
+                        out.push(' ');
+                    }
+                }
+                open = !open;
+                i += 2;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn markdown_view(id: impl Into<ElementId>, text: SharedString) -> TextView {
-    TextView::markdown(id, text)
+    TextView::markdown(id, mend_bold(&text))
         .selectable(true)
         .style(markdown_style())
         .on_link_click(|url, _, _, cx| {
@@ -1449,5 +1488,24 @@ impl Render for Detail {
             .text_size(px(13.))
             .overflow_hidden()
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod bold_tests {
+    use super::mend_bold;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn bold_closed_after_punctuation_before_a_letter_gets_a_space() {
+        assert_eq!(mend_bold("**建議：**把檔案拆開"), "**建議：** 把檔案拆開");
+        assert_eq!(mend_bold("- **嚴重**（高）與 **建議：**照做"), "- **嚴重**（高）與 **建議：** 照做");
+    }
+
+    #[test]
+    fn bold_that_already_closes_and_code_stay_as_written() {
+        for text in ["**建議：** 把", "**done**，ok", "**a:**\nnext", "`**x：**y`", "```\n**x：**y\n```\n"] {
+            assert_eq!(mend_bold(text), text);
+        }
     }
 }

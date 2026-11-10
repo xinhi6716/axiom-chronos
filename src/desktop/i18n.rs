@@ -1,5 +1,6 @@
 //! Interface text. English is the key; each screen keeps a table of its own translations.
 use gpui_kit::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -8,6 +9,25 @@ pub enum Lang {
 }
 
 impl Global for Lang {}
+
+/// The language the screens use, for text that is built where no `App` is at hand (the data layer).
+/// Kept in step with the `Lang` global by `set`.
+static DATA_ENGLISH: AtomicBool = AtomicBool::new(false);
+
+/// Sets the global language and the data layer's copy of it.
+pub fn set(lang: Lang, cx: &mut App) {
+    DATA_ENGLISH.store(lang == Lang::En, Ordering::Relaxed);
+    cx.set_global(lang);
+}
+
+/// The language text built outside a screen should use.
+pub fn data_lang() -> Lang {
+    if DATA_ENGLISH.load(Ordering::Relaxed) {
+        Lang::En
+    } else {
+        Lang::ZhTw
+    }
+}
 
 pub type Table = &'static [(&'static str, &'static str)];
 

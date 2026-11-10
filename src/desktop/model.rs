@@ -1,4 +1,5 @@
 //! What the screens draw and the commands they send. Screens never read `~/.axiom` or start processes.
+use super::i18n::{translate, Lang, Table};
 use crate::base::Res;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -203,10 +204,20 @@ pub struct Run {
     pub decisions: Vec<SharedString>,
     pub report: Option<TextSource>,
     pub elapsed: Option<SharedString>,
+    /// Every warning to show, as text in the language of the day. It includes the text of `notes`.
     pub warnings: Vec<SharedString>,
+    /// The warnings the usage ledger raised, grouped and still structured, so a screen can
+    /// translate them or leave out the ones it already shows another way.
+    pub notes: Vec<Note>,
 }
 
 impl Run {
+    /// Warnings that are not the text of a ledger note.
+    pub fn other_warnings(&self) -> impl Iterator<Item = &SharedString> {
+        let texts: Vec<String> = self.notes.iter().flat_map(|n| [n.text(Lang::En), n.text(Lang::ZhTw)]).collect();
+        self.warnings.iter().filter(move |w| !texts.iter().any(|t| t == w.as_ref()))
+    }
+
     pub fn count(&self, state: UnitState) -> usize {
         self.units.iter().filter(|u| u.state == state).count()
     }
@@ -578,5 +589,328 @@ impl AppState {
     pub fn recheck(&mut self, cx: &mut Context<Self>) {
         self.command(Action::Recheck, None, |backend| backend.recheck());
         cx.notify();
+    }
+}
+
+/// A wish as the screens show it: the markup a prompt arrives wrapped in is taken off and the
+/// words inside stay. The stored wish is never changed, only what is drawn.
+///
+/// A tag counts as wrapper markup when it is one of the known wrappers, or is written in
+/// snake_case or kebab-case (`<pasted_content id="a0d5">`, `</user-query>`). Plain words such as
+/// `<div>` or `Vec<T>` are text and stay.
+pub fn clean_wish(wish: &str) -> String {
+    const WRAPPERS: [&str; 6] = ["pasted_content", "pasted_text", "pasted_image", "attachment", "system-reminder", "user_query"];
+    let mut out = String::with_capacity(wish.len());
+    let mut rest = wish;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        match wrapper_tag_len(tail, &WRAPPERS) {
+            Some(len) => rest = &tail[len..],
+            None => {
+                out.push('<');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
+}
+
+/// The length of the wrapper tag at the start of `text`, if it begins with one.
+fn wrapper_tag_len(text: &str, known: &[&str]) -> Option<usize> {
+    let close = text.find('>')?;
+    let inner = &text[1..close];
+    if inner.contains('<') {
+        return None;
+    }
+    let inner = inner.strip_prefix('/').unwrap_or(inner);
+    let name_end = inner.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(inner.len());
+    let name = &inner[..name_end];
+    let tag_like = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    let wrapper = known.contains(&name) || name.contains('_') || name.contains('-');
+    (tag_like && wrapper).then_some(close + 1)
+}
+
+/// A line of a markdown file as plain text for a list that draws no markdown: headings are
+/// dropped, bullet and number markers and bold marks come off.
+pub fn plain_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return None;
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    let numbered = digits > 0 && line[digits..].starts_with(". ");
+    let body = if numbered {
+        &line[digits + 2..]
+    } else {
+        ["- ", "* ", "+ "].iter().find_map(|marker| line.strip_prefix(marker)).unwrap_or(line)
+    };
+    let body = body.replace("**", "").replace("__", "");
+    let body = body.trim();
+    (!body.is_empty()).then(|| body.to_owned())
+}
+
+/// A warning the usage ledger raised, kept as facts so each screen can word it for its reader.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Note {
+    ContextHigh { agent: String, model: String, peak: u64 },
+    CacheRewrites { agent: String, count: u64, tokens: u64, usd: f64 },
+    FileReads { agent: String, path: String, reads: u64, largest: u64 },
+    CopiedHistory { file: String, calls: u64 },
+}
+
+const NOTE_TEXT: Table = &[
+    ("{agent} reached {peak} tokens of context on {model}.", "{agent}的上下文累積到 {peak} 個 token（模型 {model}）。"),
+    (
+        "{agent} rewrote its cache {count} times after long waits ({tokens} tokens, about ${usd}).",
+        "{agent}在長時間等待後重寫快取 {count} 次（{tokens} 個 token，約 ${usd}）。",
+    ),
+    ("{agent} read {file} {reads} times, up to {size}.", "{agent}讀了 {file} {reads} 次，最多 {size}。"),
+    (
+        "{calls} calls in {file} could not be told apart from copied history and were not counted.",
+        "{file} 中有 {calls} 次呼叫無法和複製來的歷史區分開，沒有計入。",
+    ),
+    ("dispatcher", "調度員"),
+    ("reviewer", "審查員"),
+    ("architect", "切模組"),
+    ("astra", "Astra"),
+    ("critic", "第二審"),
+    ("memory-keeper", "記憶員"),
+    ("{n} bytes", "{n} 位元組"),
+];
+
+fn commas(value: u64) -> String {
+    let mut text = value.to_string();
+    let mut at = text.len();
+    while at > 3 {
+        at -= 3;
+        text.insert(at, ',');
+    }
+    text
+}
+
+/// "100 KB" for people reading Chinese; English keeps the exact byte count.
+fn size_text(lang: Lang, bytes: u64) -> String {
+    let figure = |value: f64| if value < 10.0 { format!("{value:.1}") } else { format!("{value:.0}") };
+    match lang {
+        Lang::En => format!("{} bytes", commas(bytes)),
+        Lang::ZhTw if bytes < 1024 => translate(lang, NOTE_TEXT, "{n} bytes").replace("{n}", &bytes.to_string()),
+        Lang::ZhTw if bytes < 1024 * 1024 => format!("{} KB", figure(bytes as f64 / 1024.0)),
+        Lang::ZhTw => format!("{} MB", figure(bytes as f64 / (1024.0 * 1024.0))),
+    }
+}
+
+/// The role in Chinese for `chronos:reviewer`; English shows the name as the ledger has it.
+fn agent_label(lang: Lang, agent: &str) -> String {
+    if lang == Lang::En {
+        return agent.to_owned();
+    }
+    let role = agent.strip_prefix("chronos:").unwrap_or(agent);
+    let lower = role.to_ascii_lowercase();
+    let known = ["dispatcher", "reviewer", "architect", "astra", "critic", "memory-keeper"];
+    match known.iter().find(|k| **k == lower) {
+        Some(k) => translate(lang, NOTE_TEXT, k).to_owned(),
+        None => role.to_owned(),
+    }
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(path)
+}
+
+impl Note {
+    /// The warning as a sentence, with its figures.
+    pub fn text(&self, lang: Lang) -> String {
+        match self {
+            Self::ContextHigh { agent, model, peak } => {
+                translate(lang, NOTE_TEXT, "{agent} reached {peak} tokens of context on {model}.")
+                    .replace("{agent}", &agent_label(lang, agent))
+                    .replace("{peak}", &commas(*peak))
+                    .replace("{model}", model)
+            }
+            Self::CacheRewrites { agent, count, tokens, usd } => translate(
+                lang,
+                NOTE_TEXT,
+                "{agent} rewrote its cache {count} times after long waits ({tokens} tokens, about ${usd}).",
+            )
+            .replace("{agent}", &agent_label(lang, agent))
+            .replace("{count}", &count.to_string())
+            .replace("{tokens}", &commas(*tokens))
+            .replace("{usd}", &format!("{usd:.2}")),
+            Self::FileReads { agent, path, reads, largest } => {
+                translate(lang, NOTE_TEXT, "{agent} read {file} {reads} times, up to {size}.")
+                    .replace("{agent}", &agent_label(lang, agent))
+                    .replace("{file}", if lang == Lang::En { path } else { file_name(path) })
+                    .replace("{reads}", &reads.to_string())
+                    .replace("{size}", &size_text(lang, *largest))
+            }
+            Self::CopiedHistory { file, calls } => translate(
+                lang,
+                NOTE_TEXT,
+                "{calls} calls in {file} could not be told apart from copied history and were not counted.",
+            )
+            .replace("{calls}", &calls.to_string())
+            .replace("{file}", file),
+        }
+    }
+
+    pub fn weight(&self) -> (u8, u64) {
+        match self {
+            Self::ContextHigh { peak, .. } => (3, *peak),
+            Self::CacheRewrites { tokens, .. } => (2, *tokens),
+            Self::FileReads { largest, .. } => (1, *largest),
+            Self::CopiedHistory { calls, .. } => (0, *calls),
+        }
+    }
+}
+
+/// One note per fact: the same agent reading the same file is one line with the reads added and
+/// the largest size kept; an agent's context warning or cache rewrites are one line each. The
+/// largest come first.
+pub fn group_notes(notes: impl IntoIterator<Item = Note>) -> Vec<Note> {
+    let mut grouped: Vec<Note> = vec![];
+    for note in notes {
+        let same = grouped.iter_mut().find(|have| match (&**have, &note) {
+            (Note::ContextHigh { agent: a, .. }, Note::ContextHigh { agent: b, .. }) => a == b,
+            (Note::CacheRewrites { agent: a, .. }, Note::CacheRewrites { agent: b, .. }) => a == b,
+            (Note::FileReads { agent: a, path: p, .. }, Note::FileReads { agent: b, path: q, .. }) => a == b && p == q,
+            (Note::CopiedHistory { file: a, .. }, Note::CopiedHistory { file: b, .. }) => a == b,
+            _ => false,
+        });
+        match (same, note) {
+            (None, note) => grouped.push(note),
+            (Some(Note::ContextHigh { model, peak, .. }), Note::ContextHigh { model: m, peak: p, .. }) => {
+                if p > *peak {
+                    (*model, *peak) = (m, p);
+                }
+            }
+            (Some(Note::CacheRewrites { count, tokens, usd, .. }), Note::CacheRewrites { count: c, tokens: t, usd: u, .. }) => {
+                *count += c;
+                *tokens += t;
+                *usd += u;
+            }
+            (Some(Note::FileReads { reads, largest, .. }), Note::FileReads { reads: r, largest: l, .. }) => {
+                *reads += r;
+                *largest = (*largest).max(l);
+            }
+            (Some(Note::CopiedHistory { calls, .. }), Note::CopiedHistory { calls: c, .. }) => *calls = (*calls).max(c),
+            (Some(_), _) => {}
+        }
+    }
+    grouped.sort_by(|a, b| b.weight().cmp(&a.weight()));
+    grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn wrapper_tags_come_off_and_the_words_inside_stay() {
+        let raw = "<pasted_content id=\"a0d5\"> 工作目錄在：[E:\\x]\n做完整測試 </pasted_content>";
+        assert_eq!(clean_wish(raw), "工作目錄在：[E:\\x]\n做完整測試");
+        assert_eq!(clean_wish("<user-query>fix it</user-query> now"), "fix it now");
+        assert_eq!(clean_wish("<pasted_content/>plain"), "plain");
+    }
+
+    #[test]
+    fn ordinary_angle_brackets_are_not_markup() {
+        for text in ["return Vec<T> from <div> and a < b > c", "if x<5 and y>3", "use <Foo> or <b>bold</b>", "<3 love"] {
+            assert_eq!(clean_wish(text), text);
+        }
+    }
+
+    #[test]
+    fn an_unclosed_bracket_keeps_the_rest() {
+        assert_eq!(clean_wish("<pasted_content id=\"a"), "<pasted_content id=\"a");
+    }
+
+    fn reads(agent: &str, path: &str, reads: u64, largest: u64) -> Note {
+        Note::FileReads { agent: agent.into(), path: path.into(), reads, largest }
+    }
+
+    #[test]
+    fn reads_of_one_file_become_one_note_largest_first() {
+        let grouped = group_notes([
+            reads("chronos:reviewer", "E:/p/schema.json", 1, 90_000),
+            reads("chronos:reviewer", "E:/p/big.log", 1, 900_000),
+            reads("chronos:reviewer", "E:/p/schema.json", 4, 102_400),
+            reads("chronos:architect", "E:/p/schema.json", 2, 50),
+        ]);
+        assert_eq!(
+            grouped,
+            vec![
+                reads("chronos:reviewer", "E:/p/big.log", 1, 900_000),
+                reads("chronos:reviewer", "E:/p/schema.json", 5, 102_400),
+                reads("chronos:architect", "E:/p/schema.json", 2, 50),
+            ]
+        );
+        assert_eq!(grouped[1].text(Lang::ZhTw), "審查員讀了 schema.json 5 次，最多 100 KB。");
+    }
+
+    #[test]
+    fn context_and_cache_notes_are_one_per_agent() {
+        let high = |peak: u64| Note::ContextHigh { agent: "d".into(), model: format!("m{peak}"), peak };
+        let rewrites = |count, tokens, usd| Note::CacheRewrites { agent: "d".into(), count, tokens, usd };
+        let grouped = group_notes([high(900_000), high(965_312), rewrites(2, 10, 1.5), rewrites(3, 20, 1.5)]);
+        assert_eq!(grouped, vec![high(965_312), rewrites(5, 30, 3.0)]);
+    }
+
+    #[test]
+    fn every_kind_has_a_chinese_sentence_that_keeps_its_figures() {
+        let notes = [
+            Note::ContextHigh { agent: "chronos:dispatcher".into(), model: "claude-sonnet-5-5".into(), peak: 965_312 },
+            Note::CacheRewrites { agent: "chronos:dispatcher".into(), count: 6, tokens: 21_000_000, usd: 12.5 },
+            reads("chronos:reviewer", "a/schema.json", 5, 100),
+            Note::CopiedHistory { file: "s.jsonl".into(), calls: 7 },
+        ];
+        let figures = [
+            vec!["965,312", "claude-sonnet-5-5", "調度員"],
+            vec!["6", "21,000,000", "12.50"],
+            vec!["schema.json", "5", "100 位元組"],
+            vec!["7", "s.jsonl", "複製"],
+        ];
+        for (note, figures) in notes.iter().zip(figures) {
+            let zh = note.text(Lang::ZhTw);
+            let en = note.text(Lang::En);
+            assert_ne!(zh, en);
+            assert!(!zh.contains('{') && !en.contains('{'), "{zh} / {en}");
+            for figure in figures {
+                assert!(zh.contains(figure), "{zh} lacks {figure}");
+            }
+        }
+        assert_eq!(notes[2].text(Lang::En), "chronos:reviewer read a/schema.json 5 times, up to 100 bytes.");
+    }
+
+    #[test]
+    fn other_warnings_leave_out_the_text_of_ledger_notes() {
+        let note = reads("chronos:reviewer", "a/b.json", 2, 5000);
+        let run = Run {
+            warnings: vec![note.text(Lang::ZhTw).into(), "Module x depends on y".into()],
+            notes: vec![note],
+            ..crate::desktop::demo::state().runs[0].clone()
+        };
+        let other: Vec<&str> = run.other_warnings().map(|w| w.as_ref()).collect();
+        assert_eq!(other, ["Module x depends on y"]);
+    }
+
+    #[test]
+    fn markdown_lines_lose_their_markup_and_headings_vanish() {
+        assert_eq!(plain_line("# Decisions"), None);
+        assert_eq!(plain_line("- 精讀範圍：先以 **關鍵詞** 判定"), Some("精讀範圍：先以 關鍵詞 判定".into()));
+        assert_eq!(plain_line("  12. second  "), Some("second".into()));
+        assert_eq!(plain_line("1.5 million tokens"), Some("1.5 million tokens".into()));
+        assert_eq!(plain_line("   "), None);
+    }
+
+    #[test]
+    fn sizes_read_naturally() {
+        assert_eq!(size_text(Lang::ZhTw, 100 * 1024), "100 KB");
+        assert_eq!(size_text(Lang::ZhTw, 1536), "1.5 KB");
+        assert_eq!(size_text(Lang::ZhTw, 3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(size_text(Lang::En, 1_234_567), "1,234,567 bytes");
     }
 }

@@ -58,7 +58,7 @@ const TEXT: i18n::Table = &[
     ("Over the line in {over} of {seen} runs, so this is a pattern.", "{seen} 次中有 {over} 次超過，不是偶發。"),
     (
         "**What to do:** split the wish into smaller parts so a new agent takes over each one, and have it search large files instead of reading them whole.",
-        "**建議：**把願望拆成幾個較小的部分，讓每個部分由新的 agent 接手；大檔案用搜尋的，不要整份讀進來。",
+        "**建議：** 把願望拆成幾個較小的部分，讓每個部分由新的 agent 接手；大檔案用搜尋的，不要整份讀進來。",
     ),
     ("Cost by model", "各模型花費"),
     ("Cost by role", "各角色花費"),
@@ -156,6 +156,8 @@ enum Warning {
     ContextTooLarge { agent: SharedString, peak: u64, runs_seen: usize, runs_over: usize },
     /// A warning the run itself carries, shown as written.
     Reported { project: SharedString, text: SharedString },
+    /// A ledger warning, worded for the reader's language when it is drawn.
+    Ledger { project: SharedString, note: Note },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -269,10 +271,22 @@ fn summarize(runs: &[Run]) -> Summary {
             runs_over: row.runs_over,
         })
         .collect();
+    // The context warning is the context card above; the ledger's own line for it would say the
+    // same thing a second time.
+    let mut ledger: Vec<(SharedString, Note)> = runs
+        .iter()
+        .flat_map(|run| {
+            run.notes
+                .iter()
+                .filter(|note| !matches!(note, Note::ContextHigh { .. }))
+                .map(|note| (run.project.clone(), note.clone()))
+        })
+        .collect();
+    ledger.sort_by_key(|(_, note)| std::cmp::Reverse(note.weight()));
+    summary.warnings.extend(ledger.into_iter().map(|(project, note)| Warning::Ledger { project, note }));
     for run in runs {
         summary.warnings.extend(
-            run.warnings
-                .iter()
+            run.other_warnings()
                 .map(|text| Warning::Reported { project: run.project.clone(), text: text.clone() }),
         );
     }
@@ -721,6 +735,11 @@ fn warning_alert(ix: usize, warning: &Warning, all_runs: bool, cx: &App) -> Aler
             let message = if all_runs { format!("{project}: {text}") } else { text.to_string() };
             Alert::warning(("usage-warning", ix), message).text_color(t.text).icon(icon)
         }
+        Warning::Ledger { project, note } => {
+            let text = note.text(*cx.global::<i18n::Lang>());
+            let message = if all_runs { format!("{project}: {text}") } else { text };
+            Alert::warning(("usage-warning", ix), message).text_color(t.text).icon(icon)
+        }
     }
 }
 
@@ -960,7 +979,7 @@ impl Render for UsageView {
         let summary = summarize(selected);
         let rows = run_rows(&state.runs);
         let subtitle: SharedString = match (scope, current) {
-            (Scope::ThisRun, Some(index)) => format!("{} · {}", state.runs[index].project, state.runs[index].wish).into(),
+            (Scope::ThisRun, Some(index)) => format!("{} · {}", state.runs[index].project, state.runs[index].wish.split_whitespace().collect::<Vec<_>>().join(" ")).into(),
             _ if state.runs.len() == 1 => tr(cx, TEXT, "1 run").into(),
             _ => tr(cx, TEXT, "{n} runs").replace("{n}", &state.runs.len().to_string()).into(),
         };
@@ -1025,7 +1044,7 @@ mod tests {
         chart_scale, fmt_cost, fmt_dollars, fmt_ratio, fmt_tokens, fmt_usd, run_cost, run_rows, summarize, ContextRow,
         Dollars, Warning, CONTEXT_WARNING_TOKENS, TEXT, UNKNOWN,
     };
-    use crate::desktop::i18n::COMMON;
+    use crate::desktop::i18n::{Lang, COMMON};
 
     fn run(project: &'static str) -> Run {
         Run {
@@ -1048,6 +1067,7 @@ mod tests {
             report: None,
             elapsed: None,
             warnings: vec![],
+            notes: vec![],
         }
     }
 
@@ -1201,6 +1221,54 @@ mod tests {
         assert_eq!(
             summary.warnings,
             [Warning::ContextTooLarge { agent: "over".into(), peak: CONTEXT_WARNING_TOKENS + 1, runs_seen: 1, runs_over: 1 }]
+        );
+    }
+
+    fn noted(project: &'static str, notes: Vec<Note>) -> Run {
+        Run { notes, ..run(project) }
+    }
+
+    fn high(agent: &str) -> Note {
+        Note::ContextHigh { agent: agent.into(), model: "m".into(), peak: 965_312 }
+    }
+
+    fn reads(path: &str, reads: u64) -> Note {
+        Note::FileReads { agent: "chronos:reviewer".into(), path: path.into(), reads, largest: 100 }
+    }
+
+    #[test]
+    fn the_ledgers_context_line_is_not_shown_beside_the_context_card() {
+        let usage = Usage { contexts: vec![agent("dispatcher", 965_312)], ..Default::default() };
+        let mut one = with_usage("a", usage);
+        one.notes = vec![high("dispatcher"), reads("x/schema.json", 5)];
+        one.warnings = one.notes.iter().map(|n| n.text(Lang::En).into()).chain(["Log was cut short".into()]).collect();
+        let summary = summarize(&[one]);
+        let kinds: Vec<&str> = summary
+            .warnings
+            .iter()
+            .map(|w| match w {
+                Warning::ContextTooLarge { .. } => "card",
+                Warning::Ledger { note: Note::FileReads { .. }, .. } => "reads",
+                Warning::Ledger { .. } => "other note",
+                Warning::Reported { .. } => "reported",
+            })
+            .collect();
+        assert_eq!(kinds, ["card", "reads", "reported"], "{:?}", summary.warnings);
+    }
+
+    #[test]
+    fn ledger_notes_across_runs_come_largest_first_and_never_repeat_as_plain_text() {
+        let big = Note::FileReads { agent: "a".into(), path: "big.log".into(), reads: 1, largest: 9_000_000 };
+        let mut first = noted("p1", vec![reads("schema.json", 5)]);
+        first.warnings = vec![first.notes[0].text(Lang::ZhTw).into()];
+        let second = noted("p2", vec![big.clone()]);
+        let summary = summarize(&[first, second]);
+        assert_eq!(
+            summary.warnings,
+            [
+                Warning::Ledger { project: "p2".into(), note: big },
+                Warning::Ledger { project: "p1".into(), note: reads("schema.json", 5) },
+            ]
         );
     }
 

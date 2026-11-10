@@ -112,7 +112,7 @@ pub fn run(options: Options) -> i32 {
         gpui_kit::init(cx);
         let mode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()) };
         theme::apply(mode, None, cx);
-        cx.set_global(if options.english { i18n::Lang::En } else { prefs.language.resolve() });
+        i18n::set(if options.english { i18n::Lang::En } else { prefs.language.resolve() }, cx);
         cx.set_global(store);
         settings::Store::save_on_quit(cx);
         if let Some(on) = prefs.reduce_motion {
