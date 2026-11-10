@@ -263,6 +263,7 @@ pub fn mark_dispatched(home: &Path, session: &str) -> Res<()> {
 }
 /// A resumed run that matches the last record adds nothing; one that differs is a new entry.
 pub fn add_provenance(home: &Path, session: &str, block: Value) -> Res<()> {
+    let _lock = lock(home)?;
     let mut goal = required(home, session)?;
     if goal.provenance.last() == Some(&block) {
         return Ok(());
