@@ -1139,7 +1139,16 @@ struct Linked {
     tab: DocTab,
     source: SharedString,
     project: Option<PathBuf>,
+    /// Review text carries translated words, so the language is part of what the cache answers.
+    lang: i18n::Lang,
     text: SharedString,
+}
+
+impl Linked {
+    /// Whether this is still the text for the same file, tab, project and interface language.
+    fn serves(&self, key: usize, tab: DocTab, source: &SharedString, project: Option<&Path>, lang: i18n::Lang) -> bool {
+        self.key == key && self.tab == tab && self.source == *source && self.project.as_deref() == project && self.lang == lang
+    }
 }
 
 pub struct Detail {
@@ -1854,8 +1863,9 @@ impl Detail {
     /// The text a tab draws, with its file references as links. Kept until the text, the tab or
     /// the project changes, so a large log is not scanned again on every frame.
     fn linked_text(&self, key: usize, tab: DocTab, file: &FileText, project: Option<&Path>, cx: &App) -> SharedString {
+        let lang = *cx.global::<i18n::Lang>();
         if let Some(cached) = self.linked.borrow().as_ref() {
-            if cached.key == key && cached.tab == tab && cached.source == file.text && cached.project.as_deref() == project {
+            if cached.serves(key, tab, &file.text, project, lang) {
                 return cached.text.clone();
             }
         }
@@ -1883,6 +1893,7 @@ impl Detail {
             tab,
             source: file.text.clone(),
             project: project.map(Path::to_path_buf),
+            lang,
             text: text.clone(),
         });
         text
@@ -2254,6 +2265,27 @@ mod system_open_tests {
         for name in ["README.md", "notes.TXT", "src/lib.rs", "Cargo.toml", "a.json", "run.log", "b.yaml"] {
             assert!(system_open_allowed(Path::new(&format!("C:/proj/{name}"))), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod linked_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn a_language_switch_misses_the_cached_text() {
+        let source: SharedString = "VERDICT: pass".into();
+        let linked = Linked {
+            key: 3,
+            tab: DocTab::Review,
+            source: source.clone(),
+            project: None,
+            lang: i18n::Lang::En,
+            text: "Verdict".into(),
+        };
+        assert!(linked.serves(3, DocTab::Review, &source, None, i18n::Lang::En));
+        assert!(!linked.serves(3, DocTab::Review, &source, None, i18n::Lang::ZhTw), "the old English text must not be served");
     }
 }
 
