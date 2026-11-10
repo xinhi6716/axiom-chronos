@@ -304,7 +304,7 @@ pub fn paint_glyph(window: &mut Window, cx: f32, cy: f32, r: f32, state: UnitSta
             stroke(window, &[at(-c, -c), at(c, c)], false, line, color);
             stroke(window, &[at(-c, c), at(c, -c)], false, line, color);
         }
-        UnitState::Pending => dot(window, cx, cy, (r * 0.26).max(1.4), color.opacity(0.85)),
+        UnitState::Pending => dot(window, cx, cy, (r * 0.26).max(1.7), color),
     }
 }
 

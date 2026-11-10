@@ -1200,7 +1200,7 @@ impl Mesh {
         let tooltip = hover.and_then(|node| self.tooltip_view(node, run, &t, scroll, cx));
         let status = run.status;
         let core = graph.core(view_h);
-        let label_w = (graph.core_r * 2.0 + 44.0).max(72.0);
+        let label_w = (graph.core_r * 2.0 + 40.0).max(92.0);
         let stage = current_stage(run).map(|s| stage_label(cx, &s.name));
         let sub: SharedString = match (status, stage) {
             (RunStatus::Active, Some(stage)) => stage,
@@ -1256,7 +1256,7 @@ impl Mesh {
                         .top(px(core.y + graph.core_r + 22.0))
                         .w(px(label_w))
                         .items_center()
-                        .child(div().text_size(px(12.)).text_color(t.text).child("Chronos"))
+                        .child(div().text_size(px(12.)).text_color(t.gold).child("C H R O N O S"))
                         .child(div().text_size(px(12.)).text_color(t.status(status)).child(sub)),
                 )
             })
