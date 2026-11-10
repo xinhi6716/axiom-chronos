@@ -19,7 +19,6 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _};
@@ -313,7 +312,7 @@ fn cost_text(usd: Option<f64>) -> SharedString {
 }
 
 fn unpriced_models(usage: &Usage) -> Vec<SharedString> {
-    usage.models.iter().filter(|m| m.usd.is_none()).map(|m| m.model.clone()).collect()
+    usage.unpriced()
 }
 
 fn required_failures(checks: &[Check]) -> Vec<&Check> {
@@ -386,7 +385,7 @@ fn stage_icon(state: StageState, animate: bool, t: &Tokens) -> AnyElement {
     match state {
         StageState::Done => icon(IconName::CircleCheck),
         StageState::Running if animate => {
-            Spinner::new().icon(IconName::LoaderCircle).color(color).with_size(px(16.)).into_any_element()
+            super::motion::Spin::new(IconName::LoaderCircle).color(color).size(px(16.)).into_any_element()
         }
         StageState::Running => icon(IconName::LoaderCircle),
         StageState::Failed => icon(IconName::CircleX),
@@ -1769,6 +1768,23 @@ mod tests {
     use super::{brief_of, Brief, FirstDay, Tone};
     use super::{attention_title, blocked_brief_title, plain_text::Plain};
     use gpui_kit::SharedString;
+
+    #[test]
+    fn production_code_has_no_uncapped_spinner() {
+        let source = include_str!("run_view.rs").split_once("#[cfg(test)]").unwrap().0;
+        assert!(!source.contains("Spinner::new"));
+        assert!(!source.contains("component::spinner"));
+    }
+
+    #[test]
+    fn unpriced_list_uses_model_price_not_missing_usage() {
+        let mut usage = crate::desktop::demo::state().runs[0].usage.clone();
+        let terra = usage.models.iter_mut().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        terra.usd = None;
+        terra.cached = None;
+        assert_eq!(unpriced_models(&usage), usage.unpriced());
+        assert_eq!(unpriced_models(&usage), vec![SharedString::from("gpt-unknown")]);
+    }
 
     #[test]
     fn plain_titles_supply_attention_and_blocked_text_with_original_tooltips() {

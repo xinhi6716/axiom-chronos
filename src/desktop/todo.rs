@@ -2,12 +2,11 @@
 use super::i18n::{tr, Table};
 use super::model::*;
 use super::plain_text;
-use super::motion::{self, ease_out, Curve, Driver, Pace, Tween};
+use super::motion::{self, ease_out, Curve, Driver, Pace, Spin, Tween};
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     h_flex, v_flex, v_virtual_list, ElementExt as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -676,9 +675,8 @@ fn state_mark(progress: Progress, size: f32, live: bool, t: &Tokens) -> AnyEleme
             .into_any_element()
     };
     match progress {
-        Progress::Running if live => Spinner::new()
-            .icon(IconName::LoaderCircle)
-            .with_size(px(size))
+        Progress::Running if live => Spin::new(IconName::LoaderCircle)
+            .size(px(size))
             .color(color)
             .into_any_element(),
         Progress::Running => icon(IconName::LoaderCircle),
@@ -1639,7 +1637,7 @@ impl Render for Todo {
             let note = building_note.expect("a run without modules has a note");
             let color = if note.failed { t.fail } else { t.run };
             let mark = if note.busy && live {
-                Spinner::new().icon(IconName::LoaderCircle).with_size(px(20.0)).color(color).into_any_element()
+                Spin::new(IconName::LoaderCircle).size(px(20.0)).color(color).into_any_element()
             } else if note.failed {
                 Icon::new(IconName::CircleX).size(px(20.0)).text_color(color).into_any_element()
             } else {
@@ -1664,7 +1662,7 @@ impl Render for Todo {
                         .text_size(px(12.0))
                         .text_color(t.muted)
                         .child(if note.busy && live {
-                            Spinner::new().icon(IconName::LoaderCircle).with_size(px(14.0)).color(t.run).into_any_element()
+                            Spin::new(IconName::LoaderCircle).size(px(14.0)).color(t.run).into_any_element()
                         } else {
                             Icon::new(IconName::LoaderCircle).size(px(14.0)).text_color(t.idle).into_any_element()
                         })
@@ -1722,6 +1720,13 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn production_code_has_no_uncapped_spinner() {
+        let source = include_str!("todo.rs").split_once("#[cfg(test)]").unwrap().0;
+        assert!(!source.contains("Spinner::new"));
+        assert!(!source.contains("component::spinner"));
+    }
 
     fn unit(module: usize, state: UnitState) -> Unit {
         Unit {

@@ -2313,7 +2313,7 @@ impl Render for Mesh {
                 )
                 .into_any_element();
         }
-        let mut frames = Driver::new(state.reduce_motion, cx);
+        let mut frames = Driver::new(state.reduce_motion, cx).capped();
         frames.keep(animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
         frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
         frames.finish(window);

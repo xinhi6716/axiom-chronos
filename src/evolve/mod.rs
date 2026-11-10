@@ -47,7 +47,7 @@ fn validate(inputs: &Inputs) -> Res<()> {
 pub fn preview(inputs: &Inputs) -> Res<Preview> {
     validate(inputs)?;
     let collected = collect::collect(inputs)?;
-    let period = usage::period(
+    let period = usage::chronos_period(
         &usage::Locations {
             home: inputs.home.clone(),
             projects: inputs.projects.clone(),

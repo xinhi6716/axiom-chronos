@@ -1,9 +1,9 @@
 //! What the screens draw and the commands they send. Screens never read `~/.axiom` or start processes.
 use super::i18n::{translate, Lang, Table};
-use crate::base::Res;
+use crate::base::{Failure, Res};
 use gpui_kit::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,10 +165,48 @@ pub struct Usage {
     pub contexts: Vec<AgentContext>,
 }
 
+pub fn price_known(model: &str) -> bool {
+    use crate::usage::price::{self, CallUsage, CodexUsage};
+    price::usd(model, &CallUsage::default()).is_some() || price::codex_usd(model, &CodexUsage::default()).is_some()
+}
+
 impl Usage {
     pub fn unpriced(&self) -> Vec<SharedString> {
-        self.models.iter().filter(|model| model.usd.is_none()).map(|model| model.model.clone()).collect()
+        self.models.iter().filter(|model| !price_known(&model.model)).map(|model| model.model.clone()).collect()
     }
+
+    pub fn incomplete(&self) -> Vec<SharedString> {
+        self.models.iter().filter(|model| model.usd.is_none() && price_known(&model.model)).map(|model| model.model.clone()).collect()
+    }
+}
+
+pub use crate::evolve::digest::Verdict;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvolveIssue { pub id: SharedString, pub title: SharedString, pub count: u64, pub cost_usd: Option<f64> }
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvolveGap { pub family: SharedString, pub location: SharedString, pub reason: SharedString }
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvolvePreview {
+    pub issues: Vec<EvolveIssue>, pub more_issues: usize, pub estimate_usd: Option<f64>,
+    pub estimate_samples: u64, pub gaps: Vec<EvolveGap>, pub repo: Option<PathBuf>, pub text: SharedString,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct PastEvolve {
+    pub id: SharedString, pub started_ms: i64, pub repo: SharedString, pub branch: SharedString,
+    pub state: SharedString, pub verdict: Verdict,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvolveFailure { pub kind: SharedString, pub message: SharedString }
+impl From<Failure> for EvolveFailure {
+    fn from(failure: Failure) -> Self { Self { kind: failure.kind.into(), message: failure.message.into() } }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum EvolveOutcome { NoOp { reason: SharedString }, Ran { exit_code: i32 } }
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EvolveState {
+    pub checking: bool, pub preview: Option<EvolvePreview>, pub runs: Vec<PastEvolve>,
+    pub starting: bool, pub started_repo: Option<PathBuf>, pub outcome: Option<EvolveOutcome>, pub error: Option<EvolveFailure>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +429,8 @@ const ERRORS_KEPT: usize = 50;
 /// never waits on the engine: `Err` means it could not be queued, and a failure that happens
 /// later arrives in `AppState::errors`.
 pub trait Backend: 'static {
+    fn evolve_check(&self) -> Res<()> { Err(Failure::new("unsupported", "evolve check is not supported")) }
+    fn evolve_start(&self, _repo: &Path) -> Res<()> { Err(Failure::new("unsupported", "evolve start is not supported")) }
     fn start_wish(&self, request: WishRequest) -> Res<()>;
     fn interject(&self, session: &str, text: &str) -> Res<()>;
     fn stop(&self, session: &str) -> Res<()>;
@@ -417,6 +457,7 @@ pub struct Address {
 
 /// The single shared model. Screens read it and call its command methods.
 pub struct AppState {
+    pub evolve: EvolveState,
     pub view: Screen,
     pub runs: Vec<Run>,
     pub current: Option<usize>,
@@ -447,13 +488,71 @@ fn default_run(runs: &[Run]) -> Option<usize> {
 }
 
 impl AppState {
+    pub fn evolve_check(&mut self, cx: &mut Context<Self>) {
+        self.queue_evolve_check();
+        cx.notify();
+    }
+
+    fn queue_evolve_check(&mut self) {
+        if self.evolve.checking { return; }
+        self.evolve.error = None;
+        self.evolve.outcome = None;
+        if let Some(backend) = self.backend.as_deref() {
+            self.evolve.checking = true;
+            if let Err(failure) = backend.evolve_check() {
+                self.evolve.checking = false;
+                self.evolve.error = Some(failure.into());
+            }
+        } else {
+            self.evolve.preview = Some(super::demo::evolve_preview());
+            self.evolve.runs = super::demo::evolve_runs();
+        }
+    }
+
+    pub fn evolve_start(&mut self, repo: PathBuf, cx: &mut Context<Self>) -> bool {
+        let queued = self.queue_evolve_start(repo);
+        cx.notify();
+        queued
+    }
+
+    fn queue_evolve_start(&mut self, repo: PathBuf) -> bool {
+        if self.evolve.starting || self.evolve.checking || self.evolve.preview.as_ref().is_none_or(|p| p.issues.is_empty()) { return false; }
+        let Some(backend) = self.backend.as_deref() else {
+            self.evolve.error = Some(Failure::new("unavailable", "evolve is unavailable in demo mode").into());
+            return false;
+        };
+        self.evolve.starting = true;
+        self.evolve.started_repo = Some(repo.clone());
+        self.evolve.error = None;
+        self.evolve.outcome = None;
+        let queued = match backend.evolve_start(&repo) {
+            Ok(()) => true,
+            Err(failure) => { self.evolve.starting = false; self.evolve.error = Some(failure.into()); false }
+        };
+        queued
+    }
+
+    pub fn evolve_dismiss(&mut self, cx: &mut Context<Self>) {
+        self.clear_evolve_result();
+        cx.notify();
+    }
+
+    fn clear_evolve_result(&mut self) {
+        self.evolve.error = None;
+        self.evolve.outcome = None;
+    }
+
     pub fn run(&self) -> Option<&Run> {
         self.current.and_then(|i| self.runs.get(i))
     }
 
     pub fn set_view(&mut self, view: Screen, cx: &mut Context<Self>) {
-        self.view = view;
+        self.change_view(view);
         cx.notify();
+    }
+
+    fn change_view(&mut self, view: Screen) {
+        self.view = view;
     }
 
     pub fn open_run(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -920,6 +1019,108 @@ pub fn group_notes(notes: impl IntoIterator<Item = Note>) -> Vec<Note> {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        starts: std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>,
+        checks: std::rc::Rc<std::cell::Cell<usize>>,
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+        fail: bool,
+    }
+    impl Backend for RecordingBackend {
+        fn evolve_check(&self) -> Res<()> {
+            self.calls.set(self.calls.get() + 1);
+            self.checks.set(self.checks.get() + 1);
+            if self.fail { Err(Failure::new("engine_stopped", "queue closed")) } else { Ok(()) }
+        }
+        fn evolve_start(&self, repo: &Path) -> Res<()> {
+            self.calls.set(self.calls.get() + 1);
+            self.starts.borrow_mut().push(repo.to_path_buf());
+            if self.fail { Err(Failure::new("engine_stopped", "queue closed")) } else { Ok(()) }
+        }
+        fn start_wish(&self, _: WishRequest) -> Res<()> { self.record_call(); Ok(()) }
+        fn interject(&self, _: &str, _: &str) -> Res<()> { self.record_call(); Ok(()) }
+        fn stop(&self, _: &str) -> Res<()> { self.record_call(); Ok(()) }
+        fn resume(&self, _: &str, _: Option<&str>) -> Res<()> { self.record_call(); Ok(()) }
+        fn delete_memory(&self, _: i64) -> Res<()> { self.record_call(); Ok(()) }
+        fn correct_memory(&self, _: i64, _: &str) -> Res<()> { self.record_call(); Ok(()) }
+        fn refresh(&self) -> Res<()> { self.record_call(); Ok(()) }
+        fn recheck(&self) -> Res<()> { self.record_call(); Ok(()) }
+        fn follow(&self, _: &str) -> Res<()> { self.record_call(); Ok(()) }
+    }
+    impl RecordingBackend {
+        fn record_call(&self) { self.calls.set(self.calls.get() + 1); }
+    }
+
+    #[test]
+    fn evolve_check_and_confirmation_have_separate_commands_and_guard() {
+        let backend = RecordingBackend::default();
+        let starts = backend.starts.clone();
+        let checks = backend.checks.clone();
+        let calls = backend.calls.clone();
+        let mut state = crate::desktop::demo::state();
+        state.backend = Some(Box::new(backend));
+        state.change_view(Screen::Doctor);
+        assert_eq!(state.view, Screen::Doctor);
+        assert_eq!(calls.get(), 0);
+        state.queue_evolve_check();
+        state.queue_evolve_check();
+        state.command(Action::Refresh, None, |b| b.refresh());
+        state.follow_current();
+        assert_eq!(calls.get(), 3, "one check, one refresh, and one follow");
+        let before_dismiss = calls.get();
+        state.clear_evolve_result();
+        assert_eq!(calls.get(), before_dismiss, "dismiss does not call the backend");
+        assert_eq!(checks.get(), 1);
+        assert!(starts.borrow().is_empty());
+        assert!(!state.queue_evolve_start(PathBuf::from("repo")), "checking prevents start");
+        state.evolve.checking = false;
+        assert!(!state.queue_evolve_start(PathBuf::from("repo")), "preview is required");
+        state.evolve.preview = Some(crate::desktop::demo::evolve_preview());
+        let repo = PathBuf::from("chosen-repo");
+        assert!(state.queue_evolve_start(repo.clone()));
+        assert!(state.evolve.starting);
+        assert_eq!(state.evolve.started_repo.as_ref(), Some(&repo));
+        assert!(!state.queue_evolve_start(PathBuf::from("second")));
+        assert_eq!(&*starts.borrow(), &[repo]);
+    }
+
+    #[test]
+    fn evolve_queue_errors_and_demo_do_not_start() {
+        let backend = RecordingBackend { fail: true, ..Default::default() };
+        let starts = backend.starts.clone();
+        let mut state = crate::desktop::demo::state();
+        state.backend = Some(Box::new(backend));
+        state.queue_evolve_check();
+        assert!(!state.evolve.checking);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "engine_stopped");
+        assert!(state.errors.is_empty());
+        state.evolve.preview = Some(crate::desktop::demo::evolve_preview());
+        assert!(!state.queue_evolve_start(PathBuf::from("repo")));
+        assert!(!state.evolve.starting);
+        assert_eq!(starts.borrow().len(), 1);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "engine_stopped");
+        state.backend = None;
+        state.queue_evolve_check();
+        assert!(state.evolve.preview.is_some());
+        assert!(!state.evolve.runs.is_empty());
+        assert!(!state.queue_evolve_start(PathBuf::from("repo")));
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "unavailable");
+        state.clear_evolve_result();
+        assert!(state.evolve.error.is_none());
+        state.evolve.preview.as_mut().unwrap().issues.clear();
+        assert!(!state.queue_evolve_start(PathBuf::from("repo")));
+        assert!(state.evolve.error.is_none());
+    }
+
+    #[test]
+    fn known_model_with_missing_usage_is_not_unpriced() {
+        let mut usage = crate::desktop::demo::state().runs[0].usage.clone();
+        let terra = usage.models.iter_mut().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        terra.usd = None;
+        terra.cached = None;
+        assert_eq!(usage.unpriced(), vec![SharedString::from("gpt-unknown")]);
+    }
 
     #[test]
     fn wrapper_tags_come_off_and_the_words_inside_stay() {

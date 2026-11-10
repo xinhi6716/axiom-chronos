@@ -50,6 +50,19 @@ pub struct Comparison {
     pub current_samples: u64,
     pub difference: f64,
 }
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Improved,
+    NotImproved,
+    Unknown,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RunVerdict {
+    pub run: history::RunRecord,
+    pub verdict: Verdict,
+    pub comparisons: Vec<Comparison>,
+}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Digest {
     pub now_ms: i64,
@@ -71,6 +84,62 @@ fn samples(sources: &[SourceStatus], family: &str) -> u64 {
         .iter()
         .find(|s| s.family == family)
         .map_or(0, |s| s.samples)
+}
+
+fn comparison(
+    run: &history::RunRecord,
+    metric: &history::MetricValue,
+    problems: &[Problem],
+    sources: &[SourceStatus],
+) -> Comparison {
+    let current = problems
+        .iter()
+        .find(|p| p.id == metric.problem)
+        .map(|p| p.metric.clone())
+        .unwrap_or_else(|| Metric {
+            value: 0.0,
+            samples: samples(sources, family(&metric.problem)),
+        });
+    Comparison {
+        problem: metric.problem.clone(),
+        earlier_run: run.id.clone(),
+        earlier_value: metric.value,
+        earlier_samples: metric.samples,
+        current_value: current.value,
+        current_samples: current.samples,
+        difference: current.value - metric.value,
+    }
+}
+
+pub fn verdicts(runs: &[history::RunRecord], current: &Digest) -> Vec<RunVerdict> {
+    runs.iter()
+        .map(|run| {
+            let comparisons: Vec<_> = run
+                .metrics
+                .iter()
+                .map(|metric| comparison(run, metric, &current.problems, &current.sources))
+                .collect();
+            let verdict = if run.state != "ended"
+                || comparisons.is_empty()
+                || comparisons
+                    .iter()
+                    .any(|c| c.earlier_samples == 0 || c.current_samples == 0)
+            {
+                Verdict::Unknown
+            } else if comparisons.iter().map(|c| c.current_value).sum::<f64>()
+                < comparisons.iter().map(|c| c.earlier_value).sum::<f64>()
+            {
+                Verdict::Improved
+            } else {
+                Verdict::NotImproved
+            };
+            RunVerdict {
+                run: run.clone(),
+                verdict,
+                comparisons,
+            }
+        })
+        .collect()
 }
 
 pub fn build(
@@ -191,25 +260,7 @@ pub fn build(
     }
     let comparisons = previous
         .into_iter()
-        .map(|(id, (run, m))| {
-            let current = problems
-                .iter()
-                .find(|p| p.id == id)
-                .map(|p| p.metric.clone())
-                .unwrap_or_else(|| Metric {
-                    value: 0.0,
-                    samples: samples(&sources, family(id)),
-                });
-            Comparison {
-                problem: id.into(),
-                earlier_run: run.id.clone(),
-                earlier_value: m.value,
-                earlier_samples: m.samples,
-                current_value: current.value,
-                current_samples: current.samples,
-                difference: current.value - m.value,
-            }
-        })
+        .map(|(_, (run, m))| comparison(run, m, &problems, &sources))
         .collect();
     Digest {
         now_ms,

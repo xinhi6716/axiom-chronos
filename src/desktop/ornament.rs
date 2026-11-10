@@ -3,6 +3,7 @@
 //! The geometry functions are pure, so the drawing can be tested without a window.
 use super::model::UnitState;
 use super::theme::Tokens;
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::f32::consts::TAU;
@@ -509,7 +510,7 @@ pub fn page_title(t: &Tokens, text: impl Into<SharedString>) -> Div {
     let text = text.into();
     let style = title_style(&text);
     let mut title = div().font_family(style.family).text_color(t.text).text_size(px(style.size))
-        .font_weight(if style.bold { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(tracked(&text));
+        .font_weight(if style.bold { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(text.clone().test_text(text));
     title.text_style().font_fallbacks = Some(FontFallbacks::from_fonts(vec![style.fallback.to_string()]));
     title
 }
@@ -655,6 +656,7 @@ mod tests {
         assert_eq!(section_caps("中a文2é"), "中A文2é");
         assert_eq!(tracked("Alpha 12"), "Alpha 12");
         assert_eq!(tracked("中文標題"), "中\u{200a}文\u{200a}標\u{200a}題");
+        assert_eq!(label_text("中文標題"), "中\u{200a}文\u{200a}標\u{200a}題");
         assert_eq!(tracked("中文A測試2"), "中\u{200a}文A測\u{200a}試2");
         assert_eq!(title_family("Alpha"), "Constantia");
         assert_eq!(title_family("中文"), "Microsoft JhengHei");
@@ -711,6 +713,24 @@ mod tests {
             swapped[1].2 = track.2;
             assert!(!gold_is_wider(&swapped));
             assert_eq!(ring_arcs(&t, 0.0), vec![track]);
+        }
+    }
+
+    #[test]
+    fn progress_arcs_are_static_fractions() {
+        for t in super::super::theme::both() {
+            for (verified, total) in [(0, 7), (3, 7), (7, 7)] {
+                let draw = || ring_arcs(&t, ring_sweep(verified, total).unwrap());
+                let first = draw();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                assert_eq!(first, draw());
+                assert_eq!((first[0].0, first[0].1), (0.0, 360.0));
+                if verified == 0 {
+                    assert_eq!(first.len(), 1);
+                } else {
+                    assert_eq!((first[1].0, first[1].1), (-90.0, -90.0 + 360.0 * ring_sweep(verified, total).unwrap()));
+                }
+            }
         }
     }
 

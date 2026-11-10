@@ -101,6 +101,154 @@ fn history(cost: Option<f64>, skill: &str) -> RunCost {
 }
 
 #[test]
+fn verdicts_compare_each_run_in_input_and_metric_order() {
+    use digest::Verdict;
+
+    let current = digest::build(
+        collected(vec![
+            event("usage.x", 5, None, "x"),
+            event("goal.y", 2, None, "y"),
+        ]),
+        &period(),
+        &[],
+        1,
+        1,
+    );
+    let mut runs = vec![
+        run(
+            "first",
+            3,
+            vec![metric("usage.x", 8.0, 10), metric("goal.y", 1.0, 5)],
+        ),
+        run("second", 1, vec![metric("usage.x", 4.0, 10)]),
+        run("flat", 2, vec![metric("usage.x", 5.0, 10)]),
+    ];
+    for run in &mut runs {
+        run.state = "ended".into();
+    }
+    let results = digest::verdicts(&runs, &current);
+    assert_eq!(
+        results.iter().map(|r| &r.run).collect::<Vec<_>>(),
+        runs.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        results.iter().map(|r| r.verdict).collect::<Vec<_>>(),
+        [
+            Verdict::Improved,
+            Verdict::NotImproved,
+            Verdict::NotImproved
+        ]
+    );
+    let comparisons = &results[0].comparisons;
+    assert_eq!(
+        comparisons
+            .iter()
+            .map(|c| c.problem.as_str())
+            .collect::<Vec<_>>(),
+        ["usage.x", "goal.y"]
+    );
+    assert_eq!(
+        (
+            comparisons[0].earlier_run.as_str(),
+            comparisons[0].earlier_value,
+            comparisons[0].earlier_samples,
+            comparisons[0].current_value,
+            comparisons[0].current_samples,
+            comparisons[0].difference
+        ),
+        ("first", 8.0, 10, 5.0, 12, -3.0)
+    );
+    assert_eq!(comparisons[1].difference, 1.0);
+    assert_eq!(results[1].comparisons[0].difference, 1.0);
+    assert_eq!(results[2].comparisons[0].difference, 0.0);
+    assert_eq!(
+        serde_json::to_string(&Verdict::NotImproved).unwrap(),
+        "\"not-improved\""
+    );
+    assert_eq!(
+        serde_json::from_str::<Verdict>("\"not-improved\"").unwrap(),
+        Verdict::NotImproved
+    );
+}
+
+#[test]
+fn verdicts_use_the_current_problem_metric_not_the_family_sample_count() {
+    let mut current = digest::build(
+        collected(vec![event("usage.x", 5, None, "x")]),
+        &period(),
+        &[],
+        1,
+        1,
+    );
+    current.problems[0].metric.value = 2.0;
+    current.problems[0].metric.samples = 0;
+    let mut prior = run("prior", 1, vec![metric("usage.x", 8.0, 10)]);
+    prior.state = "ended".into();
+
+    let result = digest::verdicts(&[prior], &current);
+    assert_eq!(result[0].verdict, digest::Verdict::Unknown);
+    assert_eq!(result[0].comparisons[0].current_value, 2.0);
+    assert_eq!(result[0].comparisons[0].current_samples, 0);
+    assert_eq!(result[0].comparisons[0].difference, -6.0);
+}
+
+#[test]
+fn verdicts_require_ended_runs_and_samples_for_every_metric() {
+    use digest::Verdict;
+
+    let current = digest::build(
+        collected(vec![event("usage.x", 1, None, "x")]),
+        &period(),
+        &[],
+        1,
+        1,
+    );
+    let mut runs = vec![
+        run("started", 1, vec![metric("usage.x", 2.0, 1)]),
+        run("empty", 2, vec![]),
+        run(
+            "earlier-zero",
+            3,
+            vec![metric("usage.x", 2.0, 1), metric("goal.y", 2.0, 0)],
+        ),
+        run(
+            "current-zero",
+            4,
+            vec![metric("usage.x", 2.0, 1), metric("hook.y", 2.0, 1)],
+        ),
+        run("absent", 5, vec![metric("goal.missing.deep", 3.0, 2)]),
+    ];
+    for run in &mut runs[1..] {
+        run.state = "ended".into();
+    }
+    let results = digest::verdicts(&runs, &current);
+    assert_eq!(
+        results.iter().map(|r| r.verdict).collect::<Vec<_>>(),
+        [
+            Verdict::Unknown,
+            Verdict::Unknown,
+            Verdict::Unknown,
+            Verdict::Unknown,
+            Verdict::Improved
+        ]
+    );
+    assert!(results[1].comparisons.is_empty());
+    assert_eq!(results[2].comparisons[1].earlier_samples, 0);
+    assert_eq!(results[3].comparisons[1].current_samples, 0);
+    let absent = &results[4].comparisons[0];
+    assert_eq!(
+        (
+            absent.problem.as_str(),
+            absent.earlier_run.as_str(),
+            absent.current_value,
+            absent.current_samples,
+            absent.difference
+        ),
+        ("goal.missing.deep", "absent", 0.0, 8, -3.0)
+    );
+}
+
+#[test]
 fn ranks_aggregates_and_displays_sources_and_unknowns() {
     assert_eq!(
         (MAX_PROBLEMS, MAX_SOURCES_PER_PROBLEM, MAX_DIGEST_BYTES),

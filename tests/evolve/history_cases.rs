@@ -26,6 +26,24 @@ fn record(id: &str, started_ms: i64) -> RunRecord {
 }
 
 #[test]
+fn loads_record_in_existing_json_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("evolve/runs");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("old.json"),
+        r#"{
+        "id": "old", "started_ms": 100, "repo": "/fixture", "base_commit": "abc",
+        "branch": "evolve/2026-11-10", "since_days": 7, "start_ms": 1, "end_ms": 2,
+        "problems": ["p1"], "metrics": [{"problem": "p1", "value": 0.5, "samples": 3}],
+        "state": "started", "session": null, "goal_status": null, "exit_code": null, "error": null
+    }"#,
+    )
+    .unwrap();
+    assert_eq!(history::list(tmp.path()).unwrap(), vec![record("old", 100)]);
+}
+
+#[test]
 fn persists_orders_and_overwrites_records() {
     let tmp = tempfile::tempdir().unwrap();
     let a = record("a", 100);

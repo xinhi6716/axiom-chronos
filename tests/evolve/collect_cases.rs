@@ -206,8 +206,12 @@ fn hook_and_usage_respect_period_and_report_undated() {
             "{}\n{}\n{}\n{{bad\n",
             json!({"ts":"2023-11-14T22:13:20Z", "session":"s", "reason":"denied"}),
             json!({"ts":"2000-01-01T00:00:00Z", "reason":"old"}),
-            json!({"reason":"undated"})
+            json!({"session":"s", "reason":"undated"})
         ),
+    );
+    put(
+        &home.join("goals/s.json"),
+        &json!({"cwd":"/fixture"}).to_string(),
     );
     let a = json!({"type":"assistant", "timestamp":"2023-11-14T22:13:20Z", "message":{"id":"a", "model":"claude-opus-5-5", "content":[], "usage":{"input_tokens":600001,"output_tokens":1}}});
     let b = json!({"type":"assistant", "message":{"id":"b", "model":"unknown", "content":[], "usage":{"input_tokens":10,"output_tokens":1}}});
@@ -259,6 +263,10 @@ fn missing_home_does_not_create_anything() {
 fn cache_gap_large_read_and_inclusive_hook_boundaries() {
     let tmp = tempfile::tempdir().unwrap();
     let input = inputs(tmp.path(), 1_700_000_600_000);
+    put(
+        &input.home.join("goals/s.json"),
+        &json!({"cwd":"/fixture"}).to_string(),
+    );
     let first = json!({"type":"assistant", "timestamp":"2023-11-14T22:13:20Z", "message":{"id":"a", "model":"claude-opus-5-5", "content":[{"type":"tool_use", "id":"read1", "name":"Read", "input":{"file_path":"large.txt"}}], "usage":{"input_tokens":1,"output_tokens":1}}});
     let tool = json!({"type":"user", "timestamp":"2023-11-14T22:13:21Z", "message":{"content":[{"type":"tool_result", "tool_use_id":"read1", "content":"x".repeat(50_000)}]}});
     let second = json!({"type":"assistant", "timestamp":"2023-11-14T22:19:20Z", "message":{"id":"b", "model":"claude-opus-5-5", "content":[], "usage":{"input_tokens":1,"cache_creation_input_tokens":50000,"output_tokens":1}}});
@@ -272,9 +280,9 @@ fn cache_gap_large_read_and_inclusive_hook_boundaries() {
         &input.home.join("hook/refusals.jsonl"),
         &format!(
             "{}\n{}\n{}\n",
-            json!({"ts":start,"reason":"start"}),
-            json!({"ts":end,"reason":"end"}),
-            json!({"ts":"2023-11-14T22:23:20.001Z","reason":"late"})
+            json!({"ts":start,"session":"s","reason":"start"}),
+            json!({"ts":end,"session":"s","reason":"end"}),
+            json!({"ts":"2023-11-14T22:23:20.001Z","session":"s","reason":"late"})
         ),
     );
     let result = collect(&input).unwrap();
@@ -400,6 +408,10 @@ fn handoff_and_verdict_exclude_old_items_and_include_pending() {
 fn non_ascii_agent_types_have_distinct_safe_problem_ids() {
     let tmp = tempfile::tempdir().unwrap();
     let input = inputs(tmp.path(), 1_700_000_600_000);
+    put(
+        &input.home.join("goals/s.json"),
+        &json!({"cwd":"/fixture"}).to_string(),
+    );
     put(&input.projects.join("p/s.jsonl"), "");
     for (id, kind) in [("a", "研究"), ("b", "分析")] {
         let agent = input
@@ -458,4 +470,200 @@ fn distinct_usage_source_keys_do_not_collide() {
         .collect();
     assert_eq!(warnings.len(), 2, "{result:?}");
     assert_ne!(warnings[0].source.key, warnings[1].source.key);
+}
+
+#[test]
+fn chronos_scope_counts_named_sessions_and_ignores_unrelated_records() {
+    use axiom::{
+        evolve,
+        usage::{self, Locations},
+    };
+    use std::collections::BTreeSet;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let input = inputs(tmp.path(), 1_700_000_600_000);
+    let locations = Locations {
+        home: input.home.clone(),
+        projects: input.projects.clone(),
+    };
+    assert!(usage::chronos_sessions(&input.home).unwrap().is_empty());
+    assert!(usage::chronos_period(&locations, input.now_ms, 7)
+        .unwrap()
+        .history
+        .is_empty());
+    assert_eq!(
+        usage::chronos_period(&locations, input.now_ms, 0)
+            .unwrap_err()
+            .kind,
+        "invalid_argument"
+    );
+    let cwd = "/same/project";
+    let dir = input.projects.join(usage::transcript_dir_name(cwd));
+    let call = |id: &str, input_tokens: u64| {
+        json!({"type":"assistant", "timestamp":"2023-11-14T22:13:20Z", "cwd":cwd, "message":{"id":id,"model":"claude-opus-5-5","content":[],"usage":{"input_tokens":input_tokens,"output_tokens":1}}}).to_string()
+    };
+    put(
+        &input.home.join("goals/goal-only.json"),
+        &json!({"cwd":cwd}).to_string(),
+    );
+    // Identity must survive an old goal mtime.
+    fs::File::options()
+        .write(true)
+        .open(input.home.join("goals/goal-only.json"))
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    put(&dir.join("goal-only.jsonl"), &call("goal", 10));
+    put(
+        &dir.join("goal-only/subagents/agent-real.jsonl"),
+        &call("sub", 20),
+    );
+    put(
+        &input.home.join("goals/both.json"),
+        &json!({"cwd":cwd}).to_string(),
+    );
+    put(&dir.join("both.jsonl"), &call("both", 30));
+    for session in ["log-only", "both"] {
+        let init = json!({"type":"system","subtype":"init","session_id":session,"cwd":cwd});
+        put(
+            &input
+                .home
+                .join(format!("logs/20231114-221320-wish-{session}.jsonl")),
+            &format!("{init}\n{}\n", call(session, 40)),
+        );
+    }
+    put(
+        &input.home.join("hook/refusals.jsonl"),
+        &format!(
+            "{}\n",
+            json!({"session":"goal-only","reason":"allowed","ts":"2023-11-14T22:13:20Z"})
+        ),
+    );
+    let expected: BTreeSet<String> = ["both", "goal-only", "log-only"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(usage::chronos_sessions(&input.home).unwrap(), expected);
+    let period = usage::chronos_period(&locations, input.now_ms, 7).unwrap();
+    assert_eq!(period.history.len(), 3);
+    assert_eq!(
+        period
+            .runs
+            .iter()
+            .map(|r| r.ledger.totals.calls)
+            .sum::<u64>(),
+        4
+    );
+    assert_eq!(
+        period
+            .runs
+            .iter()
+            .find(|r| r.session == "goal-only")
+            .unwrap()
+            .ledger
+            .subagent_files,
+        1
+    );
+    assert_eq!(
+        period
+            .runs
+            .iter()
+            .find(|r| r.session == "both")
+            .unwrap()
+            .ledger
+            .totals
+            .calls,
+        1
+    );
+    let before_tree = tree(&input.home);
+    let before = evolve::preview(&input).unwrap();
+    assert_eq!(tree(&input.home), before_tree);
+    assert_eq!(before.digest.estimate.samples, 2);
+    assert!(before.digest.estimate.median_usd.is_some());
+    assert_eq!(
+        before.digest.cost.iter().map(|row| row.calls).sum::<u64>(),
+        4
+    );
+    assert_eq!(
+        before
+            .digest
+            .sources
+            .iter()
+            .find(|s| s.family == "usage")
+            .unwrap()
+            .samples,
+        3
+    );
+    assert!(before
+        .digest
+        .problems
+        .iter()
+        .any(|p| p.id == "hook.refusal"));
+    put(
+        &dir.join("unrelated.jsonl"),
+        &format!("{}\n{{bad\n", call("expensive", 900_000)),
+    );
+    put(
+        &dir.join("unrelated/subagents/agent-expensive.jsonl"),
+        &call("expensive-sub", 900_000),
+    );
+    let hook = input.home.join("hook/refusals.jsonl");
+    let mut hook_text = fs::read_to_string(&hook).unwrap();
+    hook_text.push_str(&format!(
+        "{}\n{}\n",
+        json!({"session":"unrelated","reason":"ignored","ts":"2023-11-14T22:13:20Z"}),
+        json!({"reason":"no session"})
+    ));
+    put(&hook, &hook_text);
+    let after_tree = tree(&input.home);
+    let after = evolve::preview(&input).unwrap();
+    assert_eq!(tree(&input.home), after_tree);
+    assert_eq!(before, after);
+    let collected = collect(&input).unwrap();
+    assert_eq!(
+        collected
+            .events
+            .iter()
+            .filter(|e| e.problem == "hook.refusal")
+            .count(),
+        1
+    );
+    assert!(!collected.gaps.iter().any(|g| g.family == "hook"));
+    assert_eq!(
+        usage::period(&locations, input.now_ms, 7)
+            .unwrap()
+            .history
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn chronos_identities_require_goal_files() {
+    use axiom::usage::{self, Locations};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let input = inputs(tmp.path(), 1_700_000_600_000);
+    fs::create_dir_all(input.home.join("goals/not-a-goal.json")).unwrap();
+    let call = json!({"type":"assistant", "timestamp":"2023-11-14T22:13:20Z", "message":{"id":"a", "model":"claude-opus-5-5", "content":[], "usage":{"input_tokens":600001,"output_tokens":1}}});
+    put(
+        &input.projects.join("p/not-a-goal.jsonl"),
+        &format!("{call}\n"),
+    );
+    let locations = Locations {
+        home: input.home,
+        projects: input.projects,
+    };
+    assert!(usage::chronos_sessions(&locations.home).unwrap().is_empty());
+    assert!(usage::chronos_period(&locations, input.now_ms, 7)
+        .unwrap()
+        .history
+        .is_empty());
+    assert_eq!(
+        usage::period(&locations, input.now_ms, 7)
+            .unwrap()
+            .history
+            .len(),
+        1
+    );
 }

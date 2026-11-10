@@ -262,8 +262,26 @@ fn empty_run() -> Run {
     run
 }
 
+pub fn evolve_preview() -> EvolvePreview {
+    EvolvePreview {
+        issues: vec![EvolveIssue { id: "demo.issue".into(), title: "Repeated work".into(), count: 3, cost_usd: Some(1.25) }],
+        more_issues: 0, estimate_usd: Some(2.0), estimate_samples: 2, gaps: vec![],
+        repo: Some(if cfg!(windows) { std::path::PathBuf::from(r"C:\demo\chronos") } else { std::path::PathBuf::from("/demo/chronos") }),
+        text: "Repeated work: 3".into(),
+    }
+}
+
+pub fn evolve_runs() -> Vec<PastEvolve> {
+    [Verdict::Improved, Verdict::Unknown].into_iter().enumerate().map(|(i, verdict)| PastEvolve {
+        id: format!("demo-{}", i + 1).into(), started_ms: 1_700_000_000_000 - i as i64,
+        repo: evolve_preview().repo.unwrap().to_string_lossy().into_owned().into(),
+        branch: "evolve/demo".into(), state: "ended".into(), verdict,
+    }).collect()
+}
+
 pub fn state() -> AppState {
     AppState {
+        evolve: EvolveState::default(),
         view: Screen::Run,
         runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()],
         current: Some(0),
@@ -322,6 +340,17 @@ pub fn advance(run: &mut Run) {
 mod usage_tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn evolve_demo_has_an_absolute_repo_and_varied_history() {
+        let preview = evolve_preview();
+        assert!(preview.repo.unwrap().is_absolute());
+        assert!(!preview.issues.is_empty());
+        let runs = evolve_runs();
+        assert!(runs.iter().any(|r| r.verdict == Verdict::Improved));
+        assert!(runs.iter().any(|r| r.verdict == Verdict::Unknown));
+        assert!(runs.windows(2).all(|r| r[0].started_ms >= r[1].started_ms));
+    }
 
     #[test]
     fn sample_claude_models_have_complete_token_counts() {

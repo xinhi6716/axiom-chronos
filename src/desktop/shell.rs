@@ -294,6 +294,7 @@ impl Shell {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let mut subscriptions = subscriptions;
+        subscriptions.extend(motion::watch_window(window, cx));
         subscriptions.push(cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
             let PaletteEvent::Chose(target) = event;
             this.go_to(target.clone(), window, cx);

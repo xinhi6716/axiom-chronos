@@ -6,7 +6,8 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    io::Write,
+    fs::File,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -118,6 +119,37 @@ fn codex_role(args: &Value) -> &str {
         .or_else(|| args["model"].as_str())
         .unwrap_or("None")
 }
+fn brief_file_goal(args: &Value) -> Option<String> {
+    let file = s(&args["brief_file"]);
+    if file.is_empty() {
+        return None;
+    }
+    let path = Path::new(s(&args["cwd"])).join(file);
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(16 << 10)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(rest) = line.strip_prefix("GOAL") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                let goal = rest.trim();
+                return if goal.is_empty() {
+                    lines
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    Some(goal.to_owned())
+                };
+            }
+        }
+    }
+    None
+}
 /// The one-line progress label for a tool call, or None for tools that are not shown.
 pub fn tool_label(name: &str, args: &Value) -> Option<String> {
     if name == "Agent" {
@@ -129,6 +161,11 @@ pub fn tool_label(name: &str, args: &Value) -> Option<String> {
     } else if let Some(tool) = name.strip_prefix(BRIDGE) {
         if tool == "codex_run" {
             let brief = s(&args["brief"]);
+            let file_goal = if brief.is_empty() {
+                brief_file_goal(args)
+            } else {
+                None
+            };
             let label = brief
                 .lines()
                 .find_map(|l| {
@@ -142,6 +179,7 @@ pub fn tool_label(name: &str, args: &Value) -> Option<String> {
                         .map(str::trim)
                         .find(|l| !l.is_empty() && *l != "GOAL")
                 })
+                .or(file_goal.as_deref())
                 .unwrap_or("(no brief)");
             Some(format!("- codex {}: {}", codex_role(args), short(label)))
         } else if tool == "orch" {

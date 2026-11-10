@@ -259,7 +259,7 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
         projects: inputs.projects.clone(),
     };
     let mut usage_samples = 0;
-    match usage::period(&locs, inputs.now_ms, inputs.since_days) {
+    match usage::chronos_period(&locs, inputs.now_ms, inputs.since_days) {
         Ok(period) => {
             usage_samples = period.history.len() as u64;
             if period.undated_calls > 0 {
@@ -657,13 +657,13 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
     if !hook.exists() {
         hook_status.state = "not logged".into();
     } else {
+        let sessions = usage::chronos_sessions(&inputs.home)?;
         match fs::read_to_string(&hook) {
             Ok(text) => {
                 for (i, line) in text.lines().enumerate() {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    hook_status.samples += 1;
                     let loc = format!("{}:{}", hook.display(), i + 1);
                     let v: serde_json::Value = match serde_json::from_str(line) {
                         Ok(v) => v,
@@ -672,6 +672,13 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
                             continue;
                         }
                     };
+                    let Some(session) = v.get("session").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if !sessions.contains(session) {
+                        continue;
+                    }
+                    hook_status.samples += 1;
                     let Some(reason) = v.get("reason").and_then(|v| v.as_str()) else {
                         gap(&mut out.gaps, "hook", &loc, "missing reason");
                         continue;

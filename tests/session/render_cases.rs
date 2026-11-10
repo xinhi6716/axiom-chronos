@@ -153,6 +153,57 @@ fn codex_briefs() {
     );
 }
 #[test]
+fn codex_brief_files() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/render-label-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let temp = tempfile::tempdir_in(&dir).unwrap();
+    let dir = temp.path();
+    let name = format!("{BRIDGE}codex_run");
+    let file = dir.join("brief.txt");
+
+    std::fs::write(&file, "context\r\nGOAL 中文目標\r\nGOAL later\r\n").unwrap();
+    assert_eq!(
+        tool(&name, json!({"brief_file": file}), false),
+        "- codex None: 中文目標\n"
+    );
+    assert_eq!(
+        tool(
+            &name,
+            json!({"brief":"", "brief_file":"brief.txt", "cwd":dir}),
+            false
+        ),
+        "- codex None: 中文目標\n"
+    );
+    assert_eq!(
+        tool(
+            &name,
+            json!({"brief":"GOAL inline", "brief_file":file}),
+            false
+        ),
+        "- codex None: inline\n"
+    );
+    assert_eq!(
+        tool(&name, json!({"brief_file":dir.join("missing.txt")}), false),
+        "- codex None: (no brief)\n"
+    );
+
+    std::fs::write(&file, "GOALS x\nGOAL\r\n\r\n  next goal  \r\nGOAL later\n").unwrap();
+    assert_eq!(
+        tool(&name, json!({"brief_file":file}), false),
+        "- codex None: next goal\n"
+    );
+    std::fs::write(&file, "GOALS x\nother text\n").unwrap();
+    assert_eq!(
+        tool(&name, json!({"brief_file":file}), false),
+        "- codex None: (no brief)\n"
+    );
+    std::fs::write(&file, format!("{}中文", "x".repeat((16 << 10) - 1))).unwrap();
+    assert_eq!(
+        tool(&name, json!({"brief_file":file}), false),
+        "- codex None: (no brief)\n"
+    );
+}
+#[test]
 fn orch_line() {
     assert_eq!(
         tool(
