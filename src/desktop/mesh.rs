@@ -255,23 +255,37 @@ struct TipPlace {
     from_bottom: bool,
 }
 
+/// Where a tooltip placed at `place` really ends up: the window keeps it `TIP_EDGE` inside its
+/// edges (the panel stands for the window here), so a corner near the right or bottom edge is
+/// pushed back in. It is measured at its tallest, which is the safe side.
+fn tip_rect(place: TipPlace, width: f32, height: f32) -> Rect {
+    let top = if place.from_bottom { place.at.y - TIP_MAX_H } else { place.at.y };
+    Rect {
+        x: place.at.x.min(width - TIP_W - TIP_EDGE).max(TIP_EDGE),
+        y: top.min(height - TIP_MAX_H - TIP_EDGE).max(TIP_EDGE),
+        w: TIP_W,
+        h: TIP_MAX_H,
+    }
+}
+
 /// Moves a tooltip off the zoom controls. `at` is where it would go, `node` is what it describes
 /// (both in panel pixels). Above the controls is tried first, then beside them; the node stays
 /// uncovered when either allows it.
 fn place_tip(at: Pt, node: Rect, width: f32, height: f32) -> TipPlace {
     let c = controls_rect(width, height);
     let keep_out = Rect { x: c.x - CONTROLS_GAP, y: c.y - CONTROLS_GAP, w: c.w + CONTROLS_GAP * 2.0, h: c.h + CONTROLS_GAP * 2.0 };
-    let tip = |x: f32, y: f32| Rect { x, y, w: TIP_W, h: TIP_MAX_H };
-    if !tip(at.x, at.y).overlaps(&keep_out) {
+    // Every check is made on where the window leaves the tooltip, not where it was asked for.
+    let shown = |at: Pt, from_bottom: bool| tip_rect(TipPlace { at, from_bottom }, width, height);
+    if !shown(at, false).overlaps(&keep_out) {
         return TipPlace { at, from_bottom: false };
     }
     let above = TipPlace { at: Pt { x: at.x, y: keep_out.y }, from_bottom: true };
-    if keep_out.y - TIP_MAX_H >= TIP_EDGE && !tip(at.x, keep_out.y - TIP_MAX_H).overlaps(&node) {
+    if keep_out.y - TIP_MAX_H >= TIP_EDGE && !shown(above.at, true).overlaps(&node) && !shown(above.at, true).overlaps(&keep_out) {
         return above;
     }
-    let left_x = keep_out.x - TIP_W;
-    if left_x >= TIP_EDGE && !tip(left_x, at.y).overlaps(&node) {
-        return TipPlace { at: Pt { x: left_x, y: at.y }, from_bottom: false };
+    let left = TipPlace { at: Pt { x: keep_out.x - TIP_W, y: at.y }, from_bottom: false };
+    if left.at.x >= TIP_EDGE && !shown(left.at, false).overlaps(&node) && !shown(left.at, false).overlaps(&keep_out) {
+        return left;
     }
     above
 }
@@ -2591,6 +2605,24 @@ mod tests {
         let below = Pt { x: card.x, y: card.bottom() + 6.0 };
         let placed = place_tip(below, card, w, h);
         assert!(!rect(placed).overlaps(&c) && !rect(placed).overlaps(&card), "{placed:?}");
+    }
+
+    #[test]
+    fn a_tooltip_pushed_into_the_window_still_clears_the_controls() {
+        let (w, h) = (900.0, 600.0);
+        let c = controls_rect(w, h);
+        // A node in the bottom-right corner: beside it, the tooltip starts right of the controls,
+        // but the window pushes it back left, over them.
+        let node = Rect { x: w - 100.0, y: h - 60.0, w: 90.0, h: 24.0 };
+        let wanted = Pt { x: node.right() + 8.0, y: node.y - 2.0 };
+        let placed = place_tip(wanted, node, w, h);
+        let shown = tip_rect(placed, w, h);
+        assert!(!shown.overlaps(&c), "{placed:?} lands on {shown:?}, over {c:?}");
+        assert!(!shown.overlaps(&node), "{placed:?} lands on {shown:?}, over {node:?}");
+        assert!(shown.right() <= w && shown.bottom() <= h);
+        // Away from every edge the snapped place is the asked one.
+        let mid = TipPlace { at: Pt { x: 40.0, y: 60.0 }, from_bottom: false };
+        assert_eq!(tip_rect(mid, w, h), Rect { x: 40.0, y: 60.0, w: TIP_W, h: TIP_MAX_H });
     }
 
     #[test]
