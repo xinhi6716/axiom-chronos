@@ -30,6 +30,19 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
+      - name: Build the desktop app (Windows only)
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked --features app --bin chronos
+      - name: Name the desktop app asset
+        if: runner.os == 'Windows'
+        run: cp target/release/chronos.exe chronos.exe
+        shell: bash
+      - name: Upload the desktop app
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronos.exe
+          path: chronos.exe
   publish:
     needs: build
     runs-on: ubuntu-latest

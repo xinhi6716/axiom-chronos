@@ -37,7 +37,7 @@ fn rust_release_contract() {
         for forbidden in ["pipx", "bun", "axiom_python", "--model", "`60`", "beta", "測試版"] {
             assert!(!lower.contains(forbidden), "{name} contains {forbidden}");
         }
-        for required in ["1.0.0", "interjection"] {
+        for required in ["2.0.0", "interjection"] {
             assert!(lower.contains(required), "{name} missing {required}");
         }
     }

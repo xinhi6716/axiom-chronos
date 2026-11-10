@@ -6,9 +6,9 @@
 
 <p align="center"><strong>English</strong> · <a href="README.zh-TW.md">繁體中文</a></p>
 
-<p align="center"><a href="docs/releases/1.0.0.md">Release 1.0.0</a></p>
+<p align="center"><a href="docs/releases/2.0.0.md">Release 2.0.0</a></p>
 
-<p align="center"><a href="#begin">Quick start</a> · <a href="#the-work">Workflow</a> · <a href="#record-review">Records</a> · <a href="#status">Status</a></p>
+<p align="center"><a href="#begin">Quick start</a> · <a href="#desktop-app">Desktop app</a> · <a href="#the-work">Workflow</a> · <a href="#record-review">Records</a> · <a href="#status">Status</a></p>
 
 Make a wish on your codebase. Chronos plans it, splits it into modules, has Codex build them, has Claude review them, and keeps working until the change is verified or blocked.
 
@@ -35,6 +35,14 @@ axiom wish add a --stats flag to cli.py that prints done/total
 Inside Claude Code, use `/chronos:wish` with the same text.
 
 **Save a checkpoint first.** A wish edits files and sends project material to your signed-in model services.
+
+<a id="desktop-app"></a>
+
+## Desktop app
+
+Chronos also comes as a window, so you can make a wish, watch it and steer it without a terminal. Start it with `chronos`, or with `axiom app`. The Windows release attaches `chronos.exe`; to build it yourself, run `cargo install --git https://github.com/xinhi6716/axiom-chronos --locked --features app --bin chronos`.
+
+The main screens are **Run** (a checklist of goals, modules and units, a live graph of the run, and the brief, report, verify output and review of each unit), **Wishes** (past and running wishes, and which one needs you), **Memory** (what Chronos remembers; correct or delete an entry), **Usage** (tokens and cost per run) and **Settings** (language, theme, health check). Ctrl+N makes a new wish and Ctrl+K searches everything. A wish started in a terminal shows up there too, view only.
 
 <a id="the-work"></a>
 <a id="how-a-wish-runs"></a>
@@ -67,8 +75,15 @@ When what remains is a long batch of the project's own programs, the wish waits 
 | `--resume <session-id> [message]` | Continue a stopped or blocked wish; the message, if given, is its first turn. |
 | `--creative` | Let Chronos find one small, evidence-backed improvement. |
 | `--max-turns N` | Limit core-session turns. |
+| `--advanced-research` | Opt in to the paid research council before planning. |
 
 Put options **before** the wish; everything after them is wish text. `axiom research` turns a question into a reviewed research plan.
+
+More commands: `axiom review <git range>` gives a diff a second opinion from another model family (Codex first, with agy as an optional backup that never blocks; `--diff-only` sends just the diff), `axiom lint` checks a project's memory for stale or duplicate entries and broken quotes, and `axiom usage` prints a per-run ledger of tokens and cost.
+
+**Optional pieces.** agy (the backup reviewer) and [CodeGraph](https://github.com/colbymchenry/codegraph) (less code reading when a `.codegraph/` folder exists) are used only if installed. `--advanced-research` is the one option that costs extra: Astra, Fable and Argon discuss the problem before the plan, with Fable capped at $5 by default. It is off unless you ask.
+
+To save tokens, each module gets its own dispatcher, which hands off to a fresh one at 150k tokens with its state kept.
 
 When Claude reports a usage limit with a reset time, `axiom wish` prints when it will continue, waits for the reset and resumes the same session by itself; Ctrl-C stops the wait.
 
@@ -84,9 +99,9 @@ State lives in `~/.axiom` (set `AXIOM_HOME` to move it): work records and briefs
 
 ## Status
 
-Available: `axiom wish`, `axiom wait`, `axiom research`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
+Available: `chronos` (desktop app), `axiom wish`, `axiom wait`, `axiom research`, `axiom review`, `axiom lint`, `axiom usage`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
 
-[Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Release notes](docs/releases/1.0.0.md)
+[Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Release notes](docs/releases/2.0.0.md) · [Changelog](CHANGELOG.md) · [Desktop app design](docs/app-design.md)
 
 ---
 
