@@ -9,6 +9,7 @@ mod live;
 mod memory;
 mod mesh;
 pub mod model;
+mod ornament;
 mod run_view;
 mod settings;
 mod shell;
@@ -104,7 +105,7 @@ pub fn run(options: Options) -> i32 {
         }
     }
     let prefs = store.settings.clone();
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
+    gpui_kit::application().with_assets(ornament::Assets).run(move |cx| {
         gpui_kit::init(cx);
         let mode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()) };
         theme::apply(mode, None, cx);
