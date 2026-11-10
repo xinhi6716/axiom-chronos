@@ -182,7 +182,7 @@ fn models_and_binary_configuration() {
             "\"${AXIOM_BIN:-axiom}\" hook"
         );
     }
-    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Write|Edit|NotebookEdit|Bash|PowerShell|Read|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run|mcp__plugin_chronos_bridge__goal");
+    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "*");
     let marketplace: Value = serde_json::from_str(
         &fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude-plugin/marketplace.json"),

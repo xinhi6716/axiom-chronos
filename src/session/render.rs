@@ -246,6 +246,12 @@ impl Renderer {
                         let id = s(&b["tool_use_id"]);
                         if let Some(agent) = self.agents.remove(id) {
                             line(out, 0, &format!("< {agent} finished"));
+                            if agent == "chronos:narrator" {
+                                if let Some(text) = content_text(&b["content"]) {
+                                    let _ = write!(out, "\n{text}\n\n");
+                                    let _ = out.flush();
+                                }
+                            }
                         }
                         if let Some((role, depth)) = self.calls.get(id).cloned() {
                             self.codex_result(b, &role, depth, out);

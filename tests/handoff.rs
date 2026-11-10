@@ -149,7 +149,7 @@ fn a_dispatcher_past_the_threshold_is_refused_with_the_handoff_instruction() {
         "Read",
         json!({"file_path": r.store.join("units.tsv")}),
     ));
-    assert_eq!(refusal(&r, &read), None, "reading the store stays open");
+    assert!(refusal(&r, &read).is_some_and(|why| why.contains("handoff")));
     let threshold = |limit| context::handoff_refusal(&codex(&r), limit, None);
     assert!(
         threshold(300_000).is_none(),
@@ -520,7 +520,7 @@ fn compaction_brings_back_the_work_state() {
         "Read",
         json!({"file_path": r.store.join("units.tsv")}),
     ));
-    assert!(call(&r, &read).is_none(), "no compaction, nothing added");
+    assert!(refusal(&r, &read).is_some_and(|why| why.contains("handoff")));
 
     let boundary = |uuid: &str| {
         format!(
@@ -532,6 +532,8 @@ fn compaction_brings_back_the_work_state() {
     lines.push_str(&boundary("c1"));
     lines.push_str(&assistant(20_000));
     fs::write(&r.own, &lines).unwrap();
+    let grep = in_dispatcher(tool(&r, "Grep", json!({})));
+    assert!(call(&r, &grep).is_none(), "newly routed tools do not consume compaction context");
     let out = call(&r, &read).unwrap();
     let text = out["hookSpecificOutput"]["additionalContext"]
         .as_str()

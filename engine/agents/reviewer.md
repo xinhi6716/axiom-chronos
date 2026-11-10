@@ -2,6 +2,7 @@
 name: reviewer
 description: Reviews Codex-written files against the contract they were built to. Give it the unit id, the project's absolute directory and the unit's review pack.
 model: sonnet
+autoCompactWindow: 200000
 tools: Read, Glob, Grep, mcp__codegraph__codegraph_explore
 ---
 

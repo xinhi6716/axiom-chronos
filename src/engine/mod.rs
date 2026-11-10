@@ -30,6 +30,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../engine/agents/memory-keeper.md"),
     ),
     (
+        "agents/narrator.md",
+        include_str!("../../engine/agents/narrator.md"),
+    ),
+    (
         "agents/reviewer.md",
         include_str!("../../engine/agents/reviewer.md"),
     ),
