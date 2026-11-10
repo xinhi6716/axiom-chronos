@@ -572,14 +572,23 @@ const RING_ARC_WIDTH: f32 = 2.0;
 const RING_TRACK_ALPHA: f32 = 0.35;
 const RING_ARC_ALPHA: f32 = 1.0;
 
+fn ring_arcs(t: &Tokens, sweep: f32) -> Vec<(f32, f32, f32, Hsla)> {
+    let mut arcs = vec![(0.0, 360.0, RING_TRACK_WIDTH, t.orbit.opacity(RING_TRACK_ALPHA))];
+    if sweep > 0.0 {
+        arcs.push((-90.0, -90.0 + 360.0 * sweep, RING_ARC_WIDTH, t.gold.opacity(RING_ARC_ALPHA)));
+    }
+    arcs
+}
+
 pub fn progress_ring(t: &Tokens, verified: usize, total: usize, side: f32) -> Option<AnyElement> {
     let sweep = ring_sweep(verified, total)?;
-    let (track, gold) = (t.orbit.opacity(RING_TRACK_ALPHA), t.gold.opacity(RING_ARC_ALPHA));
+    let arcs = ring_arcs(t, sweep);
     Some(canvas(|_, _, _| (), move |bounds, _, window, _| {
         let b = Box2::of(bounds);
         let (cx, cy, r) = (b.x + b.w / 2.0, b.y + b.h / 2.0, (side / 2.0 - 1.0).max(0.0));
-        paint_orbit_arc_with_width(window, cx, cy, r, 0.0, 360.0, track, RING_TRACK_WIDTH);
-        if sweep > 0.0 { paint_orbit_arc_with_width(window, cx, cy, r, -90.0, -90.0 + 360.0 * sweep, gold, RING_ARC_WIDTH); }
+        for &(from, to, width, color) in &arcs {
+            paint_orbit_arc_with_width(window, cx, cy, r, from, to, color, width);
+        }
     }).flex_none().size(px(side)).into_any_element())
 }
 
@@ -668,25 +677,40 @@ mod tests {
 
     #[test]
     fn underline_is_empty_at_rest_and_has_an_arc_when_lit() {
-        let bounds = Box2 { x: 0.0, y: 0.0, w: 100.0, h: 8.0 };
+        let bounds = Box2 { x: 10.0, y: 20.0, w: 100.0, h: 8.0 };
         assert!(underline_points(bounds, 0.0).is_empty());
         assert!(underline_points(bounds, -1.0).is_empty());
-        let points = underline_points(bounds, 1.0);
-        assert!(points.len() > 2);
-        assert_ne!(points.first(), points.last());
+        for lit in [0.5, 1.0] {
+            let points = underline_points(bounds, lit);
+            assert!(points.len() > 2);
+            assert_ne!(points.first(), points.last());
+            assert!(points.iter().all(|p| {
+                let (x, y) = (f32::from(p.x), f32::from(p.y));
+                (bounds.x..=bounds.x + bounds.w).contains(&x)
+                    && (bounds.y..=bounds.y + bounds.h).contains(&y)
+            }));
+        }
     }
 
     #[test]
     fn progress_ring_arc_is_more_visible_than_track() {
-        assert!(RING_ARC_WIDTH > RING_TRACK_WIDTH);
-        assert!(RING_TRACK_ALPHA < RING_ARC_ALPHA);
-        assert_eq!(RING_TRACK_WIDTH, 1.0);
-        assert_eq!(RING_ARC_WIDTH, 2.0);
         for t in super::super::theme::both() {
-            let track = t.orbit.opacity(RING_TRACK_ALPHA);
-            let gold = t.gold.opacity(RING_ARC_ALPHA);
-            assert!(track.a < gold.a);
-            assert_eq!(gold.a, 1.0);
+            let sweep = 0.5;
+            let arcs = ring_arcs(&t, sweep);
+            assert_eq!(arcs.len(), 2);
+            let (track, gold) = (arcs[0], arcs[1]);
+            assert_eq!((track.0, track.1), (0.0, 360.0));
+            assert_eq!((gold.0, gold.1), (-90.0, -90.0 + 360.0 * sweep));
+            assert_eq!(track.3, t.orbit.opacity(RING_TRACK_ALPHA));
+            assert_eq!(gold.3, t.gold.opacity(RING_ARC_ALPHA));
+            let gold_is_wider = |arcs: &[(f32, f32, f32, Hsla)]| arcs[1].2 > arcs[0].2;
+            assert!(gold_is_wider(&arcs));
+            assert!(gold.3.a > track.3.a);
+            let mut swapped = arcs.clone();
+            swapped[0].2 = gold.2;
+            swapped[1].2 = track.2;
+            assert!(!gold_is_wider(&swapped));
+            assert_eq!(ring_arcs(&t, 0.0), vec![track]);
         }
     }
 

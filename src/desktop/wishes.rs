@@ -468,6 +468,8 @@ impl ListDelegate for RunList {
         Some(
             ListItem::new(ix)
                 .accessibility_label(name)
+                // The enclosing List handles selection; suppress ListItem's row-wide fills.
+                .disabled(true)
                 .h(ROW_HEIGHT)
                 .py_0()
                 .px_0()
@@ -481,8 +483,9 @@ impl ListDelegate for RunList {
                         .mb(px(6.))
                         .rounded(px(8.))
                         .bg(t.surface)
+                        .text_color(t.text)
                         .border_1()
-                        .border_color(t.border)
+                        .border_color(if selected { t.gold } else { t.border })
                         .hover(|style| style.shadow(ornament::gold_glow(&t, 0.7)))
                         .px_3()
                         .gap_3()

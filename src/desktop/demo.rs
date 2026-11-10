@@ -77,17 +77,17 @@ pub fn sample_run() -> Run {
         usage: Usage {
             total_usd: Some(116.12 + codex_usd),
             models: vec![
-                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: Some(0), cached: Some(226_026_522), cache_write: Some(0), output: Some(802_372), total: Some(226_828_894) },
-                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: Some(0), cached: Some(36_001_210), cache_write: Some(0), output: Some(128_398), total: Some(36_129_608) },
-                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: Some(0), cached: Some(633_994), cache_write: Some(0), output: Some(26_655), total: Some(660_649) },
+                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: Some(184_310), cached: Some(226_026_522), cache_write: Some(3_412_880), output: Some(802_372), total: Some(230_426_084) },
+                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: Some(41_206), cached: Some(36_001_210), cache_write: Some(1_104_530), output: Some(128_398), total: Some(37_275_344) },
+                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: Some(9_840), cached: Some(633_994), cache_write: Some(48_220), output: Some(26_655), total: Some(718_709) },
                 ModelCost { model: "gpt-6.1-terra".into(), usd: Some(codex_usd), input: Some(11_643_991), cached: Some(10_462_720), cache_write: None, output: Some(195_816), total: Some(22_302_527) },
                 ModelCost { model: "gpt-unknown".into(), usd: None, input: Some(4200), cached: Some(1200), cache_write: None, output: Some(600), total: Some(6000) },
             ],
             roles: vec![
-                RoleCost { role: "chronos:dispatcher".into(), usd: Some(78.41), input: 0, cached: 198_312_906, output: 612_044 },
-                RoleCost { role: "main".into(), usd: Some(23.82), input: 0, cached: 36_001_210, output: 128_398 },
-                RoleCost { role: "chronos:reviewer".into(), usd: Some(13.44), input: 0, cached: 27_713_616, output: 190_328 },
-                RoleCost { role: "chronos:memory-keeper".into(), usd: Some(0.45), input: 0, cached: 633_994, output: 26_655 },
+                RoleCost { role: "chronos:dispatcher".into(), usd: Some(78.41), input: 150_000, cached: 198_312_906, output: 612_044 },
+                RoleCost { role: "main".into(), usd: Some(23.82), input: 41_206, cached: 36_001_210, output: 128_398 },
+                RoleCost { role: "chronos:reviewer".into(), usd: Some(13.44), input: 34_310, cached: 27_713_616, output: 190_328 },
+                RoleCost { role: "chronos:memory-keeper".into(), usd: Some(0.45), input: 9_840, cached: 633_994, output: 26_655 },
                 RoleCost { role: "codex terra".into(), usd: None, input: 11_643_991, cached: 10_462_720, output: 195_816 },
             ],
             contexts: vec![
@@ -322,6 +322,20 @@ pub fn advance(run: &mut Run) {
 mod usage_tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn sample_claude_models_have_complete_token_counts() {
+        let run = sample_run();
+        let models: Vec<_> = run.usage.models.iter().filter(|model| model.model.starts_with("claude-")).collect();
+        assert_eq!(models.len(), 3);
+        for model in models {
+            let input = model.input.unwrap();
+            let cache_write = model.cache_write.unwrap();
+            assert!(input > 0, "{} has no input tokens", model.model);
+            assert!(cache_write > 0, "{} has no cache-write tokens", model.model);
+            assert_eq!(model.total, Some(input + model.cached.unwrap() + cache_write + model.output.unwrap()));
+        }
+    }
 
     #[test]
     fn sample_prices_codex_and_keeps_an_unpriced_model_and_empty_run() {
