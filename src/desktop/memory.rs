@@ -95,6 +95,56 @@ fn correction_problem(text: &str, current: &str) -> Option<Problem> {
     }
 }
 
+/// Corrections the person wrote and has not seen saved. Saving only queues the request, so the
+/// text is kept until the entry shows it; a failure hands it back for another try.
+#[derive(Default)]
+struct Corrections {
+    /// Texts set aside for entries the person moved away from, or whose save failed.
+    drafts: HashMap<i64, String>,
+    /// Texts handed to the engine, with how many errors had been reported by then.
+    sent: HashMap<i64, (String, u64)>,
+}
+
+impl Corrections {
+    fn submit(&mut self, id: i64, text: String, errors_seen: u64) {
+        self.drafts.remove(&id);
+        self.sent.insert(id, (text, errors_seen));
+    }
+
+    /// Settles what was sent: an entry that now says it is done, a failed save becomes a draft
+    /// again, and a gone entry is forgotten.
+    fn settle(&mut self, body_of: impl Fn(i64) -> Option<String>, errors: &[AppError]) {
+        let ids: Vec<i64> = self.sent.keys().copied().collect();
+        for id in ids {
+            let Some((text, mark)) = self.sent.get(&id).cloned() else { continue };
+            match body_of(id) {
+                None => {
+                    self.sent.remove(&id);
+                }
+                Some(body) if body.trim() == text.trim() => {
+                    self.sent.remove(&id);
+                }
+                Some(_) if errors.iter().any(|e| e.action == crate::desktop::model::Action::CorrectMemory && e.id > mark) => {
+                    self.sent.remove(&id);
+                    self.drafts.insert(id, text);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// What the box starts with when `id` is corrected: the unsaved text if there is any.
+    fn start_text(&mut self, id: i64, body: &str) -> String {
+        if let Some(draft) = self.drafts.remove(&id) {
+            return draft;
+        }
+        match self.sent.get(&id) {
+            Some((text, _)) => text.clone(),
+            None => body.to_owned(),
+        }
+    }
+}
+
 /// "Last confirmed Nov 3, 05:15", written in the interface language.
 fn confirmed_line(entry: &MemoryEntry, lang: Lang) -> String {
     if entry.confirmed.is_empty() {
@@ -310,8 +360,8 @@ pub struct MemoryView {
     /// The correction box, shared by whichever entry is being corrected.
     edit: Entity<TextareaState>,
     editing: Option<i64>,
-    /// Unsaved corrections of entries the person moved away from.
-    drafts: HashMap<i64, String>,
+    /// Corrections not yet saved: set aside, or waiting for the engine.
+    corrections: Corrections,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -383,7 +433,7 @@ impl MemoryView {
             on_screen,
             edit,
             editing: None,
-            drafts: HashMap::new(),
+            corrections: Corrections::default(),
             _subscriptions,
         };
         this.apply(true, window, cx);
@@ -612,6 +662,11 @@ impl MemoryView {
     /// Keeps the correction box on the entry it belongs to: moving to another entry sets a
     /// changed text aside as a draft, and coming back to that entry opens it again.
     fn sync_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        {
+            let state = self.state.read(cx);
+            let memory = &state.memory;
+            self.corrections.settle(|id| memory.iter().find(|m| m.id == id).map(|m| m.body.to_string()), &state.errors);
+        }
         let selected = self.selected_entry(cx).map(|e| (e.id, e.body.clone()));
         if let Some(editing) = self.editing {
             if selected.as_ref().map(|(id, _)| *id) == Some(editing) {
@@ -620,12 +675,12 @@ impl MemoryView {
             let typed = self.edit.read(cx).value().to_string();
             let body = self.state.read(cx).memory.iter().find(|m| m.id == editing).map(|m| m.body.clone());
             if body.is_some_and(|body| typed.trim() != body.trim()) {
-                self.drafts.insert(editing, typed);
+                self.corrections.drafts.insert(editing, typed);
             }
             self.editing = None;
         }
         if let Some((id, _)) = selected {
-            if let Some(draft) = self.drafts.remove(&id) {
+            if let Some(draft) = self.corrections.drafts.remove(&id) {
                 self.editing = Some(id);
                 self.edit.update(cx, |edit, cx| edit.set_value(draft, window, cx));
             }
@@ -634,7 +689,8 @@ impl MemoryView {
 
     fn start_correcting(&mut self, id: i64, body: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.editing = Some(id);
-        self.edit.update(cx, |edit, cx| edit.set_value(body.to_string(), window, cx));
+        let text = self.corrections.start_text(id, body);
+        self.edit.update(cx, |edit, cx| edit.set_value(text, window, cx));
         self.edit.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -652,6 +708,8 @@ impl MemoryView {
         if correction_problem(&text, &current).is_some() {
             return;
         }
+        let errors_seen = self.state.read(cx).next_error;
+        self.corrections.submit(id, text.clone(), errors_seen);
         self.state.update(cx, |state, cx| state.correct_memory(id, &text, cx));
         self.stop_correcting(window, cx);
     }
@@ -1054,6 +1112,38 @@ mod tests {
         let mut memory = sample();
         memory[1].wish = "make the nightly report faster".into();
         assert_eq!(visible_memories(&memory, None, &search_terms("nightly")), vec![1]);
+    }
+
+    fn failure(id: u64) -> AppError {
+        AppError { id, action: crate::desktop::model::Action::CorrectMemory, session: None, message: "disk full".into() }
+    }
+
+    #[test]
+    fn a_correction_is_kept_until_saved_and_a_failure_can_be_retried() {
+        let mut c = Corrections::default();
+        let old = "old text";
+        c.submit(7, "my edit".into(), 0);
+        // Queued but not yet shown: pressing Correct again must not bring back the old text.
+        c.settle(|_| Some(old.to_owned()), &[]);
+        assert_eq!(c.start_text(7, old), "my edit");
+        // The engine reports a failure later: the text comes back as a draft to retry.
+        c.settle(|_| Some(old.to_owned()), &[failure(1)]);
+        assert!(c.sent.is_empty());
+        assert_eq!(c.drafts.get(&7).map(String::as_str), Some("my edit"));
+        assert_eq!(c.start_text(7, old), "my edit");
+        // The retry succeeds: once the entry shows it, nothing is kept.
+        c.submit(7, "my edit".into(), 1);
+        c.settle(|_| Some("my edit".to_owned()), &[failure(1)]);
+        assert!(c.sent.is_empty() && c.drafts.is_empty());
+        assert_eq!(c.start_text(7, "my edit"), "my edit");
+    }
+
+    #[test]
+    fn a_correction_of_a_deleted_entry_is_forgotten() {
+        let mut c = Corrections::default();
+        c.submit(7, "x".into(), 0);
+        c.settle(|_| None, &[]);
+        assert!(c.sent.is_empty() && c.drafts.is_empty());
     }
 
     #[test]
