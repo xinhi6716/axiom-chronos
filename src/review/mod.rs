@@ -18,6 +18,8 @@ use std::{
 
 /// What goes to Codex, as `orch review-pack` bounds a unit.
 const CODEX_BUDGET: usize = 80_000;
+/// Diff-only reviews may not open files, so they carry more of the change instead.
+const DIFF_ONLY_BUDGET: usize = 320_000;
 /// agy takes the prompt as a command-line argument, so its diff must leave room for the
 /// instructions inside the command-line limit. Bytes are never fewer than UTF-16 units.
 const AGY_BUDGET: usize = AGY_PROMPT_LIMIT - 4_000;
@@ -312,7 +314,8 @@ fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &V
         }
         Err(e) => return Attempt::Failed(e.clone()),
     };
-    let p = match prompt(repo, range, files, CODEX_BUDGET) {
+    let budget = if diff_only() { DIFF_ONLY_BUDGET } else { CODEX_BUDGET };
+    let p = match prompt(repo, range, files, budget) {
         Ok(p) => p,
         Err(e) => return Attempt::Failed(e),
     };
