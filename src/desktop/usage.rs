@@ -87,51 +87,11 @@ const TEXT: i18n::Table = &[
     ("Make a wish", "許願"),
 ];
 
-/// Every role the engine reports, under the ids it may use, with the one name people see for it.
-/// The first id is the role's key. Ids are matched without a plugin prefix such as `chronos:`.
-const ROLES: [(&[&str], &str, &str); 7] = [
-    (&["main", "core", "chronos"], "Core", "主控"),
-    (&["dispatcher"], "Dispatcher", "調度員"),
-    (&["reviewer"], "Reviewer", "審查員"),
-    (&["architect"], "Architect", "架構師"),
-    (&["memory-keeper"], "Memory keeper", "記憶管理員"),
-    (&["critic"], "Critic", "第二審"),
-    (&["astra"], "Astra", "Astra"),
-];
-
-fn role_of(id: &str) -> Option<&'static (&'static [&'static str], &'static str, &'static str)> {
-    let bare = id.trim().rsplit(':').next().unwrap_or(id).to_ascii_lowercase().replace('_', "-");
-    ROLES.iter().find(|(ids, _, _)| ids.contains(&bare.as_str()))
-}
-
-/// One key per role, so `chronos:dispatcher` and `dispatcher` are counted together. An id that
-/// names no known role is its own key, exactly as reported.
-pub(super) fn role_key(id: &str) -> SharedString {
-    match role_of(id) {
-        Some((ids, _, _)) => ids[0].into(),
-        None => SharedString::from(id.to_owned()),
-    }
-}
-
-/// The name a role is shown under in `lang`. An unknown id is shown as reported.
-pub(super) fn role_name(lang: i18n::Lang, id: &str) -> SharedString {
-    match (role_of(id), lang) {
-        (Some((_, en, _)), i18n::Lang::En) => (*en).into(),
-        (Some((_, _, zh)), i18n::Lang::ZhTw) => (*zh).into(),
-        (None, _) => SharedString::from(id.to_owned()),
-    }
-}
+pub(super) use super::i18n::{role_key, role_name};
 
 /// A ledger note worded with the same role names as the rest of the app.
 pub(super) fn note_text(note: &Note, lang: i18n::Lang) -> String {
-    let mut named = note.clone();
-    match &mut named {
-        Note::ContextHigh { agent, .. } | Note::CacheRewrites { agent, .. } | Note::FileReads { agent, .. } => {
-            *agent = role_name(lang, agent).to_string();
-        }
-        Note::CopiedHistory { .. } => {}
-    }
-    named.text(lang)
+    note.text(lang)
 }
 
 /// The run's warnings for display: those it carries as text, then its ledger notes, each role

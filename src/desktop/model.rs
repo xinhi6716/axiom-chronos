@@ -672,12 +672,6 @@ const NOTE_TEXT: Table = &[
         "{calls} calls in {file} could not be told apart from copied history and were not counted.",
         "{file} 中有 {calls} 次呼叫無法和複製來的歷史區分開，沒有計入。",
     ),
-    ("dispatcher", "調度員"),
-    ("reviewer", "審查員"),
-    ("architect", "切模組"),
-    ("astra", "Astra"),
-    ("critic", "第二審"),
-    ("memory-keeper", "記憶員"),
     ("{n} bytes", "{n} 位元組"),
 ];
 
@@ -702,18 +696,9 @@ fn size_text(lang: Lang, bytes: u64) -> String {
     }
 }
 
-/// The role in Chinese for `chronos:reviewer`; English shows the name as the ledger has it.
+/// The role under its one name, shared with the usage screen and the log.
 fn agent_label(lang: Lang, agent: &str) -> String {
-    if lang == Lang::En {
-        return agent.to_owned();
-    }
-    let role = agent.strip_prefix("chronos:").unwrap_or(agent);
-    let lower = role.to_ascii_lowercase();
-    let known = ["dispatcher", "reviewer", "architect", "astra", "critic", "memory-keeper"];
-    match known.iter().find(|k| **k == lower) {
-        Some(k) => translate(lang, NOTE_TEXT, k).to_owned(),
-        None => role.to_owned(),
-    }
+    super::i18n::role_name(lang, agent).to_string()
 }
 
 fn file_name(path: &str) -> &str {
@@ -882,7 +867,7 @@ mod tests {
                 assert!(zh.contains(figure), "{zh} lacks {figure}");
             }
         }
-        assert_eq!(notes[2].text(Lang::En), "chronos:reviewer read a/schema.json 5 times, up to 100 bytes.");
+        assert_eq!(notes[2].text(Lang::En), "Reviewer read a/schema.json 5 times, up to 100 bytes.");
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::rc::Rc;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,16 @@ const MENTION_SYNC: usize = 4000;
 const MENTION_ROW_H: f32 = 30.;
 const MENTION_ROWS: f32 = 7.5;
 const WISH_H: f32 = 132.;
+/// The list's header, footer and padding, which sit outside its scrolling rows.
+const MENTION_CHROME: f32 = 84.;
+/// Kept between the list and the window's bottom edge.
+const MENTION_EDGE: f32 = 12.;
+
+/// How tall the list's rows may be when `room` is the window space below the wish box: the usual
+/// height, cut down to what fits, but never less than one row so the list stays usable.
+fn mention_rows_height(room: f32) -> f32 {
+    (room - MENTION_CHROME - MENTION_EDGE).clamp(MENTION_ROW_H, MENTION_ROW_H * MENTION_ROWS)
+}
 
 /// What a git probe found about the chosen folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -548,6 +559,8 @@ pub struct Composer {
     mention: Option<Mention>,
     mention_task: Option<Task<()>>,
     mention_scroll: ScrollHandle,
+    /// Window space below the wish box, measured when it was last drawn.
+    mention_room: Rc<Cell<f32>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -603,6 +616,7 @@ impl Composer {
             mention: None,
             mention_task: None,
             mention_scroll: ScrollHandle::new(),
+            mention_room: Rc::new(Cell::new(f32::MAX)),
             _subscriptions: subscriptions,
         }
     }
@@ -1133,7 +1147,24 @@ impl Composer {
                     .child(self.label("Wish", cx))
                     .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Type @ to point at a file or folder."))),
             )
-            .child(div().relative().child(Textarea::new(&self.wish).h(px(WISH_H))).children(popup))
+            .child(
+                div()
+                    .relative()
+                    .child(Textarea::new(&self.wish).h(px(WISH_H)))
+                    .child({
+                        // Measures how far down the window the wish box ends, so the list can stay inside it.
+                        let room = self.mention_room.clone();
+                        canvas(
+                            move |bounds, window, _| {
+                                room.set(f32::from(window.viewport_size().height - bounds.bottom()));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
+                    })
+                    .children(popup),
+            )
     }
 
     /// The `@` list, drawn over the controls below the wish box.
@@ -1186,7 +1217,7 @@ impl Composer {
                 this.child(
                     div()
                         .id("composer-mention-rows")
-                        .max_h(px(MENTION_ROW_H * MENTION_ROWS))
+                        .max_h(px(mention_rows_height(self.mention_room.get())))
                         .overflow_y_scroll()
                         .track_scroll(&self.mention_scroll)
                         .children(rows),
@@ -1529,6 +1560,16 @@ mod tests {
 
     fn repo() -> FolderCheck {
         FolderCheck::Repo { head: Head::Branch("main".into()), changes: 0 }
+    }
+
+    #[test]
+    fn the_file_list_shrinks_to_the_room_below_the_wish_box() {
+        let full = MENTION_ROW_H * MENTION_ROWS;
+        assert_eq!(mention_rows_height(f32::MAX), full);
+        assert_eq!(mention_rows_height(1000.0), full);
+        let cut = mention_rows_height(300.0);
+        assert!(cut < full && cut + MENTION_CHROME + MENTION_EDGE <= 300.0, "{cut}");
+        assert_eq!(mention_rows_height(0.0), MENTION_ROW_H, "never less than one row");
     }
 
     #[test]

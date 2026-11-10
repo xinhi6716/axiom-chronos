@@ -90,6 +90,19 @@ const WHEEL_LINE: f32 = 20.0;
 /// However far the graph is panned, this much of it stays in the panel.
 const KEEP_VISIBLE: f32 = 80.0;
 const FIT_PAD: f32 = 24.0;
+/// The zoom controls' box at the panel's bottom-right, and its gap from the panel's edge. The width
+/// has a little slack for the longer English label.
+const CONTROLS_W: f32 = 200.0;
+const CONTROLS_H: f32 = 36.0;
+const CONTROLS_INSET: f32 = 10.0;
+/// Clear space kept between the controls and anything else drawn near them.
+const CONTROLS_GAP: f32 = 6.0;
+/// The strip along the bottom that Fit and keyboard reveal leave free for the controls.
+const CONTROLS_BAND: f32 = CONTROLS_H + CONTROLS_INSET + CONTROLS_GAP;
+const TIP_W: f32 = 260.0;
+/// A tooltip is cut off here, so its placement can be worked out before it is measured.
+const TIP_MAX_H: f32 = 220.0;
+const TIP_EDGE: f32 = 8.0;
 /// A press that moves less than this is a click, not a drag.
 const DRAG_SLOP: f32 = 3.0;
 /// Below this chip height on screen, chips and cards are drawn without words.
@@ -211,6 +224,8 @@ fn clamp_view(view: View, content: Option<Rect>, width: f32, height: f32) -> Vie
 
 /// The view that frames all of `content` in the panel, centred, never enlarged past its true size.
 fn fit_view(content: Rect, width: f32, height: f32) -> View {
+    // The bottom strip belongs to the zoom controls, so the graph is framed above it.
+    let height = (height - CONTROLS_BAND).max(1.0);
     let zoom = ((width - FIT_PAD * 2.0) / content.w.max(1.0))
         .min((height - FIT_PAD * 2.0) / content.h.max(1.0))
         .clamp(MIN_ZOOM, 1.0);
@@ -223,11 +238,49 @@ fn fit_view(content: Rect, width: f32, height: f32) -> View {
     }
 }
 
+/// Where the zoom controls sit in a panel of this size.
+fn controls_rect(width: f32, height: f32) -> Rect {
+    Rect {
+        x: width - CONTROLS_INSET - CONTROLS_W,
+        y: height - CONTROLS_INSET - CONTROLS_H,
+        w: CONTROLS_W,
+        h: CONTROLS_H,
+    }
+}
+
+/// Where a tooltip goes: its corner, and whether that corner is its bottom-left (it grows upward).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TipPlace {
+    at: Pt,
+    from_bottom: bool,
+}
+
+/// Moves a tooltip off the zoom controls. `at` is where it would go, `node` is what it describes
+/// (both in panel pixels). Above the controls is tried first, then beside them; the node stays
+/// uncovered when either allows it.
+fn place_tip(at: Pt, node: Rect, width: f32, height: f32) -> TipPlace {
+    let c = controls_rect(width, height);
+    let keep_out = Rect { x: c.x - CONTROLS_GAP, y: c.y - CONTROLS_GAP, w: c.w + CONTROLS_GAP * 2.0, h: c.h + CONTROLS_GAP * 2.0 };
+    let tip = |x: f32, y: f32| Rect { x, y, w: TIP_W, h: TIP_MAX_H };
+    if !tip(at.x, at.y).overlaps(&keep_out) {
+        return TipPlace { at, from_bottom: false };
+    }
+    let above = TipPlace { at: Pt { x: at.x, y: keep_out.y }, from_bottom: true };
+    if keep_out.y - TIP_MAX_H >= TIP_EDGE && !tip(at.x, keep_out.y - TIP_MAX_H).overlaps(&node) {
+        return above;
+    }
+    let left_x = keep_out.x - TIP_W;
+    if left_x >= TIP_EDGE && !tip(left_x, at.y).overlaps(&node) {
+        return TipPlace { at: Pt { x: left_x, y: at.y }, from_bottom: false };
+    }
+    above
+}
+
 /// The view that brings `rect` (in graph units) on screen, leaving the view alone when it already is.
 fn reveal_view(view: View, rect: Rect, width: f32, height: f32) -> View {
     let s = view.rect(rect);
     let mut pan = view.pan;
-    if s.y < REVEAL_MARGIN || s.bottom() > height - REVEAL_MARGIN {
+    if s.y < REVEAL_MARGIN || s.bottom() > height - CONTROLS_BAND {
         pan.y += height / 2.0 - s.cy();
     }
     if s.x < 0.0 || s.right() > width {
@@ -1663,16 +1716,20 @@ impl Mesh {
                 Pt { x: r.right() + 8.0, y: r.y - 2.0 }
             }
         };
+        let node_rect = self.view.rect(self.graph.rect_of(node).unwrap_or(Rect { x: core.x, y: core.y, w: 0.0, h: 0.0 }));
+        let place = place_tip(at, node_rect, self.view_w, self.view_h);
         Some(
             deferred(
                 anchored()
                     .position_mode(AnchoredPositionMode::Local)
-                    .position(point(px(at.x), px(at.y)))
-                    .anchor(Anchor::TopLeft)
-                    .snap_to_window_with_margin(px(8.))
+                    .position(point(px(place.at.x), px(place.at.y)))
+                    .anchor(if place.from_bottom { Anchor::BottomLeft } else { Anchor::TopLeft })
+                    .snap_to_window_with_margin(px(TIP_EDGE))
                     .child(
                         div()
-                            .w(px(260.))
+                            .w(px(TIP_W))
+                            .max_h(px(TIP_MAX_H))
+                            .overflow_hidden()
                             .p(px(10.))
                             .rounded(px(4.))
                             .border_1()
@@ -2479,14 +2536,50 @@ mod tests {
             let shown = view.rect(content);
             if view.zoom > MIN_ZOOM {
                 assert!(shown.x >= -0.01 && shown.right() <= 640.01, "{shown:?}");
-                assert!(shown.y >= -0.01 && shown.bottom() <= 480.01, "{shown:?}");
+                assert!(shown.y >= -0.01 && shown.bottom() <= 480.01 - CONTROLS_BAND, "Fit leaves the controls' strip free: {shown:?}");
             }
             assert!((shown.x + shown.w / 2.0 - 320.0).abs() < 0.01, "centred across");
-            assert!((shown.cy() - 240.0).abs() < 0.01, "centred down");
+            assert!((shown.cy() - (480.0 - CONTROLS_BAND) / 2.0).abs() < 0.01, "centred above the controls' strip");
             assert_eq!(clamp_view(view, Some(content), 640.0, 480.0), view, "a fitted view needs no clamping");
         }
         let tall = layout(&large_run(sample_run(), 60, 900), 640.0, 480.0, &Selection::None);
         assert!(fit_view(tall.content().unwrap(), 640.0, 480.0).zoom < 0.5, "a tall run is shrunk to fit");
+    }
+
+    #[test]
+    fn a_fitted_graph_never_reaches_the_zoom_controls() {
+        let controls = controls_rect(640.0, 480.0);
+        for run in [sample_run(), large_run(sample_run(), 14, 320), large_run(sample_run(), 60, 900)] {
+            let graph = layout(&run, 640.0, 480.0, &Selection::None);
+            let view = fit_view(graph.content().unwrap(), 640.0, 480.0);
+            if view.zoom <= MIN_ZOOM {
+                continue; // too big to frame at the smallest zoom
+            }
+            let shown = view.rect(graph.content().unwrap());
+            assert!(!shown.overlaps(&controls), "{shown:?} over {controls:?}");
+        }
+    }
+
+    #[test]
+    fn a_tooltip_stays_clear_of_the_zoom_controls() {
+        let (w, h) = (900.0, 600.0);
+        let c = controls_rect(w, h);
+        let rect = |p: TipPlace| Rect { x: p.at.x, y: if p.from_bottom { p.at.y - TIP_MAX_H } else { p.at.y }, w: TIP_W, h: TIP_MAX_H };
+        // Beside a node near the bottom right, it would cover the controls.
+        let node = Rect { x: 560.0, y: 520.0, w: 90.0, h: 24.0 };
+        let wanted = Pt { x: node.right() + 8.0, y: node.y - 2.0 };
+        assert!(Rect { x: wanted.x, y: wanted.y, w: TIP_W, h: TIP_MAX_H }.overlaps(&c), "the case needs a clash");
+        let placed = place_tip(wanted, node, w, h);
+        assert!(!rect(placed).overlaps(&c), "{placed:?}");
+        assert!(!rect(placed).overlaps(&node), "{placed:?}");
+        // A tooltip that is nowhere near the controls is left exactly where it was.
+        let far = Pt { x: 40.0, y: 60.0 };
+        assert_eq!(place_tip(far, Rect { x: 20.0, y: 58.0, w: 10.0, h: 20.0 }, w, h), TipPlace { at: far, from_bottom: false });
+        // Under a module whose card sits above the controls, it goes beside them instead of over the card.
+        let card = Rect { x: 700.0, y: 400.0, w: 150.0, h: 40.0 };
+        let below = Pt { x: card.x, y: card.bottom() + 6.0 };
+        let placed = place_tip(below, card, w, h);
+        assert!(!rect(placed).overlaps(&c) && !rect(placed).overlaps(&card), "{placed:?}");
     }
 
     #[test]

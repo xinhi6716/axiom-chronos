@@ -65,6 +65,41 @@ pub const COMMON: Table = &[
     ("Report", "報告"),
 ];
 
+/// Every role the engine reports, under the ids it may use, with the one name people see for it.
+/// The first id is the role's key. Ids are matched without a plugin prefix such as `chronos:`.
+const ROLES: [(&[&str], &str, &str); 7] = [
+    (&["main", "core", "chronos"], "Core", "主控"),
+    (&["dispatcher"], "Dispatcher", "調度員"),
+    (&["reviewer"], "Reviewer", "審查員"),
+    (&["architect"], "Architect", "架構師"),
+    (&["memory-keeper"], "Memory keeper", "記憶管理員"),
+    (&["critic"], "Critic", "第二審"),
+    (&["astra"], "Astra", "Astra"),
+];
+
+fn role_of(id: &str) -> Option<&'static (&'static [&'static str], &'static str, &'static str)> {
+    let bare = id.trim().rsplit(':').next().unwrap_or(id).to_ascii_lowercase().replace('_', "-");
+    ROLES.iter().find(|(ids, _, _)| ids.contains(&bare.as_str()))
+}
+
+/// One key per role, so `chronos:dispatcher` and `dispatcher` are counted together. An id that
+/// names no known role is its own key, exactly as reported.
+pub(super) fn role_key(id: &str) -> SharedString {
+    match role_of(id) {
+        Some((ids, _, _)) => ids[0].into(),
+        None => SharedString::from(id.to_owned()),
+    }
+}
+
+/// The name a role is shown under in `lang`. An unknown id is shown as reported.
+pub(super) fn role_name(lang: Lang, id: &str) -> SharedString {
+    match (role_of(id), lang) {
+        (Some((_, en, _)), Lang::En) => (*en).into(),
+        (Some((_, _, zh)), Lang::ZhTw) => (*zh).into(),
+        (None, _) => SharedString::from(id.to_owned()),
+    }
+}
+
 /// Translates `en`, looking in the screen's table and then the shared one.
 pub fn tr(cx: &App, table: Table, en: &'static str) -> &'static str {
     translate(*cx.global::<Lang>(), table, en)

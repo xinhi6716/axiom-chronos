@@ -163,11 +163,18 @@ pub(super) fn sendable(text: &str) -> Option<&str> {
 
 /// The source column: the engine does not know the language, so its "You" is translated here.
 pub(super) fn source_label(source: &SharedString, cx: &App) -> SharedString {
+    let lang = *cx.global::<Lang>();
     if source.as_ref() == YOU {
         tr(cx, T, YOU).into()
     } else {
-        source.clone()
+        source_name(lang, source)
     }
+}
+
+/// A role id such as `chronos:dispatcher` reads as the role's one name; any other source (a tool
+/// or unit name) is shown as reported.
+pub(super) fn source_name(lang: Lang, source: &SharedString) -> SharedString {
+    super::i18n::role_name(lang, source)
 }
 
 /// What a person's message is about: the selected module or unit, and the goal it serves.
@@ -1600,6 +1607,16 @@ mod tests {
         assert_eq!(sendable("   \n\t "), None);
         assert_eq!(sendable("  hello\n"), Some("hello"));
         assert_eq!(sendable("第一行\n第二行"), Some("第一行\n第二行"));
+    }
+
+    #[test]
+    fn log_sources_that_are_roles_use_the_shared_role_names() {
+        let name = |lang, id: &str| source_name(lang, &id.into()).to_string();
+        assert_eq!(name(Lang::ZhTw, "chronos:dispatcher"), "調度員");
+        assert_eq!(name(Lang::En, "chronos:memory-keeper"), "Memory keeper");
+        assert_eq!(name(Lang::ZhTw, "dispatcher"), "調度員");
+        assert_eq!(name(Lang::ZhTw, "read_batch"), "read_batch");
+        assert_eq!(name(Lang::En, "claude"), "claude");
     }
 
     #[test]
