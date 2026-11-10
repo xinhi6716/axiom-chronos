@@ -10,6 +10,7 @@ use super::{
     ornament,
     settings,
     todo::Todo,
+    usage,
 };
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
@@ -1071,7 +1072,8 @@ impl RunView {
     fn header(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let elapsed = run.elapsed.clone().unwrap_or_else(|| UNKNOWN.into());
-        let warning_count = run.warnings.len();
+        let warnings = usage::warning_texts(run, *cx.global::<Lang>());
+        let warning_count = warnings.len();
         h_flex()
             .flex_none()
             .w_full()
@@ -1121,7 +1123,7 @@ impl RunView {
                                 } else {
                                     counted("{n} warnings", warning_count, cx)
                                 };
-                                let tip = run.warnings.iter().map(|w| w.as_ref()).collect::<Vec<_>>().join("\n");
+                                let tip = warnings.iter().map(|w| w.as_ref()).collect::<Vec<_>>().join("\n");
                                 this.child(
                                     h_flex()
                                         .id("run-warnings")
@@ -1397,10 +1399,10 @@ impl RunView {
                 }),
         );
         rows.extend(
-            run.warnings
-                .iter()
+            usage::warning_texts(run, *cx.global::<Lang>())
+                .into_iter()
                 .enumerate()
-                .map(|(i, w)| line(("attention-warning", i), IconName::TriangleAlert, t.review, w.clone())),
+                .map(|(i, w)| line(("attention-warning", i), IconName::TriangleAlert, t.review, w)),
         );
         rows
     }
