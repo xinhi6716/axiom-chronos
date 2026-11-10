@@ -9,8 +9,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const TABLE: Table = &[
     ("verified", "已驗收"),
@@ -438,6 +439,128 @@ fn animates(run: &Run, reduce_motion: bool) -> bool {
     run.is_live() && !reduce_motion
 }
 
+/// How long each ceremony lasts, in seconds: inside the 1.2 to 2 s the design allows.
+const CEREMONY_SECONDS: f32 = 1.6;
+
+/// What the ceremonies need to know about a moment in a ceremony: 0..1 through it, or `None` when
+/// it is over (or has not begun), so a settled graph is drawn exactly as a static one.
+fn ceremony_progress(elapsed: Duration) -> Option<f32> {
+    let p = elapsed.as_secs_f32() / CEREMONY_SECONDS;
+    (p < 1.0).then_some(p)
+}
+
+fn ease(p: f32) -> f32 {
+    p * p * (3.0 - 2.0 * p)
+}
+
+/// How visible the orbit is: fading in during its ceremony, fully drawn at rest.
+fn orbit_visibility(progress: Option<f32>) -> f32 {
+    progress.map_or(1.0, ease)
+}
+
+/// The hourglass's turn: one full turn, so it ends exactly as it began.
+fn hourglass_turn(progress: Option<f32>) -> f32 {
+    progress.map_or(0.0, |p| ease(p) * std::f32::consts::TAU)
+}
+
+/// Which runs the ceremonies have already seen, so they play for what happens while the app is
+/// open and never for what was already true when it was first looked at.
+#[derive(Default)]
+struct Watch {
+    known: HashMap<SharedString, RunStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Moment {
+    /// A wish started from this app has appeared.
+    Started(SharedString),
+    /// A run that was seen unfinished has finished.
+    Ended(SharedString),
+}
+
+impl Watch {
+    fn observe(&mut self, runs: &[Run], renames: &HashMap<SharedString, SharedString>) -> Vec<Moment> {
+        let mut moments = vec![];
+        let mut now = HashMap::with_capacity(runs.len());
+        for run in runs {
+            // A wish keeps its place when its provisional id is replaced by the real one.
+            let before = self.known.get(&run.session).or_else(|| renames.get(&run.session).and_then(|old| self.known.get(old)));
+            match before {
+                None if run.hosted && run.status != RunStatus::Done => moments.push(Moment::Started(run.session.clone())),
+                Some(&was) if was != RunStatus::Done && run.status == RunStatus::Done => {
+                    moments.push(Moment::Ended(run.session.clone()))
+                }
+                _ => {}
+            }
+            now.insert(run.session.clone(), run.status);
+        }
+        self.known = now;
+        moments
+    }
+}
+
+/// The two ceremonies and when they play.
+#[derive(Default)]
+struct Ceremonies {
+    watch: Watch,
+    /// The wish whose orbit has yet to fade in, and when it began to (the first frame the graph exists).
+    orbit: Option<(SharedString, Option<Instant>)>,
+    turn: Option<(SharedString, Instant)>,
+}
+
+impl Ceremonies {
+    fn observe(&mut self, runs: &[Run], renames: &HashMap<SharedString, SharedString>, reduce_motion: bool, now: Instant) {
+        for moment in self.watch.observe(runs, renames) {
+            if reduce_motion {
+                continue;
+            }
+            match moment {
+                Moment::Started(session) => self.orbit = Some((session, None)),
+                Moment::Ended(session) => self.turn = Some((session, now)),
+            }
+        }
+    }
+
+    /// How far through the orbit's fade the graph of `session` is; starts the clock on the first call.
+    fn orbit(&mut self, session: &SharedString, reduce_motion: bool, now: Instant) -> Option<f32> {
+        let (owner, started) = self.orbit.as_mut()?;
+        if owner != session {
+            return None;
+        }
+        let progress = ceremony_progress(now.saturating_duration_since(*started.get_or_insert(now)));
+        if progress.is_none() || reduce_motion {
+            self.orbit = None;
+            return None;
+        }
+        progress
+    }
+
+    fn turn(&mut self, session: &SharedString, reduce_motion: bool, now: Instant) -> Option<f32> {
+        let (owner, at) = self.turn.as_ref()?;
+        let progress = ceremony_progress(now.saturating_duration_since(*at));
+        if progress.is_none() || reduce_motion {
+            self.turn = None;
+            return None;
+        }
+        (owner == session).then_some(progress).flatten()
+    }
+
+    /// True while a frame must still be drawn for this run's ceremonies.
+    fn playing(&self, session: &SharedString, reduce_motion: bool, now: Instant) -> bool {
+        if reduce_motion {
+            return false;
+        }
+        let orbit = self.orbit.as_ref().is_some_and(|(owner, started)| {
+            owner == session && started.map_or(true, |at| ceremony_progress(now.saturating_duration_since(at)).is_some())
+        });
+        let turn = self
+            .turn
+            .as_ref()
+            .is_some_and(|(owner, at)| owner == session && ceremony_progress(now.saturating_duration_since(*at)).is_some());
+        orbit || turn
+    }
+}
+
 /// Where along a wire particle `i` of `count` is at a given time, from 0 at the start to 1 at the end.
 fn particle_t(time: f32, length: f32, i: usize, count: usize) -> f32 {
     (time * PARTICLE_SPEED / length.max(1.0) + i as f32 / count as f32).fract()
@@ -590,8 +713,11 @@ fn stroke_points(window: &mut Window, points: &[Point<Pixels>], closed: bool, wi
 }
 
 /// The Chronos mark: an hourglass in a gold ring with a tilted orbit. `phase`, in radians, moves the small planet.
-fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32) {
+fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32, orbit_in: f32, turn: f32) {
     let at = |x: f32, y: f32| point(px(center.x + x * r), px(center.y + y * r));
+    // The hourglass alone turns, about the core.
+    let (turn_sin, turn_cos) = turn.sin_cos();
+    let at_glass = |x: f32, y: f32| at(x * turn_cos - y * turn_sin, x * turn_sin + y * turn_cos);
     let c = at(0.0, 0.0);
     let orbit_at = |a: f32| {
         let (ex, ey) = (1.39 * a.cos(), 0.49 * a.sin());
@@ -604,7 +730,7 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32)
             at(x, y)
         })
         .collect();
-    stroke_points(window, &orbit, true, 1.0, t.idle.opacity(0.8));
+    stroke_points(window, &orbit, true, 1.0, t.idle.opacity(0.8 * orbit_in));
     disc(window, c, r + 0.5, t.surface);
     let arc = |from: f32, to: f32| -> Vec<Point<Pixels>> {
         (0..=24)
@@ -622,10 +748,10 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32)
 
     let glass = |side: f32| -> PathBuilder {
         let mut b = PathBuilder::stroke(px((r * 0.07).max(1.1)));
-        b.move_to(at(side * 0.36, -0.60));
-        b.cubic_bezier_to(at(side * 0.07, -0.05), at(side * 0.36, -0.30), at(side * 0.22, -0.16));
-        b.line_to(at(side * 0.07, 0.05));
-        b.cubic_bezier_to(at(side * 0.36, 0.60), at(side * 0.22, 0.16), at(side * 0.36, 0.30));
+        b.move_to(at_glass(side * 0.36, -0.60));
+        b.cubic_bezier_to(at_glass(side * 0.07, -0.05), at_glass(side * 0.36, -0.30), at_glass(side * 0.22, -0.16));
+        b.line_to(at_glass(side * 0.07, 0.05));
+        b.cubic_bezier_to(at_glass(side * 0.36, 0.60), at_glass(side * 0.22, 0.16), at_glass(side * 0.36, 0.30));
         b
     };
     for side in [-1.0, 1.0] {
@@ -634,23 +760,23 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32)
         }
     }
     let mut sand = PathBuilder::fill();
-    sand.move_to(at(-0.23, -0.40));
-    sand.curve_to(at(0.23, -0.40), at(0.0, -0.33));
-    sand.curve_to(at(0.0, -0.09), at(0.14, -0.20));
-    sand.curve_to(at(-0.23, -0.40), at(-0.14, -0.20));
+    sand.move_to(at_glass(-0.23, -0.40));
+    sand.curve_to(at_glass(0.23, -0.40), at_glass(0.0, -0.33));
+    sand.curve_to(at_glass(0.0, -0.09), at_glass(0.14, -0.20));
+    sand.curve_to(at_glass(-0.23, -0.40), at_glass(-0.14, -0.20));
     sand.close();
-    sand.move_to(at(-0.24, 0.50));
-    sand.curve_to(at(0.0, 0.20), at(-0.09, 0.37));
-    sand.curve_to(at(0.24, 0.50), at(0.09, 0.37));
+    sand.move_to(at_glass(-0.24, 0.50));
+    sand.curve_to(at_glass(0.0, 0.20), at_glass(-0.09, 0.37));
+    sand.curve_to(at_glass(0.24, 0.50), at_glass(0.09, 0.37));
     sand.close();
     if let Ok(path) = sand.build() {
         window.paint_path(path, t.gold);
     }
     for y in [-0.66, 0.66] {
-        stroke_points(window, &[at(-0.42, y), at(0.42, y)], false, (r * 0.09).max(1.4), t.gold);
+        stroke_points(window, &[at_glass(-0.42, y), at_glass(0.42, y)], false, (r * 0.09).max(1.4), t.gold);
     }
     let (px_, py_) = orbit_at(phase + 0.6);
-    disc(window, at(px_, py_), (r * 0.09).max(1.8), t.gold);
+    disc(window, at(px_, py_), (r * 0.09).max(1.8), t.gold.opacity(orbit_in));
 }
 
 /// Everything drawn behind the node cards.
@@ -662,6 +788,10 @@ struct Backdrop {
     time: Option<f32>,
     selected: Option<Node>,
     hovered: Option<Node>,
+    /// 0..1: how much of the orbit has faded in. 1 at rest.
+    orbit_in: f32,
+    /// Radians the hourglass has turned. 0 at rest.
+    turn: f32,
 }
 
 impl Backdrop {
@@ -688,7 +818,7 @@ impl Backdrop {
         // The sky first: fixed stars and the faint orbits around the core, which never move.
         let stars = ornament::star_field(f32::from(bounds.size.width), view_h);
         ornament::paint_stars(window, (origin.x, origin.y), &stars, self.t.text);
-        let arc_color = self.t.orbit.opacity(if self.dark { 0.55 } else { 0.7 });
+        let arc_color = self.t.orbit.opacity((if self.dark { 0.55 } else { 0.7 }) * self.orbit_in);
         for r in orbit_radii(graph) {
             ornament::paint_orbit_arc(window, origin.x + core.x, origin.y + core.y, r, -88.0, 88.0, arc_color);
         }
@@ -724,7 +854,7 @@ impl Backdrop {
         let halo = self.t.gold.opacity(if graph.live { 0.22 + 0.16 * breath } else { 0.24 });
         soft_glow(window, point(px(center.x), px(center.y)), graph.core_r * 0.96, graph.core_r * 1.1, halo);
         let phase = self.time.map_or(0.0, |time| time * std::f32::consts::TAU / ORBIT_SECONDS);
-        paint_emblem(window, center, graph.core_r, &self.t, phase);
+        paint_emblem(window, center, graph.core_r, &self.t, phase, self.orbit_in, self.turn);
     }
 
     fn paint_particles(&self, window: &mut Window, origin: Pt, wire: &Wire, fade_out: f32) {
@@ -815,11 +945,25 @@ pub struct Mesh {
     seen_session: Option<SharedString>,
     /// Demo only: a captured scene keeps its hover whatever the real pointer does.
     pinned: bool,
+    ceremonies: Ceremonies,
+    /// Demo only: holds a ceremony at this point (0..1) so a still can be captured.
+    frozen: Option<(Moment, f32)>,
 }
 
 impl Mesh {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        // Runs already on screen when the app opens are the baseline: they never get a ceremony.
+        let mut ceremonies = Ceremonies::default();
+        {
+            let s = state.read(cx);
+            ceremonies.watch.observe(&s.runs, &s.renames);
+        }
+        cx.observe(&state, |this, state, cx| {
+            let s = state.read(cx);
+            this.ceremonies.observe(&s.runs, &s.renames, s.reduce_motion, Instant::now());
+            cx.notify();
+        })
+        .detach();
         let mut this = Self {
             state,
             scroll: ScrollHandle::new(),
@@ -841,6 +985,8 @@ impl Mesh {
             seen_selection: Selection::None,
             seen_session: None,
             pinned: false,
+            ceremonies,
+            frozen: None,
         };
         let scene = this.state.read(cx).scene.clone();
         if let Some(scene) = scene {
@@ -887,6 +1033,8 @@ impl Mesh {
                 }
                 "mesh-select-module" => s.selection = Selection::Module(7),
                 "mesh-reduced" => s.reduce_motion = true,
+                "mesh-orbit-fade" => self.frozen = Some((Moment::Started(s.runs[0].session.clone()), 0.45)),
+                "mesh-hourglass-turn" => self.frozen = Some((Moment::Ended(s.runs[0].session.clone()), 0.4)),
                 _ => {}
             }
             cx.notify();
@@ -1169,6 +1317,16 @@ impl Mesh {
         }
         let hover = self.hover.filter(|&node| node == Node::Core || graph.rect_of(node).is_some());
 
+        let now = Instant::now();
+        let reduced = state.reduce_motion;
+        let (mut orbit_p, mut turn_p) = (self.ceremonies.orbit(&run.session, reduced, now), self.ceremonies.turn(&run.session, reduced, now));
+        if let Some((moment, p)) = &self.frozen {
+            match moment {
+                Moment::Started(owner) if *owner == run.session => orbit_p = Some(*p),
+                Moment::Ended(owner) if *owner == run.session => turn_p = Some(*p),
+                _ => {}
+            }
+        }
         let time = moving.then(|| self.clock.elapsed().as_secs_f32());
         let breath = time.map_or(0.0, ornament::breath);
         let top = scroll - OVERSCAN;
@@ -1194,6 +1352,8 @@ impl Mesh {
             time,
             selected: selected_node(&selection),
             hovered: hover,
+            orbit_in: orbit_visibility(orbit_p),
+            turn: hourglass_turn(turn_p),
         };
         let handle = self.scroll.clone();
         let this = cx.entity();
@@ -1452,7 +1612,7 @@ impl Render for Mesh {
                 )
                 .into_any_element();
         }
-        if animates(run, state.reduce_motion) {
+        if animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()) {
             window.request_animation_frame();
         }
         let finished = (run.status == RunStatus::Done).then(|| summary(run, &t, cx));
@@ -1802,6 +1962,119 @@ mod tests {
         assert!(graph.modules[0].running && !graph.modules[1].running);
         let idle = run_of(&[&[Failed, Built], &[Pending]]);
         assert!(!layout(&idle, 640.0, 600.0, &Selection::None).live);
+    }
+
+    fn run_as(session: &'static str, status: RunStatus, hosted: bool) -> Run {
+        let mut run = run_of(&[&[Verified]]);
+        run.session = session.into();
+        run.status = status;
+        run.hosted = hosted;
+        run
+    }
+
+    fn no_renames() -> HashMap<SharedString, SharedString> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn nothing_plays_for_runs_that_were_there_when_the_app_opened() {
+        let mut watch = Watch::default();
+        watch.observe(&[run_as("a", RunStatus::Active, true), run_as("b", RunStatus::Done, true)], &no_renames());
+        let same = [run_as("a", RunStatus::Active, true), run_as("b", RunStatus::Done, true)];
+        assert!(watch.observe(&same, &no_renames()).is_empty());
+    }
+
+    #[test]
+    fn a_wish_started_here_plays_the_orbit_once_and_only_when_unfinished() {
+        let mut watch = Watch::default();
+        watch.observe(&[], &no_renames());
+        let runs = [run_as("new", RunStatus::Active, true)];
+        assert_eq!(watch.observe(&runs, &no_renames()), vec![Moment::Started("new".into())]);
+        assert!(watch.observe(&runs, &no_renames()).is_empty(), "the same wish never starts twice");
+        let history = [run_as("new", RunStatus::Active, true), run_as("old", RunStatus::Done, true)];
+        assert!(watch.observe(&history, &no_renames()).is_empty(), "a finished run found later is history");
+        let elsewhere = [run_as("new", RunStatus::Active, true), run_as("term", RunStatus::Active, false)];
+        assert!(watch.observe(&elsewhere, &no_renames()).is_empty(), "a run from a terminal is not a wish started here");
+    }
+
+    #[test]
+    fn a_provisional_id_becoming_the_real_one_is_not_a_second_start() {
+        let mut watch = Watch::default();
+        watch.observe(&[], &no_renames());
+        assert_eq!(watch.observe(&[run_as("temp", RunStatus::Active, true)], &no_renames()).len(), 1);
+        let renames: HashMap<SharedString, SharedString> = [("real".into(), "temp".into())].into();
+        assert!(watch.observe(&[run_as("real", RunStatus::Active, true)], &renames).is_empty());
+    }
+
+    #[test]
+    fn the_hourglass_turns_once_when_a_run_seen_unfinished_ends() {
+        let mut watch = Watch::default();
+        watch.observe(&[run_as("a", RunStatus::Active, true), run_as("b", RunStatus::Done, true)], &no_renames());
+        let ended = [run_as("a", RunStatus::Done, true), run_as("b", RunStatus::Done, true)];
+        assert_eq!(watch.observe(&ended, &no_renames()), vec![Moment::Ended("a".into())]);
+        assert!(watch.observe(&ended, &no_renames()).is_empty());
+        // A run first seen already finished, even after the app has been running, never turns it.
+        let late = [run_as("c", RunStatus::Done, false)];
+        assert!(watch.observe(&late, &no_renames()).is_empty());
+    }
+
+    #[test]
+    fn ceremonies_last_about_a_second_and_a_half_play_once_and_then_stop_asking_for_frames() {
+        assert!((1.2..=2.0).contains(&CEREMONY_SECONDS));
+        let session: SharedString = "a".into();
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let mut c = Ceremonies::default();
+        c.observe(&[], &no_renames(), false, t0);
+        c.observe(&[run_as("a", RunStatus::Active, true)], &no_renames(), false, t0);
+        assert!(c.playing(&session, false, at(0.0)));
+        assert_eq!(c.orbit(&session, false, at(5.0)), Some(0.0), "the clock starts when the graph is first drawn");
+        assert!(c.orbit(&session, false, at(5.8)).is_some_and(|p| p > 0.4 && p < 0.6));
+        assert!(c.orbit(&session, false, at(5.0 + CEREMONY_SECONDS + 0.01)).is_none());
+        assert!(!c.playing(&session, false, at(9.0)), "settled: no more frames");
+        assert!(c.orbit(&session, false, at(9.1)).is_none(), "it does not play again");
+        c.observe(&[run_as("a", RunStatus::Done, true)], &no_renames(), false, at(10.0));
+        assert!(c.turn(&session, false, at(10.8)).is_some());
+        assert!(c.turn(&session, false, at(10.0 + CEREMONY_SECONDS + 0.01)).is_none());
+        assert!(!c.playing(&session, false, at(13.0)));
+        assert!(c.turn(&session, false, at(10.5)).is_none(), "once over it never replays");
+    }
+
+    #[test]
+    fn reduce_motion_skips_both_ceremonies() {
+        let session: SharedString = "a".into();
+        let t0 = Instant::now();
+        let mut c = Ceremonies::default();
+        c.observe(&[run_as("a", RunStatus::Active, true)], &no_renames(), true, t0);
+        c.observe(&[run_as("n", RunStatus::Active, true), run_as("a", RunStatus::Active, true)], &no_renames(), true, t0);
+        c.observe(&[run_as("n", RunStatus::Done, true), run_as("a", RunStatus::Done, true)], &no_renames(), true, t0);
+        assert!(!c.playing(&"n".into(), true, t0) && !c.playing(&session, true, t0));
+        assert!(c.orbit(&"n".into(), true, t0).is_none() && c.turn(&session, true, t0).is_none());
+        // And turning reduce_motion on mid-ceremony stops it at once.
+        let mut c = Ceremonies::default();
+        c.observe(&[run_as("a", RunStatus::Active, true)], &no_renames(), false, t0);
+        c.observe(&[run_as("a", RunStatus::Done, true)], &no_renames(), false, t0);
+        assert!(!c.playing(&session, true, t0));
+        assert!(c.turn(&session, true, t0).is_none());
+    }
+
+    #[test]
+    fn a_ceremony_belongs_to_its_own_run() {
+        let t0 = Instant::now();
+        let mut c = Ceremonies::default();
+        c.observe(&[run_as("a", RunStatus::Active, true)], &no_renames(), false, t0);
+        c.observe(&[run_as("a", RunStatus::Done, true)], &no_renames(), false, t0);
+        assert!(c.turn(&"other".into(), false, t0).is_none());
+        assert!(!c.playing(&"other".into(), false, t0));
+    }
+
+    #[test]
+    fn the_turn_is_one_full_turn_and_the_fade_ends_fully_visible() {
+        assert_eq!(hourglass_turn(None), 0.0);
+        assert!((hourglass_turn(Some(1.0)) - std::f32::consts::TAU).abs() < 1e-5);
+        assert_eq!(orbit_visibility(None), 1.0);
+        assert_eq!(orbit_visibility(Some(0.0)), 0.0);
+        assert!((orbit_visibility(Some(1.0)) - 1.0).abs() < 1e-6);
     }
 
     #[test]

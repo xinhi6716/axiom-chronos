@@ -7,11 +7,12 @@ use super::{
     control::{self, Control},
     detail::Detail,
     mesh::Mesh,
+    ornament,
     settings,
     todo::Todo,
 };
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle};
+use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, ResizableState};
@@ -19,7 +20,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -122,6 +123,8 @@ const STAGE_NAMES: [&str; 7] = ["Astra", "Critic", "Architect", "Build", "Full t
 const FULL_TEST: &str = "Full test";
 
 const UNKNOWN: &str = "—";
+/// The dim portrait behind the no-runs state.
+const PORTRAIT_SIDE: f32 = 260.0;
 const ONE_LINE_CHARS: usize = 400;
 const TOOLTIP_CHARS: usize = 600;
 const LONG_TEXT_CHARS: usize = 20_000;
@@ -1258,6 +1261,9 @@ impl RunView {
             .gap_6()
             .p_8()
             .overflow_y_scrollbar()
+            // The portrait sits in the flow above everything, and its lower half fades out, so no
+            // text is ever drawn over it.
+            .child(ornament::portrait_backdrop(&t, PORTRAIT_SIDE, cx.theme().is_dark()))
             .when_some(self.first_day_card(cx), |this, card| {
                 this.child(div().w_full().max_w(px(640.)).child(card))
             })
@@ -1271,20 +1277,6 @@ impl RunView {
                     .header(
                         EmptyHeader::new()
                             .max_w(px(560.))
-                            .media(
-                                EmptyMedia::new().child(
-                                    div()
-                                        .size(px(72.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .bg(t.gold.opacity(0.12))
-                                        .border_1()
-                                        .border_color(t.gold.opacity(0.35))
-                                        .child(Icon::new(IconName::Star).size(px(30.)).text_color(t.gold)),
-                                ),
-                            )
                             .title(EmptyTitle::new().text_xl().text_color(t.text).child(tr(cx, TEXT, title)))
                             .description(EmptyDescription::new().text_sm().child(tr(cx, TEXT, description))),
                     )
@@ -1454,14 +1446,12 @@ impl RunView {
             .p_4()
             .bg(t.canvas.opacity(0.72))
             .child(
-                v_flex()
+                ornament::frame(&t, accent.opacity(0.6), t.surface)
+                    .flex()
+                    .flex_col()
                     .w_full()
                     .max_w(px(560.))
                     .max_h_full()
-                    .rounded(px(12.))
-                    .bg(t.surface)
-                    .border_1()
-                    .border_color(t.border)
                     .child(
                         h_flex()
                             .flex_none()
