@@ -629,6 +629,8 @@ impl Engine {
             Ok(_) => {
                 if let Some(entry) = self.memory.iter_mut().find(|m| m.id == id) {
                     entry.body = text.trim().to_owned().into();
+                    entry.corrected = true;
+                    entry.confirmed = confirmed_text(app::unix(SystemTime::now()).unwrap_or(0) as f64).into();
                 }
                 self.inbox.push(Update::Memory(self.memory.clone()));
                 self.memory_dirty = true;
@@ -879,9 +881,21 @@ fn read_memory(home: &Path) -> Res<Vec<MemoryEntry>> {
                 body: text(entry, "body"),
                 // `null` means the project is gone, so nothing is known to have changed.
                 stale: entry["stale"].as_bool() == Some(true),
+                wish: text(entry, "wish"),
+                confirmed: entry["confirmed"].as_f64().map(confirmed_text).unwrap_or_default().into(),
+                corrected: entry["corrected"].as_f64().is_some(),
             })
         })
         .collect())
+}
+
+/// "Nov 3, 05:15" for a unix time in seconds, or nothing when the time is not a plausible one.
+fn confirmed_text(unix: f64) -> String {
+    if unix.is_finite() && unix > 0.0 {
+        started_text(&stamp_of(unix as i64))
+    } else {
+        String::new()
+    }
 }
 
 /// What `map_wish` needs besides the wish itself.
@@ -1091,6 +1105,23 @@ fn structure(
         });
     }
     (modules, units)
+}
+
+/// The plan's items as the checklist shows them. A module id the map does not hold is left out
+/// rather than guessed at, and a plan with no items gives no goals at all.
+fn goal_items(goals: &[app::GoalView], modules: &[Module]) -> Vec<GoalItem> {
+    goals
+        .iter()
+        .map(|goal| GoalItem {
+            id: goal.id.clone().into(),
+            title: goal.title.clone().into(),
+            modules: goal
+                .modules
+                .iter()
+                .filter_map(|id| modules.iter().position(|m| m.id.as_ref() == id.as_str()))
+                .collect(),
+        })
+        .collect()
 }
 
 fn need_of(attention: &app::Attention) -> Need {
@@ -1326,6 +1357,7 @@ fn map_wish(wish: &app::Wish, sources: &Sources<'_>, titles: &mut HashMap<PathBu
         warnings.extend(ledger.warnings.iter().map(|w| warning_text(w).into()));
     }
     let (modules, units) = structure(wish, titles, &mut warnings);
+    let goals = goal_items(&wish.goals, &modules);
     let mut stages: Vec<Stage> = wish.stages.iter().map(stage_of).collect();
     if let Some(until) = sources.hosted.and_then(|h| h.limit_until).filter(|_| status == RunStatus::LimitWait) {
         if let Some(stage) = stages.iter_mut().find(|s| s.phase == Phase::Running) {
@@ -1376,8 +1408,7 @@ fn map_wish(wish: &app::Wish, sources: &Sources<'_>, titles: &mut HashMap<PathBu
         started: first_stamp.map(started_text).unwrap_or_default().into(),
         started_at: started_unix.and_then(|s| u64::try_from(s).ok()),
         stages,
-        // Nothing in the engine maps plan items to modules yet.
-        goals: vec![],
+        goals,
         modules,
         units,
         usage: usage_of(wish, sources.ledger),
@@ -1482,7 +1513,7 @@ mod tests {
         assert_eq!(run.needs[0].title.as_ref(), "Need a key");
         assert_eq!(run.needs[0].note.as_ref(), "Provide STAGING_DSN");
         assert_eq!(run.decisions.len(), 1);
-        assert!(run.goals.is_empty(), "goals have no engine source yet");
+        assert!(run.goals.is_empty(), "a store with no plan-final.md has no goals to show");
 
         let names: Vec<&str> = run.stages.iter().map(|s| s.name.as_ref()).collect();
         assert_eq!(names, ["Astra", "Critic", "Architect", "Build", "Full test", "Memory", "Report"]);
@@ -1878,8 +1909,19 @@ mod tests {
         rig.engine.handle(Command::Memory(read_memory(&home)));
         assert_eq!(rig.engine.memory.len(), 2);
         assert!(!rig.engine.memory[0].stale);
+        let untouched = |engine: &Engine, id: i64| engine.memory.iter().find(|m| m.id == id).unwrap().clone();
+        let before = untouched(&rig.engine, first);
+        assert_eq!(before.wish.as_ref(), "wish", "the wish it came from");
+        assert!(!before.confirmed.is_empty(), "an entry never confirmed again was confirmed when recorded");
+        assert!(!before.corrected);
 
         rig.engine.handle(Command::CorrectMemory(first, "the right text".into()));
+        assert!(untouched(&rig.engine, first).corrected);
+        assert!(!untouched(&rig.engine, second).corrected, "only the corrected entry is marked");
+        let reread = read_memory(&home).unwrap();
+        let after = reread.iter().find(|m| m.id == first).unwrap();
+        assert!(after.corrected, "the store records the correction");
+        assert_ne!(after.confirmed, before.confirmed, "a correction is a fresh confirmation");
         let body = |engine: &Engine, id: i64| engine.memory.iter().find(|m| m.id == id).map(|m| m.body.clone());
         assert_eq!(body(&rig.engine, first).as_deref(), Some("the right text"));
         let stored = read_memory(&home).unwrap();
@@ -1925,6 +1967,63 @@ mod tests {
         assert_eq!(goal_line("GOAL\nSCOPE x"), None);
         assert_eq!(goal_line("GOALS are nice"), None);
         assert_eq!(goal_line(""), None);
+    }
+
+    fn module(id: &str) -> Module {
+        Module { id: id.into(), purpose: "p".into(), depends: vec![], units: vec![], contract: None }
+    }
+
+    fn goal(id: &str, title: &str, modules: &[&str]) -> app::GoalView {
+        app::GoalView { id: id.into(), title: title.into(), modules: modules.iter().map(|m| (*m).into()).collect() }
+    }
+
+    #[test]
+    fn goals_point_at_the_modules_that_deliver_them() {
+        let modules = [module("m1"), module("m2"), module("loose")];
+        let goals = goal_items(&[goal("G1", "Render pages", &["m2", "m1"]), goal("G2", "Docs", &[])], &modules);
+        assert_eq!(goals.len(), 2);
+        assert_eq!(goals[0].id.as_ref(), "G1");
+        assert_eq!(goals[0].title.as_ref(), "Render pages");
+        assert_eq!(goals[0].modules, vec![1, 0], "indices into the run's modules, in the plan's order");
+        assert!(goals[1].modules.is_empty(), "a goal no module serves stays listed and unserved");
+    }
+
+    #[test]
+    fn a_module_the_run_does_not_have_is_dropped_not_invented() {
+        let goals = goal_items(&[goal("G1", "x", &["m1", "ghost"])], &[module("m1")]);
+        assert_eq!(goals[0].modules, vec![0]);
+        assert!(goal_items(&[], &[module("m1")]).is_empty(), "no plan items, no goals");
+    }
+
+    #[test]
+    fn a_stored_plan_reaches_the_run_as_goals() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        write(
+            &store.join("modules.md"),
+            &MAP.replace("PURPOSE    core things", "PURPOSE    core things
+SERVES     G1")
+                .replace("PURPOSE    second", "PURPOSE    second
+SERVES     G2"),
+        );
+        write(&store.join("astra/plan-final.md"), "# Plan
+
+### G1 Render every page
+
+### G2 Split the table
+");
+        goal_file(dir.path(), "s1", base_goal("active"));
+        let run = map_one(dir.path(), None, SystemTime::now());
+        let shown: Vec<(&str, &str, Vec<usize>)> =
+            run.goals.iter().map(|g| (g.id.as_ref(), g.title.as_ref(), g.modules.clone())).collect();
+        assert_eq!(shown, [("G1", "Render every page", vec![0]), ("G2", "Split the table", vec![1])]);
+    }
+
+    #[test]
+    fn memory_times_read_as_dates_and_unknown_times_stay_blank() {
+        assert!(confirmed_text(1_793_767_800.0).contains(", "), "{}", confirmed_text(1_793_767_800.0));
+        assert_eq!(confirmed_text(0.0), "");
+        assert_eq!(confirmed_text(f64::NAN), "");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The control bar at the foot of the Run screen: what this run offers right now, and its event log.
-use super::i18n::{tr, Table};
+use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::theme::{Tokened as _, Tokens};
 use crate::base::Res;
@@ -63,6 +63,10 @@ const T: Table = &[
     ("Reading the report…", "正在讀取報告…"),
     ("Could not read the report: {error}", "讀不到報告：{error}"),
     ("Only the beginning is shown: the report is longer.", "報告太長，只顯示開頭。"),
+    ("About {}: ", "關於 {}："),
+    ("goal {}", "目標 {}"),
+    ("module {}", "模組 {}"),
+    ("unit {}", "單元 {}"),
 ];
 
 const LOG_HEIGHT: Pixels = px(320.);
@@ -164,6 +168,78 @@ pub(super) fn source_label(source: &SharedString, cx: &App) -> SharedString {
     } else {
         source.clone()
     }
+}
+
+/// What a person's message is about: the selected module or unit, and the goal it serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Subject {
+    pub goal: Option<SharedString>,
+    pub module: SharedString,
+    pub unit: Option<SharedString>,
+}
+
+/// The selected item of `run`, or `None` when nothing is selected or the selection is gone.
+pub(super) fn subject_of(run: &Run, selection: &Selection) -> Option<Subject> {
+    let (module, unit) = match *selection {
+        Selection::None => return None,
+        Selection::Module(m) => (m, None),
+        Selection::Unit(u) => {
+            let unit = run.units.get(u)?;
+            (unit.module, Some(unit.id.clone()))
+        }
+    };
+    let found = run.modules.get(module)?;
+    let goal = run.goals.iter().find(|g| g.modules.contains(&module)).map(|g| g.id.clone());
+    Some(Subject { goal, module: found.id.clone(), unit })
+}
+
+/// The words that open the box, such as "About goal G1 · module m1 · unit a1: ". The engine is
+/// not changed: the run sees them as the first words of the message.
+pub(super) fn address_line(subject: &Subject, lang: Lang) -> String {
+    let part = |key: &'static str, id: &str| fill(translate(lang, T, key), &[id]);
+    let mut parts = Vec::with_capacity(3);
+    if let Some(goal) = &subject.goal {
+        parts.push(part("goal {}", goal));
+    }
+    parts.push(part("module {}", &subject.module));
+    if let Some(unit) = &subject.unit {
+        parts.push(part("unit {}", unit));
+    }
+    fill(translate(lang, T, "About {}: "), &[&parts.join(" · ")])
+}
+
+pub(super) fn address_text(subject: &Subject, cx: &App) -> String {
+    address_line(subject, *cx.global::<Lang>())
+}
+
+/// `draft` with an earlier address of ours taken off the front, so a second click replaces the
+/// first instead of stacking on it. Text the person wrote is never cut.
+pub(super) fn without_address(draft: &str) -> &str {
+    for lang in [Lang::En, Lang::ZhTw] {
+        let opening = translate(lang, T, "About {}: ");
+        let Some((head, tail)) = opening.split_once("{}") else { continue };
+        let Some(rest) = draft.strip_prefix(head) else { continue };
+        if let Some(end) = rest.find(tail) {
+            let body = &rest[..end];
+            // Only an address Chronos wrote: one line, made of the known parts.
+            let ours = !body.contains('\n')
+                && body.split(" · ").all(|part| {
+                    ["goal {}", "module {}", "unit {}"].iter().any(|key| {
+                        let (before, after) = translate(lang, T, key).split_once("{}").unwrap_or(("", ""));
+                        part.starts_with(before) && part.ends_with(after)
+                    })
+                });
+            if ours {
+                return &rest[end + tail.len()..];
+            }
+        }
+    }
+    draft
+}
+
+/// The box's new text: the address first, then whatever the person had already typed.
+pub(super) fn addressed_draft(draft: &str, address: &str) -> String {
+    format!("{address}{}", without_address(draft))
 }
 
 fn you_line(text: &str, time: SharedString, you: &'static str) -> LogLine {
@@ -539,7 +615,23 @@ impl Control {
         if self.log.open {
             self.sync_log(cx);
         }
+        self.take_address(window, cx);
         cx.notify();
+    }
+
+    /// Opens the box for the message the details panel asked for, ahead of anything typed.
+    fn take_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(address) = self.state.read(cx).address.clone() else { return };
+        if self.session.as_ref() != Some(&address.session) {
+            return;
+        }
+        self.state.update(cx, |state, _| state.address = None);
+        if self.entry != Entry::Interjection {
+            return;
+        }
+        let text = addressed_draft(&self.input.read(cx).value(), &address.text);
+        self.input.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.input.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     fn sync_log(&mut self, cx: &mut Context<Self>) {
@@ -1517,6 +1609,58 @@ mod tests {
         assert_eq!(line.time.as_ref(), "09:05:03");
         assert_eq!(line.source.as_ref(), "你");
         assert_eq!(line.level, LogLevel::Info);
+    }
+
+    #[test]
+    fn a_selected_unit_is_addressed_with_its_module_and_goal() {
+        let run = crate::desktop::demo::sample_run();
+        let unit = 0;
+        let module = run.units[unit].module;
+        let goal = run.goals.iter().find(|g| g.modules.contains(&module)).expect("demo units belong to a goal");
+        let subject = subject_of(&run, &Selection::Unit(unit)).unwrap();
+        assert_eq!(subject.goal.as_ref(), Some(&goal.id));
+        assert_eq!(subject.module, run.modules[module].id);
+        assert_eq!(subject.unit.as_ref(), Some(&run.units[unit].id));
+        assert_eq!(
+            address_line(&subject, Lang::En),
+            format!("About goal {} · module {} · unit {}: ", goal.id, run.modules[module].id, run.units[unit].id)
+        );
+        assert!(address_line(&subject, Lang::ZhTw).starts_with("關於 目標 "));
+    }
+
+    #[test]
+    fn nothing_selected_or_a_gone_item_has_no_address() {
+        let run = crate::desktop::demo::sample_run();
+        assert_eq!(subject_of(&run, &Selection::None), None);
+        assert_eq!(subject_of(&run, &Selection::Unit(9999)), None);
+        assert_eq!(subject_of(&run, &Selection::Module(9999)), None);
+    }
+
+    #[test]
+    fn a_module_with_no_goal_is_addressed_without_inventing_one() {
+        let mut run = crate::desktop::demo::sample_run();
+        run.goals.clear();
+        let subject = subject_of(&run, &Selection::Module(0)).unwrap();
+        assert_eq!(subject.goal, None);
+        assert_eq!(address_line(&subject, Lang::En), format!("About module {}: ", run.modules[0].id));
+    }
+
+    #[test]
+    fn a_second_address_replaces_the_first_and_keeps_what_was_typed() {
+        let first = "About module m1: ";
+        let second = "About unit u4: ";
+        assert_eq!(addressed_draft("", first), first);
+        let typed = addressed_draft("use the cache", first);
+        assert_eq!(typed, "About module m1: use the cache");
+        assert_eq!(addressed_draft(&typed, second), "About unit u4: use the cache");
+        assert_eq!(addressed_draft("關於 單元 u1：先停下", "關於 模組 m2："), "關於 模組 m2：先停下");
+    }
+
+    #[test]
+    fn text_that_only_looks_like_an_address_is_not_cut() {
+        assert_eq!(without_address("About the cache: use less"), "About the cache: use less");
+        assert_eq!(without_address("About module m1\nand more: x"), "About module m1\nand more: x");
+        assert_eq!(without_address("plain"), "plain");
     }
 
     #[test]

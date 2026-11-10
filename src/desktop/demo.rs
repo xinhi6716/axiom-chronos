@@ -248,9 +248,9 @@ pub fn state() -> AppState {
         current: Some(0),
         selection: Selection::None,
         memory: vec![
-            MemoryEntry { id: 48, project: "chronos-r5".into(), title: "Stop hook blocks idle turns".into(), body: "While a goal is active the Stop hook refuses to end the turn, so long waits turn into polling. A waiting status lets the session end.".into(), stale: false },
-            MemoryEntry { id: 41, project: "ml_hfo2".into(), title: "Page images beat tiled sheets".into(), body: "Single pages at 300 dpi, eight per call, cost less than 2x2 tiles because tiles are downscaled and need more tokens per page.".into(), stale: false },
-            MemoryEntry { id: 33, project: "chronos-r4".into(), title: "CRLF breaks doc tests on Linux".into(), body: "Read documents tolerating CRLF and write them with LF.".into(), stale: true },
+            MemoryEntry { id: 48, project: "chronos-r5".into(), title: "Stop hook blocks idle turns".into(), body: "While a goal is active the Stop hook refuses to end the turn, so long waits turn into polling. A waiting status lets the session end.".into(), stale: false, wish: "把剩下的精讀改成背景批次".into(), confirmed: "Nov 8, 21:40".into(), corrected: false },
+            MemoryEntry { id: 41, project: "ml_hfo2".into(), title: "Page images beat tiled sheets".into(), body: "Single pages at 300 dpi, eight per call, cost less than 2x2 tiles because tiles are downscaled and need more tokens per page.".into(), stale: false, wish: "Read every PDF page and keep the original page numbers".into(), confirmed: "Nov 5, 09:12".into(), corrected: true },
+            MemoryEntry { id: 33, project: "chronos-r4".into(), title: "CRLF breaks doc tests on Linux".into(), body: "Read documents tolerating CRLF and write them with LF.".into(), stale: true, wish: "Fix the failing Linux tests".into(), confirmed: "Oct 29, 14:03".into(), corrected: false },
         ],
         checks: vec![
             Check { name: "claude".into(), status: CheckStatus::Ok, detail: "2.1.317 (Claude Code)".into() },
@@ -266,5 +266,6 @@ pub fn state() -> AppState {
         errors: vec![],
         next_error: 0,
         renames: Default::default(),
+        address: None,
     }
 }

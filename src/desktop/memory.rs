@@ -1,25 +1,28 @@
-//! What Chronos has learned from verified units: filter by project, search, read, delete.
-use super::i18n::{tr, Table};
+//! What Chronos has learned from verified units: filter by project, search, read, correct, delete.
+use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::theme::Tokened as _;
-use super::wishes::{bind_list_keys, empty_state, matches_terms, one_line, search_terms, select_row};
+use super::wishes::{
+    bind_list_keys, empty_state, matches_terms, one_line, search_terms, select_row, started_label,
+};
 use gpui_kit::base::actions::{SelectFirst, SelectLast, SelectPageDown, SelectPageUp};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::Empty;
-use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown};
+use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, Textarea, TextareaState};
 use gpui_kit::component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, Icon, IconName, IndexPath, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex, Disableable as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 
 gpui_kit::actions!(chronos_memory, [FocusMemorySearch, DeleteSelectedMemory]);
 
@@ -50,7 +53,55 @@ const T: Table = &[
     ),
     ("Clear filters", "清除篩選"),
     ("Select a memory to read it", "選一筆記憶來閱讀"),
+    ("What Chronos has learned", "Chronos 學到的事"),
+    ("From the wish", "來自這個願望"),
+    ("The wish was not recorded", "沒有記錄來源願望"),
+    ("Last confirmed {}", "最近確認於 {}"),
+    ("Last confirmed: not recorded", "最近確認時間：沒有記錄"),
+    ("Corrected", "已更正"),
+    ("A person rewrote this note. The new text is what later briefs see.", "這筆記憶的內容已由人修改，之後的派工看到的是新內容。"),
+    ("Correct", "更正"),
+    ("Save correction", "儲存更正"),
+    ("Discard", "放棄修改"),
+    ("Your correction replaces this note's text and is what later briefs see.", "更正後的文字會取代這筆記憶的內容，之後的派工看到的就是它。"),
+    ("The text cannot be empty.", "內容不能是空的。"),
+    ("The text is longer than {} lines.", "內容不能超過 {} 行。"),
+    ("The text has not changed.", "內容還沒有修改。"),
+    ("Correct this memory", "更正這筆記憶"),
 ];
+
+/// The longest correction the memory store accepts, in lines.
+const MAX_CORRECTION_LINES: usize = 12;
+
+/// Why a correction cannot be saved yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Problem {
+    Empty,
+    TooLong,
+    Unchanged,
+}
+
+/// What stops `text` from replacing `current`: blank, over the store's line limit, or no change.
+fn correction_problem(text: &str, current: &str) -> Option<Problem> {
+    let text = text.trim();
+    if text.is_empty() {
+        Some(Problem::Empty)
+    } else if text.lines().count() > MAX_CORRECTION_LINES {
+        Some(Problem::TooLong)
+    } else if text == current.trim() {
+        Some(Problem::Unchanged)
+    } else {
+        None
+    }
+}
+
+/// "Last confirmed Nov 3, 05:15", written in the interface language.
+fn confirmed_line(entry: &MemoryEntry, lang: Lang) -> String {
+    if entry.confirmed.is_empty() {
+        return translate(lang, T, "Last confirmed: not recorded").to_owned();
+    }
+    fill(translate(lang, T, "Last confirmed {}"), &[&started_label(&entry.confirmed, lang)])
+}
 
 /// Projects that have memories, by name, with how many each holds.
 pub fn project_counts(memory: &[MemoryEntry]) -> Vec<(SharedString, usize)> {
@@ -67,7 +118,7 @@ pub fn project_counts(memory: &[MemoryEntry]) -> Vec<(SharedString, usize)> {
 }
 
 fn entry_matches(entry: &MemoryEntry, terms: &[String]) -> bool {
-    matches_terms(&[&entry.title, &entry.body, &entry.project], terms)
+    matches_terms(&[&entry.title, &entry.body, &entry.project, &entry.wish], terms)
 }
 
 /// Indices into `memory` of the rows to show, most recently recorded first.
@@ -178,7 +229,8 @@ impl ListDelegate for MemoryList {
             T,
             "A file it was recorded from has changed or been removed since. Chronos reads the current file instead of quoting this note in a brief.",
         );
-        let summary = SharedString::from(format!("{} · {}", entry.project, one_line(&entry.body)));
+        let source = if entry.wish.trim().is_empty() { &entry.body } else { &entry.wish };
+        let summary = SharedString::from(format!("{} · {}", entry.project, one_line(source)));
         let title = one_line(&entry.title);
         let stale = entry.stale;
         Some(
@@ -255,6 +307,11 @@ pub struct MemoryView {
     query: SharedString,
     terms: Vec<String>,
     on_screen: bool,
+    /// The correction box, shared by whichever entry is being corrected.
+    edit: Entity<TextareaState>,
+    editing: Option<i64>,
+    /// Unsaved corrections of entries the person moved away from.
+    drafts: HashMap<i64, String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -295,12 +352,22 @@ impl MemoryView {
         });
         let focus = list.read(cx).focus_handle(cx);
         list.update(cx, |list, _| list.delegate_mut().focus = Some(focus));
+        let edit = cx.new(|cx| {
+            let mut input = TextareaState::new(window, cx);
+            input.set_rows(6, cx);
+            input
+        });
 
         let _subscriptions = vec![
             cx.observe_in(&state, window, Self::on_state_changed),
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.subscribe_in(&project, window, Self::on_project_event),
             cx.subscribe(&list, |_, _, _: &ListEvent, cx| cx.notify()),
+            cx.subscribe(&edit, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
         ];
         let on_screen = state.read(cx).view == Screen::Memory;
         let mut this = Self {
@@ -314,11 +381,19 @@ impl MemoryView {
             query: SharedString::default(),
             terms: Vec::new(),
             on_screen,
+            edit,
+            editing: None,
+            drafts: HashMap::new(),
             _subscriptions,
         };
         this.apply(true, window, cx);
         if on_screen {
             this.focus_list(window, cx);
+        }
+        if this.state.read(cx).scene.as_deref() == Some("memory-edit") {
+            if let Some((id, body)) = this.selected_entry(cx).map(|e| (e.id, e.body.clone())) {
+                this.start_correcting(id, &body, window, cx);
+            }
         }
         this
     }
@@ -514,6 +589,106 @@ impl MemoryView {
         self.move_selection(|row, last| (row + PAGE_ROWS).min(last), window, cx);
     }
 
+    /// Keeps the correction box on the entry it belongs to: moving to another entry sets a
+    /// changed text aside as a draft, and coming back to that entry opens it again.
+    fn sync_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.selected_entry(cx).map(|e| (e.id, e.body.clone()));
+        if let Some(editing) = self.editing {
+            if selected.as_ref().map(|(id, _)| *id) == Some(editing) {
+                return;
+            }
+            let typed = self.edit.read(cx).value().to_string();
+            let body = self.state.read(cx).memory.iter().find(|m| m.id == editing).map(|m| m.body.clone());
+            if body.is_some_and(|body| typed.trim() != body.trim()) {
+                self.drafts.insert(editing, typed);
+            }
+            self.editing = None;
+        }
+        if let Some((id, _)) = selected {
+            if let Some(draft) = self.drafts.remove(&id) {
+                self.editing = Some(id);
+                self.edit.update(cx, |edit, cx| edit.set_value(draft, window, cx));
+            }
+        }
+    }
+
+    fn start_correcting(&mut self, id: i64, body: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = Some(id);
+        self.edit.update(cx, |edit, cx| edit.set_value(body.to_string(), window, cx));
+        self.edit.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn stop_correcting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.focus_list(window, cx);
+        cx.notify();
+    }
+
+    fn save_correction(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.edit.read(cx).value().to_string();
+        let current = self.state.read(cx).memory.iter().find(|m| m.id == id).map(|m| m.body.clone());
+        let Some(current) = current else { return };
+        if correction_problem(&text, &current).is_some() {
+            return;
+        }
+        self.state.update(cx, |state, cx| state.correct_memory(id, &text, cx));
+        self.stop_correcting(window, cx);
+    }
+
+    fn problem_text(&self, problem: Problem, cx: &App) -> String {
+        match problem {
+            Problem::Empty => tr(cx, T, "The text cannot be empty.").to_owned(),
+            Problem::TooLong => fill(tr(cx, T, "The text is longer than {} lines."), &[&MAX_CORRECTION_LINES.to_string()]),
+            Problem::Unchanged => tr(cx, T, "The text has not changed.").to_owned(),
+        }
+    }
+
+    fn editor(&self, entry: &MemoryEntry, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.tokens();
+        let (id, body) = (entry.id, entry.body.clone());
+        let typed = self.edit.read(cx).value().to_string();
+        let problem = correction_problem(&typed, &body);
+        // An untouched box says nothing; the reason shows once there is something to judge.
+        let shown = problem.filter(|p| *p != Problem::Unchanged || typed.trim() != body.trim());
+        let note = shown.filter(|p| *p != Problem::Unchanged).map(|p| self.problem_text(p, cx));
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(t.muted)
+                    .child(tr(cx, T, "Your correction replaces this note's text and is what later briefs see.")),
+            )
+            .child(Textarea::new(&self.edit).small().h(px(180.)))
+            .when_some(note, |this, note| {
+                this.child(div().text_xs().text_color(t.fail).child(note))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("memory-discard")
+                            .ghost()
+                            .small()
+                            .label(tr(cx, T, "Discard"))
+                            .on_click(cx.listener(|this, _, window, cx| this.stop_correcting(window, cx))),
+                    )
+                    .child(
+                        Button::new("memory-save")
+                            .primary()
+                            .small()
+                            .label(tr(cx, T, "Save correction"))
+                            .disabled(problem.is_some())
+                            .on_click(cx.listener(move |this, _, window, cx| this.save_correction(id, window, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn nothing_yet(&self, cx: &App) -> Empty {
         let hint = tr(
             cx,
@@ -569,6 +744,46 @@ impl MemoryView {
                             .child(Icon::new(IconName::Folder).size(px(13.)))
                             .child(entry.project.clone())
                             .child(format!("#{}", entry.id)),
+                    )
+                    .child(
+                        div()
+                            .id(("memory-wish", entry.id as u64))
+                            .text_xs()
+                            .text_color(t.muted)
+                            .line_clamp(3)
+                            .child(if entry.wish.trim().is_empty() {
+                                tr(cx, T, "The wish was not recorded").to_string()
+                            } else {
+                                format!("{}: {}", tr(cx, T, "From the wish"), one_line(&entry.wish))
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .text_color(t.muted)
+                            .child(Icon::new(IconName::Calendar).size(px(13.)))
+                            .child(confirmed_line(&entry, *cx.global::<Lang>()))
+                            .when(entry.corrected, |this| {
+                                this.child(
+                                    div()
+                                        .id(("memory-corrected", entry.id as u64))
+                                        .px_2()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(t.border)
+                                        .child(tr(cx, T, "Corrected"))
+                                        .tooltip({
+                                            let tip = tr(
+                                                cx,
+                                                T,
+                                                "A person rewrote this note. The new text is what later briefs see.",
+                                            );
+                                            move |window, cx| Tooltip::new(tip).build(window, cx)
+                                        }),
+                                )
+                            }),
                     ),
             )
             .when(entry.stale, |this| {
@@ -585,7 +800,9 @@ impl MemoryView {
                     .flex_none(),
                 )
             })
-            .child(
+            .child(if self.editing == Some(entry.id) {
+                self.editor(&entry, cx)
+            } else {
                 v_flex()
                     .id(("memory-body", entry.id as u64))
                     .flex_1()
@@ -601,19 +818,36 @@ impl MemoryView {
                                 ("memory-body-text", entry.id as u64),
                                 entry.body.clone(),
                             )),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             .child(
-                h_flex().flex_none().justify_end().child(
-                    Button::new("memory-delete")
-                        .ghost()
-                        .small()
-                        .danger()
-                        .label(tr(cx, T, "Delete"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.confirm_delete(id, title.clone(), window, cx);
-                        })),
-                ),
+                h_flex()
+                    .flex_none()
+                    .justify_between()
+                    .child({
+                        let body = entry.body.clone();
+                        Button::new("memory-correct")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Replace)
+                            .label(tr(cx, T, "Correct"))
+                            .accessibility_label(tr(cx, T, "Correct this memory"))
+                            .disabled(self.editing == Some(entry.id))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_correcting(id, &body, window, cx);
+                            }))
+                    })
+                    .child(
+                        Button::new("memory-delete")
+                            .ghost()
+                            .small()
+                            .danger()
+                            .label(tr(cx, T, "Delete"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete(id, title.clone(), window, cx);
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -642,6 +876,7 @@ impl Render for MemoryView {
         }
         let no_entries = self.state.read(cx).memory.is_empty();
         let no_rows = self.row_count(cx) == 0;
+        self.sync_editing(window, cx);
 
         v_flex()
             .key_context("MemoryScreen")
@@ -652,6 +887,14 @@ impl Render for MemoryView {
             .px_6()
             .pb_5()
             .gap_4()
+            .child(
+                div()
+                    .flex_none()
+                    .text_lg()
+                    .font_semibold()
+                    .text_color(t.text)
+                    .child(tr(cx, T, "What Chronos has learned")),
+            )
             .when(no_entries, |this| this.child(self.nothing_yet(cx)))
             .when(!no_entries, |this| {
                 this.child(
@@ -727,6 +970,9 @@ mod tests {
             title: title.to_owned().into(),
             body: body.to_owned().into(),
             stale,
+            wish: SharedString::default(),
+            confirmed: SharedString::default(),
+            corrected: false,
         }
     }
 
@@ -781,6 +1027,54 @@ mod tests {
     #[test]
     fn no_memories_give_no_projects() {
         assert!(project_counts(&[]).is_empty());
+    }
+
+    #[test]
+    fn search_also_finds_the_wish_an_entry_came_from() {
+        let mut memory = sample();
+        memory[1].wish = "make the nightly report faster".into();
+        assert_eq!(visible_memories(&memory, None, &search_terms("nightly")), vec![1]);
+    }
+
+    #[test]
+    fn a_correction_must_say_something_new_and_fit_the_store() {
+        assert_eq!(correction_problem("  \n ", "old"), Some(Problem::Empty));
+        assert_eq!(correction_problem(" old \n", "old"), Some(Problem::Unchanged));
+        assert_eq!(correction_problem("new", "old"), None);
+        let twelve = vec!["line"; MAX_CORRECTION_LINES].join("\n");
+        assert_eq!(correction_problem(&twelve, "old"), None);
+        let thirteen = vec!["line"; MAX_CORRECTION_LINES + 1].join("\n");
+        assert_eq!(correction_problem(&thirteen, "old"), Some(Problem::TooLong));
+    }
+
+    #[test]
+    fn the_line_limit_is_the_one_the_memory_store_enforces() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::memory::Memory::open(dir.path()).unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("memory/memory.db")).unwrap();
+        db.execute(
+            "INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created) VALUES ('p', 'u', 't', 's', 'b', '', 'w', '[]', '/nowhere', 1000.0)",
+            [],
+        )
+        .unwrap();
+        let id = db.last_insert_rowid();
+        let fits = vec!["x"; MAX_CORRECTION_LINES].join("
+");
+        let over = vec!["x"; MAX_CORRECTION_LINES + 1].join("
+");
+        assert!(store.correct(id, &fits).is_ok());
+        assert!(store.correct(id, &over).is_err());
+    }
+
+    #[test]
+    fn the_confirmed_time_reads_in_both_languages_and_never_guesses() {
+        let mut e = entry(1, "p", "t", "b", false);
+        e.confirmed = "Nov 3, 05:15".into();
+        assert_eq!(confirmed_line(&e, Lang::En), "Last confirmed Nov 3, 05:15");
+        assert_eq!(confirmed_line(&e, Lang::ZhTw), "最近確認於 11月3日 05:15");
+        e.confirmed = SharedString::default();
+        assert_eq!(confirmed_line(&e, Lang::En), "Last confirmed: not recorded");
+        assert_eq!(confirmed_line(&e, Lang::ZhTw), "最近確認時間：沒有記錄");
     }
 
     #[test]
