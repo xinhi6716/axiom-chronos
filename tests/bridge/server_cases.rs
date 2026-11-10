@@ -597,6 +597,8 @@ fn unlock(home: &std::path::Path) {
 #[test]
 fn first_goal_call_records_the_run_once_with_the_handshake_version() {
     std::env::remove_var(axiom::provenance::ENV);
+    // The bridge reads the plugin from CLAUDE_PLUGIN_ROOT, so a value set by the shell would leak in.
+    std::env::remove_var("CLAUDE_PLUGIN_ROOT");
     let temp = common::temp();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();
