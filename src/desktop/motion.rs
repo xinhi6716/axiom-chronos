@@ -6,8 +6,36 @@
 //! settled screen asks for nothing and so uses no CPU, and `reduce_motion` shows every animation's
 //! end state at once.
 use gpui_kit::*;
+use gpui_kit::component::{Icon, IconName, Sizable as _, Size};
+use gpui_kit::prelude::FluentBuilder as _;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
+use std::hash::Hash;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+pub const FRAME_GAP: Duration = Duration::from_millis(33);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameAsk {
+    Now,
+    After(Duration),
+    Paused,
+}
+
+pub fn next_frame(now: Instant, last: Option<Instant>, active: bool, minimized: bool) -> FrameAsk {
+    if !active || minimized {
+        return FrameAsk::Paused;
+    }
+    let Some(last) = last else { return FrameAsk::Now };
+    let elapsed = now.saturating_duration_since(last);
+    if elapsed >= FRAME_GAP {
+        FrameAsk::Now
+    } else {
+        FrameAsk::After(FRAME_GAP - elapsed)
+    }
+}
 
 /// Named durations. Everything in ordinary use stays at or under 300 ms; only the launch, a
 /// ceremony that plays once, is longer.
@@ -292,17 +320,23 @@ pub struct Driver {
     reduce: bool,
     held: bool,
     moving: bool,
+    capped: bool,
 }
 
 impl Driver {
     pub fn new(reduce: bool, cx: &App) -> Self {
-        Self { now: now(cx), reduce, held: is_frozen(cx), moving: false }
+        Self { now: now(cx), reduce, held: is_frozen(cx), moving: false, capped: false }
     }
 
     /// A driver at a given moment, for tests.
     #[cfg(test)]
     pub fn at(now: Instant, reduce: bool) -> Self {
-        Self { now, reduce, held: false, moving: false }
+        Self { now, reduce, held: false, moving: false, capped: false }
+    }
+
+    pub fn capped(mut self) -> Self {
+        self.capped = true;
+        self
     }
 
     pub fn now(&self) -> Instant {
@@ -343,12 +377,128 @@ impl Driver {
     }
 
     pub fn finish(self, window: &mut Window) -> bool {
-        let wants = self.wants_frame();
-        if wants {
-            window.request_animation_frame();
+        if !self.wants_frame() {
+            return false;
         }
-        wants
+        let ask = self.capped.then(|| next_frame(Instant::now(), Some(self.now), window.is_window_active(), !window.is_visible()));
+        match ask {
+            None | Some(FrameAsk::Now) => window.request_animation_frame(),
+            Some(FrameAsk::Paused) => {}
+            Some(FrameAsk::After(wait)) => defer_redraw(window, window.current_view(), Instant::now() + wait),
+        }
+        true
     }
+}
+
+fn want<K: Hash + Eq, V: Hash + Eq>(pending: &mut HashMap<K, HashSet<V>>, window: K, view: V) -> bool {
+    use std::collections::hash_map::Entry;
+    match pending.entry(window) {
+        Entry::Occupied(mut entry) => {
+            entry.get_mut().insert(view);
+            false
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(HashSet::from([view]));
+            true
+        }
+    }
+}
+
+fn take<K: Hash + Eq, V>(pending: &mut HashMap<K, HashSet<V>>, window: &K) -> HashSet<V> {
+    pending.remove(window).unwrap_or_default()
+}
+
+thread_local! {
+    static PENDING_REDRAWS: RefCell<HashMap<WindowId, HashSet<EntityId>>> = RefCell::new(HashMap::new());
+}
+
+/// Lets platform frames pass until `due`, with at most one chain per window.
+fn defer_redraw(window: &Window, view: EntityId, due: Instant) {
+    let window_id = window.window_handle().window_id();
+    if !PENDING_REDRAWS.with(|pending| want(&mut pending.borrow_mut(), window_id, view)) {
+        return;
+    }
+    fn tick(window: &Window, window_id: WindowId, due: Instant) {
+        window.on_next_frame(move |window, cx| {
+            if !window.is_visible() || !window.is_window_active() {
+                PENDING_REDRAWS.with(|pending| take(&mut pending.borrow_mut(), &window_id));
+                return;
+            }
+            if Instant::now() >= due {
+                let views = PENDING_REDRAWS.with(|pending| take(&mut pending.borrow_mut(), &window_id));
+                for view in views {
+                    cx.notify(view);
+                }
+            } else {
+                tick(window, window_id, due);
+            }
+        });
+    }
+    tick(window, window_id, due);
+}
+
+const SPIN_PERIOD: Duration = Duration::from_millis(800);
+static SPIN_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+pub fn spin_phase(elapsed: Duration) -> f32 {
+    let phase = (elapsed.as_nanos() % SPIN_PERIOD.as_nanos()) as f64 / SPIN_PERIOD.as_nanos() as f64;
+    (phase as f32).min(f32::from_bits(1.0f32.to_bits() - 1))
+}
+
+#[derive(IntoElement)]
+pub struct Spin {
+    icon: IconName,
+    size: Option<Pixels>,
+    color: Option<Hsla>,
+}
+
+impl Spin {
+    pub fn new(icon: IconName) -> Self {
+        Self { icon, size: None, color: None }
+    }
+
+    pub fn size(mut self, size: Pixels) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    pub fn color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
+impl RenderOnce for Spin {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let now = now(cx);
+        let reduced = cx.reduce_motion()
+            || cx.try_global::<super::settings::Store>().is_some_and(|store| store.settings.reduce_motion == Some(true));
+        let phase = if reduced || is_frozen(cx) {
+            0.0
+        } else {
+            let epoch = *SPIN_EPOCH.get_or_init(|| now);
+            let phase = spin_phase(now.saturating_duration_since(epoch));
+            match next_frame(Instant::now(), Some(now), window.is_window_active(), !window.is_visible()) {
+                FrameAsk::Paused => {}
+                FrameAsk::Now => window.request_animation_frame(),
+                FrameAsk::After(wait) => defer_redraw(window, window.current_view(), Instant::now() + wait),
+            }
+            phase
+        };
+        let icon = Icon::new(self.icon)
+            .with_size(self.size.map(Size::from).unwrap_or(Size::Medium))
+            .when_some(self.color, |icon, color| icon.text_color(color))
+            .transform(Transformation::rotate(percentage(ease_in_out(phase))));
+        div().child(icon)
+    }
+}
+
+/// Redraws the whole window when it is activated or becomes visible, so paused animation resumes.
+pub fn watch_window<T: 'static>(window: &mut Window, cx: &mut Context<T>) -> [Subscription; 2] {
+    [
+        cx.observe_window_activation(window, |_, window, _| window.refresh()),
+        window.observe_window_visibility(|_, window, _| window.refresh()),
+    ]
 }
 
 #[cfg(test)]
@@ -356,6 +506,148 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn pending_views_share_a_window_chain() {
+        let mut pending = HashMap::new();
+        assert!(want(&mut pending, 1, 10));
+        assert!(!want(&mut pending, 1, 20));
+        assert_eq!(pending[&1], HashSet::from([10, 20]));
+        assert!(want(&mut pending, 2, 30));
+        assert_eq!(take(&mut pending, &1), HashSet::from([10, 20]));
+        assert!(want(&mut pending, 1, 10));
+        assert_eq!(take(&mut pending, &1), HashSet::from([10]));
+        assert!(take(&mut pending, &1).is_empty());
+        assert_eq!(take(&mut pending, &2), HashSet::from([30]));
+    }
+
+    #[test]
+    fn external_renders_do_not_multiply_deferred_chains() {
+        let start = Instant::now();
+        let external: Vec<u64> = (0..100).map(|i| 20 + i * 57 + (i * i * 13 % 43)).collect();
+        let last_external = *external.last().unwrap();
+        let mut pending = HashMap::new();
+        let mut chains = Vec::new();
+        let mut draws = Vec::new();
+        for view in 1..=3 {
+            if want(&mut pending, 1, view) {
+                chains.push(start + FRAME_GAP);
+            }
+        }
+
+        for ms in 0..=10_000 {
+            let time = start + Duration::from_millis(ms);
+            if let Ok(i) = external.binary_search(&ms) {
+                if want(&mut pending, 1, (i % 3) + 1) {
+                    chains.push(time + FRAME_GAP);
+                }
+            }
+            if ms % 6 == 0 && chains.first().is_some_and(|due| time >= *due) {
+                chains.remove(0);
+                let views = take(&mut pending, &1);
+                assert_eq!(views, HashSet::from([1, 2, 3]));
+                draws.push(time);
+                for view in views {
+                    if want(&mut pending, 1, view) {
+                        chains.push(time + FRAME_GAP);
+                    }
+                }
+            }
+            assert!(chains.len() <= 1);
+            assert_eq!(pending.len(), chains.len());
+        }
+        let after_external: Vec<_> = draws.iter().filter(|time| **time > start + Duration::from_millis(last_external)).collect();
+        assert!(after_external.len() > 2);
+        assert!(after_external.windows(2).all(|pair| pair[1].duration_since(*pair[0]) >= FRAME_GAP));
+        let last_five_seconds = draws.iter().filter(|time| **time > start + Duration::from_secs(5)).count();
+        assert!((125..=152).contains(&last_five_seconds), "{last_five_seconds} draws");
+    }
+
+    #[test]
+    fn spin_phase_wraps_every_eight_tenths_of_a_second() {
+        assert_eq!(spin_phase(Duration::ZERO), 0.0);
+        assert_eq!(spin_phase(Duration::from_millis(400)), 0.5);
+        for ms in [800, 1600] {
+            assert!(spin_phase(Duration::from_millis(ms)).abs() < 1e-6);
+        }
+        for nanos in (0..2_000_000_000u64).step_by(137_111) {
+            assert!((0.0..1.0).contains(&spin_phase(Duration::from_nanos(nanos))));
+        }
+        assert!((0.0..1.0).contains(&spin_phase(SPIN_PERIOD - Duration::from_nanos(1))));
+    }
+
+    #[test]
+    fn frame_cap_waits_until_the_deadline() {
+        let last = Instant::now();
+        assert!(FRAME_GAP >= Duration::from_millis(33));
+        assert_eq!(next_frame(last, None, true, false), FrameAsk::Now);
+        for ms in 0..=32 {
+            let elapsed = Duration::from_millis(ms);
+            match next_frame(last + elapsed, Some(last), true, false) {
+                FrameAsk::After(wait) => assert_eq!(elapsed + wait, FRAME_GAP),
+                ask => panic!("expected a wait at {ms} ms, got {ask:?}"),
+            }
+        }
+        for ms in [33, 200] {
+            assert_eq!(next_frame(last + Duration::from_millis(ms), Some(last), true, false), FrameAsk::Now);
+        }
+        assert_eq!(next_frame(last, Some(last + Duration::from_millis(1)), true, false), FrameAsk::After(FRAME_GAP));
+    }
+
+    #[test]
+    fn platform_ticks_keep_draws_at_least_one_frame_gap_apart() {
+        let start = Instant::now();
+        let mut last = None;
+        let mut draws = Vec::new();
+        for ms in (0..=10_000).step_by(6) {
+            let tick = start + Duration::from_millis(ms);
+            if next_frame(tick, last, true, false) == FrameAsk::Now {
+                draws.push(tick);
+                last = Some(tick);
+            }
+        }
+        assert!(draws.windows(2).all(|pair| pair[1].duration_since(pair[0]) >= FRAME_GAP));
+        assert!((250..=303).contains(&draws.len()), "{} draws", draws.len());
+    }
+
+    #[test]
+    fn inactive_or_minimized_pauses_and_resumes() {
+        let start = Instant::now();
+        for ms in [0, 33, 200] {
+            let tick = start + Duration::from_millis(ms);
+            for last in [None, Some(start)] {
+                assert_eq!(next_frame(tick, last, false, false), FrameAsk::Paused);
+                assert_eq!(next_frame(tick, last, true, true), FrameAsk::Paused);
+                assert_eq!(next_frame(tick, last, false, true), FrameAsk::Paused);
+            }
+            if ms >= 33 {
+                assert_eq!(next_frame(tick, Some(start), true, false), FrameAsk::Now);
+            }
+        }
+        let mut last = None;
+        let mut draws = Vec::new();
+        for ms in (0..=300).step_by(6) {
+            let active = !(60..180).contains(&ms);
+            let tick = start + Duration::from_millis(ms);
+            if next_frame(tick, last, active, false) == FrameAsk::Now {
+                assert!(active);
+                draws.push(ms);
+                last = Some(tick);
+            }
+        }
+        assert!(draws.iter().all(|&ms| !(60..180).contains(&ms)));
+        assert_eq!(draws.iter().copied().find(|&ms| ms >= 180), Some(180));
+    }
+
+    #[test]
+    fn capped_driver_still_respects_settled_and_reduced_motion() {
+        let now = Instant::now();
+        assert!(!Driver::at(now, false).wants_frame());
+        assert!(!Driver::at(now, false).capped().wants_frame());
+        let mut reduced = Driver::at(now, true).capped();
+        reduced.keep(true);
+        assert!(!reduced.wants_frame());
+    }
 
     fn steps() -> impl Iterator<Item = f32> {
         (0..=200).map(|i| i as f32 / 200.0)

@@ -4,6 +4,7 @@ use super::model::*;
 use super::{ornament, theme};
 use super::theme::Tokened as _;
 use gpui_kit::base::actions::{SelectFirst, SelectLast, SelectPageDown, SelectPageUp};
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle,
@@ -503,7 +504,21 @@ impl ListDelegate for RunList {
                             )
                         })
                         .child(ornament::glyph(glyph_state(status, verified_end), 20.0, t.outcome(status, verified_end), 0.0))
-                        .when_some(ornament::progress_ring(&t, verified, total, 24.0), |this, ring| this.child(ring))
+                        .when_some(ornament::progress_ring(&t, verified, total, 24.0), |this, ring| {
+                            let count: SharedString = progress_label(verified, total).into();
+                            this.child(
+                                h_flex().flex_none().gap_1p5()
+                                    .child(div().id(("wish-progress-ring", index)).child(ring).test_support())
+                                    .child(
+                                        div().id(("wish-progress-count", index))
+                                            .text_size(px(12.0)).text_color(t.muted)
+                                            .font_features(FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])))
+                                            .role(Role::Label).aria_label(count.clone())
+                                            .child(count.clone().test_text(count))
+                                            .test_support(),
+                                    ),
+                            )
+                        })
                         .child(
                             cell(PROJECT_WIDTH)
                                 .id(("wish-project", index))
@@ -903,7 +918,7 @@ impl Render for WishesView {
             .pt_5()
             .px_6()
             .gap_4()
-            .child(ornament::page_title(&t, tr(cx, T, "Wishes")).flex_none())
+            .child(ornament::page_title(&t, tr(cx, T, "Wishes")).id("wishes-page-title").flex_none())
             .when(no_runs, |this| this.child(self.nothing_yet(cx)))
             .when(!no_runs, |this| {
                 this.child(

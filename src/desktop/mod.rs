@@ -4,6 +4,7 @@ mod control;
 mod detail;
 pub mod demo;
 mod doctor;
+mod evolve;
 pub mod i18n;
 mod launch;
 mod live;

@@ -7,6 +7,7 @@ use crate::{
     base::{self, Failure, Res},
     cli::doctor,
     goal,
+    evolve::{self, digest::{self, Digest}},
     host::{self, Event},
     memory::Memory,
     session::{self, Config},
@@ -51,6 +52,10 @@ const STAGE_NAMES: [(&str, &str); 7] = [
 ];
 
 enum Command {
+    EvolveCheck,
+    EvolveChecked(Res<(Digest, EvolvePreview, Vec<PastEvolve>)>),
+    EvolveStart(PathBuf),
+    EvolveStarted { result: Res<EvolveOutcome>, runs: Res<Vec<PastEvolve>> },
     Start(WishRequest),
     Interject { session: String, text: String },
     Stop(String),
@@ -67,6 +72,9 @@ enum Command {
 }
 
 enum Update {
+    EvolveChecked(Res<(EvolvePreview, Vec<PastEvolve>)>),
+    EvolveStarted { result: Res<EvolveOutcome>, runs: Res<Vec<PastEvolve>> },
+    EvolveBusy,
     Runs { runs: Vec<Run>, renamed: Vec<(String, String)>, open: Option<String> },
     Memory(Vec<MemoryEntry>),
     Checks(Vec<Check>),
@@ -153,6 +161,8 @@ impl LiveBackend {
 }
 
 impl Backend for LiveBackend {
+    fn evolve_check(&self) -> Res<()> { self.send(Command::EvolveCheck) }
+    fn evolve_start(&self, repo: &Path) -> Res<()> { self.send(Command::EvolveStart(repo.to_path_buf())) }
     fn start_wish(&self, request: WishRequest) -> Res<()> {
         self.send(Command::Start(request))
     }
@@ -258,12 +268,42 @@ pub fn connect(state: Entity<AppState>, cx: &mut App) {
 fn apply(state: &mut AppState, updates: Vec<Update>) {
     for update in updates {
         match update {
+            Update::EvolveChecked(result) => {
+                state.evolve.checking = false;
+                match result {
+                    Ok((preview, runs)) => { state.evolve.preview = Some(preview); state.evolve.runs = runs; }
+                    Err(failure) => state.evolve.error = Some(failure.into()),
+                }
+            }
+            Update::EvolveStarted { result, runs } => {
+                state.evolve.starting = false;
+                match result { Ok(outcome) => { state.evolve.error = None; state.evolve.outcome = Some(outcome); }, Err(failure) => { state.evolve.outcome = None; state.evolve.error = Some(failure.into()); } }
+                match runs { Ok(runs) => state.evolve.runs = runs, Err(failure) if state.evolve.error.is_none() => state.evolve.error = Some(failure.into()), Err(_) => {} }
+            }
+            Update::EvolveBusy => state.evolve.error = Some(Failure::new("busy", "an evolve run is already in progress").into()),
             Update::Runs { runs, renamed, open } => state.replace_runs(runs, &renamed, open.as_deref()),
             Update::Memory(memory) => state.memory = memory,
             Update::Checks(checks) => state.checks = checks,
             Update::Failed { action, session, message } => state.report(action, session.map(Into::into), message),
         }
     }
+}
+
+fn evolve_preview(digest: &Digest, repo: Option<PathBuf>) -> EvolvePreview {
+    EvolvePreview {
+        issues: digest.problems.iter().take(digest::MAX_PROBLEMS).map(|p| EvolveIssue { id: p.id.clone().into(), title: p.title.clone().into(), count: p.count, cost_usd: p.cost_usd }).collect(),
+        more_issues: digest.problems.len().saturating_sub(digest::MAX_PROBLEMS),
+        estimate_usd: digest.estimate.median_usd, estimate_samples: digest.estimate.samples,
+        gaps: digest.gaps.iter().map(|g| EvolveGap { family: g.family.clone().into(), location: g.location.clone().into(), reason: g.reason.clone().into() }).collect(),
+        repo, text: digest::render(digest).into(),
+    }
+}
+
+fn evolve_runs(home: &Path, digest: &Digest) -> Res<Vec<PastEvolve>> {
+    let runs = evolve::list_runs(home)?;
+    Ok(digest::verdicts(&runs, digest).into_iter().map(|v| PastEvolve {
+        id: v.run.id.into(), started_ms: v.run.started_ms, repo: v.run.repo.into(), branch: v.run.branch.into(), state: v.run.state.into(), verdict: v.verdict,
+    }).collect())
 }
 
 /// A wish started from this app. Kept after it ends: its log exists nowhere else.
@@ -337,6 +377,8 @@ struct LedgerEntry {
 
 /// Everything that is owned by the worker thread.
 struct Engine {
+    evolve_digest: Option<Digest>,
+    evolve_starting: bool,
     home: PathBuf,
     projects: PathBuf,
     config: Box<dyn Fn() -> Config + Send>,
@@ -372,6 +414,8 @@ impl Engine {
         inbox: Inbox,
     ) -> Self {
         Self {
+            evolve_digest: None,
+            evolve_starting: false,
             poller: Poller::new(&home),
             home,
             projects,
@@ -449,6 +493,18 @@ impl Engine {
     /// Runs one command. Returns whether the disk should be read again right away.
     fn handle(&mut self, command: Command) -> bool {
         match command {
+            Command::EvolveCheck => { self.evolve_check(); false }
+            Command::EvolveChecked(result) => {
+                let result = result.map(|(digest, preview, runs)| { self.evolve_digest = Some(digest); (preview, runs) });
+                self.inbox.push(Update::EvolveChecked(result));
+                false
+            }
+            Command::EvolveStart(repo) => { self.evolve_start(repo); false }
+            Command::EvolveStarted { result, runs } => {
+                self.evolve_starting = false;
+                self.inbox.push(Update::EvolveStarted { result, runs });
+                false
+            }
             Command::Start(request) => {
                 self.start(request);
                 false
@@ -662,6 +718,46 @@ impl Engine {
             }
             Err(failure) => self.fail(Action::CorrectMemory, None, failure.message),
         }
+    }
+
+    fn evolve_inputs(&self) -> evolve::Inputs {
+        let now_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
+        evolve::Inputs { home: self.home.clone(), projects: self.projects.clone(), now_ms, since_days: evolve::DEFAULT_SINCE_DAYS }
+    }
+
+    fn evolve_check(&self) {
+        let inputs = self.evolve_inputs();
+        let commands = self.commands.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let preview = evolve::preview(&inputs)?;
+                let runs = evolve_runs(&inputs.home, &preview.digest)?;
+                let repo = evolve::repo::remembered(&inputs.home)?;
+                let view = evolve_preview(&preview.digest, repo);
+                Ok((preview.digest, view, runs))
+            })();
+            let _ = commands.send(Command::EvolveChecked(result));
+        });
+    }
+
+    fn evolve_start(&mut self, repo: PathBuf) {
+        if self.evolve_starting { self.inbox.push(Update::EvolveBusy); return; }
+        self.evolve_starting = true;
+        let inputs = self.evolve_inputs();
+        let config = (self.config)();
+        let digest = self.evolve_digest.clone();
+        let commands = self.commands.clone();
+        std::thread::spawn(move || {
+            let result = evolve::start(&inputs, Some(&repo), &config, Box::new(std::io::empty()), &mut std::io::sink()).map(|outcome| match outcome {
+                evolve::StartOutcome::NoOp { reason } => EvolveOutcome::NoOp { reason: reason.into() },
+                evolve::StartOutcome::Ran { exit_code, .. } => EvolveOutcome::Ran { exit_code },
+            });
+            let runs = (|| {
+                let digest = match digest { Some(digest) => digest, None => evolve::preview(&inputs)?.digest };
+                evolve_runs(&inputs.home, &digest)
+            })();
+            let _ = commands.send(Command::EvolveStarted { result, runs });
+        });
     }
 
     fn recheck(&self) {
@@ -1357,7 +1453,9 @@ fn roles_of(ledger: &Ledger) -> Vec<RoleCost> {
     });
     let codex = ledger.codex.iter().map(|row| RoleCost {
         role: format!("codex {}", row.model).into(),
-        usd: None,
+        usd: if row.tokens.missing.iter().any(|missing| *missing) || ledger.codex_missing_models.contains(&row.model) { None } else {
+            crate::usage::price::codex_usd(&row.model, &crate::usage::price::CodexUsage { input: row.tokens.input, cached_input: row.tokens.cached_input, output: row.tokens.output })
+        },
         input: row.tokens.input.saturating_sub(row.tokens.cached_input),
         cached: row.tokens.cached_input,
         output: row.tokens.output,
@@ -1535,6 +1633,39 @@ mod tests {
     const EVIDENCE: &str = "kind\tcommand\texit_code\tcommit\tts\n";
     const UNITS: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n";
     const MAP: &str = "# Map\n\n## m1\nPURPOSE    core things\nPATHS      src/a/\nDEPENDS    none\nCONTRACT   a stays stable\nACCEPT     tests/a.py `pytest tests/a.py`\n\n## m2\nPURPOSE    second\nPATHS      src/b/\nDEPENDS    m1\nCONTRACT   b\nACCEPT     tests/b.py `pytest tests/b.py`\n\nFULL TEST  `pytest`\n";
+
+    #[test]
+    fn live_backend_enqueues_evolve_only_for_explicit_commands() {
+        let (commands, receiver) = mpsc::channel();
+        let (_done, finished) = mpsc::channel();
+        let backend = LiveBackend { commands, finished: Mutex::new(finished) };
+        let repo = PathBuf::from("chosen-repo");
+
+        Backend::evolve_check(&backend).unwrap();
+        Backend::evolve_start(&backend, &repo).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(Command::EvolveCheck)));
+        assert!(matches!(receiver.try_recv(), Ok(Command::EvolveStart(path)) if path == repo));
+        assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+        backend.start_wish(WishRequest {
+            cwd: PathBuf::from("project"), wish: "wish".into(), creative: false,
+            max_turns: None, advanced_research: false,
+        }).unwrap();
+        backend.refresh().unwrap();
+        backend.follow("session").unwrap();
+        backend.recheck().unwrap();
+        backend.interject("session", "note").unwrap();
+        backend.stop("session").unwrap();
+        backend.resume("session", None).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(Command::Start(_))));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Refresh)));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Follow(_))));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Recheck)));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Interject { .. })));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Stop(_))));
+        assert!(matches!(receiver.try_recv(), Ok(Command::Resume { .. })));
+        assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
 
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1743,6 +1874,8 @@ mod tests {
         let codex = usage.models.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
         assert_eq!((codex.input, codex.cached, codex.cache_write, codex.output, codex.total), (Some(600_000), Some(400_000), None, Some(200_000), Some(1_200_000)));
         assert!((codex.usd.unwrap() - 1.62).abs() < 1e-9);
+        let role = usage.roles.iter().find(|r| r.role.as_ref() == "codex gpt-6.1-terra").unwrap();
+        assert_eq!(role.usd, codex.usd);
         assert!((usage.total_usd.unwrap() - ledger.totals.usd.unwrap() - 1.62).abs() < 1e-9);
     }
 
@@ -1802,12 +1935,33 @@ mod tests {
             let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
             assert_eq!((model.input, model.cached, model.output, model.total, model.usd), (None, None, Some(0), Some(0), None));
         }
+        let usage = usage_of(&wish, Some(&ledger));
+        assert!(!usage.unpriced().iter().any(|m| m.as_ref() == "gpt-6.1-terra"));
+        assert!(usage.incomplete().iter().any(|m| m.as_ref() == "gpt-6.1-terra"));
+        assert_eq!(roles_of(&ledger).iter().find(|r| r.role.as_ref() == "codex gpt-6.1-terra").unwrap().usd, None);
         // Force the ledger path rather than the complete scan path.
         let mut incomplete = wish.clone();
         incomplete.runs[0].scan.as_mut().unwrap().complete = false;
         let rows = codex_models(&incomplete, Some(&ledger));
         let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
         assert_eq!((model.input, model.cached, model.output, model.total, model.usd), (None, None, Some(0), Some(0), None));
+    }
+
+    #[test]
+    fn full_zero_codex_usage_prices_model_and_role_at_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let events = codex_events(session, "gpt-6.1-terra", 0, 0, 0);
+        let contents: String = events.iter().map(|e| format!("{e}\n")).collect();
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let wish = Poller::new(&home).poll().wishes.remove(0);
+        let usage = usage_of(&wish, Some(&ledger));
+        assert_eq!(usage.models.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap().usd, Some(0.0));
+        assert_eq!(usage.roles.iter().find(|r| r.role.as_ref() == "codex gpt-6.1-terra").unwrap().usd, Some(0.0));
     }
 
     #[test]
@@ -2029,6 +2183,88 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[test]
+    fn evolve_preview_limits_issues_and_preserves_details() {
+        let problems = (0..12).map(|i| digest::Problem {
+            id: format!("issue-{i}"), title: format!("Issue {i}"), family: "test".into(),
+            count: i, cost_usd: Some(i as f64), unpriced: 0, snapshot: false,
+            metric: digest::Metric { value: 0.0, samples: 1 }, sources: vec![],
+        }).collect();
+        let digest = Digest {
+            now_ms: 10, since_days: 7, start_ms: 0, problems,
+            gaps: vec![evolve::Gap { family: "f".into(), location: "here".into(), reason: "missing".into() }],
+            sources: vec![], cost: vec![], comparisons: vec![],
+            estimate: digest::Estimate { median_usd: None, samples: 3, unpriced_runs: 1, method: "median".into() },
+        };
+        let repo = PathBuf::from("repo");
+        let preview = evolve_preview(&digest, Some(repo.clone()));
+        assert_eq!(preview.issues.len(), 10);
+        assert_eq!(preview.issues[0].id.as_ref(), "issue-0");
+        assert_eq!(preview.issues[9].id.as_ref(), "issue-9");
+        assert_eq!(preview.more_issues, 2);
+        assert_eq!((preview.estimate_usd, preview.estimate_samples), (None, 3));
+        assert_eq!(preview.gaps[0], EvolveGap { family: "f".into(), location: "here".into(), reason: "missing".into() });
+        assert_eq!(preview.repo, Some(repo));
+        assert_eq!(preview.text.as_ref(), digest::render(&digest));
+    }
+
+    #[test]
+    fn evolve_check_is_read_only_and_populates_state() {
+        let mut rig = rig();
+        let record = evolve::history::RunRecord {
+            id: "old-run".into(), started_ms: 42, repo: "repo".into(), base_commit: "abc".into(),
+            branch: "evolve/old".into(), since_days: 7, start_ms: 0, end_ms: 42,
+            problems: vec![], metrics: vec![], state: "ended".into(), session: None,
+            goal_status: None, exit_code: Some(0), error: None,
+        };
+        evolve::history::save(rig._dir.path(), &record).unwrap();
+        fn listing(path: &Path, root: &Path, entries: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                entries.push(path.strip_prefix(root).unwrap().to_path_buf());
+                if path.is_dir() { listing(&path, root, entries); }
+            }
+        }
+        let mut before = vec![];
+        listing(rig._dir.path(), rig._dir.path(), &mut before);
+        before.sort();
+        let mut state = state_with(vec![]);
+        state.evolve.checking = true;
+        rig.engine.handle(Command::EvolveCheck);
+        let reply = rig._receiver.recv_timeout(Duration::from_secs(10)).expect("check completes");
+        rig.engine.handle(reply);
+        apply(&mut state, rig.updates());
+        assert!(!state.evolve.checking);
+        assert!(state.evolve.error.is_none(), "{:?}", state.evolve.error);
+        assert!(state.evolve.preview.is_some());
+        assert_eq!(state.evolve.runs.len(), 1);
+        assert_eq!(state.evolve.runs[0].id.as_ref(), "old-run");
+        assert_eq!(state.evolve.runs[0].verdict, Verdict::Unknown);
+        let mut after = vec![];
+        listing(rig._dir.path(), rig._dir.path(), &mut after);
+        after.sort();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn evolve_start_rejects_non_repo_and_guards_duplicate() {
+        let mut rig = rig();
+        let mut state = state_with(vec![]);
+        state.evolve.starting = true;
+        rig.engine.handle(Command::EvolveStart(rig._dir.path().to_path_buf()));
+        rig.engine.handle(Command::EvolveStart(rig._dir.path().to_path_buf()));
+        apply(&mut state, rig.updates());
+        assert!(state.evolve.starting);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "busy");
+        state.evolve.error = None;
+        let reply = rig._receiver.recv_timeout(Duration::from_secs(10)).expect("start completes");
+        rig.engine.handle(reply);
+        apply(&mut state, rig.updates());
+        assert!(!state.evolve.starting);
+        assert_eq!(state.evolve.error.as_ref().unwrap().kind.as_ref(), "not_git_repo");
+        assert!(state.evolve.outcome.is_none());
     }
 
     #[test]

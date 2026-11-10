@@ -1,5 +1,6 @@
 //! The Usage screen: what the work cost, which agent carried too much, and what to do about it.
 use super::i18n::{self, tr};
+use super::evolve::EvolvePanel;
 use super::model::*;
 use super::{ornament, theme};
 use super::theme::{Tokened as _, Tokens};
@@ -36,6 +37,7 @@ const TEXT: i18n::Table = &[
     ("Cache writes", "快取寫入"),
     ("Total", "總計"),
     ("Some models are unpriced", "部分模型沒有定價"),
+    ("Some amounts are unknown; the total is partial.", "部分金額未知；總額僅為部分金額。"),
     ("Unpriced models are excluded from the total.", "未定價的模型不計入總額。"),
     ("Output", "輸出"),
     ("Peak context", "上下文高峰"),
@@ -72,10 +74,6 @@ const TEXT: i18n::Table = &[
     ("Role", "角色"),
     ("API cost", "API 花費"),
     ("Tokens only", "只有 token"),
-    (
-        "Codex reports tokens but no dollars, so its rows show “—” and are not in the total.",
-        "Codex 只回報 token、沒有金額，所以這些列顯示「—」，也不計入總額。",
-    ),
     ("No model has reported usage yet.", "還沒有模型回報用量。"),
     ("Runs", "各次執行"),
     ("Newest first. Click a run to open it.", "最新的在最上面，點一列可開啟該次執行。"),
@@ -210,6 +208,8 @@ enum Warning {
 struct Summary {
     runs: usize,
     cost: Dollars,
+    unpriced: bool,
+    incomplete: bool,
     input: u64,
     cached: u64,
     output: u64,
@@ -274,9 +274,13 @@ fn summarize(runs: &[Run]) -> Summary {
     let mut summary = Summary { runs: runs.len(), ..Default::default() };
     for run in runs {
         let usage = &run.usage;
+        let unpriced = !usage.unpriced().is_empty();
+        let incomplete = !usage.incomplete().is_empty();
+        summary.unpriced |= unpriced;
+        summary.incomplete |= incomplete;
         let cost = run_cost(usage);
         summary.cost.add(cost);
-        if cost.is_some() && (usage.total_usd.is_none() || !usage.unpriced().is_empty()) { summary.cost.missing += 1; }
+        if cost.is_some() && (usage.total_usd.is_none() || unpriced || incomplete) { summary.cost.missing += 1; }
         for model in &usage.models {
             add_cost(&mut summary.models, &model.model, model.usd, [model.input, model.cached, model.cache_write, model.output, model.total]);
             summary.input += model.input.unwrap_or(0);
@@ -392,7 +396,7 @@ fn run_rows(runs: &[Run]) -> Vec<RunRow> {
             started: run.started.clone(),
             started_at: run.started_at,
             cost: run_cost(&run.usage),
-            cost_incomplete: !run.usage.unpriced().is_empty() || run.usage.total_usd.is_none(),
+            cost_incomplete: !run.usage.unpriced().is_empty() || !run.usage.incomplete().is_empty() || run.usage.total_usd.is_none(),
             tokens: run.usage.models.iter().filter_map(|m| m.total).sum(),
             tokens_reported: run.usage.models.iter().any(|m| m.total.is_some()),
             tokens_missing: run.usage.models.iter().any(|m| m.total.is_none()),
@@ -567,8 +571,7 @@ fn tile(t: Tokens, label: &str, value: String, color: Hsla, note: Option<(String
         .child(div().text_size(px(22.)).font_semibold().text_color(color).child(value))
         .child(
             div()
-                .h(px(16.))
-                .truncate()
+                .min_h(px(16.))
                 .text_xs()
                 .text_color(note.as_ref().map_or(t.muted, |(_, color)| *color))
                 .child(note.map_or(String::new(), |(text, _)| text)),
@@ -579,17 +582,17 @@ fn totals(summary: &Summary, cx: &App) -> Div {
     let t = cx.tokens();
     let limit = fmt_limit();
     let peak = summary.peak();
-    let cost_note = if summary.models.iter().any(|row| row.usd.missing > 0) {
-        Some(tr(cx, TEXT, "Some models are unpriced").to_owned())
-    } else if summary.cost.known.is_some() && summary.cost.missing > 0 {
-        Some(
+    let mut cost_notes = Vec::new();
+    if summary.unpriced { cost_notes.push(tr(cx, TEXT, "Some models are unpriced").to_owned()); }
+    if summary.incomplete { cost_notes.push(tr(cx, TEXT, "Some amounts are unknown; the total is partial.").to_owned()); }
+    if cost_notes.is_empty() && summary.cost.known.is_some() && summary.cost.missing > 0 {
+        cost_notes.push(
             tr(cx, TEXT, "{missing} of {runs} runs not reported")
                 .replace("{missing}", &summary.cost.missing.to_string())
                 .replace("{runs}", &summary.runs.to_string()),
-        )
-    } else {
-        None
-    };
+        );
+    }
+    let cost_note = (!cost_notes.is_empty()).then(|| cost_notes.join(" · "));
     let peak_note = (peak > 0).then(|| {
         if over_line(peak) {
             (
@@ -890,7 +893,7 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
         })))
 }
 
-fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, rows: &[CostRow], cx: &App) -> Div {
+fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, rows: &[CostRow], unpriced: bool, cx: &App) -> Div {
     let t = cx.tokens();
     panel(t)
         .flex_1()
@@ -902,7 +905,7 @@ fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, r
                 panel.child(cost_table(id, name_label, rows, cx))
             }
         })
-        .when(name_label == "Model" && rows.iter().any(CostRow::tokens_only), |panel| {
+        .when(name_label == "Model" && unpriced, |panel| {
             panel.child(
                 div().text_xs().text_color(t.muted).child(tr(
                     cx,
@@ -915,6 +918,7 @@ fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, r
 
 pub struct UsageView {
     state: Entity<AppState>,
+    evolve: Entity<EvolvePanel>,
     scope: Scope,
     row_focus: Vec<FocusHandle>,
 }
@@ -935,8 +939,10 @@ impl UsageView {
                 }
             });
         }
+        let evolve = cx.new(|cx| EvolvePanel::new(state.clone(), window, cx));
         Self {
             state,
+            evolve,
             scope: if scene.contains("usage-all") { Scope::AllRuns } else { Scope::ThisRun },
             row_focus: Vec::new(),
         }
@@ -1029,12 +1035,12 @@ impl UsageView {
                         .description(EmptyDescription::new().child(tr(cx, TEXT, "Cost and token figures appear here once a wish has run."))),
                 )
                 .content(
-                    EmptyContent::new().child(
+                    EmptyContent::new().child(h_flex().gap_3().child(
                         theme::gold_leaf(Button::new("usage-make-wish")
                             .primary(), &cx.tokens())
                             .label(tr(cx, TEXT, "Make a wish"))
                             .on_click(move |_, _, cx| state.update(cx, |state, cx| state.set_composing(true, cx))),
-                    ),
+                    ).child(self.evolve.clone())),
                 ),
         )
     }
@@ -1086,7 +1092,7 @@ impl Render for UsageView {
                                     .child(ornament::page_title(&t, tr(cx, TEXT, "Usage")))
                                     .child(div().truncate().text_xs().text_color(t.muted).child(subtitle)),
                             )
-                            .child(div().flex_none().child(self.scope_tabs(scope, current.is_some(), cx))),
+                            .child(h_flex().gap_3().flex_none().child(self.scope_tabs(scope, current.is_some(), cx)).child(self.evolve.clone())),
                     )
                     .child(totals(&summary, cx))
                     .child(context_panel(&summary, all_runs, cx))
@@ -1094,8 +1100,8 @@ impl Render for UsageView {
                     .child(
                         v_flex()
                             .gap_4()
-                            .child(cost_panel("usage-models", "Cost by model", "Model", &summary.models, cx))
-                            .when(has_roles, |this| this.child(cost_panel("usage-roles", "Cost by role", "Role", &summary.roles, cx))),
+                            .child(cost_panel("usage-models", "Cost by model", "Model", &summary.models, summary.unpriced, cx))
+                            .when(has_roles, |this| this.child(cost_panel("usage-roles", "Cost by role", "Role", &summary.roles, false, cx))),
                     )
                     .child(
                         panel(t)
@@ -1510,11 +1516,35 @@ mod tests {
         let drawn = calls.captures_iter(source).map(|call| call.get(1).unwrap().as_str());
         let passed = [
             "API cost", "Input", "Cached", "Output", "Status", "Project", "Wish", "Tokens", "Peak context", "Started",
-            "Model", "Role", "Cost by model", "Cost by role",
+            "Model", "Role", "Cost by model", "Cost by role", "Cached input", "Cache writes", "Total",
         ];
         for text in drawn.chain(passed) {
             assert!(TEXT.iter().chain(COMMON).any(|(key, _)| *key == text), "no translation for {text}");
         }
+    }
+
+    #[test]
+    fn pricing_gaps_and_priced_codex_roles_are_distinguished() {
+        let mut usage = Usage {
+            total_usd: Some(1.0),
+            models: vec![model("gpt-5", None, [1, 2, 3])],
+            roles: vec![RoleCost { role: "codex".into(), usd: Some(0.5), input: 1, cached: 2, output: 3 }],
+            ..Default::default()
+        };
+        let summary = summarize(&[with_usage("a", usage.clone())]);
+        assert!(!summary.unpriced && summary.incomplete);
+        assert_eq!(fmt_dollars(summary.cost), "$1.00+");
+        assert_eq!(fmt_dollars(summary.roles[0].usd), "$0.50");
+        assert!(!summary.roles[0].tokens_only());
+        assert!(run_rows(&[with_usage("a", usage.clone())])[0].cost_incomplete);
+        usage.models.push(model("unknown-model", None, [1, 2, 3]));
+        let summary = summarize(&[with_usage("a", usage)]);
+        assert!(summary.unpriced && summary.incomplete);
+    }
+
+    #[test]
+    fn stale_codex_pricing_note_is_absent() {
+        assert!(!include_str!("usage.rs").contains(concat!("Codex reports tokens", " but no dollars")));
     }
 
     #[test]
