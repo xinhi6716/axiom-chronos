@@ -2,7 +2,7 @@
 //! across screens: Ctrl+N, Needs you notifications and the question asked before closing.
 use super::i18n::{fill, tr, Table};
 use super::model::*;
-use super::settings;
+use super::{ornament, settings};
 use super::theme::{Tokened as _, Tokens};
 use super::{composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView, usage::UsageView, wishes::WishesView};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -714,8 +714,9 @@ impl Render for Shell {
                             .bg(tokens.surface)
                             .border_r_1()
                             .border_color(tokens.border)
+                            .child(ornament::portrait(44.).mt_1().mb_2())
                             .child(new_wish)
-                            .child(div().w(px(40.)).h(px(1.)).my_1().bg(tokens.border))
+                            .child(div().w(px(60.)).my_1().child(ornament::divider(&tokens, 0.0)))
                             .child(run_item)
                             .child(wishes_item)
                             .child(memory_item)

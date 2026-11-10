@@ -1,6 +1,7 @@
 //! The right-hand panel of the Run screen: an overview of the run, one module, or one unit.
 use super::i18n::{self, tr};
 use super::model::*;
+use super::ornament;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -819,13 +820,12 @@ impl Detail {
         };
         let label = if need.kind == NeedKind::Waiting { "Resume now" } else { "Resume" };
         let resuming = self.resuming.as_ref() == Some(&run.session);
-        v_flex()
+        ornament::frame(&t, color.opacity(0.6), t.surface.blend(color.opacity(0.06)))
+            .flex()
+            .flex_col()
             .gap_2()
-            .p_3()
-            .rounded(px(8.))
-            .bg(color.opacity(0.08))
-            .border_1()
-            .border_color(color.opacity(0.35))
+            .px_4()
+            .py_3()
             .child(
                 h_flex()
                     .gap_1p5()

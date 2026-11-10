@@ -85,6 +85,12 @@ const fn hex(rgb: u32) -> Hsla {
     Hsla { h: h / 6.0, s, l, a: 1.0 }
 }
 
+/// Both themes' tokens, for tests elsewhere that check a rule in each.
+#[cfg(test)]
+pub fn both() -> [Tokens; 2] {
+    [DARK, LIGHT]
+}
+
 pub fn module_color(index: usize) -> Hsla {
     rgb(MODULE_HUES[index % MODULE_HUES.len()]).into()
 }
@@ -155,12 +161,25 @@ impl Tokens {
     }
 }
 
+/// The interface font on Windows. The kit's default, `.SystemUIFont`, resolves to the system's
+/// icon-title font, which on Chinese Windows is Microsoft JhengHei UI. That font has no glyph for
+/// characters such as the subscript in "HfO₂", and at semibold and bold weights gpui draws the
+/// fallback glyph DirectWrite substitutes for them as the wrong character. Segoe UI has those
+/// glyphs, and Chinese text still falls back to the system's Chinese font for the user's locale.
+#[cfg(windows)]
+pub const UI_FONT: Option<&str> = Some("Segoe UI");
+#[cfg(not(windows))]
+pub const UI_FONT: Option<&str> = None;
+
 /// Applies a mode to both the component library's theme and our tokens.
 pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     Theme::change(mode, window, cx);
     let t = if cx.theme().is_dark() { DARK } else { LIGHT };
     cx.set_global(t);
     Theme::update(cx, |theme| {
+        if let Some(font) = UI_FONT {
+            theme.font_family = font.into();
+        }
         theme.background = t.canvas;
         theme.foreground = t.text;
         theme.border = t.border;
@@ -222,6 +241,16 @@ mod tests {
                 for fg in [t.text, t.muted, t.gold, t.ok, t.run, t.review, t.fail] {
                     assert!(contrast(fg, bg) >= 4.5, "{fg:?} on {bg:?}: {}", contrast(fg, bg));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn orbit_lines_are_visible_structure_that_never_competes_with_text() {
+        for t in [DARK, LIGHT] {
+            for bg in [t.canvas, t.surface, t.raised] {
+                let c = contrast(t.orbit, bg);
+                assert!((1.4..3.0).contains(&c), "orbit on {bg:?}: {c}");
             }
         }
     }

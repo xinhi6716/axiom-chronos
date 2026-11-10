@@ -2,10 +2,11 @@
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
 use super::i18n::{tr, Table};
 use super::model::*;
+use super::ornament;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -66,7 +67,9 @@ const MAX_CARD_DROP: f32 = 36.0;
 const SCROLLBAR_ROOM: f32 = 12.0;
 const REVEAL_MARGIN: f32 = 24.0;
 const OVERSCAN: f32 = 240.0;
-const PARTICLE_SPEED: f32 = 110.0;
+const PARTICLE_SPEED: f32 = 90.0;
+/// Seconds for the core's small planet to go once around the hourglass.
+const ORBIT_SECONDS: f32 = 3.0;
 /// A core wire disappears when its module is this far beyond the panel, so scrolling never leaves a bundle of lines.
 const WIRE_FADE_DISTANCE: f32 = 120.0;
 const FADE_H: f32 = 22.0;
@@ -510,24 +513,23 @@ fn state_rank(state: UnitState) -> u8 {
     }
 }
 
-/// The strokes of a wire, widest first; together they read as a glow on a dark canvas.
+/// The strokes of a wire, widest first. Wires are `orbit` hairlines; only running work, the
+/// selection and the hovered path light up, and only running work and the selection in gold.
 fn wire_layers(t: &Tokens, state: UnitState, lit: Lit, dark: bool) -> Vec<(f32, Hsla)> {
     let glow = |color: Hsla, a: f32, b: f32, c: f32, width: f32| {
         if dark {
-            vec![(7.0, color.opacity(a)), (3.5, color.opacity(b)), (width, color.opacity(c))]
+            vec![(6.0, color.opacity(a)), (3.0, color.opacity(b)), (width, color.opacity(c))]
         } else {
-            vec![(3.5, color.opacity(b * 0.7)), (width, color.opacity(c))]
+            vec![(3.0, color.opacity(b * 0.6)), (width, color.opacity(c))]
         }
     };
     match lit {
-        Lit::Hovered => glow(t.text, 0.08, 0.2, 0.95, 1.6),
-        Lit::Selected => glow(t.gold, 0.1, 0.25, 1.0, 1.6),
+        Lit::Hovered => glow(t.text, 0.05, 0.14, 0.85, 1.3),
+        Lit::Selected => glow(t.gold, 0.08, 0.2, 1.0, 1.4),
         Lit::No => match state {
-            UnitState::Running => glow(t.run, 0.07, 0.2, 0.95, 1.4),
-            UnitState::Failed => vec![(3.0, t.fail.opacity(0.16)), (1.2, t.fail.opacity(0.75))],
-            UnitState::Built => vec![(1.2, t.review.opacity(if dark { 0.55 } else { 0.7 }))],
-            UnitState::Verified => vec![(1.0, t.ok.opacity(if dark { 0.3 } else { 0.45 }))],
-            UnitState::Pending => vec![(1.0, t.idle.opacity(0.6))],
+            UnitState::Running => glow(t.gold, 0.06, 0.16, 0.9, 1.2),
+            UnitState::Pending => vec![(1.0, t.orbit.opacity(if dark { 0.75 } else { 0.9 }))],
+            _ => vec![(1.0, t.orbit.opacity(if dark { 0.95 } else { 1.0 }))],
         },
     }
 }
@@ -587,7 +589,7 @@ fn stroke_points(window: &mut Window, points: &[Point<Pixels>], closed: bool, wi
     }
 }
 
-/// The Chronos mark: an hourglass in a gold ring with a tilted orbit. `phase` moves the small planet.
+/// The Chronos mark: an hourglass in a gold ring with a tilted orbit. `phase`, in radians, moves the small planet.
 fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32) {
     let at = |x: f32, y: f32| point(px(center.x + x * r), px(center.y + y * r));
     let c = at(0.0, 0.0);
@@ -647,7 +649,7 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32)
     for y in [-0.66, 0.66] {
         stroke_points(window, &[at(-0.42, y), at(0.42, y)], false, (r * 0.09).max(1.4), t.gold);
     }
-    let (px_, py_) = orbit_at(phase * 0.7 + 0.6);
+    let (px_, py_) = orbit_at(phase + 0.6);
     disc(window, at(px_, py_), (r * 0.09).max(1.8), t.gold);
 }
 
@@ -682,6 +684,14 @@ impl Backdrop {
         let origin = Pt { x: f32::from(bounds.origin.x), y: f32::from(bounds.origin.y) };
         let view_h = f32::from(bounds.size.height);
         let graph = &self.graph;
+        let core = graph.core(view_h);
+        // The sky first: fixed stars and the faint orbits around the core, which never move.
+        let stars = ornament::star_field(f32::from(bounds.size.width), view_h);
+        ornament::paint_stars(window, (origin.x, origin.y), &stars, self.t.text);
+        let arc_color = self.t.orbit.opacity(if self.dark { 0.55 } else { 0.7 });
+        for r in orbit_radii(graph) {
+            ornament::paint_orbit_arc(window, origin.x + core.x, origin.y + core.y, r, -88.0, 88.0, arc_color);
+        }
         let mut wires: Vec<(Wire, UnitState, Lit, bool, f32)> = Vec::with_capacity(graph.modules.len() * 3);
         for m in &graph.modules {
             let wire = graph.core_wire(m, view_h, scroll);
@@ -709,45 +719,51 @@ impl Backdrop {
                 self.paint_particles(window, origin, wire, *fade);
             }
         }
-        let core = graph.core(view_h);
         let center = Pt { x: origin.x + core.x, y: origin.y + core.y };
-        let breath = self.time.map_or(0.5, |time| (time * 1.6).sin() * 0.5 + 0.5);
-        let halo = self.t.gold.opacity(if graph.live { 0.32 + 0.16 * breath } else { 0.28 });
+        let breath = self.time.map_or(0.5, ornament::breath);
+        let halo = self.t.gold.opacity(if graph.live { 0.22 + 0.16 * breath } else { 0.24 });
         soft_glow(window, point(px(center.x), px(center.y)), graph.core_r * 0.96, graph.core_r * 1.1, halo);
-        paint_emblem(window, center, graph.core_r, &self.t, self.time.unwrap_or(0.0));
+        let phase = self.time.map_or(0.0, |time| time * std::f32::consts::TAU / ORBIT_SECONDS);
+        paint_emblem(window, center, graph.core_r, &self.t, phase);
     }
 
     fn paint_particles(&self, window: &mut Window, origin: Pt, wire: &Wire, fade_out: f32) {
         let count = particle_count(wire.length());
         let time = self.time.unwrap_or(0.0);
-        let core = if self.dark { hsla(0.0, 0.0, 1.0, 1.0) } else { self.t.run };
+        let core = if self.dark { self.t.text } else { self.t.gold };
         for i in 0..count {
             let t = particle_t(time, wire.length(), i, count);
             let fade = (t / 0.08).min((1.0 - t) / 0.08).clamp(0.0, 1.0) * fade_out;
             let center = pt(origin, wire.at(t));
-            soft_glow(window, center, 2.0, 7.0, self.t.run.opacity(0.75 * fade));
-            disc(window, center, 1.9, core.opacity(0.95 * fade));
+            soft_glow(window, center, 1.8, 6.0, self.t.gold.opacity(0.6 * fade));
+            disc(window, center, 1.5, core.opacity(0.9 * fade));
         }
     }
 }
 
-/// The small shape that says a state without relying on color.
-fn state_mark(state: UnitState, size_px: f32, color: Hsla, turn: f32) -> AnyElement {
-    let icon = |name: IconName| Icon::new(name).with_size(px(size_px)).text_color(color);
-    match state {
-        UnitState::Pending => div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(size_px))
-            .child(div().size(px(size_px * 0.66)).rounded_full().border_1().border_color(color))
-            .into_any_element(),
-        UnitState::Running => icon(IconName::LoaderCircle).rotate(radians(turn)).into_any_element(),
-        UnitState::Built => icon(IconName::Eye).into_any_element(),
-        UnitState::Verified => icon(IconName::Check).into_any_element(),
-        UnitState::Failed => icon(IconName::Close).into_any_element(),
+/// Radii of the faint orbits around the core: through the module bodies, through the first
+/// column of units, and one further out when the panel has room.
+fn orbit_radii(graph: &Graph) -> Vec<f32> {
+    let Some(card) = graph.modules.first().map(|m| m.rect) else {
+        return vec![];
+    };
+    let inner = card.x + card.w / 2.0 - graph.core_x;
+    let units = graph.chips.first().map_or(graph.knee + 8.0, |c| c.rect.x + c.rect.w / 2.0) - graph.core_x;
+    let edge = graph.width - SCROLLBAR_ROOM - graph.core_x;
+    let mut radii = vec![inner];
+    if units > inner + 40.0 && units < edge {
+        radii.push(units);
     }
+    let outer = edge - 18.0;
+    if outer > radii[radii.len() - 1] + 80.0 {
+        radii.push(outer);
+    }
+    radii
+}
+
+/// The small shape that says a state without relying on color. `breath` swells the running ring.
+fn state_mark(state: UnitState, size_px: f32, color: Hsla, breath: f32) -> AnyElement {
+    ornament::glyph(state, size_px, color, breath).into_any_element()
 }
 
 fn glow(color: Hsla, blur: f32) -> Vec<BoxShadow> {
@@ -770,28 +786,18 @@ struct NodeLook {
 
 fn node_look(t: &Tokens, state: UnitState, base: Hsla, dark: bool) -> NodeLook {
     let color = t.unit(state);
-    let tint = |a: f32| base.blend(color.opacity(a));
+    let tint = |c: Hsla, a: f32| base.blend(c.opacity(a));
     match state {
-        UnitState::Pending => NodeLook { border: color.opacity(0.45), fill: base, glow: None, text: t.muted },
-        UnitState::Verified => NodeLook {
-            border: color.opacity(if dark { 0.3 } else { 0.45 }),
-            fill: base,
-            glow: None,
-            text: t.muted,
-        },
-        UnitState::Built => NodeLook { border: color.opacity(0.7), fill: tint(0.07), glow: None, text: t.text },
+        UnitState::Pending => NodeLook { border: t.orbit.opacity(0.8), fill: base, glow: None, text: t.muted },
+        UnitState::Verified => NodeLook { border: t.orbit, fill: base, glow: None, text: t.muted },
+        UnitState::Built => NodeLook { border: color.opacity(0.6), fill: tint(color, 0.05), glow: None, text: t.text },
         UnitState::Running => NodeLook {
-            border: color.opacity(0.95),
-            fill: tint(0.12),
-            glow: Some(color.opacity(if dark { 0.45 } else { 0.25 })),
+            border: t.gold.opacity(0.85),
+            fill: tint(t.gold, if dark { 0.06 } else { 0.08 }),
+            glow: Some(t.gold.opacity(if dark { 0.22 } else { 0.16 })),
             text: t.text,
         },
-        UnitState::Failed => NodeLook {
-            border: color.opacity(0.9),
-            fill: tint(0.12),
-            glow: Some(color.opacity(if dark { 0.3 } else { 0.18 })),
-            text: t.text,
-        },
+        UnitState::Failed => NodeLook { border: color.opacity(0.75), fill: tint(color, 0.07), glow: None, text: t.text },
     }
 }
 
@@ -922,12 +928,12 @@ impl Mesh {
         self.state.update(cx, |s, cx| s.select(selection, cx));
     }
 
-    fn card_view(&self, m: &ModuleBox, run: &Run, t: &Tokens, dark: bool, turn: f32, cx: &App) -> AnyElement {
+    fn card_view(&self, m: &ModuleBox, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
         let selected = selected_node(&self.state.read(cx).selection) == Some(Node::Module(m.index));
         let hovered = self.hover == Some(Node::Module(m.index));
         let look = node_look(t, m.state, t.surface, dark);
         let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
-        let shadow = if selected { Some(t.gold.opacity(if dark { 0.4 } else { 0.25 })) } else { look.glow };
+        let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
         let share = |n: usize| if m.total == 0 { 0.0 } else { n as f32 / m.total as f32 };
         let run_ref = &run.modules[m.index];
         let count = |state| run_ref.units.iter().filter(|&&u| run.units[u].state == state).count();
@@ -944,9 +950,10 @@ impl Mesh {
             .w(px(m.rect.w))
             .h(px(m.rect.h))
             .justify_center()
-            .gap(px(4.))
-            .px(px(8.))
-            .rounded(px(9.))
+            .gap(px(3.))
+            .pl(px(4.))
+            .pr(px(8.))
+            .rounded(px(4.))
             .border_1()
             .border_color(border)
             .bg(look.fill)
@@ -954,19 +961,18 @@ impl Mesh {
             .child(
                 h_flex()
                     .gap(px(5.))
-                    .child(state_mark(m.state, 13., t.unit(m.state), turn))
+                    .child(ornament::body(m.state, 24., t.unit(m.state), t.orbit, look.fill, if m.running { breath } else { 0.0 }))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone()))
                     .when(m.rect.w >= 120.0, |this| {
-                        this.child(div().flex_none().text_size(px(11.)).text_color(t.muted).child(format!("{}/{}", m.verified, m.total)))
+                        this.child(div().flex_none().text_size(px(12.)).text_color(t.muted).child(format!("{}/{}", m.verified, m.total)))
                     }),
             )
             .child(
                 h_flex()
-                    .h(px(3.))
+                    .h(px(2.))
                     .w_full()
-                    .rounded_full()
                     .overflow_hidden()
-                    .bg(t.border.opacity(0.7))
+                    .bg(t.orbit.opacity(0.6))
                     .children(segments.into_iter().filter(|(n, _)| *n > 0).map(|(n, color)| {
                         let quiet = m.state == UnitState::Verified;
                         div().h_full().w(relative(share(n))).bg(if quiet { color.opacity(0.55) } else { color })
@@ -975,12 +981,12 @@ impl Mesh {
             .into_any_element()
     }
 
-    fn chip_view(&self, chip: &ChipBox, run: &Run, t: &Tokens, dark: bool, turn: f32, cx: &App) -> AnyElement {
+    fn chip_view(&self, chip: &ChipBox, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
         let selected = selected_node(&self.state.read(cx).selection) == Some(chip.node);
         let hovered = self.hover == Some(chip.node);
         let look = node_look(t, chip.state, t.surface, dark);
         let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
-        let shadow = if selected { Some(t.gold.opacity(if dark { 0.4 } else { 0.25 })) } else { look.glow };
+        let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
         let label: SharedString = match chip.node {
             Node::Unit(u) => run.units[u].id.clone(),
             Node::Folded(_, state) => {
@@ -1002,23 +1008,23 @@ impl Mesh {
             .h(px(chip.rect.h))
             .gap(px(4.))
             .px(px(6.))
-            .rounded(px(6.))
+            .rounded(px(3.))
             .border_1()
             .border_color(border)
             .bg(look.fill)
             .when_some(shadow, |this, color| this.shadow(glow(color, 9.)))
-            .child(state_mark(chip.state, 12., t.unit(chip.state), turn))
+            .child(state_mark(chip.state, 13., t.unit(chip.state), breath))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(11.5))
+                    .text_size(px(12.))
                     .when(mono, |this| this.font_family(cx.theme().mono_font_family.clone()))
                     .text_color(look.text)
                     .child(label),
             )
-            .when_some(retries, |this, text| this.child(div().flex_none().text_size(px(10.5)).text_color(t.muted).child(text)))
+            .when_some(retries, |this, text| this.child(div().flex_none().text_size(px(12.)).text_color(t.muted).child(text)))
             .into_any_element()
     }
 
@@ -1115,7 +1121,7 @@ impl Mesh {
                         div()
                             .w(px(260.))
                             .p(px(10.))
-                            .rounded(px(8.))
+                            .rounded(px(4.))
                             .border_1()
                             .border_color(t.border)
                             .bg(t.raised)
@@ -1164,7 +1170,7 @@ impl Mesh {
         let hover = self.hover.filter(|&node| node == Node::Core || graph.rect_of(node).is_some());
 
         let time = moving.then(|| self.clock.elapsed().as_secs_f32());
-        let turn = time.unwrap_or(0.0) * 3.0;
+        let breath = time.map_or(0.0, ornament::breath);
         let top = scroll - OVERSCAN;
         let bottom = scroll + view_h + OVERSCAN;
         let visible = |r: &Rect| r.bottom() >= top && r.y <= bottom;
@@ -1172,13 +1178,13 @@ impl Mesh {
             .modules
             .iter()
             .filter(|m| visible(&m.rect))
-            .map(|m| self.card_view(m, run, &t, dark, turn, cx))
+            .map(|m| self.card_view(m, run, &t, dark, breath, cx))
             .collect();
         let chips: Vec<AnyElement> = graph
             .chips
             .iter()
             .filter(|c| visible(&c.rect))
-            .map(|c| self.chip_view(c, run, &t, dark, turn, cx))
+            .map(|c| self.chip_view(c, run, &t, dark, breath, cx))
             .collect();
 
         let backdrop = Backdrop {
@@ -1194,7 +1200,7 @@ impl Mesh {
         let tooltip = hover.and_then(|node| self.tooltip_view(node, run, &t, scroll, cx));
         let status = run.status;
         let core = graph.core(view_h);
-        let label_w = (graph.core_r * 2.0 + 44.0).max(72.0);
+        let label_w = (graph.core_r * 2.0 + 40.0).max(92.0);
         let stage = current_stage(run).map(|s| stage_label(cx, &s.name));
         let sub: SharedString = match (status, stage) {
             (RunStatus::Active, Some(stage)) => stage,
@@ -1250,8 +1256,8 @@ impl Mesh {
                         .top(px(core.y + graph.core_r + 22.0))
                         .w(px(label_w))
                         .items_center()
-                        .child(div().text_size(px(12.)).text_color(t.text).child("Chronos"))
-                        .child(div().text_size(px(11.)).text_color(t.status(status)).child(sub)),
+                        .child(div().text_size(px(12.)).text_color(t.gold).child("C H R O N O S"))
+                        .child(div().text_size(px(12.)).text_color(t.status(status)).child(sub)),
                 )
             })
             .vertical_scrollbar(&self.scroll)
@@ -1297,8 +1303,8 @@ fn legend(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
 
 fn summary_fact(t: &Tokens, label: &'static str, value: SharedString, color: Hsla) -> impl IntoElement {
     v_flex()
-        .child(div().text_size(px(11.)).text_color(t.muted).child(label))
-        .child(div().text_size(px(13.)).text_color(color).child(value))
+        .child(div().text_size(px(12.)).text_color(t.muted).child(label))
+        .child(div().text_size(px(14.)).text_color(color).child(value))
 }
 
 /// What a finished run produced. Units that are not verified are named, never counted as done.
@@ -1329,15 +1335,14 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         Some(TextSource::Path(path)) => Some(path.clone()),
         _ => None,
     };
-    v_flex()
+    ornament::frame(t, if complete { t.ok.opacity(0.55) } else { t.review.opacity(0.6) }, t.surface)
+        .flex()
+        .flex_col()
         .flex_none()
         .m(px(12.))
-        .p(px(12.))
+        .px(px(16.))
+        .py(px(12.))
         .gap(px(8.))
-        .rounded(px(10.))
-        .border_1()
-        .border_color(if complete { t.ok.opacity(0.5) } else { t.review.opacity(0.6) })
-        .bg(t.surface)
         .child(
             h_flex()
                 .gap(px(8.))
@@ -1349,6 +1354,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
                 ))
                 .child(div().text_size(px(15.)).text_color(t.text).child(headline)),
         )
+        .child(ornament::divider(t, 0.0))
         .child(
             h_flex()
                 .flex_wrap()
@@ -1372,7 +1378,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
             this.child(
                 v_flex()
                     .gap(px(3.))
-                    .child(div().text_size(px(11.)).text_color(t.muted).child(tr(cx, TABLE, "Not verified")))
+                    .child(div().text_size(px(12.)).text_color(t.muted).child(tr(cx, TABLE, "Not verified")))
                     .children(open.iter().take(shown).map(|u| {
                         h_flex()
                             .gap(px(5.))
@@ -1393,32 +1399,27 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         })
 }
 
-fn emblem_view(t: Tokens, radius: f32) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let center = bounds.center();
-            let c = Pt { x: f32::from(center.x), y: f32::from(center.y) };
-            soft_glow(window, center, radius * 0.96, radius * 1.1, t.gold.opacity(0.28));
-            paint_emblem(window, c, radius, &t, 0.0);
-        },
-    )
-    .size(px(radius * 3.6))
+/// The portrait, large and dim, above the words of an empty state.
+fn empty_state(t: &Tokens, dark: bool, height: f32) -> Div {
+    let side = (height * 0.5).clamp(160.0, 340.0);
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .bg(t.canvas)
+        .child(div().mb(px(-side * 0.1)).child(ornament::portrait_backdrop(t, side, dark)))
 }
 
 impl Render for Mesh {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let dark = cx.theme().is_dark();
+        let height = f32::from(window.viewport_size().height) - 220.0;
         let state_entity = self.state.clone();
         let state = self.state.read(cx);
         let Some(run) = state.run() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .bg(t.canvas)
-                .child(emblem_view(t, 26.))
+            return empty_state(&t, dark, height)
                 .child(div().text_size(px(15.)).text_color(t.text).child(tr(cx, TABLE, "No wish to show")))
                 .child(
                     div()
@@ -1439,13 +1440,7 @@ impl Render for Mesh {
                 .into_any_element();
         };
         if run.modules.is_empty() {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .bg(t.canvas)
-                .child(emblem_view(t, 26.))
+            return empty_state(&t, dark, height)
                 .child(div().text_size(px(15.)).text_color(t.text).child(tr(cx, TABLE, planning_line(run))))
                 .child(
                     div()
@@ -1819,6 +1814,39 @@ mod tests {
             assert!(!animates(&run, false));
         }
         assert!(!animates(&run_of(&[&[Verified]]), false));
+    }
+
+    #[test]
+    fn wires_are_orbit_hairlines_that_turn_gold_only_along_running_work() {
+        let same = |a: Hsla, b: Hsla| a.h == b.h && a.s == b.s && a.l == b.l;
+        for (t, dark) in super::super::theme::both().into_iter().zip([true, false]) {
+            for state in [Pending, Verified, Built, Failed] {
+                for (width, color) in wire_layers(&t, state, Lit::No, dark) {
+                    assert!(same(color, t.orbit), "{state:?} wire is not an orbit line");
+                    assert!(width <= 1.0, "{state:?} wire is not a hairline");
+                }
+            }
+            assert!(wire_layers(&t, Running, Lit::No, dark).iter().all(|(_, c)| same(*c, t.gold)));
+            assert!(wire_layers(&t, Pending, Lit::Selected, dark).iter().all(|(_, c)| same(*c, t.gold)));
+        }
+    }
+
+    #[test]
+    fn faint_orbits_circle_the_core_through_the_modules_and_the_units() {
+        for width in WIDTHS {
+            let graph = layout(&sample_run(), width, 600.0, &Selection::None);
+            let radii = orbit_radii(&graph);
+            assert!((1..=3).contains(&radii.len()), "{} orbits at width {width}", radii.len());
+            assert!(radii.windows(2).all(|pair| pair[1] > pair[0]), "{radii:?}");
+            let card = graph.modules[0].rect;
+            let first = graph.core_x + radii[0];
+            assert!(first > card.x && first < card.right(), "the first orbit misses the module bodies");
+            assert!(radii[0] > graph.core_r);
+            assert!(graph.core_x + radii[radii.len() - 1] < width, "an orbit leaves the panel at width {width}");
+        }
+        assert!(orbit_radii(&layout(&run_of(&[]), 640.0, 600.0, &Selection::None)).is_empty());
+        let wide = layout(&sample_run(), 1120.0, 600.0, &Selection::None);
+        assert!(orbit_radii(&wide).len() >= 2);
     }
 
     #[test]
