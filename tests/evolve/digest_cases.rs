@@ -245,6 +245,7 @@ fn ledger(rows: Vec<AgentRow>) -> Ledger {
         by_agent: rows,
         instances: vec![],
         codex: vec![],
+        codex_missing_models: Default::default(),
         codex_runs_without_usage: 0,
         warnings: vec![],
         copied_calls: 0,
