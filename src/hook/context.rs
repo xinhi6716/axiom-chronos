@@ -76,15 +76,48 @@ pub fn last_context(path: &Path) -> Option<u64> {
     tail.split(|b| *b == b'\n').rev().find_map(context_of)
 }
 
-/// Context of the first assistant message: what the agent started with.
-fn first_context(path: &Path) -> Option<u64> {
+fn read_head(path: &Path) -> Option<Vec<u8>> {
     let mut head = Vec::new();
     File::open(path)
         .ok()?
         .take(HEAD_BYTES)
         .read_to_end(&mut head)
         .ok()?;
-    head.split(|b| *b == b'\n').find_map(context_of)
+    Some(head)
+}
+
+/// Context of the first assistant message: what the agent started with.
+fn first_context(path: &Path) -> Option<u64> {
+    read_head(path)?
+        .split(|b| *b == b'\n')
+        .find_map(context_of)
+}
+
+/// The text of the user messages in the transcript's head: the prompt the agent was started with.
+pub fn opening_text(path: &Path) -> Option<String> {
+    let head = read_head(path)?;
+    let mut out = String::new();
+    for line in head.split(|b| *b == b'\n') {
+        if !contains(line, b"\"user\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if v["type"] != "user" {
+            continue;
+        }
+        match &v["message"]["content"] {
+            Value::String(text) => out.push_str(text),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .for_each(|text| out.push_str(text)),
+            _ => (),
+        }
+        out.push('\n');
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// The id of the last compaction boundary in the transcript's tail.

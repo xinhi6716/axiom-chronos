@@ -109,7 +109,7 @@ fn path(store: &Path, module: Option<&str>) -> PathBuf {
         None => dir.join("wish.json"),
     }
 }
-fn map_modules(store: &Path) -> Res<Option<Vec<String>>> {
+pub(crate) fn map_modules(store: &Path) -> Res<Option<Vec<String>>> {
     let file = store.join("modules.md");
     if !file.exists() {
         return Ok(None);
@@ -260,10 +260,22 @@ fn keep_pending(all: Vec<Handoff>) -> Vec<Handoff> {
 
 /// Marks a handoff as taken by a fresh dispatcher.
 pub fn take_handoff(store: &Path, module: Option<&str>) -> Res<()> {
+    take(store, module, None)
+}
+
+/// Marks `h` taken once a dispatcher was seen running with it; a newer note of the module stays pending.
+pub fn take_delivered(store: &Path, h: &Handoff) -> Res<()> {
+    take(store, h.module.as_deref(), Some(&h.ts))
+}
+
+fn take(store: &Path, module: Option<&str>, ts: Option<&str>) -> Res<()> {
     with_lock(store, false, || {
         let Some(mut note) = read_handoff(store, module)? else {
             return Ok(());
         };
+        if note.taken || ts.is_some_and(|ts| ts != note.ts) {
+            return Ok(());
+        }
         note.taken = true;
         base::atomic_write(
             &path(store, module),
@@ -273,15 +285,23 @@ pub fn take_handoff(store: &Path, module: Option<&str>) -> Res<()> {
     })
 }
 
-pub fn handoff_text(h: &Handoff) -> String {
-    let mut text = format!(
-        "HANDOFF {} at {}{}\nnext: {}\n",
+/// The first line of a handoff's text without its pending mark; it names the note by module and time.
+pub fn handoff_header(h: &Handoff) -> String {
+    format!(
+        "HANDOFF {} at {}",
         h.module
             .as_deref()
             .map_or("for the whole wish".to_string(), |m| format!(
                 "for module {m}"
             )),
-        h.ts,
+        h.ts
+    )
+}
+
+pub fn handoff_text(h: &Handoff) -> String {
+    let mut text = format!(
+        "{}{}\nnext: {}\n",
+        handoff_header(h),
         if h.taken { "" } else { " (pending)" },
         h.next
     );

@@ -384,6 +384,7 @@ fn a_fresh_dispatcher_prompt_carries_the_digest_and_the_handoff() {
     assert!(prompt.contains("DIGEST\nunits: 1 (failed 1)"));
     assert!(prompt.contains("a1  failed"));
 
+    dispatcher_runs(&r, prompt);
     assert!(
         orch::read_handoff(&r.store, Some("m1"))
             .unwrap()
@@ -394,6 +395,95 @@ fn a_fresh_dispatcher_prompt_carries_the_digest_and_the_handoff() {
         call(&r, &start("Carry out module m1.")).is_none(),
         "a handoff is given to one fresh dispatcher"
     );
+}
+
+fn start_with(r: &Run, description: &str, prompt: &str) -> Value {
+    tool(
+        r,
+        "Agent",
+        json!({"subagent_type":"chronos:dispatcher","description":description,"prompt":prompt}),
+    )
+}
+fn given_prompt(out: &Value) -> String {
+    out["hookSpecificOutput"]["updatedInput"]["prompt"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+fn pending_modules(r: &Run) -> Vec<String> {
+    orch::pending_handoffs(&r.store)
+        .unwrap()
+        .into_iter()
+        .filter_map(|h| h.module)
+        .collect()
+}
+/// The dispatcher `d1` runs: its transcript opens with the prompt it was started with, then it reads the store.
+fn dispatcher_runs(r: &Run, prompt: &str) {
+    let opening = json!({"type":"user","message":{"role":"user","content":prompt}});
+    fs::write(&r.own, format!("{opening}\n{}", assistant(20_000))).unwrap();
+    let read = in_dispatcher(tool(
+        r,
+        "Read",
+        json!({"file_path": r.store.join("units.tsv")}),
+    ));
+    assert_eq!(refusal(r, &read), None);
+}
+
+#[test]
+fn only_the_module_a_dispatcher_carries_out_gets_its_handoff() {
+    let r = run();
+    handoff(&r, "m1", "fix a1");
+    handoff(&r, "m2", "start b1");
+    let out = call(&r, &start_with(&r, "Dispatch m2", "處理 m2，不要修改 m1")).unwrap();
+    let prompt = given_prompt(&out);
+    assert!(prompt.contains("HANDOFF for module m2"), "{prompt}");
+    assert!(
+        !prompt.contains("HANDOFF for module m1"),
+        "m1 is named only as a module to leave alone: {prompt}"
+    );
+    assert!(pending_modules(&r).contains(&"m1".to_string()));
+    dispatcher_runs(&r, &prompt);
+    assert_eq!(pending_modules(&r), ["m1"], "only m2's note was delivered");
+
+    let why = refusal(&r, &start_with(&r, "Dispatcher", "Carry out m1, after m2."))
+        .expect("two named modules and a description naming neither leave the target unclear");
+    assert!(why.contains("m1, m2") && why.contains("description"), "{why}");
+    let out = call(&r, &start_with(&r, "Dispatch m1", "Carry out m1, after m2.")).unwrap();
+    assert!(given_prompt(&out).contains("HANDOFF for module m1"));
+    assert!(
+        call(&r, &start_with(&r, "Dispatch m2", "Carry out module m2 (m1 is done).")).is_none(),
+        "m2's note is taken and m1's goes to no m2 dispatcher"
+    );
+}
+
+#[test]
+fn a_handoff_stays_pending_until_a_dispatcher_runs_with_it() {
+    let r = run();
+    handoff(&r, "m1", "dispatch fix unit a1-fix");
+    let start = start_dispatcher(&r, "m1");
+    let first = given_prompt(&call(&r, &start).unwrap());
+    assert!(first.contains("next: dispatch fix unit a1-fix"));
+    // The launch failed or was cancelled: no dispatcher ever ran with the note.
+    assert_eq!(pending_modules(&r), ["m1"]);
+    assert!(orch::digest(&r.store, &r.project, Some("m1"))
+        .unwrap()
+        .contains("handoff pending (m1)"));
+    assert_eq!(
+        goal::set_status(&r.home, "s", "blocked", Some("needs a key"))
+            .unwrap_err()
+            .kind,
+        "handoff_pending"
+    );
+    // A dispatcher started without the note consumes nothing.
+    dispatcher_runs(&r, "Carry out module m1.");
+    assert_eq!(pending_modules(&r), ["m1"]);
+
+    let retry = given_prompt(&call(&r, &start).expect("the retry gets the note again"));
+    assert!(retry.contains("next: dispatch fix unit a1-fix"));
+    dispatcher_runs(&r, &retry);
+    assert!(pending_modules(&r).is_empty());
+    assert!(call(&r, &start).is_none(), "a delivered note is given once");
+    goal::set_status(&r.home, "s", "blocked", Some("needs a key")).unwrap();
 }
 
 #[test]

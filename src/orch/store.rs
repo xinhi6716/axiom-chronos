@@ -178,21 +178,68 @@ pub struct StoreLock {
     _file: LockFile,
     _threads: MutexGuard<'static, ()>,
 }
+/// True when `holder` is a pid and no process runs under it.
+fn dead(holder: &str) -> bool {
+    holder
+        .parse::<u32>()
+        .ok()
+        .filter(|p| *p > 0 && p.to_string() == holder)
+        .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p))
+}
+/// A claimant writes its pid right after creating its marker; an empty marker older than this was abandoned.
+const EMPTY_MARKER_GRACE: Duration = Duration::from_secs(5);
+/// Dead reclaimers in a row after which a waiter gives up rather than claim yet another level.
+const MAX_RECLAIM_LEVELS: usize = 8;
+/// The claimant of a reclaim marker that will never finish: it died, left the marker empty, or is
+/// this process, whose threads take the store's lock one at a time.
+fn abandoned(marker: &Path) -> Option<String> {
+    let claimant = std::fs::read_to_string(marker).ok()?;
+    let claimant = claimant.trim();
+    if claimant.is_empty() {
+        let age = std::fs::metadata(marker).ok()?.modified().ok()?.elapsed().ok()?;
+        return (age > EMPTY_MARKER_GRACE).then(|| "unknown".to_string());
+    }
+    (dead(claimant) || claimant == std::process::id().to_string()).then(|| claimant.to_string())
+}
 /// Only the process that creates the marker may delete a dead holder's lock, so two that
-/// saw the same dead holder cannot delete the fresh lock one of them has just taken.
+/// saw the same dead holder cannot delete the fresh lock one of them has just taken. A marker
+/// whose claimant died is passed over by claiming one named after that claimant, which is just
+/// as exclusive, so a crash mid-reclaim never keeps the lock from being reclaimed.
 fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
-    let marker = path.with_extension(format!("lock.{holder}.stale"));
-    let claimed = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .is_ok();
-    if !claimed && !force {
-        return false;
+    let mut name = format!("lock.{holder}.stale");
+    let mut markers = Vec::new();
+    loop {
+        let marker = path.with_extension(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{}", std::process::id());
+                markers.push(marker);
+                break;
+            }
+            Err(_) if force => {
+                markers.push(marker);
+                break;
+            }
+            Err(_) => {
+                let Some(claimant) =
+                    abandoned(&marker).filter(|_| markers.len() < MAX_RECLAIM_LEVELS)
+                else {
+                    return false;
+                };
+                markers.push(marker);
+                name = format!("{name}.{claimant}.stale");
+            }
+        }
     }
     let cleared = std::fs::read_to_string(path).is_ok_and(|s| s.trim() == holder)
         && std::fs::remove_file(path).is_ok();
-    let _ = std::fs::remove_file(&marker);
+    for marker in &markers {
+        let _ = std::fs::remove_file(marker);
+    }
     cleared
 }
 fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
@@ -232,11 +279,7 @@ fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<
         } else {
             holder.trim()
         };
-        let dead = holder
-            .parse::<u32>()
-            .ok()
-            .filter(|p| *p > 0 && p.to_string() == holder)
-            .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p));
+        let dead = dead(holder);
         if dead && clear_dead_lock(&path, holder, force) {
             note.push_str(&format!(
                 "replacing stale store lock (pid {holder} is dead)
@@ -1488,5 +1531,59 @@ mod tests {
         );
         drop(holder.stdin.take());
         holder.wait().unwrap();
+    }
+
+    fn lock_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".orch.lock"))
+            .collect()
+    }
+
+    #[test]
+    fn a_reclaimer_that_died_mid_reclaim_does_not_keep_a_dead_holders_lock() {
+        let short = Duration::from_millis(300);
+        let t = tempfile::tempdir().unwrap();
+        let lock = t.path().join(".orch.lock");
+        // Pid 4294967295 held the lock and died; pid 4294967294 claimed the reclaim and died too.
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        let marker = t.path().join(".orch.lock.4294967295.stale");
+        std::fs::write(&marker, "4294967294\n").unwrap();
+        let mut note = String::new();
+        let held = acquire(t.path(), false, &mut note, short)
+            .expect("an abandoned reclaim marker is itself reclaimed");
+        assert!(note.contains("replacing stale store lock"), "{note}");
+        drop(held);
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+
+        // A reclaimer that died before writing its pid leaves an empty marker.
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        let empty = std::fs::File::create(&marker).unwrap();
+        empty
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        drop(empty);
+        drop(acquire(t.path(), false, &mut String::new(), short).expect("an old empty marker"));
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+
+        // A live reclaimer keeps its claim, and every level of a dead chain is cleared once it ends.
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        let mut claimant = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        std::fs::write(&marker, "4294967294\n").unwrap();
+        let second = t.path().join(".orch.lock.4294967295.stale.4294967294.stale");
+        std::fs::write(&second, format!("{}\n", claimant.id())).unwrap();
+        assert!(acquire(t.path(), false, &mut String::new(), short).is_err());
+        assert_eq!(std::fs::read_to_string(&lock).unwrap().trim(), "4294967295");
+        drop(claimant.stdin.take());
+        claimant.wait().unwrap();
+        drop(acquire(t.path(), false, &mut String::new(), short).expect("the claimant died"));
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
     }
 }
