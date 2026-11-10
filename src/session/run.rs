@@ -291,42 +291,34 @@ pub fn resume(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
+    resume_keeping(config, session, max_turns, message, input, None, out)
+}
+
+pub(super) fn resume_keeping(
+    config: &Config,
+    session: &str,
+    max_turns: Option<u32>,
+    message: Option<&str>,
+    input: Box<dyn BufRead + Send>,
+    hand_back: Option<HandBack>,
+    out: &mut dyn Write,
+) -> Res<i32> {
     let (prompt, cwd) = resume_target(config, session, message)?;
-    run_inner(
+    run_observed(
         config,
         "wish",
         &prompt,
         &cwd,
         max_turns,
         input,
+        hand_back,
         out,
         Some(session),
-    )
-}
-
-fn run_inner(
-    config: &Config,
-    skill: &str,
-    text: &str,
-    project: &Path,
-    max_turns: Option<u32>,
-    input: Box<dyn BufRead + Send>,
-    out: &mut dyn Write,
-    resume: Option<&str>,
-) -> Res<i32> {
-    run_observed(
-        config,
-        skill,
-        text,
-        project,
-        max_turns,
-        input,
-        out,
-        resume,
         &mut |_| {},
         &Launch::default(),
     )
 }
+
 pub(super) fn run_observed(
     config: &Config,
     skill: &str,
@@ -334,6 +326,7 @@ pub(super) fn run_observed(
     project: &Path,
     max_turns: Option<u32>,
     input: Box<dyn BufRead + Send>,
+    hand_back: Option<HandBack>,
     out: &mut dyn Write,
     resume: Option<&str>,
     observe: &mut dyn FnMut(&serde_json::Value),
@@ -342,11 +335,14 @@ pub(super) fn run_observed(
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();
     let spawned = spawn_with(config, skill, text, project, max_turns, resume, launch)?;
-    forward_input(Arc::clone(&spawned.writer), input);
+    forward_input_keeping(Arc::clone(&spawned.writer), input, hand_back);
     drive(spawned, config, out, &INTERRUPTED, observe)
 }
 
 pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
+
+/// Where a run's forwarder returns a line it read but could not deliver because the run is over.
+pub type HandBack = Box<dyn FnOnce(String) + Send>;
 
 pub fn send(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
     stdin
@@ -522,7 +518,15 @@ pub fn spawn_with(
 /// Forwards each non-blank line of `input` to claude as a user message until EOF. While the
 /// writer is empty because claude is waiting out a usage limit, the line waits for the resumed
 /// process; the thread ends once `drive` has let go of the writer.
-pub fn forward_input(writer: Writer, mut input: Box<dyn BufRead + Send>) {
+pub fn forward_input(writer: Writer, input: Box<dyn BufRead + Send>) {
+    forward_input_keeping(writer, input, None);
+}
+
+pub(super) fn forward_input_keeping(
+    writer: Writer,
+    mut input: Box<dyn BufRead + Send>,
+    hand_back: Option<HandBack>,
+) {
     std::thread::spawn(move || {
         let mut line = String::new();
         loop {
@@ -544,7 +548,12 @@ pub fn forward_input(writer: Writer, mut input: Box<dyn BufRead + Send>) {
                         }
                         break;
                     }
-                    None if Arc::strong_count(&writer) == 1 => return,
+                    None if Arc::strong_count(&writer) == 1 => {
+                        if let Some(hand_back) = hand_back {
+                            hand_back(line.to_owned());
+                        }
+                        return;
+                    }
                     None => {
                         drop(guard);
                         std::thread::sleep(Duration::from_millis(250));
