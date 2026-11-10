@@ -47,11 +47,14 @@ pub struct Tally {
     pub gap_rewrites: u64,
     pub gap_rewrite_tokens: u64,
     pub gap_rewrite_usd: f64,
+    #[serde(skip)]
+    pub missing: [bool; 4],
 }
 impl Tally {
     fn add(&mut self, call: &Call) {
         let u = &call.usage;
         self.calls += 1;
+        for (missing, reported) in self.missing.iter_mut().zip(call.reported) { *missing |= !reported; }
         self.input += u.input;
         self.cache_write += u.cache_write;
         self.cache_write_5m += u.cache_write_5m();
@@ -99,6 +102,8 @@ pub struct CodexTokens {
     pub output: u64,
     pub reasoning_output: u64,
     pub total: u64,
+    #[serde(skip)]
+    pub missing: [bool; 3],
 }
 impl CodexTokens {
     fn from_report(usage: &Value) -> Option<Self> {
@@ -110,6 +115,7 @@ impl CodexTokens {
             output: n("outputTokens"),
             reasoning_output: n("reasoningOutputTokens"),
             total: n("totalTokens"),
+            missing: ["inputTokens", "cachedInputTokens", "outputTokens"].map(|key| usage[key].as_u64().is_none()),
         })
     }
 }
@@ -187,6 +193,8 @@ pub struct Ledger {
     pub by_agent: Vec<AgentRow>,
     pub instances: Vec<Instance>,
     pub codex: Vec<CodexRow>,
+    #[serde(skip)]
+    pub codex_missing_models: Vec<String>,
     pub codex_runs_without_usage: u64,
     pub warnings: Vec<Warning>,
     pub copied_calls: u64,
@@ -507,6 +515,7 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
     let mut reads = BTreeMap::<(String, String, String), (u64, u64)>::new();
     let mut codex = BTreeMap::<String, CodexRow>::new();
     let mut codex_runs_without_usage = 0;
+    let mut codex_missing_models = Vec::new();
     let (mut copied_calls, mut compactions, mut skipped_lines) = (0, 0, 0);
     let mut claude_code_usd = None;
 
@@ -587,6 +596,9 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
             }
             let Some(tokens) = run.tokens else {
                 codex_runs_without_usage += 1;
+                if let Some(model) = run.model {
+                    codex_missing_models.push(model);
+                }
                 continue;
             };
             let model = run.model.unwrap_or_else(|| UNKNOWN_AGENT.to_owned());
@@ -601,6 +613,9 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
             row.tokens.output += tokens.output;
             row.tokens.reasoning_output += tokens.reasoning_output;
             row.tokens.total += tokens.total;
+            for (missing, part) in row.tokens.missing.iter_mut().zip(tokens.missing) {
+                *missing |= part;
+            }
         }
     }
 
@@ -720,6 +735,7 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
             by_agent,
             instances,
             codex: codex.into_values().collect(),
+            codex_missing_models,
             codex_runs_without_usage,
             warnings,
             copied_calls,

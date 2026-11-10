@@ -2,17 +2,18 @@
 //! plus what surrounds them: setup problems, no runs yet, and the summary when a run ends.
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
-use super::theme::{Tokened as _, Tokens};
+use super::theme::{self, Tokened as _, Tokens};
 use super::{
     control::{self, Control},
     detail::Detail,
     mesh::Mesh,
     ornament,
+    plain_text,
     settings,
     todo::Todo,
     usage,
 };
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
@@ -28,6 +29,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 const TEXT: Table = &[
+    ("Run", "執行"),
     ("Started in terminal: view only", "在終端機啟動：僅供檢視"),
     ("Elapsed", "經過時間"),
     ("Cost", "費用"),
@@ -554,6 +556,15 @@ fn clipped_title(text: &str) -> String {
 }
 
 /// Reads only what the run reports. A state it cannot tell apart gets the plainest true sentence.
+fn blocked_brief_title(title: plain_text::Plain) -> (String, Option<SharedString>) {
+    (clipped_title(&title.shown), title.original)
+}
+
+fn attention_title(title: plain_text::Plain) -> (SharedString, SharedString) {
+    let tooltip = title.original.unwrap_or_else(|| title.shown.clone());
+    (title.shown, tooltip)
+}
+
 fn brief_of(run: &Run) -> Brief {
     let working = |key| Brief::plain(key, Tone::Working);
     match run.status {
@@ -861,14 +872,14 @@ impl RunView {
                 .px_4()
                 .py_2()
                 .rounded(px(10.))
-                .bg(t.gold.opacity(0.06))
+                .bg(t.surface)
                 .border_1()
                 .border_color(t.gold.opacity(0.3))
                 .child(
                     h_flex()
                         .gap_2()
                         .items_baseline()
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(t.text).child(tr(cx, TEXT, "Your first day with Chronos")))
+                        .child(ornament::section_label(&t, tr(cx, TEXT, "Your first day with Chronos")))
                         .child(div().text_xs().text_color(t.muted).child(count)),
                 )
                 .children(day.items().into_iter().enumerate().map(|(i, (label, done, meaning))| {
@@ -894,7 +905,16 @@ impl RunView {
     /// The top line: what is happening, whether anything is needed, and what follows.
     fn brief(&self, run: &Run, cx: &App) -> impl IntoElement {
         let t = cx.tokens();
-        let brief = brief_of(run);
+        let mut brief = brief_of(run);
+        let original = if run.status == RunStatus::Blocked && !brief.args.is_empty() {
+            run.needs.iter().find(|n| n.kind != NeedKind::Interjection).and_then(|need| {
+                let (arg, original) = blocked_brief_title(plain_text::plain(cx, &need.title));
+                brief.args[0] = arg;
+                original
+            })
+        } else {
+            None
+        };
         let (icon, color) = match brief.tone {
             Tone::Working => (IconName::LoaderCircle, t.run),
             Tone::Waiting => (IconName::Pause, t.review),
@@ -915,7 +935,11 @@ impl RunView {
             .border_b_1()
             .border_color(t.border)
             .child(Icon::new(icon).size(px(16.)).text_color(color))
-            .child(div().min_w_0().text_sm().font_weight(FontWeight::MEDIUM).text_color(t.text).child(text))
+            .child(
+                div().id("run-brief-text").min_w_0().text_sm().font_weight(FontWeight::MEDIUM).text_color(t.text)
+                    .when_some(original, |this, original| this.tooltip(tooltip(original)))
+                    .child(text),
+            )
     }
 
     /// The details panel, with its "say something about this" action when a message can reach the run.
@@ -1089,6 +1113,7 @@ impl RunView {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
+                    .child(ornament::page_title(&t, tr(cx, TEXT, "Run")))
                     .child(self.wish(run, cx))
                     .child(
                         h_flex()
@@ -1165,7 +1190,7 @@ impl RunView {
             .px_4()
             .py_3()
             .rounded(px(10.))
-            .bg(t.fail.opacity(0.07))
+            .bg(t.surface)
             .border_1()
             .border_color(t.fail.opacity(0.4))
             .child(
@@ -1279,35 +1304,30 @@ impl RunView {
                     .header(
                         EmptyHeader::new()
                             .max_w(px(560.))
-                            .title(EmptyTitle::new().text_xl().text_color(t.text).child(tr(cx, TEXT, title)))
+                            .title(EmptyTitle::new().child(ornament::page_title(&t, tr(cx, TEXT, title))))
                             .description(EmptyDescription::new().text_sm().child(tr(cx, TEXT, description))),
                     )
                     .content(
                         EmptyContent::new()
                             .child(
-                                Button::new("make-a-wish")
-                                    .custom(
-                                        ButtonCustomVariant::new(cx)
-                                            .color(t.gold)
-                                            .foreground(t.canvas)
-                                            .hover(t.gold.opacity(0.88))
-                                            .active(t.gold.opacity(0.76)),
-                                    )
-                                    .large()
-                                    .h(px(44.))
-                                    .px_6()
-                                    .disabled(blocked)
-                                    .when(!blocked, |this| this.bg(t.gold))
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .text_size(px(15.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(Icon::new(IconName::Star).size(px(16.)))
-                                            .child(tr(cx, TEXT, "Make a wish")),
-                                    )
-                                    .on_click(move |_, _, cx| compose.update(cx, |s, cx| s.set_composing(true, cx))),
+                                theme::gold_leaf(
+                                    Button::new("make-a-wish")
+                                        .large()
+                                        .h(px(44.))
+                                        .px_6()
+                                        .disabled(blocked)
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .text_size(px(15.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(Icon::new(IconName::Star).size(px(16.)))
+                                                .child(tr(cx, TEXT, "Make a wish")),
+                                        )
+                                        .on_click(move |_, _, cx| compose.update(cx, |s, cx| s.set_composing(true, cx))),
+                                    &t,
+                                ),
                             )
                             .when(blocked, |this| {
                                 this.child(
@@ -1347,13 +1367,14 @@ impl RunView {
             .iter()
             .map(|&index| {
                 let unit = &run.units[index];
+                let (title, tooltip) = attention_title(plain_text::plain(cx, &unit.title));
                 let color = t.unit(unit.state);
                 let state = self.state.clone();
                 Button::new(("attention-unit", index))
                     .ghost()
                     .small()
                     .w_full()
-                    .tooltip(unit.title.clone())
+                    .tooltip(tooltip)
                     .child(
                         h_flex()
                             .flex_1()
@@ -1362,7 +1383,7 @@ impl RunView {
                             .items_center()
                             .text_xs()
                             .child(Icon::new(unit_icon(unit.state)).size(px(13.)).text_color(color))
-                            .child(div().flex_1().min_w_0().truncate().text_color(t.text).child(unit.title.clone()))
+                            .child(div().flex_1().min_w_0().truncate().text_color(t.text).child(title))
                             .child(div().flex_none().text_color(color).child(tr(cx, TEXT, unit.state.label()))),
                     )
                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select(Selection::Unit(index), cx)))
@@ -1542,11 +1563,7 @@ impl RunView {
                                     .gap_1()
                                     .when(attention_count > 0, |this| {
                                         this.child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(t.muted)
-                                                .child(tr(cx, TEXT, "What needs attention")),
+                                            ornament::section_label(&t, tr(cx, TEXT, "What needs attention")),
                                         )
                                     })
                                     .when(summary.verdict == Verdict::Clean && attention_count == 0, |this| {
@@ -1653,7 +1670,6 @@ impl RunView {
         let session = run.session.clone();
         column(self.mesh.clone())
             .relative()
-            .bg(t.canvas)
             .map(|this| match &summary {
                 Some(summary) if !hidden => this.child(self.summary(run, summary, cx)).into_any_element(),
                 Some(_) => this
@@ -1751,7 +1767,30 @@ mod tests {
     };
     use super::super::i18n::Lang;
     use super::{brief_of, Brief, FirstDay, Tone};
+    use super::{attention_title, blocked_brief_title, plain_text::Plain};
     use gpui_kit::SharedString;
+
+    #[test]
+    fn plain_titles_supply_attention_and_blocked_text_with_original_tooltips() {
+        let title = Plain { shown: "Plain\n title".into(), original: Some("Technical title".into()) };
+        let (shown, tooltip) = attention_title(title.clone());
+        assert_eq!(shown.as_ref(), "Plain\n title");
+        assert_eq!(tooltip.as_ref(), "Technical title");
+        let (arg, original) = blocked_brief_title(title);
+        assert_eq!(arg, "Plain");
+        assert_eq!(original.as_deref(), Some("Technical title"));
+    }
+
+    #[test]
+    fn untranslated_titles_keep_attention_and_blocked_fallbacks() {
+        let title = Plain { shown: "Untranslated title".into(), original: None };
+        let (shown, tooltip) = attention_title(title.clone());
+        assert_eq!(shown.as_ref(), "Untranslated title");
+        assert_eq!(tooltip.as_ref(), "Untranslated title");
+        let (arg, original) = blocked_brief_title(title);
+        assert_eq!(arg, "Untranslated title");
+        assert_eq!(original, None);
+    }
 
     fn run_with(states: &[UnitState]) -> Run {
         let mut run = sample_run();
@@ -1796,7 +1835,7 @@ mod tests {
     #[test]
     fn models_without_a_price_are_named() {
         let usage = sample_run().usage;
-        assert_eq!(unpriced_models(&usage), vec![SharedString::from("gpt-6.1-terra")]);
+        assert_eq!(unpriced_models(&usage), vec![SharedString::from("gpt-unknown")]);
         assert!(unpriced_models(&Usage::default()).is_empty());
     }
 

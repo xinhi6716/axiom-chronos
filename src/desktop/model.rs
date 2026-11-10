@@ -135,7 +135,9 @@ pub struct ModelCost {
     /// Each count is `None` when the run did not report it.
     pub input: Option<u64>,
     pub cached: Option<u64>,
+    pub cache_write: Option<u64>,
     pub output: Option<u64>,
+    pub total: Option<u64>,
 }
 
 /// Spend attributed to one role. Left empty when a run has no per-role record.
@@ -161,6 +163,12 @@ pub struct Usage {
     pub models: Vec<ModelCost>,
     pub roles: Vec<RoleCost>,
     pub contexts: Vec<AgentContext>,
+}
+
+impl Usage {
+    pub fn unpriced(&self) -> Vec<SharedString> {
+        self.models.iter().filter(|model| model.usd.is_none()).map(|model| model.model.clone()).collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

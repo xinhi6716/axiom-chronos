@@ -402,8 +402,208 @@ pub fn paint_stars(window: &mut Window, origin: (f32, f32), stars: &[Star], ink:
 
 /// Paints part of a circle of radius `r` around `(cx, cy)`, as the graph's faint orbits.
 pub fn paint_orbit_arc(window: &mut Window, cx: f32, cy: f32, r: f32, from_deg: f32, to_deg: f32, color: Hsla) {
+    paint_orbit_arc_with_width(window, cx, cy, r, from_deg, to_deg, color, 1.0);
+}
+
+fn paint_orbit_arc_with_width(window: &mut Window, cx: f32, cy: f32, r: f32, from_deg: f32, to_deg: f32, color: Hsla, width: f32) {
     let steps = ((to_deg - from_deg).abs() / 2.0).ceil().max(8.0) as usize;
-    stroke(window, &arc(cx, cy, r, from_deg, to_deg, steps), false, 1.0, color);
+    stroke(window, &arc(cx, cy, r, from_deg, to_deg, steps), false, width, color);
+}
+
+/// Static layers shared by the backdrop and its contrast checks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackdropLayers {
+    pub stars: Vec<Star>,
+    pub glow_alpha: f32,
+    pub vignette_alpha: f32,
+}
+
+pub fn backdrop_layers(w: f32, h: f32, dark: bool) -> BackdropLayers {
+    BackdropLayers { stars: star_field(w, h), glow_alpha: if dark { 0.05 } else { 0.02 }, vignette_alpha: if dark { 0.15 } else { 0.04 } }
+}
+
+/// A fixed canvas: no clock, animation, or frame requests.
+pub fn backdrop(t: &Tokens, dark: bool) -> impl IntoElement {
+    let (ground, glow, ink) = (t.canvas, t.gold, t.text);
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let b = Box2::of(bounds);
+        let layers = backdrop_layers(b.w, b.h, dark);
+        window.paint_quad(fill(bounds, ground));
+        // Nested, translucent rounded rectangles approximate a diffuse central glow. Their
+        // cumulative opacity at the centre is exactly glow_alpha.
+        let n = 24;
+        let alpha = 1.0 - (1.0 - layers.glow_alpha).powf(1.0 / n as f32);
+        for i in (1..=n).rev() {
+            let scale = i as f32 / n as f32;
+            let (w, h) = (b.w * 0.8 * scale, b.h * 0.8 * scale);
+            let rect = Box2 { x: b.x + (b.w - w) / 2.0, y: b.y + (b.h - h) / 2.0, w, h };
+            window.paint_quad(fill(rect.bounds(), glow.opacity(alpha)).corner_radii(px(w.min(h) / 2.0)));
+        }
+        let shade: Hsla = rgb(0x000000).into();
+        for (rect, angle) in [
+            (Box2 { x: b.x, y: b.y, w: b.w * 0.3, h: b.h }, 90.0),
+            (Box2 { x: b.x + b.w * 0.7, y: b.y, w: b.w * 0.3, h: b.h }, 270.0),
+            (Box2 { x: b.x, y: b.y, w: b.w, h: b.h * 0.3 }, 180.0),
+            (Box2 { x: b.x, y: b.y + b.h * 0.7, w: b.w, h: b.h * 0.3 }, 0.0),
+        ] {
+            let fade = linear_gradient(angle, linear_color_stop(shade.opacity(layers.vignette_alpha), 0.0), linear_color_stop(shade.opacity(0.0), 1.0));
+            window.paint_quad(fill(rect.bounds(), fade));
+        }
+        paint_stars(window, (b.x, b.y), &layers.stars, ink);
+    }).absolute().top_0().left_0().size_full()
+}
+
+pub const TITLE_FALLBACK: &str = "Palatino Linotype";
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x2e80..=0x2fff | 0x3040..=0x30ff | 0x3100..=0x312f | 0x31a0..=0x31bf | 0x31c0..=0x31ef | 0x31f0..=0x31ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff | 0x20000..=0x323af)
+}
+
+pub fn title_family(text: &str) -> &'static str {
+    if text.chars().any(is_cjk) { "Microsoft JhengHei" } else { "Constantia" }
+}
+
+pub fn section_caps(text: &str) -> String {
+    text.chars().map(|c| c.to_ascii_uppercase()).collect()
+}
+
+pub fn tracked(text: &str) -> String {
+    let mut out = String::new();
+    let mut previous_cjk = false;
+    for c in text.chars() {
+        let cjk = is_cjk(c);
+        if previous_cjk && cjk { out.push('\u{200a}'); }
+        out.push(c);
+        previous_cjk = cjk;
+    }
+    out
+}
+
+struct TitleStyle {
+    family: &'static str,
+    fallback: &'static str,
+    bold: bool,
+    size: f32,
+}
+
+fn title_style(text: &str) -> TitleStyle {
+    TitleStyle { family: title_family(text), fallback: TITLE_FALLBACK, bold: text.chars().any(is_cjk), size: 22.0 }
+}
+
+const LABEL_SIZE: f32 = 12.0;
+
+fn label_text(text: &str) -> String {
+    let caps = tracked(&section_caps(text));
+    let mut spaced = String::new();
+    let mut previous_latin = false;
+    for c in caps.chars() {
+        let latin = c.is_ascii_alphabetic();
+        if previous_latin && latin { spaced.push('\u{2009}'); }
+        spaced.push(c);
+        previous_latin = latin;
+    }
+    spaced
+}
+
+pub fn page_title(t: &Tokens, text: impl Into<SharedString>) -> Div {
+    let text = text.into();
+    let style = title_style(&text);
+    let mut title = div().font_family(style.family).text_color(t.text).text_size(px(style.size))
+        .font_weight(if style.bold { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(tracked(&text));
+    title.text_style().font_fallbacks = Some(FontFallbacks::from_fonts(vec![style.fallback.to_string()]));
+    title
+}
+
+pub fn section_label(t: &Tokens, text: &str) -> Div {
+    div().flex().flex_col().text_color(t.gold).text_size(px(LABEL_SIZE)).child(label_text(text)).child(divider(t, 0.0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emblem { Hourglass, Scroll, StarBook, Astrolabe, Armillary }
+
+/// Each polyline is in the square's coordinate system; shapes keep a margin for the ink.
+pub fn emblem_strokes(kind: Emblem, side: f32) -> Vec<Vec<(f32, f32)>> {
+    let circle = |cx: f32, cy: f32, rx: f32, ry: f32| -> Vec<(f32, f32)> {
+        (0..=48).map(|i| { let a = TAU * i as f32 / 48.0; (cx + rx * a.cos(), cy + ry * a.sin()) }).collect()
+    };
+    let lines: Vec<Vec<(f32, f32)>> = match kind {
+        Emblem::Hourglass => vec![vec![(0.22,0.14),(0.78,0.14)], vec![(0.22,0.86),(0.78,0.86)], vec![(0.28,0.14),(0.31,0.28),(0.5,0.5),(0.69,0.72),(0.72,0.86)], vec![(0.72,0.14),(0.69,0.28),(0.5,0.5),(0.31,0.72),(0.28,0.86)], vec![(0.39,0.75),(0.5,0.65),(0.61,0.75)]],
+        Emblem::Scroll => vec![vec![(0.23,0.23),(0.23,0.72),(0.29,0.79),(0.76,0.79),(0.81,0.73),(0.76,0.67),(0.68,0.67),(0.68,0.79)], vec![(0.23,0.23),(0.29,0.17),(0.73,0.17),(0.78,0.23),(0.73,0.29),(0.23,0.29)], vec![(0.36,0.41),(0.66,0.41)], vec![(0.36,0.52),(0.66,0.52)], vec![(0.36,0.63),(0.57,0.63)]],
+        Emblem::StarBook => vec![vec![(0.12,0.24),(0.32,0.2),(0.5,0.27),(0.68,0.2),(0.88,0.24),(0.88,0.76),(0.68,0.72),(0.5,0.79),(0.32,0.72),(0.12,0.76),(0.12,0.24)], vec![(0.5,0.27),(0.5,0.79)], vec![(0.69,0.35),(0.72,0.43),(0.8,0.46),(0.72,0.49),(0.69,0.57),(0.66,0.49),(0.58,0.46),(0.66,0.43),(0.69,0.35)]],
+        Emblem::Astrolabe => vec![circle(0.5,0.48,0.34,0.34), circle(0.5,0.48,0.25,0.25), vec![(0.5,0.1),(0.5,0.86)], vec![(0.12,0.48),(0.88,0.48)], vec![(0.28,0.7),(0.72,0.26)], vec![(0.37,0.9),(0.63,0.9)]],
+        Emblem::Armillary => vec![circle(0.5,0.45,0.34,0.34), circle(0.5,0.45,0.15,0.34), circle(0.5,0.45,0.34,0.12), vec![(0.2,0.62),(0.8,0.28)], vec![(0.5,0.79),(0.5,0.9)], vec![(0.3,0.9),(0.7,0.9)]],
+    };
+    let side = side.max(0.0);
+    lines.into_iter().map(|line| line.into_iter().map(|(x,y)| (x * side, y * side)).collect()).collect()
+}
+
+pub fn emblem(kind: Emblem, side: f32, ink: Hsla) -> impl IntoElement {
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let b = Box2::of(bounds);
+        for line in emblem_strokes(kind, side) {
+            let points: Vec<_> = line.into_iter().map(|(x,y)| point(px(b.x + x), px(b.y + y))).collect();
+            stroke(window, &points, false, 1.4, ink);
+        }
+    }).flex_none().size(px(side))
+}
+
+fn underline_points(b: Box2, lit: f32) -> Vec<Point<Pixels>> {
+    if lit.clamp(0.0, 1.0) <= 0.0 { return Vec::new(); }
+    (0..=32).map(|i| {
+        let a = std::f32::consts::PI * (0.12 + 0.76 * i as f32 / 32.0);
+        point(px(b.x + b.w / 2.0 + b.w * 0.46 * a.cos()), px(b.y + b.h * 0.12 + b.h * 0.75 * a.sin()))
+    }).collect()
+}
+
+pub fn orbit_underline(ink: Hsla, lit: f32) -> impl IntoElement {
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let lit = lit.clamp(0.0, 1.0);
+        let points = underline_points(Box2::of(bounds), lit);
+        if !points.is_empty() { stroke(window, &points, false, 1.0, ink.opacity(ink.a * lit)); }
+    }).w_full().h(px(8.0)).flex_none()
+}
+
+pub fn ring_sweep(verified: usize, total: usize) -> Option<f32> {
+    (total != 0).then(|| (verified as f64 / total as f64).min(1.0) as f32)
+}
+
+const RING_TRACK_WIDTH: f32 = 1.0;
+const RING_ARC_WIDTH: f32 = 2.0;
+const RING_TRACK_ALPHA: f32 = 0.35;
+const RING_ARC_ALPHA: f32 = 1.0;
+
+fn ring_arcs(t: &Tokens, sweep: f32) -> Vec<(f32, f32, f32, Hsla)> {
+    let mut arcs = vec![(0.0, 360.0, RING_TRACK_WIDTH, t.orbit.opacity(RING_TRACK_ALPHA))];
+    if sweep > 0.0 {
+        arcs.push((-90.0, -90.0 + 360.0 * sweep, RING_ARC_WIDTH, t.gold.opacity(RING_ARC_ALPHA)));
+    }
+    arcs
+}
+
+pub fn progress_ring(t: &Tokens, verified: usize, total: usize, side: f32) -> Option<AnyElement> {
+    let sweep = ring_sweep(verified, total)?;
+    let arcs = ring_arcs(t, sweep);
+    Some(canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let b = Box2::of(bounds);
+        let (cx, cy, r) = (b.x + b.w / 2.0, b.y + b.h / 2.0, (side / 2.0 - 1.0).max(0.0));
+        for &(from, to, width, color) in &arcs {
+            paint_orbit_arc_with_width(window, cx, cy, r, from, to, color, width);
+        }
+    }).flex_none().size(px(side)).into_any_element())
+}
+
+fn gold_fill_stops(t: &Tokens) -> [LinearColorStop; 2] {
+    let leaf = t.gold_leaf(super::theme::Press::Normal);
+    [linear_color_stop(leaf.top, 0.0), linear_color_stop(leaf.bottom, 1.0)]
+}
+
+pub fn gold_fill(t: &Tokens) -> Background {
+    let [top, bottom] = gold_fill_stops(t);
+    linear_gradient(180.0, top, bottom)
+}
+
+pub fn gold_glow(t: &Tokens, strength: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow { color: t.gold.opacity(0.24 * strength.clamp(0.0, 1.0)), offset: Point::default(), blur_radius: px(12.0), spread_radius: px(0.0), inset: false }]
 }
 
 #[cfg(test)]
@@ -411,6 +611,146 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn backdrop_is_fixed_and_keeps_stars_faint() {
+        for dark in [false, true] {
+            let layers = backdrop_layers(1200.0, 900.0, dark);
+            assert_eq!(layers, backdrop_layers(1200.0, 900.0, dark));
+            assert_eq!(layers.stars, star_field(1200.0, 900.0));
+            assert!(!layers.stars.is_empty());
+            assert!(layers.stars.iter().all(|s| s.alpha > 0.0 && s.alpha < STAR_MAX_ALPHA));
+            assert!(layers.glow_alpha > 0.0 && layers.glow_alpha < 1.0);
+            assert!(layers.vignette_alpha > 0.0 && layers.vignette_alpha < 1.0);
+        }
+    }
+
+    #[test]
+    fn backdrop_centre_preserves_text_contrast() {
+        let luminance = |c: Rgba| {
+            let linear = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+        };
+        let contrast = |a: Rgba, b: Rgba| { let (a,b) = (luminance(a), luminance(b)); (a.max(b) + 0.05) / (a.min(b) + 0.05) };
+        assert!(contrast(rgb(0x000000).into(), rgb(0xffffff).into()) > 4.5);
+        let themes = super::super::theme::both();
+        let dark = themes.iter().find(|t| t.canvas.l < 0.5).expect("dark theme");
+        let light = themes.iter().find(|t| t.canvas.l >= 0.5).expect("light theme");
+        for (t, dark) in [(dark, true), (light, false)] {
+            let a = backdrop_layers(1200.0, 900.0, dark).glow_alpha;
+            let (canvas, glow) = (Rgba::from(t.canvas), Rgba::from(t.gold));
+            let bg = Rgba { r: glow.r * a + canvas.r * (1.0 - a), g: glow.g * a + canvas.g * (1.0 - a), b: glow.b * a + canvas.b * (1.0 - a), a: 1.0 };
+            for fg in [t.text, t.muted] {
+                let ratio = contrast(Rgba::from(fg), bg);
+                assert!(ratio >= 4.5, "dark={dark}, {fg:?}: {ratio}");
+            }
+            assert_ne!(bg, canvas);
+        }
+    }
+
+    #[test]
+    fn typography_respects_latin_chinese_and_mixed_text() {
+        assert_eq!(section_caps("alpha 12"), "ALPHA 12");
+        assert_eq!(section_caps("中文"), "中文");
+        assert_eq!(section_caps("中a文2é"), "中A文2é");
+        assert_eq!(tracked("Alpha 12"), "Alpha 12");
+        assert_eq!(tracked("中文標題"), "中\u{200a}文\u{200a}標\u{200a}題");
+        assert_eq!(tracked("中文A測試2"), "中\u{200a}文A測\u{200a}試2");
+        assert_eq!(title_family("Alpha"), "Constantia");
+        assert_eq!(title_family("中文"), "Microsoft JhengHei");
+        assert_eq!(title_family("Alpha 中"), "Microsoft JhengHei");
+    }
+
+    #[test]
+    fn title_and_label_styles_follow_typography_contract() {
+        for (text, bold) in [("Alpha", false), ("中文", true), ("Alpha 中", true)] {
+            let style = title_style(text);
+            assert_eq!(style.family, title_family(text));
+            assert_eq!(style.bold, bold);
+            assert!((20.0..=24.0).contains(&style.size));
+            assert_eq!(style.fallback, TITLE_FALLBACK);
+        }
+        assert!(LABEL_SIZE >= 12.0);
+        assert_eq!(label_text("alpha 中文"), "A\u{2009}L\u{2009}P\u{2009}H\u{2009}A 中\u{200a}文");
+        assert_eq!(label_text("中a文2é"), tracked(&section_caps("中a文2é")));
+    }
+
+    #[test]
+    fn underline_is_empty_at_rest_and_has_an_arc_when_lit() {
+        let bounds = Box2 { x: 10.0, y: 20.0, w: 100.0, h: 8.0 };
+        assert!(underline_points(bounds, 0.0).is_empty());
+        assert!(underline_points(bounds, -1.0).is_empty());
+        for lit in [0.5, 1.0] {
+            let points = underline_points(bounds, lit);
+            assert!(points.len() > 2);
+            assert_ne!(points.first(), points.last());
+            assert!(points.iter().all(|p| {
+                let (x, y) = (f32::from(p.x), f32::from(p.y));
+                (bounds.x..=bounds.x + bounds.w).contains(&x)
+                    && (bounds.y..=bounds.y + bounds.h).contains(&y)
+            }));
+        }
+    }
+
+    #[test]
+    fn progress_ring_arc_is_more_visible_than_track() {
+        for t in super::super::theme::both() {
+            let sweep = 0.5;
+            let arcs = ring_arcs(&t, sweep);
+            assert_eq!(arcs.len(), 2);
+            let (track, gold) = (arcs[0], arcs[1]);
+            assert_eq!((track.0, track.1), (0.0, 360.0));
+            assert_eq!((gold.0, gold.1), (-90.0, -90.0 + 360.0 * sweep));
+            assert_eq!(track.3, t.orbit.opacity(RING_TRACK_ALPHA));
+            assert_eq!(gold.3, t.gold.opacity(RING_ARC_ALPHA));
+            let gold_is_wider = |arcs: &[(f32, f32, f32, Hsla)]| arcs[1].2 > arcs[0].2;
+            assert!(gold_is_wider(&arcs));
+            assert!(gold.3.a > track.3.a);
+            let mut swapped = arcs.clone();
+            swapped[0].2 = gold.2;
+            swapped[1].2 = track.2;
+            assert!(!gold_is_wider(&swapped));
+            assert_eq!(ring_arcs(&t, 0.0), vec![track]);
+        }
+    }
+
+    #[test]
+    fn progress_ring_and_gold_effects_follow_contract() {
+        for t in super::super::theme::both() {
+            assert!(progress_ring(&t, 0, 0, 20.0).is_none());
+            assert!(progress_ring(&t, 1, 2, 20.0).is_some());
+            let off = gold_glow(&t, 0.0);
+            let full = gold_glow(&t, 1.0);
+            assert!(!off.is_empty());
+            assert!(off.iter().all(|shadow| shadow.color.a == 0.0));
+            assert!(full.iter().any(|shadow| shadow.color.a > 0.0 && shadow.blur_radius > px(0.0)));
+            assert_eq!(gold_glow(&t, 2.0), full);
+            let stops = gold_fill_stops(&t);
+            assert_eq!((stops[0].percentage, stops[1].percentage), (0.0, 1.0));
+            assert_ne!(stops[0].color, stops[1].color);
+            assert_eq!(gold_fill(&t), linear_gradient(180.0, stops[0], stops[1]));
+        }
+    }
+
+    #[test]
+    fn progress_sweep_handles_empty_zero_and_overfull() {
+        assert_eq!(ring_sweep(0, 7), Some(0.0));
+        assert_eq!(ring_sweep(3, 6), Some(0.5));
+        assert_eq!(ring_sweep(7, 7), Some(1.0));
+        assert_eq!(ring_sweep(8, 7), Some(1.0));
+        assert_eq!(ring_sweep(0, 0), None);
+    }
+
+    #[test]
+    fn emblem_geometry_is_bounded_and_distinct() {
+        let kinds = [Emblem::Hourglass, Emblem::Scroll, Emblem::StarBook, Emblem::Astrolabe, Emblem::Armillary];
+        let shapes: Vec<_> = kinds.into_iter().map(|kind| emblem_strokes(kind, 80.0)).collect();
+        for (i, shape) in shapes.iter().enumerate() {
+            assert!(!shape.is_empty());
+            assert!(shape.iter().all(|line| line.len() >= 2 && line.iter().all(|&(x,y)| (0.0..=80.0).contains(&x) && (0.0..=80.0).contains(&y))));
+            for other in &shapes[..i] { assert_ne!(shape, other); }
+        }
+    }
 
     #[test]
     fn the_portrait_is_the_256px_png_inside_the_window_icon() {

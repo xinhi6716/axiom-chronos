@@ -1,6 +1,7 @@
 //! The Settings screen: environment checks, versions and the preferences that persist.
 use super::i18n::{fill, tr, Table};
 use super::model::*;
+use super::ornament;
 use super::settings::{self, LanguageChoice, Store, ThemeChoice};
 use super::theme::{Tokened as _, Tokens};
 use crate::base;
@@ -11,7 +12,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::component::{Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _};
+use gpui_kit::component::{Icon, IconName, Selectable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -62,6 +63,8 @@ const T: Table = &[
     ("Dark", "深色"),
     ("Reduce motion", "減少動態"),
     ("Turns off the particles and transitions.", "關閉粒子與過場動畫。"),
+    ("Plain words", "白話翻譯"),
+    ("Turns technical text into plain Traditional Chinese using Claude Haiku.", "使用 Claude Haiku 將技術文字轉成白話繁體中文。"),
     ("Data folder", "資料存放位置"),
     ("Open", "開啟"),
     ("Settings could not be saved: {}", "無法儲存設定：{}"),
@@ -74,11 +77,11 @@ const RECHECK_TIMEOUT: Duration = Duration::from_secs(20);
 /// With no backend nothing will answer, so the button only acknowledges the press.
 const RECHECK_ACKNOWLEDGE: Duration = Duration::from_millis(900);
 
-fn status_icon(status: CheckStatus) -> IconName {
+fn check_glyph(status: CheckStatus) -> UnitState {
     match status {
-        CheckStatus::Ok => IconName::CircleCheck,
-        CheckStatus::Warn => IconName::TriangleAlert,
-        CheckStatus::Fail => IconName::CircleX,
+        CheckStatus::Ok => UnitState::Verified,
+        CheckStatus::Warn => UnitState::Built,
+        CheckStatus::Fail => UnitState::Failed,
     }
 }
 
@@ -234,12 +237,15 @@ impl DoctorView {
         } else {
             (tr(cx, T, "Everything is ready").into(), t.ok)
         };
-        let recheck = Button::new("recheck")
-            .small()
-            .icon(IconName::RefreshCw)
-            .label(if checking { tr(cx, T, "Checking…") } else { tr(cx, T, "Re-check") })
-            .loading(checking)
-            .on_click(cx.listener(|this, _, _, cx| this.start_recheck(cx)));
+        let recheck = super::theme::gold_leaf(
+            Button::new("recheck")
+                .small()
+                .icon(IconName::RefreshCw)
+                .label(if checking { tr(cx, T, "Checking…") } else { tr(cx, T, "Re-check") })
+                .loading(checking)
+                .on_click(cx.listener(|this, _, _, cx| this.start_recheck(cx))),
+            &t,
+        );
         let body = if checks.is_empty() {
             div()
                 .py_4()
@@ -324,6 +330,15 @@ impl DoctorView {
                     .accessibility_label(tr(cx, T, "Reduce motion"))
                     .on_click(move |on, _, cx| settings::set_reduce_motion(*on, &state, cx)),
             ))
+            .child(preference_row(
+                &t,
+                tr(cx, T, "Plain words"),
+                Some(tr(cx, T, "Turns technical text into plain Traditional Chinese using Claude Haiku.")),
+                Switch::new("plain-words")
+                    .checked(super::plain_text::enabled(cx))
+                    .accessibility_label(tr(cx, T, "Plain words"))
+                    .on_click(|on, _, cx| super::plain_text::set_enabled(*on, cx)),
+            ))
             .child(
                 v_flex()
                     .gap_1p5()
@@ -360,19 +375,17 @@ impl DoctorView {
 }
 
 fn card(t: &Tokens, title: &'static str, action: Option<AnyElement>) -> Stateful<Div> {
-    v_flex()
+    ornament::frame(t, t.border, t.surface)
         .id(title)
+        .flex()
+        .flex_col()
         .p_4()
         .gap_1()
-        .rounded(px(10.))
-        .border_1()
-        .border_color(t.border)
-        .bg(t.surface)
         .child(
             h_flex()
                 .justify_between()
-                .h(px(24.))
-                .child(div().text_base().font_medium().child(title))
+                .gap_2()
+                .child(ornament::section_label(t, title).flex_1().min_w_0())
                 .children(action),
         )
 }
@@ -400,7 +413,7 @@ fn check_row(index: usize, check: &Check, cx: &App) -> AnyElement {
         .child(
             h_flex()
                 .gap_2()
-                .child(Icon::new(status_icon(check.status)).size(px(15.)).text_color(color))
+                .child(ornament::glyph(check_glyph(check.status), 15.0, color, 0.0))
                 .child(div().w(px(92.)).flex_shrink_0().text_sm().truncate().child(check.name.clone()))
                 .child(
                     div()
@@ -475,7 +488,7 @@ impl Render for DoctorView {
                 .child(
                     v_flex()
                         .gap_0p5()
-                        .child(div().text_xl().font_semibold().child(tr(cx, &[], "Settings")))
+                        .child(ornament::page_title(&t, tr(cx, &[], "Settings")))
                         .child(div().text_sm().text_color(t.muted).child(tr(cx, T, "Check the environment and choose how Chronos looks."))),
                 )
                 .child(
@@ -497,6 +510,19 @@ mod tests {
 
     fn check(name: &'static str, status: CheckStatus, detail: &'static str) -> Check {
         Check { name: name.into(), status, detail: detail.into() }
+    }
+
+    #[test]
+    fn check_glyphs_match_statuses_and_are_distinct() {
+        let ok = check_glyph(CheckStatus::Ok);
+        let warn = check_glyph(CheckStatus::Warn);
+        let fail = check_glyph(CheckStatus::Fail);
+        assert_eq!(ok, UnitState::Verified);
+        assert_eq!(warn, UnitState::Built);
+        assert_eq!(fail, UnitState::Failed);
+        assert_ne!(ok, warn);
+        assert_ne!(ok, fail);
+        assert_ne!(warn, fail);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! The right-hand panel of the Run screen: an overview of the run, one module, or one unit.
 use super::i18n::{self, tr};
 use super::model::*;
-use super::ornament;
+use super::{ornament, plain_text, theme};
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -915,7 +915,7 @@ fn brief_markdown(text: &str) -> Option<String> {
 
 /// A review stored as JSON, written out for reading. `None` when it is not one. Each finding's
 /// location is a link when it names a file inside `project`.
-fn review_markdown(text: &str, verdict_label: &str, no_findings: &str, project: Option<&Path>) -> Option<String> {
+fn review_markdown(text: &str, verdict_label: &str, no_findings: &str, project: Option<&Path>, lookup: &dyn Fn(&str) -> String) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let verdict = value.get("verdict")?.as_str()?;
     let word = |finding: &serde_json::Value, keys: &[&str]| {
@@ -935,7 +935,7 @@ fn review_markdown(text: &str, verdict_label: &str, no_findings: &str, project: 
             }
         }
         if let Some(body) = word(finding, &["evidence", "text", "check"]) {
-            out.push_str(&format!(" {body}"));
+            out.push_str(&format!(" {}", lookup(&body)));
         }
         if let Some(fix) = word(finding, &["fix"]) {
             out.push_str(&format!(" → {fix}"));
@@ -1019,15 +1019,6 @@ fn quiet_panel(icon: IconName, text: impl Into<SharedString>, detail: Option<Sha
         .when_some(detail, |this, detail| {
             this.child(div().w_full().text_xs().text_center().child(SelectableText::new("quiet-detail", detail)))
         })
-}
-
-/// The app's gold, which `.primary()` would not pick up because the theme leaves the kit's button tokens alone.
-fn primary_button(t: &Tokens, cx: &App) -> ButtonCustomVariant {
-    ButtonCustomVariant::new(cx)
-        .color(t.gold)
-        .foreground(t.canvas)
-        .hover(t.gold.opacity(0.9))
-        .active(t.gold.opacity(0.8))
 }
 
 fn markdown_style() -> TextViewStyle {
@@ -1368,13 +1359,14 @@ impl Detail {
         let t = cx.tokens();
         let unit = &run.units[index];
         let detail = format!("{} · {}", unit.id, attempts_text(unit.attempts, cx));
+        let title = plain_text::plain(cx, &unit.title);
         Button::new(("unit-row", index))
             .ghost()
             .w_full()
             .h_auto()
             .px_1()
             .py_1()
-            .tooltip(unit.title.clone())
+            .tooltip(title.original.unwrap_or_else(|| title.shown.clone()))
             .on_click(self.go(Selection::Unit(index)))
             .child(
                 h_flex()
@@ -1387,7 +1379,7 @@ impl Detail {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(13.)).text_color(t.text).truncate().child(unit.title.clone()))
+                            .child(div().text_size(px(13.)).text_color(t.text).truncate().child(title.shown))
                             .child(div().text_xs().text_color(t.muted).truncate().child(detail)),
                     ),
             )
@@ -1409,6 +1401,8 @@ impl Detail {
         };
         let label = if need.kind == NeedKind::Waiting { "Resume now" } else { "Resume" };
         let resuming = self.resuming.as_ref() == Some(&run.session);
+        let title = plain_text::plain(cx, &need.title);
+        let note = plain_text::plain(cx, &need.note);
         ornament::frame(&t, color.opacity(0.6), t.surface.blend(color.opacity(0.06)))
             .flex()
             .flex_col()
@@ -1423,13 +1417,15 @@ impl Detail {
                     .child(Icon::new(icon).size(px(14.)))
                     .child(tr(cx, TABLE, kind)),
             )
-            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(need.title.clone()))
-            .child(div().text_color(t.muted).child(SelectableText::new(("need-note", index), need.note.clone())))
+            .child(div().id(("need-title", index)).text_size(px(14.)).font_weight(FontWeight::MEDIUM)
+                .when_some(title.original, |this, original| this.tooltip(tooltip_of(original))).child(title.shown))
+            .child(div().id(("need-note-tip", index)).text_color(t.muted)
+                .when_some(note.original, |this, original| this.tooltip(tooltip_of(original)))
+                .child(SelectableText::new(("need-note", index), note.shown)))
             .when(with_action, |this| {
                 this.child(
                     h_flex().justify_end().child(
-                        Button::new(("need-resume", index))
-                            .custom(primary_button(&t, cx))
+                        theme::gold_leaf(Button::new(("need-resume", index)), &t)
                             .small()
                             .label(tr(cx, TABLE, label))
                             .loading(resuming)
@@ -1620,6 +1616,7 @@ impl Detail {
     fn unit_page(&self, run: &Run, index: usize, cx: &Context<Self>) -> AnyElement {
         let t = cx.tokens();
         let unit = &run.units[index];
+        let title = plain_text::plain(cx, &unit.title);
         let selected = DocTab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         let module = run.modules.get(unit.module);
         let label = tr(cx, &[], unit.state.label());
@@ -1643,8 +1640,8 @@ impl Detail {
                             .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .line_clamp(3)
-                            .tooltip(tooltip_of(unit.title.clone()))
-                            .child(unit.title.clone()),
+                            .tooltip(tooltip_of(title.original.unwrap_or_else(|| title.shown.clone())))
+                            .child(title.shown),
                     )
                     .when(unit.id != unit.title, |this| {
                         this.child(
@@ -1877,7 +1874,7 @@ impl Detail {
             DocTab::Brief | DocTab::Report | DocTab::Review => {
                 let shaped = match tab {
                     DocTab::Brief => brief_markdown(&file.text),
-                    DocTab::Review => review_markdown(&file.text, tr(cx, TABLE, "Verdict"), tr(cx, TABLE, "No findings."), project),
+                    DocTab::Review => review_markdown(&file.text, tr(cx, TABLE, "Verdict"), tr(cx, TABLE, "No findings."), project, &str::to_owned),
                     _ => None,
                 }
                 .unwrap_or_else(|| file.text.to_string());
@@ -1934,6 +1931,28 @@ impl Detail {
                         .child(body),
                 )
                 .into_any_element();
+        }
+        if tab == DocTab::Review {
+            let originals = RefCell::new(Vec::new());
+            let lookup = |text: &str| {
+                let plain = plain_text::plain(cx, &SharedString::from(text.to_owned()));
+                if let Some(original) = plain.original {
+                    originals.borrow_mut().push(original.to_string());
+                }
+                plain.shown.to_string()
+            };
+            if let Some(shaped) = review_markdown(&file.text, tr(cx, TABLE, "Verdict"), tr(cx, TABLE, "No findings."), project.as_deref(), &lookup) {
+                let text = project.as_deref().map_or_else(|| shaped.clone(), |root| link_markdown(&shaped, root));
+                let originals = originals.into_inner();
+                let tip = (!originals.is_empty()).then(|| originals.join("\n"));
+                return div().id(("review-original", key))
+                    .when(scrolls, |this| this.size_full())
+                    .when_some(tip, |this, original| this.tooltip(tooltip_of(original)))
+                    .child(markdown_view(("doc-text", key), text.into(), project)
+                        .scrollable(scrolls)
+                        .when(scrolls, |this| this.size_full().px_4()))
+                    .into_any_element();
+            }
         }
         let text = self.linked_text(key, tab, file, project.as_deref(), cx);
         markdown_view(("doc-text", key), text, project)
@@ -2232,13 +2251,25 @@ mod cite_tests {
     }
 
     #[test]
+    fn review_lookup_changes_only_the_finding_text() {
+        let review = r#"{"verdict":"pass","findings":[{"severity":"minor","location":"bridge.rs","evidence":"Original finding","fix":"Leave fix"}]}"#;
+        let root = project();
+        let identity = review_markdown(review, "Verdict", "No findings.", Some(&root), &str::to_owned).unwrap();
+        let translated = review_markdown(review, "Verdict", "No findings.", Some(&root), &|text| {
+            assert_eq!(text, "Original finding");
+            "白話內容".to_owned()
+        }).unwrap();
+        assert_eq!(translated, identity.replace("Original finding", "白話內容"));
+    }
+
+    #[test]
     fn a_review_finding_shows_its_location_as_a_link() {
         let root = project();
         let review = r#"{"verdict":"pass","findings":[{"severity":"minor","location":"bridge.rs","evidence":"x"},{"severity":"minor","location":"../../etc/passwd.txt"}]}"#;
-        let text = review_markdown(review, "Verdict", "No findings.", Some(&root)).unwrap();
+        let text = review_markdown(review, "Verdict", "No findings.", Some(&root), &str::to_owned).unwrap();
         assert!(text.contains("[`bridge.rs`](chronos-cite:bridge.rs)"), "{text}");
         assert!(text.contains(" `../../etc/passwd.txt`") && !text.contains("passwd.txt)"), "{text}");
-        let plain = review_markdown(review, "Verdict", "No findings.", None).unwrap();
+        let plain = review_markdown(review, "Verdict", "No findings.", None, &str::to_owned).unwrap();
         assert!(plain.contains(" `bridge.rs`") && !plain.contains("chronos-cite"));
     }
 }

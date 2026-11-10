@@ -4,9 +4,61 @@
 //! the Fable 5.2 row was read there on 2026-11-10.
 //! Claude Code's own cost-state records agree with these rates to the cent for Opus 5.5
 //! (5-minute and 1-hour cache writes) and Haiku 5.5 (both prompt-length tiers).
+//!
+//! Codex source: https://developers.openai.com/api/docs/pricing, read 2026-11-10.
 
 pub const PRICES_AS_OF: &str = "2026-11-09";
 pub const PRICES_SOURCE: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
+
+pub const CODEX_PRICES_SOURCE: &str = "https://developers.openai.com/api/docs/pricing";
+pub const CODEX_PRICES_AS_OF: &str = "2026-11-10";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CodexUsage {
+    /// Total input tokens, including cached input.
+    pub input: u64,
+    pub cached_input: u64,
+    /// Total output tokens, including reasoning tokens.
+    pub output: u64,
+}
+
+// USD per million tokens: model, input, cached input, output.
+#[rustfmt::skip]
+const CODEX_RATES: &[(&str, f64, f64, f64)] = &[
+    ("gpt-6-astra",   10.0,  1.0,   50.0), // gpt-6-astra
+    ("gpt-6.1-sol",    2.0,  0.1,   10.0), // gpt-6.1-sol
+    ("gpt-6.1-terra",  1.0,  0.05,   5.0), // gpt-6.1-terra
+    ("gpt-6-luna",     0.1,  0.01,   0.5), // gpt-6-luna
+    ("gpt-6-sol",      2.0,  0.2,   10.0), // gpt-6-sol
+    ("gpt-5.6-sol",    4.0,  0.4,   20.0), // gpt-5.6-sol
+    ("gpt-5.6-terra",  2.0,  0.2,   12.0), // gpt-5.6-terra
+    ("gpt-5.6-luna",   0.2,  0.02,   1.2), // gpt-5.6-luna
+    ("gpt-5.4-mini",  0.75,  0.075,  4.5), // gpt-5.4-mini
+    ("gpt-5.4-nano",   0.2,  0.02,  1.25), // gpt-5.4-nano
+    ("gpt-5.2",       1.75,  0.175, 14.0), // gpt-5.2
+    ("gpt-5.1",       1.25,  0.125, 10.0), // gpt-5.1
+    ("gpt-5",         1.25,  0.125, 10.0), // gpt-5
+    ("gpt-5-mini",    0.25,  0.025,  2.0), // gpt-5-mini
+    ("gpt-5-nano",    0.05,  0.005,  0.4), // gpt-5-nano
+    ("gpt-4.1",        2.0,  0.5,    8.0), // gpt-4.1
+    ("gpt-4.1-mini",   0.4,  0.1,    1.6), // gpt-4.1-mini
+    ("gpt-4o",         2.5,  1.25,  10.0), // gpt-4o
+    ("gpt-4o-mini",   0.15,  0.075,  0.6), // gpt-4o-mini
+    ("o3",             2.0,  0.5,    8.0), // o3
+];
+
+pub fn codex_usd(model: &str, usage: &CodexUsage) -> Option<f64> {
+    let &(_, input_rate, cached_rate, output_rate) = CODEX_RATES
+        .iter()
+        .find(|(id, _, _, _)| *id == without_date(model))?;
+    let cached = usage.cached_input.min(usage.input);
+    Some(
+        ((usage.input - cached) as f64 * input_rate
+            + cached as f64 * cached_rate
+            + usage.output as f64 * output_rate)
+            / 1e6,
+    )
+}
 
 const LONG_PROMPT_TOKENS: u64 = 100_000;
 const FAST_MULTIPLIER: f64 = 2.0;
@@ -147,12 +199,15 @@ impl Rates {
     }
 }
 
-fn family_of(model: &str) -> Option<&'static Family> {
-    let undated = match model.rsplit_once('-') {
+fn without_date(model: &str) -> &str {
+    match model.rsplit_once('-') {
         Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
         _ => model,
-    };
-    FAMILIES.iter().find(|f| f.id == undated)
+    }
+}
+
+fn family_of(model: &str) -> Option<&'static Family> {
+    FAMILIES.iter().find(|f| f.id == without_date(model))
 }
 
 fn rates_for(model: &str, u: &CallUsage) -> Option<Rates> {
@@ -180,4 +235,79 @@ pub fn usd(model: &str, usage: &CallUsage) -> Option<f64> {
 
 pub fn cache_write_usd(model: &str, usage: &CallUsage) -> Option<f64> {
     Some(rates_for(model, usage)?.write_cost(usage))
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    #[test]
+    fn computes_cost_from_literal_rates() {
+        let terra = CodexUsage {
+            input: 1_000_000,
+            cached_input: 400_000,
+            output: 200_000,
+        };
+        let expected_terra = (600_000.0 * 1.0 + 400_000.0 * 0.05 + 200_000.0 * 5.0) / 1e6;
+        assert!((codex_usd("gpt-6.1-terra", &terra).unwrap() - expected_terra).abs() < 1e-12);
+
+        let astra = CodexUsage {
+            input: 500_000,
+            cached_input: 0,
+            output: 100_000,
+        };
+        let expected_astra = (500_000.0 * 10.0 + 100_000.0 * 50.0) / 1e6;
+        assert!((codex_usd("gpt-6-astra", &astra).unwrap() - expected_astra).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cached_input_saturates_at_total_input() {
+        let usage = CodexUsage {
+            input: 1_000_000,
+            cached_input: 2_000_000,
+            output: 0,
+        };
+        assert!((codex_usd("gpt-6.1-terra", &usage).unwrap() - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn model_lookup_is_exact_except_for_date_suffix() {
+        let usage = CodexUsage {
+            input: 1_000_000,
+            cached_input: 0,
+            output: 0,
+        };
+        assert_eq!(codex_usd("gpt-9-unknown", &usage), None);
+        assert_eq!(codex_usd("gpt-5.1-codex", &usage), None);
+        assert_eq!(codex_usd("gpt-5", &usage), Some(1.25));
+        assert_eq!(codex_usd("gpt-5-mini", &usage), Some(0.25));
+        assert_eq!(
+            codex_usd("gpt-6.1-terra-20260101", &usage),
+            codex_usd("gpt-6.1-terra", &usage)
+        );
+    }
+
+    #[test]
+    fn source_and_date_are_documented() {
+        assert_eq!(
+            CODEX_PRICES_SOURCE,
+            "https://developers.openai.com/api/docs/pricing"
+        );
+        let parts: Vec<_> = CODEX_PRICES_AS_OF.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!((parts[0].len(), parts[1].len(), parts[2].len()), (4, 2, 2));
+        assert!(parts
+            .iter()
+            .all(|part| part.bytes().all(|b| b.is_ascii_digit())));
+        let month: u32 = parts[1].parse().unwrap();
+        let day: u32 = parts[2].parse().unwrap();
+        assert!((1..=12).contains(&month));
+        assert!((1..=31).contains(&day));
+        let docs = include_str!("price.rs")
+            .split_once("pub const PRICES_AS_OF")
+            .unwrap()
+            .0;
+        assert!(docs.contains(CODEX_PRICES_SOURCE));
+        assert!(docs.contains(CODEX_PRICES_AS_OF));
+    }
 }

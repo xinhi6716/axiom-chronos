@@ -451,7 +451,7 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
                     )
                     .child(
                         Button::new("ask-confirm")
-                            .map(|b| if question.danger { b.danger() } else { b.primary() })
+                            .map(|b| if question.danger { b.danger() } else { super::theme::gold_leaf(b, &cx.tokens()) })
                             .label(question.confirm)
                             .track_focus(&confirm_focus)
                             .on_click(move |_, window, cx| {
@@ -869,7 +869,7 @@ impl Control {
                     )
                     .child(
                         Button::new("report-close")
-                            .primary()
+                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                             .label(tr(cx, T, "Close"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     ),
@@ -1025,7 +1025,7 @@ impl Control {
         let _ = window;
         let resuming = matches!(&self.pending, Some(p) if p.kind == PendingKind::Resuming);
         Button::new(id)
-            .primary()
+            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
             .small()
             .icon(IconName::Play)
             .label(if resuming { tr(cx, T, "Resuming…") } else { tr(cx, T, label) })
@@ -1099,7 +1099,7 @@ impl Control {
                     .child(self.entry_box(px(56.)))
                     .child(
                         Button::new("control-send")
-                            .primary()
+                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                             .icon(IconName::ArrowUp)
                             .label(tr(cx, T, "Send"))
                             .disabled(blank || self.pending.is_some())
@@ -1266,7 +1266,7 @@ impl Control {
                     .child(div().w_1())
                     .child(
                         Button::new("control-another")
-                            .primary()
+                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                             .small()
                             .icon(IconName::Plus)
                             .label(tr(cx, T, "Make another wish"))
@@ -1283,6 +1283,11 @@ impl Control {
         let t = cx.tokens();
         let mono = cx.theme().mono_font_family.clone();
         let source = line.source.clone();
+        let text = if matches!(line.source.as_ref(), YOU | "你") {
+            super::plain_text::Plain { shown: line.text.clone(), original: None }
+        } else {
+            super::plain_text::plain(cx, &line.text)
+        };
         h_flex()
             .id(("log-row", ix))
             .w_full()
@@ -1304,7 +1309,13 @@ impl Control {
                     .tooltip(move |window, cx| Tooltip::new(source.clone()).build(window, cx))
                     .child(source_label(&line.source, cx)),
             )
-            .child(div().flex_1().min_w_0().text_color(t.text).child(line.text.clone()))
+            .child(
+                div().id(("log-text", ix)).flex_1().min_w_0().text_color(t.text)
+                    .when_some(text.original, |this, original| {
+                        this.tooltip(move |window, cx| Tooltip::new(original.clone()).build(window, cx))
+                    })
+                    .child(text.shown),
+            )
             .into_any_element()
     }
 
@@ -1366,7 +1377,7 @@ impl Control {
                             .when(paused, |this| {
                                 this.child(
                                     Button::new("log-latest")
-                                        .primary()
+                                        .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                                         .xsmall()
                                         .icon(IconName::ArrowDown)
                                         .label(if unread > 0 {

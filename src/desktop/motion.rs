@@ -64,7 +64,12 @@ pub fn lerp(a: f32, b: f32, x: f32) -> f32 {
 
 /// Blends two colours through RGB, so a blend never swings through an unrelated hue.
 pub fn mix(a: Hsla, b: Hsla, x: f32) -> Hsla {
-    let x = x.clamp(0.0, 1.0);
+    if x.is_nan() || x <= 0.0 {
+        return a;
+    }
+    if x >= 1.0 {
+        return b;
+    }
     let (a, b) = (Rgba::from(a), Rgba::from(b));
     Rgba { r: lerp(a.r, b.r, x), g: lerp(a.g, b.g, x), b: lerp(a.b, b.b, x), a: lerp(a.a, b.a, x) }.into()
 }
@@ -419,6 +424,19 @@ mod tests {
         let half = Rgba::from(mix(a, b, 0.5));
         assert!((half.r - (Rgba::from(a).r + Rgba::from(b).r) / 2.0).abs() < 1e-3);
         assert_eq!(Rgba::from(mix(a, b, 7.0)), Rgba::from(b));
+    }
+
+    #[test]
+    fn mix_returns_the_exact_endpoint_including_alpha() {
+        let (mut a, mut b): (Hsla, Hsla) = (rgb(0x0c1826).into(), rgb(0xdcc28a).into());
+        a.a = 0.35;
+        b.a = 0.65;
+        for x in [-1.0, 0.0, f32::NAN] {
+            assert_eq!(mix(a, b, x), a, "x = {x}");
+        }
+        for x in [1.0, 2.0] {
+            assert_eq!(mix(a, b, x), b, "x = {x}");
+        }
     }
 
     #[test]
