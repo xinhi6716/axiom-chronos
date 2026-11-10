@@ -15,3 +15,10 @@ jobs:
       - run: cargo build --locked
       - run: cargo test --locked
       - run: cargo run --locked -- --version
+  desktop-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+        working-directory: tests/desktop-smoke

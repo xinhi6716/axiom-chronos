@@ -21,6 +21,8 @@ mod wishes;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::*;
 use model::Screen;
+/// Exported so a headless test can install the same global `run` does, with `Store::open(true)`.
+pub use settings::Store;
 pub use shell::Shell;
 use std::time::Duration;
 
