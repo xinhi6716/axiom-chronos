@@ -297,6 +297,9 @@ pub struct WishRequest {
     pub creative: bool,
     /// `None` leaves the turn count uncapped, as `axiom wish` does without `--max-turns`.
     pub max_turns: Option<u32>,
+    /// The council of Astra, Fable 5.2 and Argon, as `axiom wish --advanced-research`. It costs
+    /// real money, so it is on only when the user turned it on for this wish.
+    pub advanced_research: bool,
 }
 
 /// What the app was doing when something went wrong.

@@ -2,6 +2,7 @@
 use super::control::{ask, Ask};
 use super::i18n::{tr, Table};
 use super::model::*;
+use super::superswitch::{self, Activation, Members};
 use super::theme::Tokened as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Dialog, DialogFooter};
@@ -16,7 +17,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const T: Table = &[
     ("Choose folder…", "選擇資料夾…"),
@@ -50,6 +51,14 @@ const T: Table = &[
     ("Write your wish to start.", "請先寫下願望。"),
     ("Maximum turns must be a whole number above 0.", "最多回合數必須是大於 0 的整數。"),
     ("Not connected to a session, so this wish cannot start.", "目前沒有連上工作階段，無法開始這個願望。"),
+    ("Advanced research", "高級研究"),
+    (
+        "Astra, Fable 5.2 and Argon, three models from different families, deliberate before the plan. Fable is capped at $5; Argon's quota is small.",
+        "Astra、Fable 5.2、Argon 三個不同家族的模型先討論再定計畫。Fable 上限 $5，Argon 額度很小。",
+    ),
+    ("agy is not installed, so the council will run with fewer members: without Argon.", "沒有安裝 agy，議會會少一位成員：沒有 Argon。"),
+    ("claude is not installed, so the council will run with fewer members: without Fable.", "沒有安裝 claude，議會會少一位成員：沒有 Fable。"),
+    ("agy and claude are not installed, so the council will run with fewer members: Astra alone.", "沒有安裝 agy 和 claude，議會會少兩位成員：只剩 Astra。"),
     ("Discard this wish?", "要捨棄這個願望嗎？"),
     ("What you wrote will be lost.", "你寫的內容不會保留。"),
     ("Discard", "捨棄"),
@@ -138,6 +147,11 @@ pub(super) fn parse_turns(text: &str) -> Option<Option<u32>> {
 /// Text in the wish box is the only thing Cancel can lose.
 pub(super) fn asks_before_discarding(wish: &str) -> bool {
     !wish.trim().is_empty()
+}
+
+/// The request Start sends. The council is on only when the switch was turned on in this dialog.
+pub(super) fn request(cwd: PathBuf, ready: Ready, creative: bool, research: &Activation) -> WishRequest {
+    WishRequest { cwd, wish: ready.wish, creative, max_turns: ready.max_turns, advanced_research: research.is_on() }
 }
 
 /// Reads `git status --porcelain=v2 --branch`.
@@ -229,6 +243,10 @@ pub struct Composer {
     check: FolderCheck,
     probe: Option<Task<()>>,
     creative: bool,
+    research: Activation,
+    /// Which council members this machine can run; `None` until the background look finishes.
+    members: Option<Members>,
+    members_probe: Option<Task<()>>,
     advanced: bool,
     not_connected: bool,
     _subscriptions: Vec<Subscription>,
@@ -269,6 +287,9 @@ impl Composer {
             check: FolderCheck::Idle,
             probe: None,
             creative: false,
+            research: Activation::default(),
+            members: None,
+            members_probe: None,
             advanced: false,
             not_connected: false,
             _subscriptions: subscriptions,
@@ -292,6 +313,9 @@ impl Composer {
 
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.creative = false;
+        // Every new wish starts with the council off; it is never carried over or remembered.
+        self.research = Activation::default();
+        self.look_for_members(cx);
         self.advanced = false;
         self.not_connected = false;
         let (wish_hint, turns_hint) = (
@@ -318,9 +342,26 @@ impl Composer {
                 if first.replace(false) {
                     this.focus_first(window, cx);
                 }
+                // Frames are asked for only while the activation plays; once it settles, none.
+                if this.research.wants_frame(Instant::now(), this.state.read(cx).reduce_motion) {
+                    window.request_animation_frame();
+                }
                 this.fill(dialog, cx)
             })
         });
+    }
+
+    /// Looks on a background thread, so a slow PATH never holds the dialog.
+    fn look_for_members(&mut self, cx: &mut Context<Self>) {
+        self.members = None;
+        let probe = cx.background_spawn(async { Members::detect() });
+        self.members_probe = Some(cx.spawn(async move |this, cx| {
+            let found = probe.await;
+            let _ = this.update(cx, |this, cx| {
+                this.members = Some(found);
+                cx.notify();
+            });
+        }));
     }
 
     fn focus_first(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,12 +426,7 @@ impl Composer {
             cx.notify();
             return;
         }
-        let request = WishRequest {
-            cwd,
-            wish: ready.wish,
-            creative: self.creative,
-            max_turns: ready.max_turns,
-        };
+        let request = request(cwd, ready, self.creative, &self.research);
         self.state.update(cx, |s, cx| {
             s.set_view(Screen::Run, cx);
             s.start_wish(request, cx);
@@ -464,6 +500,7 @@ impl Composer {
             .child(self.folder_section(cx))
             .child(self.wish_section(cx))
             .child(self.creative_row(cx))
+            .child(self.research_card(cx))
             .child(self.advanced_section(cx))
     }
 
@@ -643,6 +680,60 @@ impl Composer {
             .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Let Chronos find one small, evidence-backed improvement.")))
     }
 
+    fn research_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let look = self.research.look(Instant::now(), self.state.read(cx).reduce_motion);
+        let shortfall = self.members.and_then(Members::shortfall).map(|text| tr(cx, T, text));
+        div()
+            .id("composer-research")
+            .relative()
+            .w_full()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(superswitch::border(look, &t))
+            .bg(t.canvas)
+            .overflow_hidden()
+            .child(superswitch::backdrop(look, t))
+            .child(
+                h_flex()
+                    .relative()
+                    .min_h(px(84.))
+                    .pl(px(superswitch::EMBLEM_GUTTER))
+                    .pr_4()
+                    .py_3()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(cx, T, "Advanced research")))
+                            .child(div().text_xs().text_color(t.muted).child(tr(
+                                cx,
+                                T,
+                                "Astra, Fable 5.2 and Argon, three models from different families, deliberate before the plan. Fable is capped at $5; Argon's quota is small.",
+                            )))
+                            .children(shortfall.map(|text| {
+                                h_flex()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(t.review)
+                                    .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                                    .child(text)
+                            })),
+                    )
+                    .child(
+                        Switch::new("composer-research-switch")
+                            .checked(self.research.is_on())
+                            .accessibility_label(tr(cx, T, "Advanced research"))
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.research.set(*checked, Instant::now());
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
     fn advanced_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let turns = self.turns.read(cx).value();
@@ -779,6 +870,35 @@ impl Composer {
                 fill(self, window, cx);
                 self.cancel(window, cx);
             }
+            "-research" => {
+                // Shows the dialog off for a moment, then turns the switch on as a click would.
+                fill(self, window, cx);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(1500)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.research.set(true, Instant::now());
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            "-research-short" => {
+                fill(self, window, cx);
+                self.members_probe = None;
+                self.members = Some(Members { fable: true, argon: false });
+                self.research.set(true, Instant::now());
+            }
+            "-research-reduced" => {
+                fill(self, window, cx);
+                self.state.update(cx, |s, _| s.reduce_motion = true);
+                self.research.set(true, Instant::now());
+            }
+            held if held.starts_with("-research-at-") => {
+                fill(self, window, cx);
+                if let Ok(ms) = held["-research-at-".len()..].parse::<u32>() {
+                    self.research.hold(ms as f32 / 1000.0);
+                }
+            }
             "-not-connected" => {
                 fill(self, window, cx);
                 self.probe = None;
@@ -856,6 +976,19 @@ mod tests {
         assert_eq!(parse_turns("1.5"), None);
         assert_eq!(parse_turns("99999999999"), None);
         assert_eq!(validate(true, &repo(), "wish", "0"), Err(Blocked::BadTurns));
+    }
+
+    #[test]
+    fn the_request_carries_the_research_switch_only_when_it_was_turned_on() {
+        let ready = || Ready { wish: "wish".into(), max_turns: Some(9) };
+        let off = request(PathBuf::from("C:\\p"), ready(), true, &Activation::default());
+        assert!(!off.advanced_research);
+        assert_eq!((off.wish.as_str(), off.creative, off.max_turns), ("wish", true, Some(9)));
+        let mut switch = Activation::default();
+        switch.set(true, Instant::now());
+        assert!(request(PathBuf::from("C:\\p"), ready(), false, &switch).advanced_research);
+        switch.set(false, Instant::now());
+        assert!(!request(PathBuf::from("C:\\p"), ready(), false, &switch).advanced_research);
     }
 
     #[test]

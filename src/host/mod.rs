@@ -18,6 +18,8 @@ use std::{
 pub struct Options {
     pub creative: bool,
     pub max_turns: Option<u32>,
+    /// The council of Astra, Fable 5.2 and Argon. Costs real money, so it is off unless asked for.
+    pub advanced_research: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,7 +139,18 @@ impl Wish {
             ));
         }
         let text = session::wish_text(wish.trim(), options.creative, false);
-        let spawned = session::spawn(&config, "wish", &text, project, options.max_turns, None)?;
+        let launch = session::Launch {
+            advanced_research: options.advanced_research,
+        };
+        let spawned = session::spawn_with(
+            &config,
+            "wish",
+            &text,
+            project,
+            options.max_turns,
+            None,
+            &launch,
+        )?;
         Ok(Self::drive(config, spawned))
     }
     /// `message` is sent as the first prompt; without one the session gets the continuation prompt.
