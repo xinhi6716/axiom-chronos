@@ -58,8 +58,16 @@ pub struct AstraFiles {
     pub ruling: bool,
     pub plan_final: bool,
 }
+/// One item of the final plan and the modules whose map section serves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GoalView {
+    pub id: String,
+    pub title: String,
+    pub modules: Vec<String>,
+}
 #[derive(Debug, Clone)]
 pub(crate) struct View {
+    pub goals: Vec<GoalView>,
     pub map: Option<Map>,
     pub map_error: Option<String>,
     pub units: Vec<UnitView>,
@@ -324,7 +332,31 @@ pub(crate) fn view(store: &Path, warnings: &mut Vec<String>) -> Option<View> {
         ruling: nonempty(astra_dir.join("ruling.md")),
         plan_final: nonempty(astra_dir.join("plan-final.md")),
     };
+    let goals = read(
+        &astra_dir.join("plan-final.md"),
+        &label("astra/plan-final.md"),
+        warnings,
+    )
+    .map(|t| orch::parse_plan(&t))
+    .unwrap_or_default()
+    .into_iter()
+    .map(|item| GoalView {
+        modules: map
+            .as_ref()
+            .map(|m| {
+                m.modules
+                    .iter()
+                    .filter(|x| x.serves.contains(&item.id))
+                    .map(|x| x.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        id: item.id,
+        title: item.title,
+    })
+    .collect();
     Some(View {
+        goals,
         map,
         map_error,
         units,

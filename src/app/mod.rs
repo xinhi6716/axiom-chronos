@@ -13,7 +13,7 @@ use std::{
 mod log;
 mod store;
 pub use log::{AgentView, ModelUsage, OpenCall, Run, Scan, Summary, Tokens};
-pub use store::{AstraFiles, Claim, Counts, ModuleView, UnitView};
+pub use store::{AstraFiles, Claim, Counts, GoalView, ModuleView, UnitView};
 
 pub const STAGES: [&str; 7] = [
     "astra",
@@ -64,6 +64,8 @@ pub struct Wish {
     pub last_activity: Option<String>,
     pub store: Option<PathBuf>,
     pub astra: AstraFiles,
+    /// Items of the final plan with the modules serving each; empty without a plan.
+    pub goals: Vec<GoalView>,
     pub stages: Vec<Stage>,
     pub modules: Vec<ModuleView>,
     pub units: Vec<UnitView>,
@@ -178,6 +180,7 @@ impl Poller {
                 last_activity,
                 store,
                 astra: view.astra,
+                goals: view.goals,
                 stages,
                 modules: view.modules,
                 units: view.units,
@@ -244,6 +247,7 @@ fn goals(home: &Path, warnings: &mut Vec<String>) -> Vec<Loaded> {
 }
 fn empty() -> store::View {
     store::View {
+        goals: vec![],
         map: None,
         map_error: None,
         units: vec![],
