@@ -40,7 +40,8 @@ fn bridge_documentation_contract() {
             assert!(contains(&text, phrase), "{path}: {phrase}");
             assert!(!contains(&text.replace(phrase, ""), phrase), "{path}: {phrase}");
         }
-        for forbidden in ["gemini", "antigravity", "agy", "rewrite", "--astra", "[astra]", "review_code", "second_review"] {
+        // Gemini returned in 2.0 only as the optional backup reviewer (agy), so its name may appear.
+        for forbidden in ["rewrite", "--astra", "[astra]", "review_code", "second_review"] {
             assert!(excludes(&text, forbidden), "{path}: {forbidden}");
             assert!(!excludes(&format!("{text} {forbidden}"), forbidden), "{path}: {forbidden}");
         }
