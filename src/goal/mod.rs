@@ -325,7 +325,11 @@ pub fn set_status_with_batch(
     }
     if status == "blocked" {
         if let Some(project) = &goal.project {
-            let pending = crate::orch::pending_handoffs(&crate::orch::store_for(home, project)?)?;
+            let store = crate::orch::store_for(home, project)?;
+            let pending: Vec<_> = crate::orch::pending_handoffs(&store)?
+                .into_iter()
+                .filter(|h| crate::orch::stalled_out(&store, h).is_none())
+                .collect();
             if let Some(h) = pending.first() {
                 let whom = h
                     .module

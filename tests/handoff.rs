@@ -457,3 +457,146 @@ fn compaction_brings_back_the_work_state() {
     fs::write(&r.own, &lines).unwrap();
     assert!(call(&r, &read).is_some());
 }
+
+fn start_dispatcher(r: &Run, module: &str) -> Value {
+    tool(
+        r,
+        "Agent",
+        json!({"subagent_type":"chronos:dispatcher","description":module,"prompt":format!("Carry out module {module}.")}),
+    )
+}
+fn handoff_stuck(r: &Run, module: &str, stuck: &str) {
+    let out = orch::run(
+        &r.store,
+        &args(&["handoff", "--module", module, "--next", "go on", "--stuck", stuck]),
+        false,
+        false,
+    );
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+}
+fn units(r: &Run, rows: &str) {
+    fs::write(
+        r.store.join("units.tsv"),
+        format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n{rows}"),
+    )
+    .unwrap();
+}
+fn stalls(n: &str) {
+    std::env::set_var(orch::STALL_ENV, n);
+}
+
+// The limit lives in a process-wide variable, so these tests run in one function each under a lock.
+static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn three_handoffs_without_progress_stop_the_module() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("3");
+    let r = run();
+    for round in 0..4 {
+        handoff_stuck(&r, "m1", "a1 keeps failing");
+        let n = orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled;
+        assert_eq!(n, round, "the first handoff has nothing to compare with");
+        if round < 3 {
+            // not yet stopped: the fresh dispatcher starts and takes the note
+            let out = call(&r, &start_dispatcher(&r, "m1")).expect("allowed with the note");
+            assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+        }
+    }
+    let why = refusal(&r, &start_dispatcher(&r, "m1")).expect("fourth dispatcher refused");
+    assert!(why.contains("a1 keeps failing"), "{why}");
+    assert!(why.contains("a1 failed"), "{why}");
+    assert!(why.contains("blocked"), "{why}");
+    // the core can now close the goal as blocked despite the pending note
+    goal::set_status(&r.home, "s", "blocked", Some("stalled")).unwrap();
+}
+
+#[test]
+fn progress_resets_the_count() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("3");
+    let r = run();
+    for _ in 0..3 {
+        handoff_stuck(&r, "m1", "stuck");
+    }
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 2);
+    // a state change
+    units(&r, "a1\tm1\tverified\t\t\t\t\nb1\tm2\tpending\t\t\t\t\n");
+    handoff_stuck(&r, "m1", "stuck");
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 0);
+    handoff_stuck(&r, "m1", "stuck");
+    handoff_stuck(&r, "m1", "stuck");
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 2);
+    // a newly registered unit
+    units(&r, "a1\tm1\tverified\t\t\t\t\na2\tm1\tpending\t\t\t\t\nb1\tm2\tpending\t\t\t\t\n");
+    handoff_stuck(&r, "m1", "stuck");
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 0);
+    // progress made after the last handoff also lifts a stop
+    for _ in 0..4 {
+        handoff_stuck(&r, "m1", "stuck");
+    }
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_some());
+    units(&r, "a1\tm1\tverified\t\t\t\t\na2\tm1\tverified\t\t\t\t\nb1\tm2\tpending\t\t\t\t\n");
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_none());
+}
+
+#[test]
+fn the_limit_is_configurable() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let r = run();
+    stalls("1");
+    handoff_stuck(&r, "m1", "s");
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_none());
+    handoff_stuck(&r, "m1", "s");
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_some());
+    stalls("5");
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_none());
+    stalls("0");
+    for _ in 0..6 {
+        handoff_stuck(&r, "m1", "s");
+    }
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_none(), "0 turns the guard off");
+    stalls("3");
+}
+
+#[test]
+fn other_modules_are_unaffected() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("2");
+    let r = run();
+    for _ in 0..3 {
+        handoff_stuck(&r, "m1", "s");
+    }
+    handoff_stuck(&r, "m2", "s");
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_some());
+    assert!(refusal(&r, &start_dispatcher(&r, "m2")).is_none());
+    assert_eq!(orch::read_handoff(&r.store, Some("m2")).unwrap().unwrap().stalled, 0);
+    // m1's progress is not m2's
+    units(&r, "a1\tm1\tverified\t\t\t\t\nb1\tm2\tpending\t\t\t\t\n");
+    handoff_stuck(&r, "m2", "s");
+    assert_eq!(orch::read_handoff(&r.store, Some("m2")).unwrap().unwrap().stalled, 1);
+    stalls("3");
+}
+
+#[test]
+fn old_handoffs_without_the_counter_keep_working() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("1");
+    let r = run();
+    let dir = r.store.join("handoffs/module");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("m1.json"),
+        r#"{"module":"m1","ts":"2026-01-01T00:00:00Z","next":"old step","in_flight":"","stuck":"","decisions":"","taken":false}"#,
+    )
+    .unwrap();
+    let old = orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap();
+    assert_eq!((old.stalled, old.snapshot), (0, None));
+    assert!(refusal(&r, &start_dispatcher(&r, "m1")).is_none());
+    // the next handoff has nothing comparable, so it starts at 0 rather than being counted
+    handoff_stuck(&r, "m1", "s");
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 0);
+    handoff_stuck(&r, "m1", "s");
+    assert_eq!(orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap().stalled, 1);
+    stalls("3");
+}

@@ -34,6 +34,66 @@ pub struct Handoff {
     /// Set once a fresh dispatcher was started with this note.
     #[serde(default)]
     pub taken: bool,
+    /// Consecutive handoffs of this module with no unit progress in the store since the one before.
+    #[serde(default)]
+    pub stalled: u32,
+    /// The module's units (id and state) when this note was written; absent in older stores.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+}
+
+pub const STALL_ENV: &str = "AXIOM_HANDOFF_STALLS";
+pub const DEFAULT_STALL_LIMIT: u32 = 3;
+
+/// Handoffs in a row without progress after which a module gets no new dispatcher:
+/// `AXIOM_HANDOFF_STALLS`, 0 to turn the guard off, 3 when unset.
+pub fn stall_limit() -> Option<u32> {
+    let raw = std::env::var(STALL_ENV).unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Some(DEFAULT_STALL_LIMIT);
+    }
+    match raw.parse::<u32>() {
+        Ok(0) => None,
+        Ok(n) => Some(n),
+        Err(_) => {
+            eprintln!("{STALL_ENV}={raw} is not a count; using {DEFAULT_STALL_LIMIT}");
+            Some(DEFAULT_STALL_LIMIT)
+        }
+    }
+}
+
+/// The module's units as `id=state` lines, so a new, removed or changed unit shows as a difference.
+fn snapshot_of(store: &Path, module: &str) -> Option<String> {
+    let mut rows: Vec<String> = read_units(store)
+        .ok()?
+        .iter()
+        .filter(|u| u.track == module)
+        .map(|u| format!("{}={}", u.id, u.state))
+        .collect();
+    rows.sort();
+    Some(rows.join(";"))
+}
+
+/// The handoff, when its module has reached the stall limit and the store still shows no progress since.
+pub fn stalled_out(store: &Path, h: &Handoff) -> Option<String> {
+    let module = h.module.as_deref()?;
+    let limit = stall_limit()?;
+    if h.stalled < limit || h.snapshot.is_none() || snapshot_of(store, module) != h.snapshot {
+        return None;
+    }
+    let units = read_units(store).ok()?;
+    let states: Vec<String> = units
+        .iter()
+        .filter(|u| u.track == module)
+        .map(|u| format!("{} {}", u.id, u.state))
+        .collect();
+    Some(format!(
+        "Module {module} was handed off {} times in a row with no unit progress, so no new dispatcher starts on it. Close the goal as blocked with the tool `goal`, status blocked, and this note: stuck: {}; units: {}.",
+        h.stalled + 1,
+        if h.stuck.is_empty() { "not stated" } else { &h.stuck },
+        if states.is_empty() { "none".to_string() } else { states.join(", ") }
+    ))
 }
 
 fn io(e: std::io::Error) -> Failure {
@@ -123,7 +183,7 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
         ));
     }
     check_module(store, module.as_deref())?;
-    let note = Handoff {
+    let mut note = Handoff {
         module,
         ts: base::now_iso(),
         repo,
@@ -132,9 +192,20 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
         stuck: field("--stuck"),
         decisions: field("--decisions"),
         taken: false,
+        stalled: 0,
+        snapshot: None,
     };
     let file = path(store, note.module.as_deref());
     with_lock(store, false, || {
+        if let Some(m) = note.module.clone() {
+            note.snapshot = snapshot_of(store, &m);
+            // Only a note that carries a snapshot too can show that nothing moved.
+            if let Some(prev) = read_handoff(store, Some(&m))? {
+                if prev.snapshot.is_some() && prev.snapshot == note.snapshot {
+                    note.stalled = prev.stalled + 1;
+                }
+            }
+        }
         std::fs::create_dir_all(file.parent().unwrap()).map_err(io)?;
         base::atomic_write(&file, &serde_json::to_vec_pretty(&note).unwrap()).map_err(io)
     })?;

@@ -287,6 +287,16 @@ fn names_module(prompt: &str, module: &str) -> bool {
             && !prompt[i + module.len()..].chars().next().is_some_and(word)
     })
 }
+/// Why no fresh dispatcher may start on a module its prompt names: it keeps handing off without progress.
+fn stalled_module(home: &Path, g: &Goal, input: &Value) -> Option<String> {
+    let store = store_of(home, g.project.as_deref())?;
+    let prompt = input.get("prompt")?.as_str()?;
+    crate::orch::pending_handoffs(&store)
+        .ok()?
+        .iter()
+        .filter(|h| h.module.as_deref().is_some_and(|m| names_module(prompt, m)))
+        .find_map(|h| crate::orch::stalled_out(&store, h))
+}
 /// A fresh dispatcher's input with the pending handoff of the module its prompt names appended.
 fn with_handoff(home: &Path, g: &Goal, input: &Value) -> Option<Value> {
     let store = store_of(home, g.project.as_deref())?;
@@ -534,6 +544,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 return deny("Could not record dispatch.");
             }
             if dispatcher && !agent && g.status == "active" {
+                if let Some(reason) = stalled_module(home, &g, input) {
+                    return deny(&reason);
+                }
                 if let Some(updated) = with_handoff(home, &g, input) {
                     return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}}));
                 }
