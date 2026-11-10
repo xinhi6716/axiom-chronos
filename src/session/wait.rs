@@ -199,6 +199,30 @@ pub fn run(
     input: Box<dyn BufRead + Send>,
     out: &mut dyn Write,
 ) -> Res<i32> {
+    run_with(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        input,
+        out,
+        &run::Launch::default(),
+    )
+}
+
+/// `run` with what the launch opts in to.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+    launch: &run::Launch,
+) -> Res<i32> {
     let mut lines = SharedInput::new(input);
     let mut session = None;
     let code = run_observed(
@@ -215,6 +239,7 @@ pub fn run(
                 session = event["session_id"].as_str().map(str::to_owned);
             }
         },
+        launch,
     )?;
     match session {
         Some(id) => follow(config, &id, code, max_turns, &mut lines, out),

@@ -406,6 +406,9 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
                 }
             }
         }
+        if let Some(note) = crate::council::stage_note_at(&store.join("astra")) {
+            out.push_str(&format!("council: {note}\n"));
+        }
     }
     Ok(out)
 }

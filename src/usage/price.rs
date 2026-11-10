@@ -1,6 +1,7 @@
 //! Claude API list prices in USD per million tokens, keyed by model family.
 //!
-//! Source: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-09.
+//! Source: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-09;
+//! the Fable 5.2 row was read there on 2026-11-10.
 //! Claude Code's own cost-state records agree with these rates to the cent for Opus 5.5
 //! (5-minute and 1-hour cache writes) and Haiku 5.5 (both prompt-length tiers).
 
@@ -66,6 +67,7 @@ impl Family {
 #[rustfmt::skip]
 const FAMILIES: &[Family] = &[
     //     family               input  5m write  1h write  read   output
+    family("claude-fable-5-2",   8.0,  10.0,     16.0,     0.20,  40.0).with_fast_mode(),
     family("claude-fable-5-1",  10.0,  12.5,     20.0,     0.25,  50.0),
     family("claude-mythos-5-1", 10.0,  12.5,     20.0,     0.25,  50.0),
     family("claude-fable-5",    10.0,  12.5,     20.0,     1.0,   50.0),

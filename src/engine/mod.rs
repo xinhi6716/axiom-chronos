@@ -42,6 +42,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../engine/research/audit.schema.json"),
     ),
     (
+        "research/council.schema.json",
+        include_str!("../../engine/research/council.schema.json"),
+    ),
+    (
         "research/plan.schema.json",
         include_str!("../../engine/research/plan.schema.json"),
     ),

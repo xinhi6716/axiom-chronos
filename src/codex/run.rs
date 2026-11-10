@@ -25,6 +25,10 @@ pub struct RunRequest {
 
 impl AppServer {
     pub fn run(&self, req: &RunRequest) -> Res<Value> {
+        self.run_capped(req, None)
+    }
+    /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
+    pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
             || req.brief.trim().is_empty()
@@ -186,7 +190,14 @@ impl AppServer {
             }
             match method {
                 "thread/tokenUsage/updated" => {
-                    report["usage"] = params["tokenUsage"]["total"].clone()
+                    report["usage"] = params["tokenUsage"]["total"].clone();
+                    let total = report["usage"]["totalTokens"].as_u64().unwrap_or(0);
+                    if token_cap.is_some_and(|cap| total >= cap) {
+                        self.interrupt(&thread_id, turn_id);
+                        report["status"] = json!("token_cap");
+                        report["error"] = json!({"kind":"token_cap","message":format!("turn reached {total} tokens and was interrupted")});
+                        break;
+                    }
                 }
                 "item/completed" => record_item(&mut report, &params["item"]),
                 "error" if params["willRetry"] != true => {

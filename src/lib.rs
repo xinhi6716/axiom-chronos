@@ -4,6 +4,7 @@ pub mod bridge;
 pub mod cli;
 pub mod codegraph;
 pub mod codex;
+pub mod council;
 #[cfg(feature = "app")]
 pub mod desktop;
 pub mod engine;

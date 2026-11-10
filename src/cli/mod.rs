@@ -20,6 +20,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
     let mut turns = (skill == "research").then_some(40);
     let (mut no_architect, mut creative, mut resume, mut project_set) =
         (false, false, None, false);
+    let mut launch = session::Launch::default();
     const RESUME_USAGE: &str = "--resume takes a session id and an optional message";
     if skill == "wish" && args.iter().any(|a| a == "--resume") {
         let mut j = 0;
@@ -65,6 +66,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             },
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
+            "--advanced-research" => launch.advanced_research = true,
             "--" => {
                 i += 1;
                 break;
@@ -114,7 +116,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         ));
     }
     let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
-    match session::run(
+    if launch.advanced_research {
+        eprintln!("axiom: {}", crate::council::NOTICE);
+    }
+    match session::run_with(
         &session::Config::from_env(),
         skill,
         &text,
@@ -122,6 +127,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         turns,
         Box::new(io::BufReader::new(io::stdin())),
         &mut io::stdout(),
+        &launch,
     ) {
         Ok(code) => code,
         Err(e) => usage(e.message),

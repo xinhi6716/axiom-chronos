@@ -17,7 +17,7 @@ if sys.argv[1:4] == ['plugin', 'list', '--json']:
     sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
-record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')}, 'messages': []}
+record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')}, 'messages': []}
 
 def save():
     with open(os.environ['FAKE_CLAUDE_RECORD'], 'w', encoding='utf-8') as f:

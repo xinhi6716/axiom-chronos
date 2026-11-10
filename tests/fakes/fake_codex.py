@@ -8,6 +8,7 @@ before reading anything, as when the `app-server` command line is rejected.
 """
 import json
 import os
+import re
 import sys
 import time
 import threading
@@ -204,6 +205,9 @@ for line in sys.stdin:
         echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
                 'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
         final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
+        if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
+            ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
+            final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
         if params.get('outputSchema') and 'BADJSON' in text:
             final = 'not json'
         elif params.get('outputSchema') and 'WRONGSHAPE' in text:
