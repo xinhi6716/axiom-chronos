@@ -2,6 +2,7 @@
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
 use super::i18n::{tr, Table};
 use super::model::*;
+use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -304,7 +305,7 @@ fn reveal_view(view: View, rect: Rect, width: f32, height: f32) -> View {
 }
 
 /// A thing on the graph.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Node {
     Core,
     Module(usize),
@@ -1181,6 +1182,29 @@ fn state_mark(state: UnitState, size_px: f32, color: Hsla, breath: f32) -> AnyEl
     ornament::glyph(state, size_px, color, breath).into_any_element()
 }
 
+/// A state mark that is changing: the old shape fades out under the new one as it fades in.
+fn mark_between(blend: Option<(UnitState, f32)>, state: UnitState, size_px: f32, t: &Tokens, breath: f32) -> AnyElement {
+    let Some((from, k)) = blend else { return state_mark(state, size_px, t.unit(state), breath) };
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size_px))
+        .child(div().absolute().top_0().left_0().child(state_mark(from, size_px, t.unit(from).opacity(1.0 - k), 0.0)))
+        .child(div().absolute().top_0().left_0().child(state_mark(state, size_px, t.unit(state).opacity(k), breath)))
+        .into_any_element()
+}
+
+/// A node's look partway from one state to the next.
+fn look_between(from: &NodeLook, to: &NodeLook, k: f32) -> NodeLook {
+    let glow = match (from.glow, to.glow) {
+        (None, None) => None,
+        (Some(a), None) => Some(a.opacity(a.a * (1.0 - k))),
+        (None, Some(b)) => Some(b.opacity(b.a * k)),
+        (Some(a), Some(b)) => Some(mix(a, b, k)),
+    };
+    NodeLook { border: mix(from.border, to.border, k), fill: mix(from.fill, to.fill, k), glow, text: mix(from.text, to.text, k) }
+}
+
 fn glow(color: Hsla, blur: f32) -> Vec<BoxShadow> {
     vec![BoxShadow {
         color,
@@ -1192,6 +1216,7 @@ fn glow(color: Hsla, blur: f32) -> Vec<BoxShadow> {
 }
 
 /// Border, fill, glow and text colors for a node in a given state.
+#[derive(Clone, Copy)]
 struct NodeLook {
     border: Hsla,
     fill: Hsla,
@@ -1260,9 +1285,70 @@ pub struct Mesh {
     /// Demo only: holds a ceremony at this point (0..1) so a still can be captured.
     frozen: Option<(Moment, f32)>,
     scene_view: Option<SceneView>,
+    /// Each node's state at the last layout, and the nodes changing state now: from what, since when.
+    node_states: HashMap<Node, UnitState>,
+    blends: HashMap<Node, (UnitState, Instant)>,
+    /// Nodes that appeared while the graph was on screen, and when; they fade in.
+    arrivals: HashMap<Node, Instant>,
+    blend_session: Option<SharedString>,
+}
+
+fn glyph_side(r: Rect, zoom: f32) -> f32 {
+    (24.0 * zoom).clamp(8.0, 40.0).min(r.h - 4.0).max(4.0)
 }
 
 impl Mesh {
+    /// Notes nodes whose state changed since the last layout, so they blend into the new state.
+    /// A run seen for the first time, or reduce motion, just shows the states as they are.
+    fn track_blends(&mut self, graph: &Graph, session: &SharedString, reduce: bool, now: Instant) {
+        let fresh = self.blend_session.as_ref() != Some(session);
+        let states: HashMap<Node, UnitState> = graph
+            .modules
+            .iter()
+            .map(|m| (Node::Module(m.index), m.state))
+            .chain(graph.chips.iter().map(|c| (c.node, c.state)))
+            .collect();
+        if fresh || reduce {
+            self.blends.clear();
+            self.arrivals.clear();
+        } else {
+            for (node, state) in &states {
+                match self.node_states.get(node) {
+                    Some(&before) if before != *state => {
+                        self.blends.insert(*node, (before, now));
+                    }
+                    None => {
+                        self.arrivals.insert(*node, now);
+                    }
+                    _ => {}
+                }
+            }
+            self.blends.retain(|_, (_, at)| now.saturating_duration_since(*at) < Pace::Change.duration());
+            self.arrivals.retain(|_, at| now.saturating_duration_since(*at) < Pace::Row.duration());
+        }
+        self.blend_session = Some(session.clone());
+        self.node_states = states;
+    }
+
+    /// How visible a node is: 1, or less while it fades in after appearing.
+    fn presence_of(&self, node: Node, cx: &App) -> f32 {
+        let Some(&at) = self.arrivals.get(&node) else { return 1.0 };
+        let reduce = self.state.read(cx).reduce_motion;
+        let mut arrive = Tween::rest(0.0, Pace::Row, Curve::EaseOut);
+        arrive.set(1.0, at, reduce);
+        arrive.value(motion::now(cx), reduce)
+    }
+
+    /// How far a node is through its change of state, while it is changing.
+    fn blend_of(&self, node: Node, cx: &App) -> Option<(UnitState, f32)> {
+        let &(from, at) = self.blends.get(&node)?;
+        let reduce = self.state.read(cx).reduce_motion;
+        let mut change = Tween::rest(0.0, Pace::Change, Curve::Smooth);
+        change.set(1.0, at, reduce);
+        let k = change.value(motion::now(cx), reduce);
+        (k < 1.0).then_some((from, k))
+    }
+
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Runs already on screen when the app opens are the baseline: they never get a ceremony.
         let mut ceremonies = Ceremonies::default();
@@ -1306,6 +1392,10 @@ impl Mesh {
             ceremonies,
             frozen: None,
             scene_view: None,
+            node_states: HashMap::new(),
+            blends: HashMap::new(),
+            arrivals: HashMap::new(),
+            blend_session: None,
         };
         let scene = this.state.read(cx).scene.clone();
         if let Some(scene) = scene {
@@ -1533,14 +1623,34 @@ impl Mesh {
     fn card_view(&self, m: &ModuleBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
         let selected = selected_node(&self.state.read(cx).selection) == Some(Node::Module(m.index));
         let hovered = self.hover == Some(Node::Module(m.index));
+        let blend = self.blend_of(Node::Module(m.index), cx);
         let look = node_look(t, m.state, t.surface, dark);
+        let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
         let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
         let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
+        let body_breath = if m.running { breath } else { 0.0 };
+        let side = glyph_side(r, self.view.zoom);
+        let body: AnyElement = match blend {
+            None => ornament::body(m.state, side, t.unit(m.state), t.orbit, look.fill, body_breath).into_any_element(),
+            Some((from, k)) => div()
+                .relative()
+                .flex_none()
+                .size(px(side))
+                .child(div().absolute().top_0().left_0().child(ornament::body(from, side, t.unit(from).opacity(1.0 - k), t.orbit, look.fill, 0.0)))
+                .child(div().absolute().top_0().left_0().child(ornament::body(
+                    m.state,
+                    side,
+                    t.unit(m.state).opacity(k),
+                    t.orbit.opacity(k),
+                    look.fill.opacity(k),
+                    body_breath,
+                )))
+                .into_any_element(),
+        };
         let share = |n: usize| if m.total == 0 { 0.0 } else { n as f32 / m.total as f32 };
         let zoom = self.view.zoom;
         let worded = CHIP_H * zoom >= LABEL_MIN_CHIP_H;
         let text_px = (13.0 * zoom).clamp(12.0, 20.0);
-        let glyph = (24.0 * zoom).clamp(8.0, 40.0).min(r.h - 4.0).max(4.0);
         let run_ref = &run.modules[m.index];
         let count = |state| run_ref.units.iter().filter(|&&u| run.units[u].state == state).count();
         let segments = [
@@ -1550,6 +1660,7 @@ impl Mesh {
             (count(UnitState::Failed), t.fail),
         ];
         v_flex()
+            .opacity(self.presence_of(Node::Module(m.index), cx))
             .absolute()
             .left(px(r.x))
             .top(px(r.y))
@@ -1568,7 +1679,7 @@ impl Mesh {
             .child(
                 h_flex()
                     .gap(px((5.0 * zoom).min(8.0)))
-                    .child(ornament::body(m.state, glyph, t.unit(m.state), t.orbit, look.fill, if m.running { breath } else { 0.0 }))
+                    .child(body)
                     .when(worded, |this| {
                         this.child(div().flex_1().min_w_0().truncate().text_size(px(text_px)).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone()))
                     })
@@ -1593,14 +1704,17 @@ impl Mesh {
     fn chip_view(&self, chip: &ChipBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
         let selected = selected_node(&self.state.read(cx).selection) == Some(chip.node);
         let hovered = self.hover == Some(chip.node);
+        let blend = self.blend_of(chip.node, cx);
         let look = node_look(t, chip.state, t.surface, dark);
+        let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
         let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
         let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
         let zoom = self.view.zoom;
         if r.h < LABEL_MIN_CHIP_H {
             // Too small for words: a tinted body in the state's color, its shape kept when it fits.
-            let color = t.unit(chip.state);
+            let color = blend.map_or(t.unit(chip.state), |(from, k)| mix(t.unit(from), t.unit(chip.state), k));
             return div()
+                .opacity(self.presence_of(chip.node, cx))
                 .absolute()
                 .left(px(r.x))
                 .top(px(r.y))
@@ -1613,7 +1727,7 @@ impl Mesh {
                 .border_1()
                 .border_color(if selected || hovered { border } else { color.opacity(0.7) })
                 .bg(look.fill.blend(color.opacity(0.18)))
-                .when(r.h >= 10.0, |this| this.child(state_mark(chip.state, r.h - 4.0, color, breath)))
+                .when(r.h >= 10.0, |this| this.child(mark_between(blend, chip.state, r.h - 4.0, t, breath)))
                 .into_any_element();
         }
         let text_px = (12.0 * zoom).clamp(12.0, 18.0);
@@ -1631,6 +1745,7 @@ impl Mesh {
             _ => None,
         };
         h_flex()
+            .opacity(self.presence_of(chip.node, cx))
             .absolute()
             .left(px(r.x))
             .top(px(r.y))
@@ -1644,7 +1759,7 @@ impl Mesh {
             .border_color(border)
             .bg(look.fill)
             .when_some(shadow, |this, color| this.shadow(glow(color, 9.)))
-            .child(state_mark(chip.state, (13.0 * zoom).clamp(10.0, 22.0), t.unit(chip.state), breath))
+            .child(mark_between(blend, chip.state, (13.0 * zoom).clamp(10.0, 22.0), t, breath))
             .child(
                 div()
                     .flex_1()
@@ -1801,6 +1916,10 @@ impl Mesh {
             }
         }
         self.view = clamp_view(self.view, graph.content(), width, view_h);
+        self.track_blends(&graph, &run.session, state.reduce_motion, motion::now(cx));
+        let mut frames = Driver::new(state.reduce_motion, cx);
+        frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
+        frames.finish(window);
         let view = self.view;
         if self.cursor.is_some_and(|n| n != Node::Core && graph.rect_of(n).is_none()) {
             self.cursor = None;
@@ -2180,9 +2299,10 @@ impl Render for Mesh {
                 )
                 .into_any_element();
         }
-        if animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()) {
-            window.request_animation_frame();
-        }
+        let mut frames = Driver::new(state.reduce_motion, cx);
+        frames.keep(animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
+        frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
+        frames.finish(window);
         let finished = (run.status == RunStatus::Done).then(|| summary(run, &t, cx));
         let legend = legend(run, &t, cx);
         let this = cx.entity();
@@ -2874,6 +2994,22 @@ mod tests {
         c.observe(&[run_as("temp", RunStatus::Done, true)], &no_renames(), false, at(1.0));
         c.observe(&[run_as("real", RunStatus::Done, true)], &renames, false, at(1.2));
         assert!(c.turn(&real, false, at(1.5)).is_some());
+    }
+
+    #[test]
+    fn a_node_changing_state_blends_from_the_old_look_to_the_new() {
+        for t in crate::desktop::theme::both() {
+            let from = node_look(&t, UnitState::Running, t.surface, true);
+            let to = node_look(&t, UnitState::Verified, t.surface, true);
+            let start = look_between(&from, &to, 0.0);
+            let end = look_between(&from, &to, 1.0);
+            assert_eq!((Rgba::from(start.border), Rgba::from(start.fill)), (Rgba::from(from.border), Rgba::from(from.fill)));
+            assert_eq!((Rgba::from(end.border), Rgba::from(end.fill)), (Rgba::from(to.border), Rgba::from(to.fill)));
+            // The running glow fades out rather than vanishing at once.
+            let half = look_between(&from, &to, 0.5).glow.expect("still glowing halfway");
+            assert!(half.a > 0.0 && half.a < from.glow.unwrap().a);
+            assert!(end.glow.is_none_or(|g| g.a < 1e-6));
+        }
     }
 
     #[test]

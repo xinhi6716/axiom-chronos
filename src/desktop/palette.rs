@@ -4,6 +4,7 @@
 use super::control::offer;
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
+use super::motion::{self, Driver, Presence};
 use super::ornament;
 use super::theme::{Tokened as _, Tokens};
 use super::wishes::{can_resume, one_line};
@@ -801,6 +802,9 @@ pub struct Palette {
     restore: Option<FocusHandle>,
     /// The selected result while the index is rebuilt, so a refresh does not move the selection.
     keep: Option<Target>,
+    /// Opens with the soft spring and leaves quickly; while leaving, `ghost` is what is drawn.
+    presence: Presence,
+    ghost: Overlay,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -835,6 +839,8 @@ impl Palette {
             focus: cx.focus_handle(),
             restore: None,
             keep: None,
+            presence: Presence::default(),
+            ghost: Overlay::Closed,
             _subscriptions: subscriptions,
         }
     }
@@ -852,6 +858,8 @@ impl Palette {
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focus(window, cx);
         self.overlay = Overlay::Search;
+        self.ghost = Overlay::Search;
+        self.presence.show(motion::now(cx));
         let placeholder = tr(cx, T, "Search wishes, goals, modules, units and memory, or run a command");
         self.query.update(cx, |query, cx| {
             query.set_value("", window, cx);
@@ -867,6 +875,8 @@ impl Palette {
     pub(super) fn show_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focus(window, cx);
         self.overlay = Overlay::Shortcuts;
+        self.ghost = Overlay::Shortcuts;
+        self.presence.show(motion::now(cx));
         self.searching = None;
         self.focus.focus(window, cx);
         cx.notify();
@@ -877,6 +887,7 @@ impl Palette {
             return;
         }
         self.overlay = Overlay::Closed;
+        self.presence.hide(motion::now(cx));
         self.searching = None;
         if let Some(handle) = self.restore.take() {
             handle.focus(window, cx);
@@ -966,17 +977,34 @@ impl Palette {
         cx.emit(PaletteEvent::Chose(target));
     }
 
-    fn scrim(&self, id: &'static str, t: &Tokens, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The dimmed window behind an overlay. While the overlay leaves it is only drawn: it takes no
+    /// clicks and has its own id, so nothing mistakes it for an open overlay.
+    fn scrim(&self, id: &'static str, level: f32, live: bool, t: &Tokens, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
-            .id(id)
+            .id(if live { id } else { "overlay-leaving" })
             .absolute()
             .inset_0()
-            .occlude()
-            .bg(t.canvas.opacity(0.72))
+            .bg(t.canvas.opacity(0.72 * level.clamp(0.0, 1.0)))
             .flex()
             .flex_col()
             .items_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close(window, cx)))
+            .when(live, |this| {
+                this.occlude().on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close(window, cx)))
+            })
+    }
+
+    /// The overlay's panel as it opens or leaves: it fades and settles down into place.
+    fn panel_motion(panel: Div, level: f32) -> Div {
+        panel.relative().top(px(-14.0 * (1.0 - level))).opacity(level.clamp(0.0, 1.0))
+    }
+
+    fn finish(element: Stateful<Div>, live: bool) -> AnyElement {
+        // Lets the headless keyboard tests see the overlay; nothing without `test-support`.
+        if live {
+            element.test_support().into_any_element()
+        } else {
+            element.into_any_element()
+        }
     }
 
     fn result_row(&self, ix: usize, hit: &Hit, t: &Tokens, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1066,7 +1094,7 @@ impl Palette {
         }))
     }
 
-    fn render_search(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_search(&mut self, level: f32, live: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.tokens();
         let rows: Vec<AnyElement> = self
             .hits
@@ -1097,9 +1125,9 @@ impl Palette {
                 .into_any_element()
         };
         let shortcuts_keys = keys_of(Global::Shortcuts);
-        self.scrim("palette-scrim", &t, cx)
+        let scrim = self.scrim("palette-scrim", level, live, &t, cx)
             .child(
-                div()
+                Self::panel_motion(div(), level)
                     .mt(px(72.))
                     .w(px(780.))
                     .max_w(relative(0.92))
@@ -1166,10 +1194,8 @@ impl Palette {
                                     ),
                             ),
                     ),
-            )
-            // Lets the headless keyboard tests see the overlay; nothing without `test-support`.
-            .test_support()
-            .into_any_element()
+            );
+        Self::finish(scrim, live)
     }
 
     fn area_section(&self, area: Area, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1187,7 +1213,7 @@ impl Palette {
             }))
     }
 
-    fn render_shortcuts(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_shortcuts(&mut self, level: f32, live: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.tokens();
         // The list scrolls only when the window is too short to show it whole.
         let room = (f32::from(window.viewport_size().height) - SHORTCUTS_TOP - SHORTCUTS_CHROME).max(160.);
@@ -1196,9 +1222,9 @@ impl Palette {
         };
         let left = column(&Area::ALL[..5], self, cx);
         let right = column(&Area::ALL[5..], self, cx);
-        self.scrim("shortcuts-scrim", &t, cx)
+        let scrim = self.scrim("shortcuts-scrim", level, live, &t, cx)
             .child(
-                div()
+                Self::panel_motion(div(), level)
                     .mt(px(SHORTCUTS_TOP))
                     .w(px(860.))
                     .max_w(relative(0.94))
@@ -1239,20 +1265,28 @@ impl Palette {
                                     ),
                             ),
                     ),
-            )
-            // Lets the headless keyboard tests see the overlay; nothing without `test-support`.
-            .test_support()
-            .into_any_element()
+            );
+        Self::finish(scrim, live)
     }
 }
 
 impl Render for Palette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.overlay {
+        let reduce = self.state.read(cx).reduce_motion;
+        let mut motion = Driver::new(reduce, cx);
+        let level = motion.level(&self.presence);
+        // A closed overlay is still drawn, without taking input, until it has faded out.
+        let (overlay, live) = match self.overlay {
+            Overlay::Closed if self.presence.visible(motion.now(), reduce) => (self.ghost, false),
+            overlay => (overlay, true),
+        };
+        let element = match overlay {
             Overlay::Closed => div().into_any_element(),
-            Overlay::Search => self.render_search(cx),
-            Overlay::Shortcuts => self.render_shortcuts(window, cx),
-        }
+            Overlay::Search => self.render_search(level, live, cx),
+            Overlay::Shortcuts => self.render_shortcuts(level, live, window, cx),
+        };
+        motion.finish(window);
+        element
     }
 }
 

@@ -3,7 +3,9 @@
 //! Needs you notifications and the question asked before closing.
 use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Lang, Table};
+use super::launch::{self, Launch, Square};
 use super::model::*;
+use super::motion::{self, lerp, mix, Curve, Driver, Pace, Tween};
 use super::palette::{self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target};
 use super::settings::{LanguageChoice, ThemeChoice};
 use super::{ornament, settings};
@@ -16,8 +18,10 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Placement, Selectable as _, StyledExt as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 const T: Table = &[
     ("What the current wish is doing", "目前的願望進行到哪裡"),
@@ -83,6 +87,21 @@ const STOP_DEADLINE: Duration = Duration::from_secs(10);
 /// How long closing the window waits for the engine to drop its wishes before giving up.
 const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
 const TOAST_MESSAGE_CHARS: usize = 120;
+/// How far a new screen drifts up into place as it crossfades in.
+const SCREEN_DRIFT: f32 = 10.0;
+
+/// The rail's screens, in order.
+const SCREENS: [Screen; 5] = [Screen::Run, Screen::Wishes, Screen::Memory, Screen::Usage, Screen::Doctor];
+
+fn slot(screen: Screen) -> usize {
+    SCREENS.iter().position(|s| *s == screen).unwrap_or(0)
+}
+
+/// Demo only: splits a scene such as `switch-at-120` into what to do and when to hold it.
+pub fn held_scene(scene: &str) -> Option<(&str, u64)> {
+    let (what, ms) = scene.rsplit_once("-at-")?;
+    Some((what, ms.parse().ok()?))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlertKind {
@@ -210,10 +229,49 @@ pub struct Shell {
     /// Holds the keyboard when nothing else does, so window-wide keys see a key context; `?`
     /// is bound outside text boxes, which needs one.
     focus: FocusHandle,
+    /// The opening ritual, while it plays.
+    launch: Launch,
+    /// Where the rail's portrait was last drawn, so the launch's keeper can land on it.
+    rail_portrait: Rc<Cell<Option<Square>>>,
+    /// The screen last drawn, the one a switch is leaving, and how far the switch has come.
+    shown: Screen,
+    leaving: Option<Screen>,
+    switch: Tween,
+    /// How lit and how hovered each rail item is, so selection and hover glows fade.
+    lit: [Tween; 5],
+    hover: [Tween; 5],
+    hovered: Option<Screen>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
+    /// Plays the launch over this window.
+    pub fn with_launch(mut self, launch: Launch) -> Self {
+        self.launch = launch;
+        self
+    }
+
+    /// Any key or click during the launch ends it at once. Returns whether it was playing.
+    fn skip_launch(&mut self, cx: &mut Context<Self>) -> bool {
+        // A held demo frame is a still picture: stray input must not end it.
+        if !self.launch.playing(motion::now(cx)) || motion::is_frozen(cx) {
+            return false;
+        }
+        self.launch.skip();
+        cx.notify();
+        true
+    }
+
+    fn screen(&self, screen: Screen) -> AnyElement {
+        match screen {
+            Screen::Run => self.run.clone().into_any_element(),
+            Screen::Wishes => self.wishes.clone().into_any_element(),
+            Screen::Memory => self.memory.clone().into_any_element(),
+            Screen::Usage => self.usage.clone().into_any_element(),
+            Screen::Doctor => self.doctor.clone().into_any_element(),
+        }
+    }
+
     pub fn new(state: Entity<AppState>, may_flash: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &state.read(cx).runs);
@@ -244,6 +302,8 @@ impl Shell {
             shell.update(cx, |shell, cx| shell.should_close(window, cx)).unwrap_or(true)
         });
         let scene = state.read(cx).scene.clone();
+        let shown = state.read(cx).view;
+        let glow = |on: bool| Tween::rest(if on { 1.0 } else { 0.0 }, Pace::Glow, Curve::EaseOut);
         if let Some(scene) = scene {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(400)).await;
@@ -269,6 +329,14 @@ impl Shell {
             stop_deadline: None,
             errors_shown: 0,
             focus,
+            launch: Launch::none(),
+            rail_portrait: Rc::new(Cell::new(None)),
+            shown,
+            leaving: None,
+            switch: Tween::rest(1.0, Pace::Screen, Curve::EaseOut),
+            lit: SCREENS.map(|screen| glow(screen == shown)),
+            hover: SCREENS.map(|_| glow(false)),
+            hovered: None,
             _subscriptions: subscriptions,
         }
     }
@@ -572,6 +640,7 @@ impl Shell {
             let stop_label = if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop and close") };
             let (keep, stop, closed) = (shell.clone(), shell.clone(), shell.clone());
             alert
+                .entrance(motion::DIALOG_ENTRANCE)
                 .icon(Icon::new(IconName::TriangleAlert).size(px(20.)).text_color(t.review))
                 .title(tr(cx, T, "A wish is still running"))
                 .description(description)
@@ -636,7 +705,49 @@ impl Shell {
         window.remove_window();
     }
 
+    /// Demo only: starts a transition on a frozen clock, then holds it `ms` in, so a capture shows
+    /// the frame mid-way. The hold waits a moment of real time first, so every view has drawn the
+    /// transition's first frame and taken its start from the frozen clock.
+    fn hold_transition(&mut self, what: &str, ms: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let start = Instant::now();
+        motion::freeze(start, cx);
+        match what {
+            "switch" => self.state.update(cx, |state, cx| state.set_view(Screen::Wishes, cx)),
+            "palette" => self.palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+                palette.type_query("read", window, cx);
+            }),
+            "palette-close" => {
+                self.palette.update(cx, |palette, cx| {
+                    palette.open(window, cx);
+                    palette.type_query("read", window, cx);
+                });
+                // Opened long enough ago to be settled, closing now.
+                motion::freeze(start + Pace::Open.duration() * 2, cx);
+                self.palette.update(cx, |palette, cx| palette.close(window, cx));
+            }
+            "progress" => self.state.update(cx, |state, cx| {
+                if let Some(run) = state.current.and_then(|i| state.runs.get_mut(i)) {
+                    super::demo::advance(run);
+                }
+                cx.notify();
+            }),
+            _ => return,
+        }
+        let held = motion::now(cx) + Duration::from_millis(ms);
+        cx.spawn_in(window, async move |_, cx| {
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            let _ = cx.update(|_, cx| motion::freeze(held, cx));
+        })
+        .detach();
+    }
+
     fn play_scene(&mut self, scene: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // `launch-at-<ms>` is held from the very start, before this runs.
+        if let Some((what, ms)) = held_scene(scene).filter(|(what, _)| *what != "launch") {
+            self.hold_transition(what, ms, window, cx);
+            return;
+        }
         match scene {
             "close-confirm" => self.ask_before_close(window, cx),
             "close-stop" => self.stop_and_close(window, cx),
@@ -700,18 +811,27 @@ impl Shell {
         hint: SharedString,
         view: Screen,
         count: usize,
+        (lit, hover): (f32, f32),
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = cx.tokens();
         let active = self.state.read(cx).view == view;
         let state = self.state.clone();
-        let colors = ButtonCustomVariant::new(cx)
-            .color(if active { t.raised } else { cx.theme().transparent })
-            .foreground(if active { t.gold } else { t.muted })
-            .hover(t.raised)
-            .active(t.raised);
+        // The selection and hover glows fade in and out rather than snapping.
+        let face = mix(t.raised.opacity(0.0), t.raised, lit.max(hover));
+        let colors = ButtonCustomVariant::new(cx).color(face).foreground(mix(t.muted, t.gold, lit)).hover(face).active(face);
+        let mark = lerp(0.35, 1.0, lit);
         div()
+            .id(("nav-glow", slot(view)))
             .relative()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered = Some(view);
+                } else if this.hovered == Some(view) {
+                    this.hovered = None;
+                }
+                cx.notify();
+            }))
             .child(
                 Button::new(id)
                     .custom(colors)
@@ -737,16 +857,16 @@ impl Shell {
                             .child(tr(cx, &[], label)),
                     ),
             )
-            .when(active, |this| {
+            .when(lit > 0.01, |this| {
                 this.child(
                     div()
                         .absolute()
                         .left(px(-8.))
-                        .top(px(14.))
+                        .top(px(14. + 12. * (1. - mark)))
                         .w(px(3.))
-                        .h(px(24.))
+                        .h(px(24. * mark))
                         .rounded_r(px(3.))
-                        .bg(t.gold),
+                        .bg(t.gold.opacity(lit)),
                 )
             })
     }
@@ -855,19 +975,40 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
         let state = self.state.read(cx);
+        let reduce = state.reduce_motion;
         let view = state.view;
         let composing = state.composing;
         let waiting = state.runs.iter().filter(|run| needs_user(run)).count();
-        let content: AnyElement = match view {
-            Screen::Run => self.run.clone().into_any_element(),
-            Screen::Wishes => self.wishes.clone().into_any_element(),
-            Screen::Memory => self.memory.clone().into_any_element(),
-            Screen::Usage => self.usage.clone().into_any_element(),
-            Screen::Doctor => self.doctor.clone().into_any_element(),
-        };
+        let mut motion = Driver::new(reduce, cx);
+        let now = motion.now();
+        motion.track(&self.launch);
+        let launching = self.launch.seconds(now).filter(|_| !reduce);
+
+        if view != self.shown {
+            // Behind the launch the screen simply changes; after it, a switch crossfades.
+            if launching.is_none() {
+                self.leaving = Some(self.shown);
+                self.switch.jump(0.0);
+                self.switch.set(1.0, now, reduce);
+            }
+            self.shown = view;
+        }
+        let switch = motion.value(&self.switch);
+        if switch >= 1.0 {
+            self.leaving = None;
+        }
+        let mut glows = [(0.0, 0.0); 5];
+        for (i, screen) in SCREENS.into_iter().enumerate() {
+            self.lit[i].set(if screen == view { 1.0 } else { 0.0 }, now, reduce);
+            self.hover[i].set(if self.hovered == Some(screen) { 1.0 } else { 0.0 }, now, reduce);
+            glows[i] = (motion.value(&self.lit[i]), motion.value(&self.hover[i]));
+        }
+        let content = self.screen(view);
+        // The screen being left stays underneath while the new one fades in over it.
+        let leaving = self.leaving.map(|screen| self.screen(screen));
         let wishes_hint: SharedString = if waiting == 0 {
             tr(cx, T, "Every wish, newest first").into()
         } else {
@@ -876,16 +1017,53 @@ impl Render for Shell {
         let status = self.title_status(cx);
         let search = self.search_button(cx);
         let new_wish = self.new_wish_button(cx);
-        let run_item = self.nav_item("nav-run", IconName::LayoutDashboard, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, cx);
-        let wishes_item = self.nav_item("nav-wishes", IconName::Inbox, "Wishes", wishes_hint, Screen::Wishes, waiting, cx);
-        let memory_item = self.nav_item("nav-memory", IconName::BookOpen, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, cx);
-        let usage_item = self.nav_item("nav-usage", IconName::ChartPie, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, cx);
-        let settings_item = self.nav_item("nav-doctor", IconName::Settings, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, cx);
+        let g = |screen: Screen| glows[slot(screen)];
+        let run_item = self.nav_item("nav-run", IconName::LayoutDashboard, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), cx);
+        let wishes_item = self.nav_item("nav-wishes", IconName::Inbox, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), cx);
+        let memory_item = self.nav_item("nav-memory", IconName::BookOpen, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), cx);
+        let usage_item = self.nav_item("nav-usage", IconName::ChartPie, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), cx);
+        let settings_item = self.nav_item("nav-doctor", IconName::Settings, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), cx);
+        let rail_cell = self.rail_portrait.clone();
+        // Hidden while the launch's keeper is on its way to this spot.
+        let rail_portrait = div()
+            .relative()
+            .mt_1()
+            .mb_2()
+            .child(ornament::portrait(44.).opacity(if launching.is_some() { 0.0 } else { 1.0 }))
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let (x, y) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                        rail_cell.set(Some(Square { x, y, side: f32::from(bounds.size.width) }));
+                    },
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        let viewport = window.viewport_size();
+        let overlay = launching.map(|s| {
+            let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
+            launch::overlay(s, w, h, self.rail_portrait.get(), super::theme::night())
+                .id("launch")
+                .occlude()
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.skip_launch(cx);
+                }))
+        });
+        motion.finish(window);
         v_flex()
             .size_full()
             .relative()
             .key_context("ChronosShell")
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                if this.skip_launch(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .bg(tokens.canvas)
             .text_color(tokens.text)
             .child(
@@ -924,7 +1102,7 @@ impl Render for Shell {
                             .bg(tokens.surface)
                             .border_r_1()
                             .border_color(tokens.border)
-                            .child(ornament::portrait(44.).mt_1().mb_2())
+                            .child(rail_portrait)
                             .child(new_wish)
                             .child(div().w(px(60.)).my_1().child(ornament::divider(&tokens, 0.0)))
                             .child(run_item)
@@ -934,10 +1112,26 @@ impl Render for Shell {
                             .child(div().flex_1())
                             .child(settings_item),
                     )
-                    .child(div().flex_1().min_w_0().h_full().child(content)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .relative()
+                            .children(leaving.map(|screen| div().absolute().top_0().left_0().size_full().child(screen)))
+                            .child(
+                                div()
+                                    .relative()
+                                    .size_full()
+                                    .top(px(SCREEN_DRIFT * (1.0 - switch)))
+                                    .when(switch < 1.0, |this| this.bg(tokens.canvas).opacity(switch))
+                                    .child(content),
+                            ),
+                    ),
             )
             .when(composing, |this| this.child(self.composer.clone()))
             .child(self.palette.clone())
+            .children(overlay)
     }
 }
 
@@ -1077,6 +1271,22 @@ mod tests {
         assert_eq!(run.status_label(), "Done");
         run.units.clear();
         assert!(!run.verified_end());
+    }
+
+    #[test]
+    fn a_held_scene_names_its_transition_and_moment() {
+        assert_eq!(held_scene("switch-at-120"), Some(("switch", 120)));
+        assert_eq!(held_scene("palette-close-at-60"), Some(("palette-close", 60)));
+        assert_eq!(held_scene("launch-at-0"), Some(("launch", 0)));
+        assert_eq!(held_scene("switch-at-"), None);
+        assert_eq!(held_scene("palette"), None);
+    }
+
+    #[test]
+    fn the_rail_lists_every_screen_once() {
+        for (i, screen) in SCREENS.into_iter().enumerate() {
+            assert_eq!(slot(screen), i);
+        }
     }
 
     #[test]
