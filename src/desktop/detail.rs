@@ -74,6 +74,7 @@ const TABLE: i18n::Table = &[
     ("No review was saved for this unit.", "這個單元沒有留下審查紀錄。"),
     ("Loading…", "讀取中…"),
     ("This file is no longer there.", "這個檔案已不存在。"),
+    ("VS Code was not found, so this file was not opened.", "找不到 VS Code，所以沒有開啟這個檔案。"),
     ("This file could not be read.", "無法讀取這個檔案。"),
     ("This file is empty.", "這個檔案是空的。"),
     ("This text is not saved as a file.", "這段文字沒有存成檔案。"),
@@ -522,6 +523,8 @@ enum Refusal {
     Outside,
     /// The file is not there.
     Missing,
+    /// No editor is installed, and the file's type is not safe to hand to the system.
+    NoEditor,
 }
 
 /// `path` with `.` and `..` worked out, without touching the disk.
@@ -793,8 +796,23 @@ fn link_plain(text: &str, project: &Path) -> String {
     out
 }
 
+/// Whether the system's default app may be asked to open `target` when no editor is available.
+/// Only plain text and source types qualify: anything else could be a program or a script that
+/// the default handler would run.
+fn system_open_allowed(target: &Path) -> bool {
+    const TEXT: &[&str] = &[
+        "md", "markdown", "txt", "log", "rs", "toml", "lock", "json", "yaml", "yml", "csv", "tsv", "ini", "cfg", "conf",
+        "diff", "patch", "css", "c", "h", "cpp", "hpp", "go", "java", "kt", "swift", "tex", "rst",
+    ];
+    target
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| TEXT.iter().any(|known| ext.eq_ignore_ascii_case(known)))
+}
+
 /// Opens a followed reference in the editor at its line: VS Code when `code` is on PATH,
-/// otherwise the system's default app for the file. Anything outside the project, or gone, is
+/// otherwise the system's default app, for plain text and source files only: a program or script
+/// is never handed to the system, which could run it. Anything outside the project, or gone, is
 /// not opened and the person is told why.
 fn open_cite(url: &str, project: Option<&Path>, window: &mut Window, cx: &mut App) {
     let Some((path, line, column)) = parse_cite_url(url) else {
@@ -803,6 +821,7 @@ fn open_cite(url: &str, project: Option<&Path>, window: &mut Window, cx: &mut Ap
     let project = project.map(Path::to_path_buf);
     let outside = tr(cx, TABLE, "That file is outside this project, so it was not opened.");
     let missing = tr(cx, TABLE, "This file is no longer there.");
+    let no_editor = tr(cx, TABLE, "VS Code was not found, so this file was not opened.");
     window
         .spawn(cx, async move |cx| {
             let opened = cx
@@ -811,6 +830,9 @@ fn open_cite(url: &str, project: Option<&Path>, window: &mut Window, cx: &mut Ap
                     let launched = crate::base::on_path("code").is_some_and(|code| {
                         crate::base::proc::cmd(code).args(editor_args(&target, line, column)).spawn().is_ok()
                     });
+                    if !launched && !system_open_allowed(&target) {
+                        return Err(Refusal::NoEditor);
+                    }
                     Ok::<_, Refusal>((target, launched))
                 })
                 .await;
@@ -818,7 +840,11 @@ fn open_cite(url: &str, project: Option<&Path>, window: &mut Window, cx: &mut Ap
                 Ok((_, true)) => {}
                 Ok((target, false)) => cx.open_with_system(&target),
                 Err(refusal) => {
-                    let message = if refusal == Refusal::Outside { outside } else { missing };
+                    let message = match refusal {
+                        Refusal::Outside => outside,
+                        Refusal::Missing => missing,
+                        Refusal::NoEditor => no_editor,
+                    };
                     window.push_notification(Notification::warning(message), cx);
                 }
             });
@@ -2203,6 +2229,31 @@ mod cite_tests {
         assert!(text.contains(" `../../etc/passwd.txt`") && !text.contains("passwd.txt)"), "{text}");
         let plain = review_markdown(review, "Verdict", "No findings.", None).unwrap();
         assert!(plain.contains(" `bridge.rs`") && !plain.contains("chronos-cite"));
+    }
+}
+
+#[cfg(test)]
+mod system_open_tests {
+    use super::system_open_allowed;
+    use std::path::Path;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn programs_and_scripts_are_never_handed_to_the_system() {
+        for name in [
+            "run.bat", "run.CMD", "tool.exe", "x.com", "x.scr", "x.msi", "x.lnk", "x.ps1", "x.vbs", "x.js", "x.jse",
+            "x.wsf", "x.hta", "x.reg", "x.py", "x.sh", "x.jar", "x.url", "x.appref-ms", "x.pif", "noext", "x.md.exe",
+            "x.bat.", "x.bat ", "x.txt:evil.bat", "x.",
+        ] {
+            assert!(!system_open_allowed(Path::new(&format!("C:/proj/{name}"))), "{name}");
+        }
+    }
+
+    #[test]
+    fn plain_text_and_source_files_may_use_the_system_fallback() {
+        for name in ["README.md", "notes.TXT", "src/lib.rs", "Cargo.toml", "a.json", "run.log", "b.yaml"] {
+            assert!(system_open_allowed(Path::new(&format!("C:/proj/{name}"))), "{name}");
+        }
     }
 }
 
