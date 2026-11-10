@@ -6,15 +6,17 @@ use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{ErrorKind, Read as _};
@@ -81,6 +83,7 @@ const TABLE: i18n::Table = &[
     ("Open the full file", "開啟完整檔案"),
     ("Verdict", "審查結果"),
     ("No findings.", "沒有發現問題。"),
+    ("That file is outside this project, so it was not opened.", "這個檔案在專案資料夾之外，所以沒有開啟。"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,11 +379,466 @@ fn is_web_link(url: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://")
 }
 
+/// A file named in a document: `src/a.rs`, `src/a.rs:12`, `src/a.rs:12:5`, `src/a.rs#L12`, a
+/// pytest id `tests/t.py::test_x`, or a Python traceback's `File "a.py", line 12`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Cite {
+    /// Where the reference is written, in bytes of the text it was found in.
+    range: std::ops::Range<usize>,
+    path: String,
+    line: Option<u32>,
+    column: Option<u32>,
+}
+
+/// Characters a path reference is made of. Letters outside ASCII are left out on purpose:
+/// Chinese prose runs straight into a path without a space.
+fn path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | ':' | '#' | '+' | '@' | '~')
+}
+
+/// The first number of `12`, `12-20` or `12-L20`.
+fn line_number(text: &str) -> Option<u32> {
+    let digits: &str = &text[..text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len())];
+    let rest = &text[digits.len()..];
+    let tail_ok = rest.is_empty()
+        || rest.strip_prefix('-').is_some_and(|r| {
+            let r = r.strip_prefix('L').unwrap_or(r);
+            !r.is_empty() && r.chars().all(|c| c.is_ascii_digit())
+        });
+    if digits.is_empty() || !tail_ok {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
+fn whole_number(text: &str) -> Option<u32> {
+    (!text.is_empty() && text.chars().all(|c| c.is_ascii_digit())).then(|| text.parse().ok()).flatten()
+}
+
+fn drive_prefixed(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || matches!(b[2], b'/' | b'\\'))
+}
+
+/// Whether `path` looks like a file: its last part has a short extension with a letter in it.
+/// Unless `lenient`, it must also name a folder or a line, so `e.g.`, `v1.2` or a bare `README.md`
+/// in a sentence are not taken for references.
+fn plausible_path(path: &str, has_line: bool, lenient: bool) -> bool {
+    if path.is_empty() || path.contains("://") || path.starts_with(['~', '-', '+']) || path.contains('#') {
+        return false;
+    }
+    let colons = path.matches(':').count();
+    if colons > usize::from(drive_prefixed(path)) {
+        return false;
+    }
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let ext_ok = (1..=10).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        && ext.chars().any(|c| c.is_ascii_alphabetic());
+    if stem.is_empty() || stem.ends_with('.') || !ext_ok {
+        return false;
+    }
+    lenient || has_line || path.contains(['/', '\\'])
+}
+
+/// Reads one run of path characters as a reference, with its range inside `raw`.
+fn parse_cite(raw: &str, lenient: bool) -> Option<Cite> {
+    let lead = raw.len() - raw.trim_start_matches([':', '#', '-', '+', '@']).len();
+    let body = raw[lead..].trim_end_matches(['.', ':', ',', '#', '-', '+', '@']);
+    let mut rest = body;
+    if let Some(at) = rest.find("::") {
+        rest = &rest[..at];
+    }
+    let (mut line, mut column) = (None, None);
+    if let Some((path, tail)) = rest.rsplit_once("#L") {
+        line = Some(line_number(tail)?);
+        rest = path;
+    } else if let Some((path, tail)) = rest.rsplit_once(':') {
+        if let Some(n) = line_number(tail) {
+            rest = path;
+            line = Some(n);
+            if let (Some(col), Some((path, prev))) = (whole_number(tail), rest.rsplit_once(':')) {
+                if let Some(n) = whole_number(prev) {
+                    rest = path;
+                    line = Some(n);
+                    column = Some(col);
+                }
+            }
+        }
+    }
+    plausible_path(rest, line.is_some(), lenient).then(|| Cite {
+        range: lead..lead + body.len(),
+        path: rest.to_owned(),
+        line,
+        column,
+    })
+}
+
+/// `", line 12` right after a quoted path in a Python traceback.
+fn traceback_line(after: &str) -> Option<u32> {
+    let rest = after.strip_prefix("\", line ")?;
+    whole_number(&rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())])
+}
+
+/// Every file reference in plain text, in order.
+fn find_cites(text: &str) -> Vec<Cite> {
+    let mut cites = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if !path_char(c) {
+            continue;
+        }
+        let mut end = start + c.len_utf8();
+        while let Some(&(i, c)) = chars.peek() {
+            if !path_char(c) {
+                break;
+            }
+            end = i + c.len_utf8();
+            chars.next();
+        }
+        let raw = &text[start..end];
+        // A traceback names the file and its line apart: `File "app.py", line 12`.
+        let traced = traceback_line(&text[end..]);
+        let found = parse_cite(raw, false).or_else(|| traced.and_then(|_| parse_cite(raw, true)));
+        if let Some(mut cite) = found {
+            let whole = cite.range.end == raw.len();
+            cite.range = start + cite.range.start..start + cite.range.end;
+            if cite.line.is_none() && whole {
+                cite.line = traced;
+            }
+            cites.push(cite);
+        }
+    }
+    cites
+}
+
+/// Why a reference was not opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// It points outside the run's project folder.
+    Outside,
+    /// The file is not there.
+    Missing,
+}
+
+/// `path` with `.` and `..` worked out, without touching the disk.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether `path` is `root` or lies inside it. Windows paths compare without regard to case.
+fn within(root: &Path, path: &Path) -> bool {
+    let key = |part: std::path::Component| {
+        let text = part.as_os_str().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    let mut parts = path.components().map(key);
+    root.components().map(key).all(|want| parts.next().is_some_and(|have| have == want))
+}
+
+/// The file a reference names, if it lies inside `project`. Relative references are read from
+/// the project folder. This only looks at the text; `checked_target` also asks the disk.
+fn resolve_cite(path: &str, project: &Path) -> Result<PathBuf, Refusal> {
+    if !project.is_absolute() || path.starts_with('~') || (!cfg!(windows) && drive_prefixed(path)) {
+        return Err(Refusal::Outside);
+    }
+    let written = if cfg!(windows) { path.to_owned() } else { path.replace('\\', "/") };
+    let target = lexical(&project.join(written));
+    let root = lexical(project);
+    if within(&root, &target) && target != root {
+        Ok(target)
+    } else {
+        Err(Refusal::Outside)
+    }
+}
+
+/// The reference's file, checked against the disk at the moment it is opened: it must exist,
+/// and its real location must still be inside the project, so a link cannot lead out through a
+/// symbolic link or junction.
+fn checked_target(path: &str, project: &Path) -> Result<PathBuf, Refusal> {
+    let target = resolve_cite(path, project)?;
+    let real = std::fs::canonicalize(&target).map_err(|_| Refusal::Missing)?;
+    let root = std::fs::canonicalize(project).map_err(|_| Refusal::Missing)?;
+    if !within(&root, &real) {
+        return Err(Refusal::Outside);
+    }
+    if !real.is_file() {
+        return Err(Refusal::Missing);
+    }
+    Ok(target)
+}
+
+const CITE_SCHEME: &str = "chronos-cite:";
+
+/// A link target that carries the reference itself, so a click needs nothing else to open it.
+fn cite_url(cite: &Cite) -> String {
+    let mut url = CITE_SCHEME.to_owned();
+    for b in cite.path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-') {
+            url.push(b as char);
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    if let Some(line) = cite.line {
+        url.push_str(&format!("#{line}"));
+        if let Some(column) = cite.column {
+            url.push_str(&format!(":{column}"));
+        }
+    }
+    url
+}
+
+/// The path, line and column a `cite_url` carries.
+fn parse_cite_url(url: &str) -> Option<(String, Option<u32>, Option<u32>)> {
+    let rest = url.strip_prefix(CITE_SCHEME)?;
+    let (encoded, place) = rest.split_once('#').map_or((rest, None), |(p, l)| (p, Some(l)));
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let raw = encoded.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = std::str::from_utf8(raw.get(i + 1..i + 3)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(raw[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(bytes).ok().filter(|p| !p.is_empty())?;
+    let (line, column) = match place {
+        None => (None, None),
+        Some(place) => match place.split_once(':') {
+            Some((l, c)) => (Some(whole_number(l)?), Some(whole_number(c)?)),
+            None => (Some(whole_number(place)?), None),
+        },
+    };
+    Some((path, line, column))
+}
+
+/// The arguments that open `target` at its line in VS Code.
+fn editor_args(target: &Path, line: Option<u32>, column: Option<u32>) -> Vec<String> {
+    let mut place = target.display().to_string();
+    if let Some(line) = line {
+        place.push_str(&format!(":{line}"));
+        if let Some(column) = column {
+            place.push_str(&format!(":{column}"));
+        }
+    }
+    vec!["-g".into(), place]
+}
+
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Plain text with each reference inside the project turned into a link. `escape` makes the
+/// rest literal for Markdown.
+fn link_text(text: &str, project: &Path, escape: bool, out: &mut String) {
+    let plain = |s: &str, out: &mut String| {
+        if escape {
+            out.push_str(&escape_markdown(s));
+        } else {
+            out.push_str(s);
+        }
+    };
+    let mut at = 0;
+    for cite in find_cites(text) {
+        if resolve_cite(&cite.path, project).is_err() {
+            continue;
+        }
+        plain(&text[at..cite.range.start], out);
+        out.push_str(&format!("[{}]({})", escape_markdown(&text[cite.range.clone()]), cite_url(&cite)));
+        at = cite.range.end;
+    }
+    plain(&text[at..], out);
+}
+
+/// The link for a code span that holds one reference and nothing else, if it lies inside the project.
+fn code_span_link(code: &str, project: &Path, lenient: bool) -> Option<String> {
+    let trimmed = code.trim();
+    let cite = parse_cite(trimmed, lenient).filter(|c| c.range == (0..trimmed.len()))?;
+    resolve_cite(&cite.path, project).ok()?;
+    Some(cite_url(&cite))
+}
+
+/// Markdown with file references inside the project made into links. Fenced code, existing
+/// links and HTML are left as written; a code span that is exactly one reference becomes a link.
+fn link_markdown(markdown: &str, project: &Path) -> String {
+    let mut out = String::with_capacity(markdown.len() + markdown.len() / 8);
+    let mut fence: Option<&str> = None;
+    for line in markdown.split_inclusive('\n') {
+        let opener = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| opener.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => {
+                fence = Some(m);
+                out.push_str(line);
+                continue;
+            }
+            (Some(open), Some(m)) if open == m => {
+                fence = None;
+                out.push_str(line);
+                continue;
+            }
+            (Some(_), _) => {
+                out.push_str(line);
+                continue;
+            }
+            (None, None) => {}
+        }
+        link_markdown_line(line, project, &mut out);
+    }
+    out
+}
+
+fn link_markdown_line(line: &str, project: &Path, out: &mut String) {
+    let bytes = line.as_bytes();
+    let mut plain_from = 0;
+    let mut i = 0;
+    let flush = |from: usize, to: usize, out: &mut String| link_text(&line[from..to], project, false, out);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'`' => {
+                let ticks = bytes[i..].iter().take_while(|b| **b == b'`').count();
+                let fence = &line[i..i + ticks];
+                let close = line[i + ticks..].find(fence).map(|at| i + ticks + at);
+                match close.filter(|&at| bytes.get(at + ticks) != Some(&b'`')) {
+                    Some(close) => {
+                        flush(plain_from, i, out);
+                        let span = &line[i..close + ticks];
+                        match code_span_link(&line[i + ticks..close], project, false) {
+                            Some(url) => out.push_str(&format!("[{span}]({url})")),
+                            None => out.push_str(span),
+                        }
+                        i = close + ticks;
+                        plain_from = i;
+                    }
+                    None => i += ticks,
+                }
+            }
+            b'[' => {
+                // An existing link or image stays as written, text and target alike.
+                let start = if i > 0 && bytes[i - 1] == b'!' { i - 1 } else { i };
+                let end = line[i..].find("](").and_then(|mid| line[i + mid..].find(')').map(|close| i + mid + close + 1));
+                match end {
+                    Some(end) => {
+                        flush(plain_from, start, out);
+                        out.push_str(&line[start..end]);
+                        i = end;
+                        plain_from = i;
+                    }
+                    None => i += 1,
+                }
+            }
+            b'<' => match line[i..].find('>') {
+                Some(close) if !line[i..i + close].contains(char::is_whitespace) => {
+                    flush(plain_from, i, out);
+                    out.push_str(&line[i..i + close + 1]);
+                    i += close + 1;
+                    plain_from = i;
+                }
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    flush(plain_from, line.len().min(bytes.len()), out);
+}
+
+/// Output text such as a test log, as Markdown that reads exactly as written, line for line,
+/// with references inside the project as links.
+fn link_plain(text: &str, project: &Path) -> String {
+    let mut out = String::with_capacity(text.len() * 5 / 4);
+    let lines: Vec<&str> = text.split('\n').collect();
+    for (n, line) in lines.iter().enumerate() {
+        let body = line.trim_start_matches(' ');
+        let indent = line.len() - body.len();
+        if body.is_empty() {
+            out.push('\u{a0}');
+        } else {
+            out.extend(std::iter::repeat('\u{a0}').take(indent));
+            link_text(body, project, true, &mut out);
+        }
+        if n + 1 < lines.len() {
+            out.push_str("\\\n");
+        }
+    }
+    out
+}
+
+/// Opens a followed reference in the editor at its line: VS Code when `code` is on PATH,
+/// otherwise the system's default app for the file. Anything outside the project, or gone, is
+/// not opened and the person is told why.
+fn open_cite(url: &str, project: Option<&Path>, window: &mut Window, cx: &mut App) {
+    let Some((path, line, column)) = parse_cite_url(url) else {
+        return;
+    };
+    let project = project.map(Path::to_path_buf);
+    let outside = tr(cx, TABLE, "That file is outside this project, so it was not opened.");
+    let missing = tr(cx, TABLE, "This file is no longer there.");
+    window
+        .spawn(cx, async move |cx| {
+            let opened = cx
+                .background_spawn(async move {
+                    let target = checked_target(&path, project.as_deref().ok_or(Refusal::Outside)?)?;
+                    let launched = crate::base::on_path("code").is_some_and(|code| {
+                        crate::base::proc::cmd(code).args(editor_args(&target, line, column)).spawn().is_ok()
+                    });
+                    Ok::<_, Refusal>((target, launched))
+                })
+                .await;
+            let _ = cx.update(|window, cx| match opened {
+                Ok((_, true)) => {}
+                Ok((target, false)) => cx.open_with_system(&target),
+                Err(refusal) => {
+                    let message = if refusal == Refusal::Outside { outside } else { missing };
+                    window.push_notification(Notification::warning(message), cx);
+                }
+            });
+        })
+        .detach();
+}
+
 fn brief_field(line: &str) -> Option<(&'static str, &str)> {
     BRIEF_FIELDS.iter().find_map(|name| {
         let rest = line.strip_prefix(name)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some((*name, rest.trim()))
     })
+}
+
+/// `text` as a code span, with enough backticks that any inside it stay text.
+fn fenced_inline(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let ticks = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
+    format!("{ticks}{pad}{text}{pad}{ticks}")
 }
 
 fn fenced(text: &str) -> String {
@@ -429,8 +887,9 @@ fn brief_markdown(text: &str) -> Option<String> {
     Some(out.trim_start().to_owned())
 }
 
-/// A review stored as JSON, written out for reading. `None` when it is not one.
-fn review_markdown(text: &str, verdict_label: &str, no_findings: &str) -> Option<String> {
+/// A review stored as JSON, written out for reading. `None` when it is not one. Each finding's
+/// location is a link when it names a file inside `project`.
+fn review_markdown(text: &str, verdict_label: &str, no_findings: &str, project: Option<&Path>) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let verdict = value.get("verdict")?.as_str()?;
     let word = |finding: &serde_json::Value, keys: &[&str]| {
@@ -443,7 +902,11 @@ fn review_markdown(text: &str, verdict_label: &str, no_findings: &str) -> Option
         let severity = word(finding, &["severity"]).unwrap_or_else(|| "note".into());
         out.push_str(&format!("\n- **{severity}**"));
         if let Some(place) = word(finding, &["location", "file"]) {
-            out.push_str(&format!(" `{place}`"));
+            let span = fenced_inline(&place);
+            match project.and_then(|project| code_span_link(&place, project, true)) {
+                Some(url) => out.push_str(&format!(" [{span}]({url})")),
+                None => out.push_str(&format!(" {span}")),
+            }
         }
         if let Some(body) = word(finding, &["evidence", "text", "check"]) {
             out.push_str(&format!(" {body}"));
@@ -592,19 +1055,32 @@ fn mend_bold(text: &str) -> String {
     out
 }
 
-fn markdown_view(id: impl Into<ElementId>, text: SharedString) -> TextView {
+/// Markdown, with web links opened in the browser and file references in the editor.
+fn markdown_view(id: impl Into<ElementId>, text: SharedString, project: Option<PathBuf>) -> TextView {
     TextView::markdown(id, mend_bold(&text))
         .selectable(true)
         .style(markdown_style())
-        .on_link_click(|url, _, _, cx| {
-            if is_web_link(url) {
+        .on_link_click(move |url, _, window, cx| {
+            if url.starts_with(CITE_SCHEME) {
+                open_cite(url, project.as_deref(), window, cx);
+            } else if is_web_link(url) {
                 cx.open_url(url);
             }
         })
 }
 
+/// The last tab text drawn with its references made into links.
+struct Linked {
+    key: usize,
+    tab: DocTab,
+    source: SharedString,
+    project: Option<PathBuf>,
+    text: SharedString,
+}
+
 pub struct Detail {
     state: Entity<AppState>,
+    linked: RefCell<Option<Linked>>,
     tab: DocTab,
     anchor: Option<Anchor>,
     /// The run whose selected item disappeared; its Overview says so once.
@@ -626,6 +1102,7 @@ impl Detail {
         let scene = state.read(cx).scene.clone();
         let mut this = Self {
             state,
+            linked: RefCell::new(None),
             tab: DocTab::Brief,
             anchor: None,
             lost_in: None,
@@ -760,13 +1237,13 @@ impl Detail {
             .when(lost, |this| {
                 this.child(quiet_line(tr(cx, TABLE, "The item you selected is no longer in this run."), &t))
             })
-            .children(run.warnings.iter().enumerate().map(|(i, warning)| {
+            .children(super::usage::warning_texts(run, *cx.global::<i18n::Lang>()).into_iter().enumerate().map(|(i, warning)| {
                 h_flex()
                     .gap_2()
                     .items_start()
                     .text_color(t.muted)
                     .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(t.review).mt(px(2.)))
-                    .child(div().flex_1().min_w_0().child(SelectableText::new(("warning", i), warning.clone())))
+                    .child(div().flex_1().min_w_0().child(SelectableText::new(("warning", i), warning)))
             }))
             .child(self.running_section(run, cx))
             .when(!run.needs.is_empty(), |this| this.child(self.needs_section(run, cx)))
@@ -1305,9 +1782,63 @@ impl Detail {
             })
     }
 
+    /// The project folder of the open run: references are followed only inside it.
+    fn project(&self, cx: &App) -> Option<PathBuf> {
+        self.state.read(cx).run().and_then(|run| run.cwd.clone()).filter(|cwd| cwd.is_absolute())
+    }
+
+    /// The text a tab draws, with its file references as links. Kept until the text, the tab or
+    /// the project changes, so a large log is not scanned again on every frame.
+    fn linked_text(&self, key: usize, tab: DocTab, file: &FileText, project: Option<&Path>, cx: &App) -> SharedString {
+        if let Some(cached) = self.linked.borrow().as_ref() {
+            if cached.key == key && cached.tab == tab && cached.source == file.text && cached.project.as_deref() == project {
+                return cached.text.clone();
+            }
+        }
+        let text: String = match tab {
+            DocTab::Verify => match project {
+                Some(project) => link_plain(&file.text, project),
+                None => file.text.to_string(),
+            },
+            DocTab::Brief | DocTab::Report | DocTab::Review => {
+                let shaped = match tab {
+                    DocTab::Brief => brief_markdown(&file.text),
+                    DocTab::Review => review_markdown(&file.text, tr(cx, TABLE, "Verdict"), tr(cx, TABLE, "No findings."), project),
+                    _ => None,
+                }
+                .unwrap_or_else(|| file.text.to_string());
+                match project {
+                    Some(project) => link_markdown(&shaped, project),
+                    None => shaped,
+                }
+            }
+        };
+        let text: SharedString = text.into();
+        *self.linked.borrow_mut() = Some(Linked {
+            key,
+            tab,
+            source: file.text.clone(),
+            project: project.map(Path::to_path_buf),
+            text: text.clone(),
+        });
+        text
+    }
+
     fn text_view(&self, key: usize, tab: DocTab, file: &FileText, scrolls: bool, cx: &Context<Self>) -> AnyElement {
         let t = cx.tokens();
+        let project = self.project(cx);
         if tab == DocTab::Verify {
+            let mono = cx.theme().mono_font_family.clone();
+            // With a project, the log is drawn as Markdown so its references can be links;
+            // without one there is nothing to follow and it stays plain selectable text.
+            let body = match project.as_deref() {
+                Some(root) => markdown_view(("doc-mono", key), self.linked_text(key, tab, file, Some(root), cx), project.clone())
+                    .font_family(mono.clone())
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .into_any_element(),
+                None => SelectableText::new(("doc-mono", key), file.text.clone()).into_any_element(),
+            };
             return div()
                 .size_full()
                 .overflow_y_scrollbar()
@@ -1322,22 +1853,15 @@ impl Detail {
                         .bg(t.canvas)
                         .border_1()
                         .border_color(t.border)
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_family(mono)
                         .text_size(px(12.))
                         .line_height(px(18.))
-                        .child(SelectableText::new(("doc-mono", key), file.text.clone())),
+                        .child(body),
                 )
                 .into_any_element();
         }
-        let text: SharedString = match tab {
-            DocTab::Brief => brief_markdown(&file.text).map(Into::into),
-            DocTab::Review => {
-                review_markdown(&file.text, tr(cx, TABLE, "Verdict"), tr(cx, TABLE, "No findings.")).map(Into::into)
-            }
-            _ => None,
-        }
-        .unwrap_or_else(|| file.text.clone());
-        markdown_view(("doc-text", key), text)
+        let text = self.linked_text(key, tab, file, project.as_deref(), cx);
+        markdown_view(("doc-text", key), text, project)
             .scrollable(scrolls)
             .when(scrolls, |this| this.size_full().px_4())
             .into_any_element()
@@ -1354,7 +1878,8 @@ impl Detail {
                 self.tab = tab;
             }
         }
-        let files = has("files") || has("cut") || has("missing") || has("unreadable") || has("loading");
+        let links = has("links");
+        let files = links || has("files") || has("cut") || has("missing") || has("unreadable") || has("loading");
         let dir = std::env::temp_dir().join("chronos-detail-scene");
         if files {
             let _ = std::fs::create_dir_all(&dir);
@@ -1424,16 +1949,26 @@ impl Detail {
             }
             let write = |name: &str, body: &str| {
                 let path = dir.join(name);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 let _ = std::fs::write(&path, body);
                 TextSource::Path(path)
             };
+            if links {
+                // The scene folder stands in for the project, holding the files the documents cite.
+                run.cwd = Some(dir.clone());
+                for name in SCENE_CITED {
+                    write(name, "# cited by the scene\n");
+                }
+            }
             let Selection::Unit(i) = selected else {
                 return;
             };
             let Some(unit) = run.units.get_mut(i) else {
                 return;
             };
-            if has("files") || has("loading") {
+            if has("files") || has("loading") || links {
                 unit.files.brief = Some(write("brief.md", SCENE_BRIEF));
                 unit.files.report = Some(write("report.md", SCENE_REPORT));
                 unit.files.verify = Some(write("verify.log", SCENE_VERIFY));
@@ -1463,8 +1998,16 @@ fn source_path(source: &TextSource) -> Option<SharedString> {
 }
 
 const SCENE_BRIEF: &str = "GOAL\nModule m01-core passes its ACCEPT test: Shared infrastructure that every later module uses.\n\nSCOPE\n`hf6_study/hf6/core/` (`__init__.py`, `paths.py`, `legacy.py`), `hf6_study/data/manifest.json`\n(all paths relative to E:/codex/ML_RRAM; create parents as needed)\n\nVERIFY\npython -m pytest -q E:/codex/ML_RRAM/hf6_study/hf6/core\n\nCONTEXT\nLegacy sources to import read-only through `legacy.py`: tools/C31/V7/sealed_preflight.py, tools/C31/V7/guard.py.\n\nStudy-wide decisions:\n\n1. **Own directory, own repo.** The whole study lives in `ML_RRAM/hf6_study/`.\n2. **Python layout.** Package `hf6` at `hf6_study/hf6/`, one subpackage per module.\n";
-const SCENE_REPORT: &str = "# 結果\n\n把頁面算圖改走快取，並補上版面測試。\n\n- 18 tests passed\n- SCOPE 之外沒有改動\n\n```text\nrender_page(pdf, sha, page, cache, dpi=300)\n```\n\n詳見 [說明](https://example.com/notes)。\n";
-const SCENE_VERIFY: &str = "$ python -m pytest tests/test_pdftext.py -q\r\n..................\t[100%]\r\n\u{1b}[32m18 passed\u{1b}[0m in 2.41s\r\nprogress 10%\rprogress 100%\n";
+const SCENE_REPORT: &str = "# 結果\n\n把頁面算圖改走快取，並補上版面測試。\n\n- 改動 `src/pdftext/render.py:42` 的 `render_page`，快取鍵加上 dpi\n- 新增 tests/test_pdftext.py::test_tile 與 tests/test_cache.py:17\n- 18 tests passed\n- SCOPE 之外沒有改動；C:/Windows/win.ini 與 ../outside/notes.md 不在專案內，不會變成連結\n\n```text\nrender_page(pdf, sha, page, cache, dpi=300)\n```\n\n詳見 [說明](https://example.com/notes)。\n";
+const SCENE_VERIFY: &str = "$ python -m pytest tests/test_pdftext.py -q\r\n..................\t[100%]\r\n\u{1b}[32m18 passed\u{1b}[0m in 2.41s\r\n  File \"src/pdftext/render.py\", line 42, in render_page\r\nprogress 10%\rprogress 100%\n";
+/// Files the scene's documents cite, created in its folder so the links lead somewhere.
+const SCENE_CITED: [&str; 5] = [
+    "src/pdftext/render.py",
+    "tests/test_pdftext.py",
+    "tests/test_cache.py",
+    "tests/bridge_tools.rs",
+    "tests/adoption_doc.rs",
+];
 const SCENE_REVIEW: &str = "{\"unit\":\"bridge-no-gemini\",\"verdict\":\"pass\",\"findings\":[{\"check\":\"untested\",\"severity\":\"minor\",\"location\":\"tests/bridge_tools.rs\",\"evidence\":\"bridge_status description not asserted\",\"fix\":\"assert description\"},{\"severity\":\"minor\",\"file\":\"tests/adoption_doc.rs\",\"text\":\"14/167 label not tied to figure\"}]}";
 
 impl Render for Detail {
@@ -1488,6 +2031,140 @@ impl Render for Detail {
             .text_size(px(13.))
             .overflow_hidden()
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod cite_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    fn project() -> PathBuf {
+        std::env::temp_dir().join("chronos-cite-project")
+    }
+
+    fn found(text: &str) -> Vec<(String, Option<u32>, Option<u32>, &str)> {
+        find_cites(text).into_iter().map(|c| (c.path.clone(), c.line, c.column, &text[c.range])).collect()
+    }
+
+    #[test]
+    fn references_are_found_with_their_line_and_column() {
+        let text = "改了 src/desktop/mesh.rs:120 和 `tests/a.rs:3:7`，見 docs/app-design.md#L26 與 tests/test_x.py::test_tile.";
+        assert_eq!(
+            found(text),
+            vec![
+                ("src/desktop/mesh.rs".to_owned(), Some(120), None, "src/desktop/mesh.rs:120"),
+                ("tests/a.rs".to_owned(), Some(3), Some(7), "tests/a.rs:3:7"),
+                ("docs/app-design.md".to_owned(), Some(26), None, "docs/app-design.md#L26"),
+                ("tests/test_x.py".to_owned(), None, None, "tests/test_x.py::test_tile"),
+            ]
+        );
+        assert_eq!(found("main.rs:12-20 failed")[0].1, Some(12));
+        assert_eq!(found(r"see E:\proj\src\lib.rs:9:")[0], (r"E:\proj\src\lib.rs".to_owned(), Some(9), None, r"E:\proj\src\lib.rs:9"));
+        let traceback = "  File \"pkg/app.py\", line 42, in main";
+        assert_eq!(found(traceback), vec![("pkg/app.py".to_owned(), Some(42), None, "pkg/app.py")]);
+        assert_eq!(found("  File \"app.py\", line 7, in x")[0].1, Some(7));
+    }
+
+    #[test]
+    fn words_that_only_look_like_files_are_not_references() {
+        for text in [
+            "e.g. this",
+            "version v1.2.3 and 2.41s",
+            "README.md alone in a sentence",
+            "https://example.com/notes/a.html",
+            "hf6_study/hf6/core/ is a folder",
+            "and/or TCP/IP",
+            "~/secret/key.pem",
+            "a:b/c.rs",
+            "18 passed in 2.41s",
+        ] {
+            assert!(find_cites(text).is_empty(), "{text}: {:?}", find_cites(text));
+        }
+    }
+
+    #[test]
+    fn only_paths_inside_the_project_resolve() {
+        let root = project();
+        assert_eq!(resolve_cite("src/a.rs", &root), Ok(root.join("src").join("a.rs")));
+        assert_eq!(resolve_cite("./src/../src/a.rs", &root), Ok(root.join("src").join("a.rs")));
+        let inside = root.join("tests").join("t.py");
+        assert_eq!(resolve_cite(&inside.display().to_string(), &root), Ok(inside));
+        for outside in ["../a.rs", "src/../../a.rs", "../chronos-cite-project-evil/a.rs", "~/a.rs"] {
+            assert_eq!(resolve_cite(outside, &root), Err(Refusal::Outside), "{outside}");
+        }
+        let elsewhere = std::env::temp_dir().join("elsewhere").join("x.rs");
+        assert_eq!(resolve_cite(&elsewhere.display().to_string(), &root), Err(Refusal::Outside));
+        assert_eq!(resolve_cite("src/a.rs", Path::new("relative/project")), Err(Refusal::Outside));
+        #[cfg(windows)]
+        {
+            assert_eq!(resolve_cite(r"C:\Windows\win.ini", &root), Err(Refusal::Outside));
+            assert_eq!(resolve_cite("/Windows/win.ini", &root), Err(Refusal::Outside));
+            let upper = root.display().to_string().to_uppercase();
+            assert!(resolve_cite(&format!(r"{upper}\src\a.rs"), &root).is_ok(), "drive letters and folders ignore case");
+        }
+    }
+
+    #[test]
+    fn opening_checks_the_disk_again() {
+        let root = std::env::temp_dir().join(format!("chronos-cite-open-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("a.rs"), "fn a() {}\n").unwrap();
+        assert_eq!(checked_target("src/a.rs", &root), Ok(root.join("src").join("a.rs")));
+        assert_eq!(checked_target("src/gone.rs", &root), Err(Refusal::Missing));
+        assert_eq!(checked_target("src", &root), Err(Refusal::Missing), "a folder is not a file to open");
+        assert_eq!(checked_target("../a.rs", &root), Err(Refusal::Outside));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn links_carry_the_reference_and_editor_gets_the_line() {
+        let cite = Cite { range: 0..0, path: "src/a b#c.rs".into(), line: Some(12), column: Some(4) };
+        let url = cite_url(&cite);
+        assert!(!url.contains(' ') && !url.contains('(') && !url.contains(')'), "{url}");
+        assert_eq!(parse_cite_url(&url), Some(("src/a b#c.rs".to_owned(), Some(12), Some(4))));
+        let drive = Cite { range: 0..0, path: r"E:\p\x.rs".into(), line: None, column: None };
+        assert_eq!(parse_cite_url(&cite_url(&drive)), Some((r"E:\p\x.rs".to_owned(), None, None)));
+        assert_eq!(parse_cite_url("https://example.com"), None);
+        assert_eq!(parse_cite_url("chronos-cite:a.rs#x"), None);
+        let target = project().join("a.rs");
+        assert_eq!(editor_args(&target, Some(12), Some(4)), vec!["-g".to_owned(), format!("{}:12:4", target.display())]);
+        assert_eq!(editor_args(&target, None, Some(4)), vec!["-g".to_owned(), target.display().to_string()]);
+    }
+
+    #[test]
+    fn markdown_links_references_and_leaves_code_links_and_outside_paths_alone() {
+        let root = project();
+        let text = "改了 src/a.rs:3 與 `tests/b.rs`。\n\n```\nsrc/in_fence.rs:1\n```\n\n[docs](docs/x.md) <https://e.com/a.rs> ../out.rs:2 `not a path`\n";
+        let linked = link_markdown(text, &root);
+        assert!(linked.contains("[src\\/a\\.rs\\:3](chronos-cite:src/a.rs#3)"), "{linked}");
+        assert!(linked.contains("[`tests/b.rs`](chronos-cite:tests/b.rs)"), "{linked}");
+        assert!(linked.contains("```\nsrc/in_fence.rs:1\n```"), "fenced code stays as written: {linked}");
+        assert!(linked.contains("[docs](docs/x.md)") && linked.contains("<https://e.com/a.rs>"), "{linked}");
+        assert!(linked.contains(" ../out.rs:2 ") && !linked.contains("out.rs#2"), "outside paths are not links: {linked}");
+        assert!(linked.contains("`not a path`"));
+        assert_eq!(link_markdown("no references here.\n", &root), "no references here.\n");
+    }
+
+    #[test]
+    fn a_log_keeps_its_lines_and_characters_and_gains_links() {
+        let root = project();
+        let linked = link_plain("FAILED tests/t.py::test_a - *x*\n\n  [2] done", &root);
+        assert_eq!(
+            linked,
+            "FAILED [tests\\/t\\.py\\:\\:test\\_a](chronos-cite:tests/t.py) \\- \\*x\\*\\\n\u{a0}\\\n\u{a0}\u{a0}\\[2\\] done"
+        );
+    }
+
+    #[test]
+    fn a_review_finding_shows_its_location_as_a_link() {
+        let root = project();
+        let review = r#"{"verdict":"pass","findings":[{"severity":"minor","location":"bridge.rs","evidence":"x"},{"severity":"minor","location":"../../etc/passwd.txt"}]}"#;
+        let text = review_markdown(review, "Verdict", "No findings.", Some(&root)).unwrap();
+        assert!(text.contains("[`bridge.rs`](chronos-cite:bridge.rs)"), "{text}");
+        assert!(text.contains(" `../../etc/passwd.txt`") && !text.contains("passwd.txt)"), "{text}");
+        let plain = review_markdown(review, "Verdict", "No findings.", None).unwrap();
+        assert!(plain.contains(" `bridge.rs`") && !plain.contains("chronos-cite"));
     }
 }
 

@@ -87,6 +87,77 @@ const TEXT: i18n::Table = &[
     ("Make a wish", "許願"),
 ];
 
+/// Every role the engine reports, under the ids it may use, with the one name people see for it.
+/// The first id is the role's key. Ids are matched without a plugin prefix such as `chronos:`.
+const ROLES: [(&[&str], &str, &str); 7] = [
+    (&["main", "core", "chronos"], "Core", "主控"),
+    (&["dispatcher"], "Dispatcher", "調度員"),
+    (&["reviewer"], "Reviewer", "審查員"),
+    (&["architect"], "Architect", "架構師"),
+    (&["memory-keeper"], "Memory keeper", "記憶管理員"),
+    (&["critic"], "Critic", "第二審"),
+    (&["astra"], "Astra", "Astra"),
+];
+
+fn role_of(id: &str) -> Option<&'static (&'static [&'static str], &'static str, &'static str)> {
+    let bare = id.trim().rsplit(':').next().unwrap_or(id).to_ascii_lowercase().replace('_', "-");
+    ROLES.iter().find(|(ids, _, _)| ids.contains(&bare.as_str()))
+}
+
+/// One key per role, so `chronos:dispatcher` and `dispatcher` are counted together. An id that
+/// names no known role is its own key, exactly as reported.
+pub(super) fn role_key(id: &str) -> SharedString {
+    match role_of(id) {
+        Some((ids, _, _)) => ids[0].into(),
+        None => SharedString::from(id.to_owned()),
+    }
+}
+
+/// The name a role is shown under in `lang`. An unknown id is shown as reported.
+pub(super) fn role_name(lang: i18n::Lang, id: &str) -> SharedString {
+    match (role_of(id), lang) {
+        (Some((_, en, _)), i18n::Lang::En) => (*en).into(),
+        (Some((_, _, zh)), i18n::Lang::ZhTw) => (*zh).into(),
+        (None, _) => SharedString::from(id.to_owned()),
+    }
+}
+
+/// A ledger note worded with the same role names as the rest of the app.
+pub(super) fn note_text(note: &Note, lang: i18n::Lang) -> String {
+    let mut named = note.clone();
+    match &mut named {
+        Note::ContextHigh { agent, .. } | Note::CacheRewrites { agent, .. } | Note::FileReads { agent, .. } => {
+            *agent = role_name(lang, agent).to_string();
+        }
+        Note::CopiedHistory { .. } => {}
+    }
+    named.text(lang)
+}
+
+/// The run's warnings for display: those it carries as text, then its ledger notes, each role
+/// under its one name.
+pub(super) fn warning_texts(run: &Run, lang: i18n::Lang) -> Vec<SharedString> {
+    run.other_warnings()
+        .cloned()
+        .chain(run.notes.iter().map(|note| note_text(note, lang).into()))
+        .collect()
+}
+
+/// The raw ids behind a role's row, for its tooltip.
+fn ids_line(ids: &[SharedString], key: &SharedString) -> String {
+    if ids.is_empty() {
+        key.to_string()
+    } else {
+        ids.iter().map(|id| id.as_ref()).collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn add_id(ids: &mut Vec<SharedString>, id: &SharedString) {
+    if !ids.contains(id) {
+        ids.push(id.clone());
+    }
+}
+
 /// An agent past this many tokens of context is flagged: every step re-reads all of it.
 const CONTEXT_WARNING_TOKENS: u64 = crate::usage::CONTEXT_WARN;
 
@@ -129,6 +200,8 @@ struct CostRow {
     output: u64,
     /// Some part did not report its tokens, so the counts are lower bounds.
     tokens_missing: bool,
+    /// For a role, every id it was reported under.
+    ids: Vec<SharedString>,
 }
 
 impl CostRow {
@@ -143,7 +216,10 @@ impl CostRow {
 
 #[derive(Clone, Debug, PartialEq)]
 struct ContextRow {
+    /// The role's key; see `role_key`.
     agent: SharedString,
+    /// Every id the agent was reported under.
+    ids: Vec<SharedString>,
     peak: u64,
     /// The project of the run that reached the peak.
     project: SharedString,
@@ -230,17 +306,23 @@ fn summarize(runs: &[Run]) -> Summary {
             summary.tokens_missing |= [model.input, model.cached, model.output].iter().any(Option::is_none);
         }
         for role in &usage.roles {
-            add_cost(&mut summary.roles, &role.role, role.usd, [Some(role.input), Some(role.cached), Some(role.output)]);
+            let key = role_key(&role.role);
+            add_cost(&mut summary.roles, &key, role.usd, [Some(role.input), Some(role.cached), Some(role.output)]);
+            if let Some(row) = summary.roles.iter_mut().find(|row| row.name == key) {
+                add_id(&mut row.ids, &role.role);
+            }
         }
-        let mut peaks: BTreeMap<&SharedString, u64> = BTreeMap::new();
+        let mut peaks: BTreeMap<SharedString, (u64, Vec<SharedString>)> = BTreeMap::new();
         for context in usage.contexts.iter().filter(|context| context.peak_tokens > 0) {
-            let peak = peaks.entry(&context.agent).or_default();
+            let (peak, ids) = peaks.entry(role_key(&context.agent)).or_default();
             *peak = (*peak).max(context.peak_tokens);
+            add_id(ids, &context.agent);
         }
-        for (agent, peak) in peaks {
-            let at = summary.contexts.iter().position(|row| row.agent == *agent).unwrap_or_else(|| {
+        for (agent, (peak, ids)) in peaks {
+            let at = summary.contexts.iter().position(|row| row.agent == agent).unwrap_or_else(|| {
                 summary.contexts.push(ContextRow {
                     agent: agent.clone(),
+                    ids: vec![],
                     peak: 0,
                     project: run.project.clone(),
                     runs_seen: 0,
@@ -249,6 +331,7 @@ fn summarize(runs: &[Run]) -> Summary {
                 summary.contexts.len() - 1
             });
             let row = &mut summary.contexts[at];
+            ids.iter().for_each(|id| add_id(&mut row.ids, id));
             row.runs_seen += 1;
             row.runs_over += usize::from(over_line(peak));
             if peak > row.peak {
@@ -576,7 +659,8 @@ const CHART_LABEL: f32 = 20.;
 
 fn context_tooltip(row: &ContextRow, all_runs: bool, cx: &App) -> String {
     let mut lines = vec![
-        format!("{}: {}", row.agent, tr(cx, TEXT, "{tokens} tokens at its largest").replace("{tokens}", &with_commas(row.peak))),
+        ids_line(&row.ids, &row.agent),
+        tr(cx, TEXT, "{tokens} tokens at its largest").replace("{tokens}", &with_commas(row.peak)),
     ];
     if all_runs && row.runs_seen > 1 {
         lines.push(tr(cx, TEXT, "Highest in {project}").replace("{project}", &row.project));
@@ -605,7 +689,7 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
                 .truncate()
                 .text_size(px(13.))
                 .text_color(if over { t.text } else { t.muted })
-                .child(row.agent.clone()),
+                .child(role_name(*cx.global::<i18n::Lang>(), &row.agent)),
         )
         .child(
             div()
@@ -727,7 +811,7 @@ fn warning_alert(ix: usize, warning: &Warning, all_runs: bool, cx: &App) -> Aler
                 ),
             );
             Alert::warning(("usage-warning", ix), TextView::markdown(("usage-warning-text", ix), body))
-                .title(tr(cx, TEXT, "{agent}: context too large").replace("{agent}", agent))
+                .title(tr(cx, TEXT, "{agent}: context too large").replace("{agent}", &role_name(*cx.global::<i18n::Lang>(), agent)))
                 .text_color(t.text)
                 .icon(icon)
         }
@@ -736,7 +820,7 @@ fn warning_alert(ix: usize, warning: &Warning, all_runs: bool, cx: &App) -> Aler
             Alert::warning(("usage-warning", ix), message).text_color(t.text).icon(icon)
         }
         Warning::Ledger { project, note } => {
-            let text = note.text(*cx.global::<i18n::Lang>());
+            let text = note_text(note, *cx.global::<i18n::Lang>());
             let message = if all_runs { format!("{project}: {text}") } else { text };
             Alert::warning(("usage-warning", ix), message).text_color(t.text).icon(icon)
         }
@@ -775,6 +859,16 @@ fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
 
 fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: &App) -> BaseTable {
     let t = cx.tokens();
+    let lang = *cx.global::<i18n::Lang>();
+    // Role rows show the role's one name, with the ids it was reported under on hover.
+    let roles = name_label == "Role";
+    let shown = |row: &CostRow| -> (SharedString, SharedString) {
+        if roles {
+            (role_name(lang, &row.name), ids_line(&row.ids, &row.name).into())
+        } else {
+            (row.name.clone(), row.name.clone())
+        }
+    };
     let mut cols = vec![grow()];
     cols.extend(NUMBER_COLS);
     BaseTable::new(id)
@@ -782,6 +876,7 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
         .column_count(cols.len())
         .child(header_row(t, &cols, &[name_label, "API cost", "Input", "Cached", "Output"], cx))
         .child(BaseBody::new("body").children(rows.iter().enumerate().map(|(ix, row)| {
+            let (name, tip) = shown(row);
             BaseRow::new(("tr", ix), ix + 2)
                 .flex()
                 .flex_row()
@@ -794,8 +889,8 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
                         .id(("name", ix))
                         .gap_2()
                         .min_w_0()
-                        .tooltip(tooltip_text(row.name.clone()))
-                        .child(div().min_w_0().truncate().child(row.name.clone()))
+                        .tooltip(tooltip_text(tip))
+                        .child(div().min_w_0().truncate().child(name))
                         .when(row.tokens_only(), |name| {
                             name.child(Tag::secondary().outline().small().flex_none().child(tr(cx, TEXT, "Tokens only")))
                         }),
@@ -1041,8 +1136,8 @@ impl Render for UsageView {
 mod tests {
     use super::super::model::*;
     use super::{
-        chart_scale, fmt_cost, fmt_dollars, fmt_ratio, fmt_tokens, fmt_usd, run_cost, run_rows, summarize, ContextRow,
-        Dollars, Warning, CONTEXT_WARNING_TOKENS, TEXT, UNKNOWN,
+        chart_scale, fmt_cost, fmt_dollars, fmt_ratio, fmt_tokens, fmt_usd, note_text, role_key, role_name, run_cost,
+        run_rows, summarize, warning_texts, ContextRow, Dollars, Warning, CONTEXT_WARNING_TOKENS, TEXT, UNKNOWN,
     };
     use crate::desktop::i18n::{Lang, COMMON};
 
@@ -1315,7 +1410,7 @@ mod tests {
     #[test]
     fn the_warning_line_is_always_inside_the_chart() {
         assert_eq!(chart_scale(&[]), 625_000);
-        let row = |peak| ContextRow { agent: "a".into(), peak, project: "p".into(), runs_seen: 1, runs_over: 0 };
+        let row = |peak| ContextRow { agent: "a".into(), ids: vec![], peak, project: "p".into(), runs_seen: 1, runs_over: 0 };
         assert_eq!(chart_scale(&[row(10)]), 625_000);
         assert_eq!(chart_scale(&[row(965_312), row(10)]), 965_312);
     }
@@ -1342,6 +1437,66 @@ mod tests {
         assert_eq!(fmt_tokens(11_643_991), "11.6M");
         assert_eq!(fmt_tokens(226_026_522), "226M");
         assert_eq!(fmt_tokens(1_500_000_000), "1.5B");
+    }
+
+    #[test]
+    fn each_role_id_reads_as_one_localized_name() {
+        let zh = |id| role_name(Lang::ZhTw, id).to_string();
+        for (ids, name) in [
+            (&["main", "core", "chronos:main"][..], "主控"),
+            (&["chronos:dispatcher", "dispatcher", "Dispatcher"][..], "調度員"),
+            (&["chronos:reviewer", "reviewer"][..], "審查員"),
+            (&["chronos:architect", "architect"][..], "架構師"),
+            (&["chronos:memory-keeper", "memory_keeper"][..], "記憶管理員"),
+            (&["chronos:critic", "critic"][..], "第二審"),
+            (&["chronos:astra", "astra"][..], "Astra"),
+        ] {
+            for id in ids {
+                assert_eq!(zh(id), name, "{id}");
+            }
+        }
+        assert_eq!(role_name(Lang::En, "chronos:memory-keeper").as_ref(), "Memory keeper");
+        assert_eq!(role_name(Lang::En, "main").as_ref(), "Core");
+        // An id that names no role is shown exactly as reported, never guessed at.
+        assert_eq!(zh("codex-worker-7"), "codex-worker-7");
+        assert_eq!(role_key("chronos:dispatcher"), role_key("dispatcher"));
+        assert_ne!(role_key("dispatcher"), role_key("reviewer"));
+    }
+
+    #[test]
+    fn a_role_reported_under_two_ids_is_one_row_with_both_ids_kept() {
+        let usage = Usage {
+            contexts: vec![agent("chronos:dispatcher", 600_000), agent("dispatcher", 700_000), agent("main", 10)],
+            roles: vec![
+                RoleCost { role: "chronos:reviewer".into(), usd: Some(1.0), input: 1, cached: 0, output: 0 },
+                RoleCost { role: "reviewer".into(), usd: Some(2.0), input: 1, cached: 0, output: 0 },
+            ],
+            ..Default::default()
+        };
+        let summary = summarize(&[with_usage("a", usage)]);
+        assert_eq!(summary.contexts.len(), 2);
+        let dispatcher = &summary.contexts[0];
+        assert_eq!((dispatcher.peak, dispatcher.runs_seen), (700_000, 1));
+        assert_eq!(dispatcher.ids, ["chronos:dispatcher", "dispatcher"]);
+        assert_eq!(summary.roles.len(), 1);
+        assert_eq!(summary.roles[0].usd.known, Some(3.0));
+        assert_eq!(summary.roles[0].ids, ["chronos:reviewer", "reviewer"]);
+    }
+
+    #[test]
+    fn ledger_notes_use_the_same_role_names_as_the_charts() {
+        let note = Note::FileReads { agent: "chronos:architect".into(), path: "a/b.json".into(), reads: 2, largest: 10 };
+        let text = note_text(&note, Lang::ZhTw);
+        assert!(text.starts_with("架構師"), "{text}");
+        let keeper = Note::CacheRewrites { agent: "chronos:memory-keeper".into(), count: 2, tokens: 5, usd: 0.1 };
+        assert!(note_text(&keeper, Lang::ZhTw).starts_with("記憶管理員"));
+        assert!(note_text(&keeper, Lang::En).starts_with("Memory keeper"));
+        let mut run = noted("p", vec![note]);
+        run.warnings = vec!["Log was cut short".into(), run.notes[0].text(Lang::ZhTw).into()];
+        let texts = warning_texts(&run, Lang::ZhTw);
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0].as_ref(), "Log was cut short");
+        assert!(texts[1].starts_with("架構師"));
     }
 
     #[test]
