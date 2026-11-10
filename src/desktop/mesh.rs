@@ -760,6 +760,17 @@ struct Ceremonies {
 
 impl Ceremonies {
     fn observe(&mut self, runs: &[Run], renames: &HashMap<SharedString, SharedString>, reduce_motion: bool, now: Instant) {
+        // A ceremony belongs to the wish, not to the id it had at the time: when the provisional id
+        // is replaced by the real one, the orbit and the turn move over with it.
+        for run in runs {
+            let Some(old) = renames.get(&run.session) else { continue };
+            if let Some((owner, _)) = self.orbit.as_mut().filter(|(owner, _)| owner == old) {
+                *owner = run.session.clone();
+            }
+            if let Some((owner, _)) = self.turn.as_mut().filter(|(owner, _)| owner == old) {
+                *owner = run.session.clone();
+            }
+        }
         for moment in self.watch.observe(runs, renames) {
             if reduce_motion {
                 continue;
@@ -2802,6 +2813,35 @@ mod tests {
         assert!(c.turn(&session, false, at(10.0 + CEREMONY_SECONDS + 0.01)).is_none());
         assert!(!c.playing(&session, false, at(13.0)));
         assert!(c.turn(&session, false, at(10.5)).is_none(), "once over it never replays");
+    }
+
+    #[test]
+    fn a_rename_hands_the_ceremonies_to_the_real_session() {
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let renames: HashMap<SharedString, SharedString> = [("real".into(), "temp".into())].into();
+        let (temp, real): (SharedString, SharedString) = ("temp".into(), "real".into());
+        // Renamed after the wish is created and before the graph first draws.
+        let mut c = Ceremonies::default();
+        c.observe(&[], &no_renames(), false, t0);
+        c.observe(&[run_as("temp", RunStatus::Active, true)], &no_renames(), false, t0);
+        c.observe(&[run_as("real", RunStatus::Active, true)], &renames, false, at(1.0));
+        assert!(c.playing(&real, false, at(1.0)), "the orbit is waiting for the real session's graph");
+        assert_eq!(c.orbit(&real, false, at(2.0)), Some(0.0));
+        assert!(c.orbit(&temp, false, at(2.0)).is_none());
+        // Renamed in the middle of the orbit: it carries on instead of stopping.
+        let mut c = Ceremonies::default();
+        c.observe(&[], &no_renames(), false, t0);
+        c.observe(&[run_as("temp", RunStatus::Active, true)], &no_renames(), false, t0);
+        assert_eq!(c.orbit(&temp, false, at(0.0)), Some(0.0));
+        c.observe(&[run_as("real", RunStatus::Active, true)], &renames, false, at(0.5));
+        assert!(c.orbit(&real, false, at(0.8)).is_some_and(|p| p > 0.0));
+        // The turn at the end follows a rename too.
+        let mut c = Ceremonies::default();
+        c.observe(&[run_as("temp", RunStatus::Active, true)], &no_renames(), false, t0);
+        c.observe(&[run_as("temp", RunStatus::Done, true)], &no_renames(), false, at(1.0));
+        c.observe(&[run_as("real", RunStatus::Done, true)], &renames, false, at(1.2));
+        assert!(c.turn(&real, false, at(1.5)).is_some());
     }
 
     #[test]
