@@ -106,6 +106,16 @@ fn mention_rows_height(room: f32) -> f32 {
     (room - MENTION_CHROME - MENTION_EDGE).clamp(MENTION_ROW_H, MENTION_ROW_H * MENTION_ROWS)
 }
 
+/// Stores a fresh measurement of the room below the wish box, and says whether it differs from
+/// the one the list was last drawn with, so a redraw is needed. Sub-pixel jitter does not count.
+fn note_room(room: &Cell<f32>, measured: f32) -> bool {
+    if (room.get() - measured).abs() < 0.5 {
+        return false;
+    }
+    room.set(measured);
+    true
+}
+
 /// What a git probe found about the chosen folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FolderCheck {
@@ -1167,9 +1177,14 @@ impl Composer {
                     .child({
                         // Measures how far down the window the wish box ends, so the list can stay inside it.
                         let room = self.mention_room.clone();
+                        let this = cx.entity();
                         canvas(
-                            move |bounds, window, _| {
-                                room.set(f32::from(window.viewport_size().height - bounds.bottom()));
+                            move |bounds, window, cx| {
+                                // The list read the old measurement while drawing, so a changed one needs another frame.
+                                if note_room(&room, f32::from(window.viewport_size().height - bounds.bottom())) {
+                                    let this = this.clone();
+                                    cx.defer(move |cx| this.update(cx, |_, cx| cx.notify()));
+                                }
                             },
                             |_, _, _, _| {},
                         )
@@ -1703,6 +1718,17 @@ mod tests {
         assert_eq!(mention_at("no at sign", 5), None);
         assert_eq!(mention_at("@@x", 3), None);
         assert_eq!(mention_at("abc", 99), None, "a cursor past the end is ignored");
+    }
+
+    #[test]
+    fn a_changed_measurement_asks_for_a_redraw_and_a_steady_one_does_not() {
+        let room = Cell::new(f32::MAX);
+        assert!(note_room(&room, 500.0), "the first measurement replaces the unmeasured default");
+        assert!(!note_room(&room, 500.0), "the same size draws nothing again");
+        assert!(!note_room(&room, 500.3), "sub-pixel jitter is ignored");
+        assert!(note_room(&room, 220.0), "a window that shrank");
+        assert_eq!(room.get(), 220.0);
+        assert!(note_room(&room, 640.0), "a window that grew");
     }
 
     #[test]
