@@ -38,6 +38,7 @@ fn contract_sentences_are_embedded() {
         ("skills/research/SKILL.md", "`chronos:critic` reviews it for overreach"),
         ("agents/memory-keeper.md", FIRST),
         ("agents/memory-keeper.md", SECOND),
+        ("agents/memory-keeper.md", "`memory_record` refuses a quote its file does not contain"),
     ];
     for (path, phrase) in cases {
         let text = asset(path);

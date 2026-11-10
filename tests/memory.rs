@@ -302,3 +302,116 @@ fn record_requires_files_and_deduplicates_by_file_set() {
         2
     );
 }
+
+mod lint_cases {
+    use super::*;
+    use axiom::memory::lint;
+
+    fn with_source(text: &[u8]) -> (tempfile::TempDir, Memory, Record) {
+        let (temp, memory, mut r) = setup();
+        fs::write(std::path::Path::new(&r.project_dir).join("a.py"), text).unwrap();
+        r.body = "uses stats\n> \"Bush invented hypertext in 1941\" - a.py".into();
+        (temp, memory, r)
+    }
+    #[test]
+    fn fabricated_quote_is_refused_naming_the_line() {
+        let (_t, memory, r) = with_source(b"def stats(): pass\n");
+        let e = memory.record(&r).unwrap_err();
+        assert_eq!(e.kind, "fabricated_quote");
+        assert!(e.message.contains("body line 2"), "{}", e.message);
+        assert!(e.message.contains("a.py"), "{}", e.message);
+        assert_eq!(memory.list(Some("p"), 10).unwrap()["entries"].as_array().unwrap().len(), 0);
+    }
+    #[test]
+    fn real_quote_passes_despite_whitespace_and_crlf() {
+        let (_t, memory, r) = with_source(b"Bush   invented\r\n  hypertext\tin\r\n1941 .\r\n");
+        memory.record(&r).unwrap();
+        let (_t, memory, mut r) = with_source(b"Bush invented hypertext in 1941");
+        r.body = "> \"Bush  invented\thypertext in 1941\" - a.py".into();
+        memory.record(&r).unwrap();
+    }
+    #[test]
+    fn missing_or_escaping_source_is_refused() {
+        let (_t, memory, mut r) = with_source(b"x");
+        r.body = "> \"x\" - gone.py".into();
+        assert_eq!(memory.record(&r).unwrap_err().kind, "missing_source");
+        r.body = "> \"x\" - ../a.py".into();
+        assert_eq!(memory.record(&r).unwrap_err().kind, "invalid_source");
+    }
+    #[test]
+    fn correct_refuses_a_fabricated_quote() {
+        let (_t, memory, mut r) = with_source(b"real text");
+        r.body = "> \"real text\" - a.py".into();
+        let id = memory.record(&r).unwrap()["id"].as_i64().unwrap();
+        let e = memory.correct(id, "> \"made up\" - a.py").unwrap_err();
+        assert_eq!(e.kind, "fabricated_quote");
+        memory.correct(id, "> \"real  text\" - a.py").unwrap();
+    }
+    fn kinds(memory: &Memory, r: &Record) -> Vec<&'static str> {
+        memory
+            .lint("p", std::path::Path::new(&r.project_dir))
+            .unwrap()
+            .iter()
+            .map(|p| p.kind)
+            .collect()
+    }
+    #[test]
+    fn lint_reports_changed_source_missing_source_and_bad_quote() {
+        let (_t, memory, mut r) = with_source(b"real text");
+        r.body = "> \"real text\" - a.py".into();
+        memory.record(&r).unwrap();
+        assert!(kinds(&memory, &r).is_empty());
+        fs::write(std::path::Path::new(&r.project_dir).join("a.py"), "other text").unwrap();
+        assert_eq!(kinds(&memory, &r), ["fabricated_quote", "stale_source"]);
+        fs::remove_file(std::path::Path::new(&r.project_dir).join("a.py")).unwrap();
+        assert_eq!(kinds(&memory, &r), ["missing_source", "stale_source"]);
+    }
+    #[test]
+    fn lint_reports_exact_duplicates_and_research_quotes() {
+        let (temp, memory, mut r) = setup();
+        memory.record(&r).unwrap();
+        // A second unit with the same text is an exact duplicate.
+        let store = temp.path().join("home/orchestrate/p");
+        let brief = store.join("c.md");
+        fs::write(&brief, "GOAL t\nSCOPE b.py\nVERIFY t\n").unwrap();
+        let mut units = fs::read_to_string(store.join("units.tsv")).unwrap();
+        units.push_str(&format!("w\tx\tverified\t\t\t\t{}\n", brief.display()));
+        fs::write(store.join("units.tsv"), units).unwrap();
+        r.unit = "w".into();
+        r.files = vec!["b.py".into()];
+        memory.record(&r).unwrap();
+        assert_eq!(kinds(&memory, &r), ["duplicate"]);
+        let research = store.join("research");
+        fs::create_dir_all(&research).unwrap();
+        fs::write(research.join("plan-final.md"), "ok\n> \"original\" - a.py\n> \"nothing like it\" - a.py\n").unwrap();
+        let problems = memory.lint("p", std::path::Path::new(&r.project_dir)).unwrap();
+        let research: Vec<_> = problems.iter().filter(|p| p.kind == "fabricated_quote").collect();
+        assert_eq!(research.len(), 1);
+        assert!(research[0].message.contains("plan-final.md line 3"), "{}", research[0].message);
+    }
+    #[test]
+    fn quote_lines_only_match_the_documented_form() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(lint::check_quotes("> a plain blockquote - a.py\nnot > \"x\" - a.py", dir.path(), "t").is_empty());
+        assert_eq!(lint::normalize(" a\r\n b\t c "), "a b c");
+    }
+    #[test]
+    fn hot_digest_is_bounded_newest_first_kept_and_per_project() {
+        let (_t, memory, _r) = setup();
+        for n in 0..30 {
+            memory.digest("p", Some(&format!("wish number {n}"))).unwrap();
+        }
+        memory.digest("p", Some(&"x".repeat(1000))).unwrap();
+        memory.digest("other", Some("secret of another project")).unwrap();
+        let hot = memory.digest("p", None).unwrap();
+        let text = hot["digest"].as_str().unwrap();
+        assert_eq!(text.lines().count(), 12);
+        assert_eq!(hot["omitted"], 19);
+        assert!(text.contains("wish number 29") && !text.contains("wish number 18"));
+        assert!(text.lines().all(|l| l.chars().count() <= 240));
+        assert!(!text.contains("secret of another project"));
+        let other = memory.digest("other", None).unwrap();
+        assert!(other["digest"].as_str().unwrap().contains("secret"));
+        assert!(!other["digest"].as_str().unwrap().contains("wish number"));
+    }
+}

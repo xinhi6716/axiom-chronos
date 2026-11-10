@@ -1,3 +1,4 @@
+pub mod lint;
 use crate::base::{self, Failure, Res};
 use crate::orch::{covers, read_units, store_for, unit_brief};
 use regex::Regex;
@@ -153,6 +154,7 @@ impl Memory {
                 ),
             ));
         }
+        refuse_bad_quotes(&[("body", &args.body), ("summary", &args.summary)], root)?;
         let store = store_for(&self.home, &args.project)?;
         if !read_units(&store)
             .map(|units| {
@@ -349,6 +351,12 @@ impl Memory {
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(err)?;
+        let dir: Option<String> = tx
+            .query_row("SELECT project_dir FROM entries WHERE id = ?", [id], |r| r.get(0))
+            .ok();
+        if let Some(dir) = dir {
+            refuse_bad_quotes(&[("text", text)], Path::new(&dir))?;
+        }
         if tx
             .execute(
                 "UPDATE entries SET body = ?, summary = ?, corrected = ?, confirmed = ? WHERE id = ?",
@@ -383,13 +391,96 @@ impl Memory {
             )
             .map_err(err)?;
         }
-        let digest = match std::fs::read_to_string(path) {
+        let all = match std::fs::read_to_string(path) {
             Ok(s) => s.replace("\r\n", "\n"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(err(e)),
         };
-        Ok(json!({"status":"completed", "digest":digest, "error":null}))
+        // Hot memory: only this project's file, newest HOT_LINES lines, each cut
+        // short. Older history and full entries stay behind memory_search / memory_get.
+        let lines: Vec<&str> = all.lines().filter(|l| !l.trim().is_empty()).collect();
+        let omitted = lines.len().saturating_sub(HOT_LINES);
+        let digest: String = lines[omitted..]
+            .iter()
+            .map(|l| format!("{}\n", l.chars().take(HOT_LINE_CHARS).collect::<String>()))
+            .collect();
+        Ok(json!({"status":"completed", "digest":digest, "omitted":omitted, "error":null}))
     }
+    /// Deterministic checks of one project's memory and research output.
+    pub fn lint(&self, project: &str, project_dir: &Path) -> Res<Vec<lint::Problem>> {
+        base::require_slug("project", project)?;
+        let mut problems = Vec::new();
+        let db = self.connect()?;
+        let mut stmt = db
+            .prepare("SELECT * FROM entries WHERE project = ? ORDER BY id")
+            .map_err(err)?;
+        let mut rows = stmt.query([project]).map_err(err)?;
+        let mut seen: std::collections::HashMap<String, i64> = Default::default();
+        while let Some(row) = rows.next().map_err(err)? {
+            let id: i64 = row.get("id").map_err(err)?;
+            let dir: String = row.get("project_dir").map_err(err)?;
+            let (title, summary, body): (String, String, String) = (
+                row.get("title").map_err(err)?,
+                row.get("summary").map_err(err)?,
+                row.get("body").map_err(err)?,
+            );
+            for (label, text) in [("body", &body), ("summary", &summary)] {
+                for mut p in lint::check_quotes(text, Path::new(&dir), label) {
+                    p.message = format!("memory {id} {}", p.message);
+                    problems.push(p);
+                }
+            }
+            if stale(row)? == Some(true) {
+                problems.push(lint::Problem {
+                    kind: "stale_source",
+                    message: format!("memory {id} ({title}): a recorded source file changed or vanished since recording"),
+                });
+            }
+            let key = lint::normalize(&format!("{title}\n{summary}\n{body}")).to_lowercase();
+            if let Some(first) = seen.insert(key, id) {
+                problems.push(lint::Problem {
+                    kind: "duplicate",
+                    message: format!("memory {id} duplicates memory {first}"),
+                });
+            }
+        }
+        let research = store_for(&self.home, project)?.join("research");
+        if let Ok(dir) = std::fs::read_dir(&research) {
+            let mut files: Vec<PathBuf> = dir
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "md"))
+                .collect();
+            files.sort();
+            for file in files {
+                let text = std::fs::read_to_string(&file).map_err(err)?;
+                let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                for mut p in lint::check_quotes(&text, project_dir, &name) {
+                    p.message = format!("research {}", p.message);
+                    problems.push(p);
+                }
+            }
+        }
+        Ok(problems)
+    }
+}
+const HOT_LINES: usize = 12;
+const HOT_LINE_CHARS: usize = 240;
+fn refuse_bad_quotes(parts: &[(&str, &str)], root: &Path) -> Res<()> {
+    let problems: Vec<lint::Problem> = parts
+        .iter()
+        .flat_map(|(label, text)| lint::check_quotes(text, root, label))
+        .collect();
+    let Some(first) = problems.first() else {
+        return Ok(());
+    };
+    Err(Failure::new(
+        first.kind,
+        problems
+            .iter()
+            .map(|p| p.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+    ))
 }
 fn now() -> f64 {
     SystemTime::now()

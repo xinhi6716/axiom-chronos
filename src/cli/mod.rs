@@ -236,6 +236,50 @@ fn memory_command(args: &[String]) -> i32 {
         }
     }
 }
+fn lint_command(args: &[String]) -> i32 {
+    let mut project = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => return usage(e),
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" => match value(args, &mut i, "--project") {
+                Ok(v) => project = v.into(),
+                Err(e) => return usage(e),
+            },
+            s => return usage(format!("lint: unrecognized argument: {s}")),
+        }
+        i += 1;
+    }
+    if !project.is_absolute() {
+        project = match std::env::current_dir() {
+            Ok(p) => p.join(project),
+            Err(e) => return usage(e),
+        };
+    }
+    if !project.is_dir() {
+        return usage(format!("--project is not a directory: {}", project.display()));
+    }
+    let slug = base::slug_for_dir(&project);
+    match Memory::open(&base::axiom_home()).and_then(|m| m.lint(&slug, &project)) {
+        Ok(problems) if problems.is_empty() => {
+            println!("axiom lint: no problems ({slug})");
+            0
+        }
+        Ok(problems) => {
+            for p in &problems {
+                println!("{}: {}", p.kind, p.message);
+            }
+            eprintln!("axiom lint: {} problem(s) in {slug}", problems.len());
+            1
+        }
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
 fn usage_command(args: &[String]) -> i32 {
     let (mut session, mut as_json, mut i) = (None, false, 0);
     while i < args.len() {
@@ -308,6 +352,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "hook" if rest.is_empty() => hook::main_stdin(),
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),
+        "lint" => lint_command(rest),
         "usage" => usage_command(rest),
         "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),

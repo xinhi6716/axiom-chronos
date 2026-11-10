@@ -436,3 +436,28 @@ fn resume_with_message() {
         );
     }
 }
+#[test]
+fn lint_exits_nonzero_on_a_fabricated_quote_and_zero_when_clean() {
+    let temp = common::temp();
+    let project = temp.path().join("proj");
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    std::fs::write(project.join("a.txt"), "the real line").unwrap();
+    let research = temp.path().join("orchestrate/proj/research");
+    std::fs::create_dir_all(&research).unwrap();
+    let plan = research.join("plan-final.md");
+    std::fs::write(&plan, "> \"the   real line\" - a.txt\n").unwrap();
+    let run = || {
+        command(temp.path())
+            .args(["lint", "--project"])
+            .arg(&project)
+            .output()
+            .unwrap()
+    };
+    let ok = run();
+    assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+    std::fs::write(&plan, "x\n> \"never written\" - a.txt\n").unwrap();
+    let bad = run();
+    assert_eq!(bad.status.code(), Some(1));
+    let out = String::from_utf8_lossy(&bad.stdout);
+    assert!(out.contains("fabricated_quote") && out.contains("plan-final.md line 2"), "{out}");
+}
