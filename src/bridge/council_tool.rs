@@ -154,7 +154,7 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
 pub fn descriptor() -> Value {
     json!({
         "name": "council",
-        "description": "Advanced research, available only because this session opted in. After Astra has written its plan, `run` puts the same brief to the two other members, cross-examines all positions once and settles the claims mechanically. The reply is a bounded digest; do not read the position files. `rule` records your ruling on each open claim.",
+        "description": "Advanced research, available only because this session opted in. After Astra has written its plan, `run` puts the same brief to the two other members, cross-examines all positions once and settles the claims mechanically. The reply is a bounded digest; do not read the position files. `rule` records your rulings and its reply carries the next unruled claims until none remain.",
         "inputSchema": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["run", "rule"], "default": "run"},
             "project": {"type": "string", "description": "Program slug."},

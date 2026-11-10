@@ -62,6 +62,7 @@ pub(super) struct Meter {
     broken: bool,
     calls: HashMap<String, Call>,
     anonymous: u64,
+    runs: u64,
 }
 #[derive(Default, Clone, Copy)]
 struct Call {
@@ -101,6 +102,7 @@ impl Meter {
             broken: false,
             calls: HashMap::new(),
             anonymous: 0,
+            runs: 0,
         })
     }
     fn observe(&mut self, id: Option<&str>, model: &str, usage: price::CallUsage) {
@@ -366,6 +368,17 @@ pub(super) fn ask_fable(
     tools: &str,
     meter: &mut Meter,
 ) -> Answer {
+    // A spent budget (also one loaded from an earlier attempt) starts no paid request.
+    if meter.exceeded() {
+        return Answer::bad(
+            Status::BudgetCut,
+            0,
+            format!("the ${:.2} cap is already spent", meter.cap_usd()),
+        );
+    }
+    meter.runs += 1;
+    // Each run's closing report is its own call, so separate runs add up.
+    let result_id = format!("result-{}", meter.runs);
     let tokens_before = meter.tokens();
     let output_before = meter.output_tokens();
     let mut argv = match command {
@@ -426,7 +439,7 @@ pub(super) fn ask_fable(
                             meter.settle_output(output_before, total.output);
                         } else {
                             usage_in_this_run = true;
-                            meter.observe(Some("result"), FABLE_MODEL, total);
+                            meter.observe(Some(&result_id), FABLE_MODEL, total);
                         }
                     }
                     result = Some(event);

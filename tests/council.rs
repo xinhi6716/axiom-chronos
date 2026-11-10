@@ -718,6 +718,71 @@ fn rulings_are_written_only_for_open_claims() {
     assert!(council::rule(&case.plan, &[ruling(&open_id, "upheld", " ")]).is_err());
 }
 
+#[test]
+fn runs_that_report_only_a_result_add_up_and_trip_the_cap() {
+    let case = Case::new();
+    // Each round costs $3 and reports it only in its closing result: $6 against the $5 cap.
+    case.run(&case.setup("result-only", "ok"), &Astra::ok())
+        .unwrap();
+    assert_eq!(case.calls_of("fable", 2).len(), 1, "round 2 ran under the cap");
+    let usd = case.stored()["cost"]["usd"].as_f64().unwrap();
+    assert!((usd - 6.0).abs() < 0.01, "two $3 runs must add up: {usd}");
+    // A retry now finds the budget spent.
+    fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
+    let before = case.calls().len();
+    case.run(&case.setup("result-only", "ok"), &Astra::ok())
+        .unwrap();
+    assert!(case.calls()[before..].iter().all(|c| c["role"] != "fable"));
+}
+
+#[test]
+fn a_retry_with_the_budget_spent_starts_no_fable_process() {
+    let case = Case::new();
+    case.run(&case.setup("r1-over-cap", "ok"), &Astra::ok())
+        .unwrap();
+    fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
+    let before = case.calls().len();
+    case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
+    assert!(
+        case.calls()[before..].iter().all(|c| c["role"] != "fable"),
+        "no paid request may start once the budget is spent"
+    );
+    assert_eq!(case.member_status("fable"), "budget_cut");
+}
+
+#[test]
+fn every_open_claim_can_be_ruled_through_successive_replies() {
+    let case = Case::new();
+    let digest = case
+        .run(&case.setup("huge,disagree", "huge,disagree"), &Astra::ok())
+        .unwrap();
+    let open_total = claims(&case)
+        .iter()
+        .filter(|c| c["status"] != "consensus")
+        .count();
+    assert!(open_total > 16, "{open_total}");
+    assert_eq!(digest["more_open"], true, "{digest}");
+    let mut batch: Vec<Value> = digest["open"].as_array().unwrap().clone();
+    let mut ruled = 0;
+    while !batch.is_empty() {
+        let rulings: Vec<_> = batch
+            .iter()
+            .map(|e| (e["id"].as_str().unwrap().to_owned(), "upheld".to_owned(), "checked".to_owned()))
+            .collect();
+        ruled += rulings.len();
+        let reply = council::rule(&case.plan, &rulings).unwrap();
+        assert!(reply.to_string().chars().count() <= DIGEST_MAX_CHARS, "reply is bounded");
+        batch = reply["next"].as_array().expect("rule carries the next batch").clone();
+        assert!(batch.len() <= 16);
+        assert_eq!(reply["more_open"], !batch.is_empty() && reply["unruled_total"].as_u64().unwrap() > batch.len() as u64);
+    }
+    assert_eq!(ruled, open_total);
+    assert!(claims(&case)
+        .iter()
+        .filter(|c| c["status"] != "consensus")
+        .all(|c| c["ruling"].is_object()));
+}
+
 // ---- bridge and launch ----
 
 fn bridge_config(home: &Path) -> Config {

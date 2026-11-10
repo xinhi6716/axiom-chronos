@@ -777,13 +777,15 @@ pub fn rule(plan_path: &Path, rulings: &[(String, String, String)]) -> Res<Value
         });
     }
     save_council(&path, &council)?;
-    let unruled: Vec<&str> = council
-        .claims
-        .iter()
-        .filter(|c| c.status != ClaimStatus::Consensus && c.ruling.is_none())
-        .map(|c| c.id.as_str())
-        .collect();
-    Ok(json!({"status":"completed","unruled":unruled}))
+    let (next, total) = converge::unruled_batch(&council);
+    let ids: Vec<&str> = next.iter().filter_map(|e| e["id"].as_str()).collect();
+    Ok(json!({
+        "status": "completed",
+        "unruled": ids,
+        "unruled_total": total,
+        "more_open": total > next.len(),
+        "next": next,
+    }))
 }
 
 /// The one-line state for a report or the app; None when no council ran.

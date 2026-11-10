@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 const MIN_EVIDENCE_CHARS: usize = 10;
 pub const DIGEST_MAX_CHARS: usize = 16_000;
-const OPEN_MAX: usize = 16;
+pub(super) const OPEN_MAX: usize = 16;
 const AGREED_MAX: usize = 10;
 
 pub(super) fn cut(text: &str, max: usize) -> String {
@@ -108,6 +108,20 @@ fn plain_note(council: &Council) -> String {
     "All three members completed both rounds.".to_owned()
 }
 
+/// The next batch of open claims that still lack a ruling, shaped like the digest's `open`.
+pub(super) fn unruled_batch(council: &Council) -> (Vec<Value>, usize) {
+    let unruled: Vec<&Claim> = council
+        .claims
+        .iter()
+        .filter(|c| c.status != ClaimStatus::Consensus && c.ruling.is_none())
+        .collect();
+    let mut entries: Vec<Value> = unruled.iter().take(OPEN_MAX).map(|c| open_entry(c)).collect();
+    while json!(entries).to_string().chars().count() > DIGEST_MAX_CHARS / 2 && entries.len() > 1 {
+        entries.pop();
+    }
+    (entries, unruled.len())
+}
+
 fn open_entry(claim: &Claim) -> Value {
     json!({
         "id": claim.id,
@@ -155,12 +169,14 @@ pub fn digest(council: &Council, path: &std::path::Path, reused: bool) -> Value 
         "agreed": settled.iter().take(AGREED_MAX).map(|c| json!({"id":c.id,"text":cut(&c.text,100)})).collect::<Vec<_>>(),
         "open": entries,
         "omitted_open": open.len().saturating_sub(OPEN_MAX),
+        "more_open": open.len() > OPEN_MAX,
         "omitted_agreed": settled.len().saturating_sub(AGREED_MAX),
         "council_path": path,
     });
     while result.to_string().chars().count() > DIGEST_MAX_CHARS && !entries.is_empty() {
         entries.pop();
         result["omitted_open"] = json!(open.len() - entries.len());
+        result["more_open"] = json!(true);
         result["open"] = json!(entries);
     }
     result
