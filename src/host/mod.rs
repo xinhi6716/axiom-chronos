@@ -124,6 +124,9 @@ impl Translator {
 pub struct Wish {
     writer: Writer,
     stop: Arc<AtomicBool>,
+    /// Set before `Exited` or `Failed` is sent, so a caller that has seen either never hears
+    /// "waiting" while the worker thread is still unwinding.
+    ended: Arc<AtomicBool>,
     events: mpsc::Receiver<Event>,
     worker: Option<JoinHandle<Res<i32>>>,
 }
@@ -169,6 +172,8 @@ impl Wish {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, events) = mpsc::channel();
         let flag = Arc::clone(&stop);
+        let ended = Arc::new(AtomicBool::new(false));
+        let ended_flag = Arc::clone(&ended);
         let worker = std::thread::spawn(move || {
             let mut translator = Translator::default();
             let result = session::drive(
@@ -178,6 +183,7 @@ impl Wish {
                 &flag,
                 &mut |event| translator.event(event, &tx),
             );
+            ended_flag.store(true, Ordering::SeqCst);
             let _ = tx.send(match &result {
                 Ok(code) => Event::Exited { code: *code },
                 Err(e) => Event::Failed(e.clone()),
@@ -187,6 +193,7 @@ impl Wish {
         Self {
             writer,
             stop,
+            ended,
             events,
             worker: Some(worker),
         }
@@ -202,7 +209,7 @@ impl Wish {
         }
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(stdin) = guard.as_mut() else {
-            return Err(if self.is_running() {
+            return Err(if !self.ended.load(Ordering::SeqCst) && self.is_running() {
                 Failure::new("waiting", "claude is waiting for its usage limit to reset")
             } else {
                 Failure::new("finished", "the wish has finished")
