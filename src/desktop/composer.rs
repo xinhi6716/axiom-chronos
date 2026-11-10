@@ -282,6 +282,12 @@ pub(super) fn mention_at(text: &str, cursor: usize) -> Option<(Range<usize>, &st
     Some((at..end, query))
 }
 
+/// The range an accepted path replaces, but only when the `@word` at the cursor is still the one
+/// the list was ranked for. Once the cursor sits in another word, the list is stale.
+pub(super) fn mention_span_for(text: &str, cursor: usize, query: &str) -> Option<Range<usize>> {
+    mention_at(text, cursor).filter(|(_, typed)| *typed == query).map(|(span, _)| span)
+}
+
 /// What replaces the `@word`: the path, quoted when it holds spaces, and a space after it unless
 /// one already follows.
 pub(super) fn mention_insert(path: &str, space_follows: bool) -> String {
@@ -594,6 +600,13 @@ impl Composer {
                 }
             }),
             cx.subscribe_in(&turns, window, move |this, _, event, _, cx| changed(this, event, cx)),
+            // Moving the cursor by mouse or arrow keys changes no text, but it can leave the `@word`
+            // or enter another, so the list follows the cursor too.
+            cx.observe_in(&wish, window, |this, wish, window, cx| {
+                if this.mention.is_some() && wish.read(cx).focus_handle(cx).is_focused(window) {
+                    this.update_mention(cx);
+                }
+            }),
         ];
         cx.defer_in(window, |this, window, cx| this.apply_scene(window, cx));
         Self {
@@ -816,7 +829,7 @@ impl Composer {
             let wish = self.wish.read(cx);
             (wish.value().to_string(), wish.cursor())
         };
-        let Some((span, _)) = mention_at(&text, cursor) else {
+        let Some(span) = mention_span_for(&text, cursor, &mention.query) else {
             self.close_mention(cx);
             return false;
         };
@@ -1690,6 +1703,17 @@ mod tests {
         assert_eq!(mention_at("no at sign", 5), None);
         assert_eq!(mention_at("@@x", 3), None);
         assert_eq!(mention_at("abc", 99), None, "a cursor past the end is ignored");
+    }
+
+    #[test]
+    fn a_list_ranked_for_one_word_does_not_replace_another() {
+        let text = "see @src/li and @docs/ma now";
+        assert_eq!(mention_span_for(text, 11, "src/li"), Some(4..11));
+        // The cursor moved into the second word: the old query no longer applies.
+        assert_eq!(mention_span_for(text, 24, "src/li"), None);
+        assert_eq!(mention_span_for(text, 24, "docs/ma"), Some(16..24));
+        // Out of any mention altogether.
+        assert_eq!(mention_span_for(text, 2, "src/li"), None);
     }
 
     #[test]
