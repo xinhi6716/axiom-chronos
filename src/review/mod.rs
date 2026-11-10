@@ -24,6 +24,16 @@ const AGY_BUDGET: usize = AGY_PROMPT_LIMIT - 4_000;
 const MAX_LISTED: usize = 200;
 const CONTEXT: &str = "-U20";
 const TOKEN_CAP: u64 = 400_000;
+const TOKEN_CAP_ENV: &str = "AXIOM_REVIEW_TOKEN_CAP";
+
+/// The Codex token cap: `AXIOM_REVIEW_TOKEN_CAP` when it is a positive count, else 400k.
+pub fn token_cap() -> u64 {
+    std::env::var(TOKEN_CAP_ENV)
+        .ok()
+        .and_then(|v| v.trim().replace('_', "").parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(TOKEN_CAP)
+}
 
 pub struct Config {
     pub codex: Res<Vec<String>>,
@@ -312,14 +322,14 @@ fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &V
         effort: Some("high".into()),
         output_schema: Some(shape.clone()),
         developer_instructions: Some(
-            "Review the diff you are given. You may read files inside this repository; do not change anything.".into(),
+            "Review the diff you are given; it already holds every changed file with its surrounding code. Read other files in this repository only to confirm or rule out a specific suspected defect, and never change anything. Your budget is limited: give your verdict before you run out, reporting what you could not check.".into(),
         ),
         timeout_s: config.codex_timeout.as_secs().max(1),
         lean: true,
         keep_plugins: vec![],
         web_search: false,
     };
-    let report = match server.run_capped(&run, Some(TOKEN_CAP)) {
+    let report = match server.run_capped(&run, Some(token_cap())) {
         Ok(report) => report,
         Err(e) => return Attempt::Failed(e),
     };
@@ -482,5 +492,20 @@ pub fn command(args: &[String]) -> i32 {
             eprintln!("axiom: {}", e.message);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn the_token_cap_reads_a_positive_count_and_falls_back_otherwise() {
+        for (value, want) in [("700_000", 700_000), ("0", TOKEN_CAP), ("lots", TOKEN_CAP), ("", TOKEN_CAP)] {
+            std::env::set_var(TOKEN_CAP_ENV, value);
+            assert_eq!(token_cap(), want, "{value:?}");
+        }
+        std::env::remove_var(TOKEN_CAP_ENV);
+        assert_eq!(token_cap(), TOKEN_CAP);
     }
 }
