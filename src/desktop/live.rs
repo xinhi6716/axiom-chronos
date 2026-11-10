@@ -513,7 +513,7 @@ impl Engine {
         self.open = Some(key.clone());
         // Starting a process takes a moment; the run should appear before it does.
         self.publish();
-        let options = host::Options { creative: request.creative, max_turns: request.max_turns };
+        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research };
         match host::Wish::start((self.config)(), &request.cwd, &request.wish, &options) {
             Ok(wish) => {
                 if let Some(entry) = self.hosted.get_mut(&key) {
@@ -1769,6 +1769,7 @@ mod tests {
             wish: "x".into(),
             creative: false,
             max_turns: None,
+            advanced_research: false,
         }));
         let updates = rig.updates();
         let provisional = updates.iter().find_map(|u| match u {

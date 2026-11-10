@@ -12,6 +12,7 @@ pub mod model;
 mod run_view;
 mod settings;
 mod shell;
+mod superswitch;
 mod todo;
 pub mod theme;
 mod usage;

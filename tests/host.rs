@@ -1,6 +1,6 @@
 mod common;
 use axiom::{
-    goal,
+    council, goal,
     host::{Event, Options, Wish},
     session::{Clock, Config, CONTINUE_TAG, LIMIT_MARGIN_SECS},
 };
@@ -178,6 +178,7 @@ fn options_and_argument_checks() {
     let options = Options {
         creative: true,
         max_turns: Some(7),
+        ..Options::default()
     };
     let wish = Wish::start(setup.config(), setup.project(), "  做點什麼 ", &options).unwrap();
     assert_eq!(wish.wait().unwrap(), 0);
@@ -218,6 +219,81 @@ fn options_and_argument_checks() {
             session: SESSION.into()
         }
     );
+}
+
+fn argv_of(record: &Value) -> Vec<String> {
+    record["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn advanced_research_reaches_the_launch_and_stays_with_the_session() {
+    let setup = Setup::new("ok");
+    let options = Options {
+        advanced_research: true,
+        ..Options::default()
+    };
+    let wish = Wish::start(setup.config(), setup.project(), "研究氧化層厚度", &options).unwrap();
+    assert_eq!(wish.wait().unwrap(), 0);
+    let record = setup.record();
+    assert_eq!(record["env"]["AXIOM_ADVANCED_RESEARCH"], "1", "{record}");
+    let argv = argv_of(&record);
+    let at = argv
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .expect("the council prompt is appended");
+    assert_eq!(argv[at + 1], council::SYSTEM_PROMPT);
+    let tools = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    assert!(
+        argv[tools + 1].ends_with(&format!(",{}", council::TOOL)),
+        "{}",
+        argv[tools + 1]
+    );
+    assert_eq!(
+        record["messages"][0]["message"]["content"][0]["text"], "/chronos:wish 研究氧化層厚度",
+        "the switch never travels in the wish text"
+    );
+    assert!(council::switch_remembered(&setup.home, SESSION));
+
+    // A resumed wish keeps the switch it was started with, without being asked again.
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
+    goal::open(
+        &setup.home,
+        SESSION,
+        "研究氧化層厚度",
+        setup.project().to_str(),
+    )
+    .unwrap();
+    goal::set_status(&setup.home, SESSION, "blocked", Some("stopped")).unwrap();
+    let resumed = Wish::resume(setup.config(), SESSION, None, None).unwrap();
+    assert_eq!(resumed.wait().unwrap(), 0);
+    assert_eq!(setup.record()["env"]["AXIOM_ADVANCED_RESEARCH"], "1");
+}
+
+#[test]
+fn without_the_option_the_council_stays_off() {
+    let setup = Setup::new("ok");
+    let wish = Wish::start(
+        setup.config(),
+        setup.project(),
+        "--advanced-research [advanced-research]",
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(wish.wait().unwrap(), 0);
+    let record = setup.record();
+    assert!(
+        record["env"]["AXIOM_ADVANCED_RESEARCH"].is_null(),
+        "{record}"
+    );
+    let argv = argv_of(&record);
+    assert!(!argv.iter().any(|a| a == "--append-system-prompt"));
+    assert!(!argv.iter().any(|a| a.contains("__council")));
+    assert!(!council::switch_remembered(&setup.home, SESSION));
 }
 
 #[test]
