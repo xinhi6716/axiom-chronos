@@ -12,6 +12,8 @@ use std::{
 // Below the roughly 167k at which Claude Code compacts a 200k-window agent on its own.
 pub const DEFAULT_HANDOFF_TOKENS: u64 = 150_000;
 pub const HANDOFF_ENV: &str = "AXIOM_HANDOFF_TOKENS";
+pub const WARN_ENV: &str = "AXIOM_HANDOFF_WARN_PERCENT";
+pub const DEFAULT_WARN_PERCENT: u64 = 80;
 /// Bytes read from the end of a transcript; the rest of the file is never read.
 pub const TAIL_BYTES: u64 = 1 << 20;
 const HEAD_BYTES: u64 = 256 * 1024;
@@ -43,6 +45,30 @@ pub fn handoff_limit() -> Option<u64> {
             Some(DEFAULT_HANDOFF_TOKENS)
         }
     }
+}
+
+/// The percentage of the handoff limit at which to warn, or None when disabled.
+pub fn warn_percent() -> Option<u64> {
+    let Some(raw) = std::env::var_os(WARN_ENV) else {
+        return Some(DEFAULT_WARN_PERCENT);
+    };
+    let raw = raw.to_string_lossy();
+    if raw.is_empty() {
+        return Some(DEFAULT_WARN_PERCENT);
+    }
+    match raw.parse::<u64>() {
+        Ok(0) => None,
+        Ok(n @ 1..=99) => Some(n),
+        _ => {
+            eprintln!("{WARN_ENV}={raw} is not a percent from 0 to 99; using {DEFAULT_WARN_PERCENT}");
+            Some(DEFAULT_WARN_PERCENT)
+        }
+    }
+}
+
+/// Integer percentage of the limit, without overflowing intermediate multiplication.
+pub fn soft_threshold(limit: u64, percent: u64) -> u64 {
+    ((u128::from(limit) * u128::from(percent) / 100).min(u128::from(u64::MAX))) as u64
 }
 
 /// At most `max` bytes from the end of the file, starting at a line boundary, and where they began.
@@ -186,6 +212,26 @@ pub fn agent_transcript(event: &Value) -> Option<PathBuf> {
     let bare = id.strip_prefix("agent-").unwrap_or(&id);
     let own = dir.join(format!("agent-{bare}.jsonl"));
     own.is_file().then_some(own)
+}
+
+/// The warning for a dispatcher in the soft band below the handoff limit.
+pub fn handoff_warning(event: &Value, limit: u64, percent: u64) -> Option<String> {
+    if !in_dispatcher(event) {
+        return None;
+    }
+    let transcript = agent_transcript(event)?;
+    let context = last_context(&transcript)?;
+    if context < soft_threshold(limit, percent)
+        || context >= limit
+        || first_context(&transcript).is_some_and(|first| first >= limit / 2)
+    {
+        return None;
+    }
+    Some(format!(
+        "Context {}k of {}k: reach a clean stopping point, then call orch handoff.",
+        context / 1000,
+        limit / 1000
+    ))
 }
 
 /// The refusal a dispatcher gets once its context reaches `limit`, or None.

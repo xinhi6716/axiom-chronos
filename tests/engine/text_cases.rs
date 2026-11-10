@@ -28,6 +28,12 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "declare the mode after the ruling"),
         ("skills/wish/SKILL.md", "no follow-up exploration"),
         ("skills/wish/SKILL.md", "`area: feature`"),
+        ("skills/wish/SKILL.md", "research/COUNCIL.md"),
+        ("skills/wish/SKILL.md", "skills/wish/BATCH.md"),
+        ("research/COUNCIL.md", "never open the members' position files"),
+        ("research/COUNCIL.md", "`more_open`"),
+        ("research/COUNCIL.md", "Nothing goes back to the members."),
+        ("research/COUNCIL.md", "Also read the council digest at that path; treat its open claims as claims about this plan."),
         ("agents/dispatcher.md", "including fix and sol units"),
         ("agents/dispatcher.md", "`orch` `[\"map\"]`"),
         ("agents/dispatcher.md", "`orch` `[\"ready\"]`"),
@@ -65,6 +71,9 @@ fn required_phrases_are_present() {
         let modified = text.replace(phrase, "");
         assert_eq!(missing_phrase(&modified, phrase), Some(phrase));
     }
+    let wish = fs::read_to_string(root.join("skills/wish/SKILL.md")).unwrap();
+    assert!(!wish.contains("never open the members' position files"));
+    assert!(!wish.contains("`$!` in Git Bash is not a Windows pid"));
     let dispatch = fs::read_to_string(root.join("DISPATCH.md")).unwrap();
     assert!(!dispatch.contains("After the worker returns"));
 }

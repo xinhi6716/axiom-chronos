@@ -98,6 +98,8 @@ fn cases() -> Vec<(&'static str, Value, bool)> {
 
 #[test]
 fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
+    let previous_warn = std::env::var_os(context::WARN_ENV);
+    std::env::set_var(context::WARN_ENV, "0");
     let r = run();
     transcript(&r.own, &[30_000, 150_000]);
     let mut failures = Vec::new();
@@ -183,6 +185,11 @@ fn dispatcher_lock_applies_to_every_tool_and_only_past_the_limit() {
             hook::handle(&event, Some(&r.home), false),
             "disabled {event}"
         );
+    }
+    if let Some(value) = previous_warn {
+        std::env::set_var(context::WARN_ENV, value);
+    } else {
+        std::env::remove_var(context::WARN_ENV);
     }
 }
 

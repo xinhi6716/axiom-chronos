@@ -119,6 +119,9 @@ fn a_long_batch_is_piloted_then_waited_on_without_a_model() {
     };
     let skill = file("skills/wish/SKILL.md");
     let step = skill.lines().find(|line| line.starts_with("7. ")).unwrap();
+    assert!(step.contains("skills/wish/BATCH.md"));
+    assert!(!skill.contains("`$!` in Git Bash is not a Windows pid"));
+    let batch = file("skills/wish/BATCH.md");
     for phrase in [
         "one pilot unit before any fan-out",
         "Only after a clean pilot",
@@ -132,14 +135,14 @@ fn a_long_batch_is_piloted_then_waited_on_without_a_model() {
         "Never watch a batch.",
     ] {
         let has = |value: &str| value.contains(phrase);
-        assert!(has(step), "missing {phrase}");
-        assert!(!has(&step.replace(phrase, "")));
+        assert!(has(batch), "missing {phrase}");
+        assert!(!has(&batch.replace(phrase, "")));
     }
-    let pilot = step.find("one pilot unit").unwrap();
-    assert!(pilot < step.find("launch the full batch").unwrap());
+    let pilot = batch.find("one pilot unit").unwrap();
+    assert!(pilot < batch.find("launch the full batch").unwrap());
     assert!(
-        step.find("launch the full batch").unwrap()
-            < step.find("Close the goal as `waiting`").unwrap()
+        batch.find("launch the full batch").unwrap()
+            < batch.find("Close the goal as `waiting`").unwrap()
     );
 
     let dispatcher = file("agents/dispatcher.md");

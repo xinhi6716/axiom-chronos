@@ -7,6 +7,7 @@ use super::*;
 use crate::base::{self, Failure, Res};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Each field's limit in characters; a longer value is refused, never cut.
 pub const HANDOFF_FIELDS: [(&str, usize); 4] = [
@@ -40,6 +41,109 @@ pub struct Handoff {
     /// The module's units (id and state) when this note was written; absent in older stores.
     #[serde(default)]
     pub snapshot: Option<String>,
+}
+
+/// Refuse instructions to evade checks or misrepresent their outcome, not statements of fact.
+pub fn note_refusal(text: &str) -> Option<String> {
+    struct Patterns {
+        verbs: regex::Regex,
+        object: regex::Regex,
+        outcome: regex::Regex,
+        as_outcome: regex::Regex,
+        claim_instruction: regex::Regex,
+        whether: regex::Regex,
+        negation: regex::Regex,
+    }
+    static PATTERNS: OnceLock<Patterns> = OnceLock::new();
+    let p = PATTERNS.get_or_init(|| Patterns {
+        verbs: regex::Regex::new(concat!(
+            r"(?i)(?P<direct>不要回報|不要汇报|不要報告|不要报告)",
+            r"|(?P<checks>\b(?:skip|omit|bypass|disable|weaken|loosen|hide|conceal|suppress)\b",
+            r"|\b(?:don['’]t|do[ \t]+not|never)[ \t]+(?:mention|report)\b",
+            r"|跳過|跳过|略過|略过|省略|繞過|绕过|禁用|停用|削弱|放寬|放宽|隱藏|隐藏|隱瞞|隐瞒|壓制|压制|不要提及)",
+            r"|(?P<as_claim>\b(?:mark|treat)\b)",
+            r"|(?P<claim>\b(?:claim|say|report)\b|聲稱|声称|標記|标记|視為|视为)"
+        )).unwrap(),
+        object: regex::Regex::new(concat!(
+            r"(?i)^[^.;!?；。！？]{0,40}?(?P<object>",
+            r"\b(?:review\w*|test\w*|ci|acceptance|verif\w*|report\w*|findings?|failures?)\b",
+            r"|審查|审查|審核|审核|測試|测试|驗證|验证|回報|汇报|報告|报告|失敗|失败|驗收|验收)"
+        )).unwrap(),
+        outcome: regex::Regex::new(concat!(
+            r"(?i)^[^.;!?；。！？]{0,40}?(?P<object>",
+            r"\b(?:passed|verified|green)\b|通過|通过|已驗證|已验证|綠燈|绿灯)"
+        )).unwrap(),
+        as_outcome: regex::Regex::new(concat!(
+            r"(?i)^[^.;!?；。！？]{0,40}?\bas\s+(?P<object>",
+            r"passed|verified|green)\b"
+        )).unwrap(),
+        claim_instruction: regex::Regex::new(
+            r"(?i)(?:^|[.;!?；。！？\r\n]|\b(?:please|then|and|to|should|must))\s*$"
+        ).unwrap(),
+        whether: regex::Regex::new(r"(?i)^\s*(?:whether|if)\b").unwrap(),
+        negation: regex::Regex::new(
+            r"(?i)(?:\b(?:do[ \t]+not|don['’]t|never|must[ \t]+not|no[ \t]+need[ \t]+to[ \t]+not)|不要|別|别|不可|切勿)$"
+        ).unwrap(),
+    });
+
+    for captures in p.verbs.captures_iter(text) {
+        let verb = captures.get(0).unwrap();
+        // Whitespace immediately before distinct verbs is disjoint; the remaining look-behind
+        // is bounded, keeping the scan linear even for long input.
+        let before = text[..verb.start()].trim_end_matches([' ', '\t']);
+        let prefix: String = before
+            .chars()
+            .rev()
+            .take(64)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if p.negation.is_match(&prefix) {
+            continue;
+        }
+        if captures.name("direct").is_some() {
+            return Some(format!("matched '{}'", verb.as_str()));
+        }
+        let tail = &text[verb.end()..];
+        if captures.name("checks").is_none()
+            && ((!p.claim_instruction.is_match(&prefix) && verb.as_str().is_ascii())
+                || p.whether.is_match(tail))
+        {
+            continue;
+        }
+        let object_pattern = if captures.name("checks").is_some() {
+            &p.object
+        } else if captures.name("as_claim").is_some() {
+            &p.as_outcome
+        } else {
+            &p.outcome
+        };
+        let end = tail.char_indices().nth(128).map_or(tail.len(), |(i, _)| i);
+        if let Some(object) = object_pattern.captures(&tail[..end]) {
+            return Some(format!(
+                "matched '{}' and '{}'",
+                verb.as_str(),
+                &object["object"]
+            ));
+        }
+    }
+    None
+}
+
+/// Check fields in the order they are presented to the successor.
+pub fn check_note(h: &Handoff) -> Result<(), (&'static str, String)> {
+    for (flag, value) in [
+        ("--next", &h.next),
+        ("--in-flight", &h.in_flight),
+        ("--stuck", &h.stuck),
+        ("--decisions", &h.decisions),
+    ] {
+        if let Some(reason) = note_refusal(value) {
+            return Err((flag, reason));
+        }
+    }
+    Ok(())
 }
 
 pub const STALL_ENV: &str = "AXIOM_HANDOFF_STALLS";
@@ -195,6 +299,11 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
         stalled: 0,
         snapshot: None,
     };
+    if let Err((flag, reason)) = check_note(&note) {
+        return Err(invalid(format!(
+            "{flag} is refused: {reason}. Write facts only; the store holds units, evidence and reviews."
+        )));
+    }
     let file = path(store, note.module.as_deref());
     with_lock(store, false, || {
         if let Some(m) = note.module.clone() {
@@ -299,6 +408,20 @@ pub fn handoff_header(h: &Handoff) -> String {
 }
 
 pub fn handoff_text(h: &Handoff) -> String {
+    if let Err((flag, _)) = check_note(h) {
+        let label = match flag {
+            "--next" => "next",
+            "--in-flight" => "in flight",
+            "--stuck" => "stuck",
+            "--decisions" => "decisions",
+            _ => unreachable!(),
+        };
+        return format!(
+            "{}{}\nnote withheld: its {label} field tells the successor to skip, weaken or hide checks; work from the store and the digest.\n",
+            handoff_header(h),
+            if h.taken { "" } else { " (pending)" },
+        );
+    }
     let mut text = format!(
         "{}{}\nnext: {}\n",
         handoff_header(h),

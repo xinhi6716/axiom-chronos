@@ -224,7 +224,8 @@ pub(crate) const MAX_READ_LINES: u64 = 500;
 
 fn waiting_loop(input: &Value) -> bool {
     static WAIT: OnceLock<regex::Regex> = OnceLock::new();
-    let re = WAIT.get_or_init(|| regex::Regex::new(r"(?i)\b(sleep|wait-(process|job|event))\b").unwrap());
+    let re = WAIT
+        .get_or_init(|| regex::Regex::new(r"(?i)\b(sleep|wait-(process|job|event))\b").unwrap());
     re.is_match(input.get("command").and_then(Value::as_str).unwrap_or(""))
 }
 
@@ -234,7 +235,9 @@ fn oversized_read(input: &Value) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
-        .is_some_and(|e| ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"].contains(&e.as_str()));
+        .is_some_and(|e| {
+            ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"].contains(&e.as_str())
+        });
     !binary
         && std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_WHOLE_READ)
         && input
@@ -289,14 +292,17 @@ fn store_of(home: &Path, project: Option<&str>) -> Option<PathBuf> {
 /// The module this agent was bound to by its first `codex_run`, if any.
 fn agent_module(home: &Path, g: &Goal, input: &Value, event: &Value) -> Option<String> {
     let key = context::agent_key(event)?;
-    [input.get("project").and_then(Value::as_str), g.project.as_deref()]
-        .into_iter()
-        .filter_map(|p| store_of(home, p))
-        .find_map(|store| {
-            let module = std::fs::read_to_string(store.join("agents").join(&key)).ok()?;
-            let module = module.trim();
-            (!module.is_empty()).then(|| module.to_string())
-        })
+    [
+        input.get("project").and_then(Value::as_str),
+        g.project.as_deref(),
+    ]
+    .into_iter()
+    .filter_map(|p| store_of(home, p))
+    .find_map(|store| {
+        let module = std::fs::read_to_string(store.join("agents").join(&key)).ok()?;
+        let module = module.trim();
+        (!module.is_empty()).then(|| module.to_string())
+    })
 }
 /// The engine's record of the work: the module's latest handoff and digest, or the whole wish's.
 fn recall(home: &Path, g: &Goal, module: Option<&str>) -> Option<String> {
@@ -348,14 +354,24 @@ fn target(store: &Path, input: &Value, pending: &[Handoff]) -> Target {
 const HANDED_OFF: &str = "\n\nA previous dispatcher handed this work off when its context grew too large. Continue from its handoff and the store; do not redo verified units.\n";
 /// A fresh dispatcher's input with the pending handoff of the work it carries out appended, or
 /// why it may not start. The note stays pending until the dispatcher is seen running with it.
-fn start_dispatcher(home: &Path, g: &Goal, input: &Value) -> Option<Result<Value, String>> {
+fn start_dispatcher(
+    home: &Path,
+    session: &str,
+    g: &Goal,
+    input: &Value,
+) -> Option<Result<Value, String>> {
     let store = store_of(home, g.project.as_deref())?;
     let prompt = input.get("prompt")?.as_str()?;
     let pending = crate::orch::pending_handoffs(&store).ok()?;
     if pending.is_empty() {
         return None;
     }
-    let chosen: Vec<&Handoff> = match target(&store, input, &pending) {
+    let target = target(&store, input, &pending);
+    let module = match &target {
+        Target::Module(m) => Some(m.as_str()),
+        _ => None,
+    };
+    let chosen: Vec<&Handoff> = match &target {
         Target::Wish => pending.iter().filter(|h| h.module.is_none()).collect(),
         Target::Module(m) => pending
             .iter()
@@ -389,6 +405,17 @@ fn start_dispatcher(home: &Path, g: &Goal, input: &Value) -> Option<Result<Value
         text.push_str(HANDED_OFF);
         text.push_str(&crate::orch::resume_text(&store, repo, h.module.as_deref()).ok()?);
     }
+    let wish_file = home.join("goals").join(format!("{session}.json"));
+    text.push('\n');
+    text.push_str(&crate::orch::anchor_text(
+        &store,
+        &crate::orch::Anchor {
+            rules: false,
+            wish: Some(&g.wish),
+            wish_file: Some(&wish_file),
+            module,
+        },
+    ));
     let mut updated = input.clone();
     updated["prompt"] = json!(text);
     Some(Ok(updated))
@@ -414,22 +441,56 @@ fn confirm_handoffs(home: &Path, g: &Goal, event: &Value) {
         }
     }
 }
-/// After Claude Code compacts a dispatcher, its next gated call brings back the work state once.
-fn after_compaction(home: &Path, g: &Goal, event: &Value, input: &Value) -> Option<String> {
-    let store = store_of(home, g.project.as_deref())?;
+/// Find a compaction boundary that has not yet been marked.
+fn pending_compaction(store: &Path, event: &Value) -> Option<(String, PathBuf)> {
     let key = context::agent_key(event)?;
     let boundary = context::last_compaction(&context::agent_transcript(event)?)?;
     let marker = store.join("agents").join(format!("{key}.compact"));
     if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == boundary) {
         return None;
     }
-    let module = agent_module(home, g, input, event);
-    let text = recall(home, g, module.as_deref())?;
+    Some((boundary, marker))
+}
+
+/// Mark a compaction boundary and return its anchor when the project store exists.
+fn compaction_anchor(
+    store: &Path,
+    boundary: &str,
+    marker: &Path,
+    module: Option<&str>,
+) -> Option<Option<String>> {
+    let has_store = store.is_dir();
     std::fs::create_dir_all(store.join("agents")).ok()?;
-    base::atomic_write(&marker, boundary.as_bytes()).ok()?;
-    Some(format!(
-        "Your context was compacted. Your work state, from the engine:\n{text}"
-    ))
+    base::atomic_write(marker, boundary.as_bytes()).ok()?;
+    Some(has_store.then(|| {
+        crate::orch::anchor_text(
+            store,
+            &crate::orch::Anchor {
+                rules: true,
+                wish: None,
+                wish_file: None,
+                module,
+            },
+        )
+    }))
+}
+
+/// After Claude Code compacts a dispatcher, its next gated call brings back the work state once.
+fn after_compaction(home: &Path, g: &Goal, event: &Value, input: &Value) -> Option<String> {
+    let store = store_of(home, g.project.as_deref())?;
+    let (boundary, marker) = pending_compaction(&store, event)?;
+    let module = agent_module(home, g, input, event);
+    let text = match recall(home, g, module.as_deref()) {
+        Some(text) => text,
+        None if store.is_dir() => "No work state is recorded yet.\n".into(),
+        None => return None,
+    };
+    let Some(anchor) = compaction_anchor(&store, &boundary, &marker, module.as_deref())? else {
+        return Some(format!(
+            "Your context was compacted. Your work state, from the engine:\n{text}"
+        ));
+    };
+    Some(format!("Your context was compacted. Your binding rules and your module's contract follow verbatim; they bind you as before.\n{anchor}Your work state, from the engine:\n{text}"))
 }
 
 fn wish_text(prompt: &str) -> Option<&str> {
@@ -479,10 +540,26 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let module = agent_module(home, &g, &Value::Null, event);
             let text = recall(home, &g, module.as_deref())
                 .unwrap_or_else(|| "No work state is recorded yet.\n".into());
-            Some(json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":format!(
+            let mut text = format!(
                 "Context was compacted. Chronos goal {session} is {}; its work state, from the engine:\n{text}",
                 g.status
-            )}}))
+            );
+            if context::in_dispatcher(event) {
+                if let Some(anchor) = store_of(home, g.project.as_deref())
+                    .filter(|store| store.is_dir())
+                    .and_then(|store| {
+                        let (boundary, marker) = pending_compaction(&store, event)?;
+                        compaction_anchor(&store, &boundary, &marker, module.as_deref())
+                    })
+                    .flatten()
+                {
+                    text.push('\n');
+                    text.push_str(&anchor);
+                }
+            }
+            Some(
+                json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":text}}),
+            )
         }
         "Stop" => {
             let g = goal::load(home?, session).ok()??;
@@ -491,7 +568,20 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
         }
         "PreToolUse" => {
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
-            let previously_routed = matches!(tool, "Write" | "Edit" | "NotebookEdit" | "Bash" | "PowerShell" | "Read" | "AskUserQuestion" | "Agent" | "Task" | CODEX | GOAL);
+            let previously_routed = matches!(
+                tool,
+                "Write"
+                    | "Edit"
+                    | "NotebookEdit"
+                    | "Bash"
+                    | "PowerShell"
+                    | "Read"
+                    | "AskUserQuestion"
+                    | "Agent"
+                    | "Task"
+                    | CODEX
+                    | GOAL
+            );
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
             let subagent = input.get("subagent_type").and_then(Value::as_str);
@@ -535,6 +625,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     ))
                 }
             };
+            let mut warning = None;
             if g.status == "active" {
                 if context::in_dispatcher(event) {
                     confirm_handoffs(home, &g, event);
@@ -564,11 +655,13 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                         {
                             return deny(&reason);
                         }
+                        warning = context::warn_percent()
+                            .and_then(|p| context::handoff_warning(event, limit, p));
                     }
                 }
                 // Calls newly routed by the wildcard have no other hook behavior.
                 if !previously_routed {
-                    return None;
+                    return warning.map(|line| json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":line}}));
                 }
             }
             let mode = g.mode.as_deref();
@@ -594,7 +687,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     .unwrap_or("");
                 let cwd = event.get("cwd").and_then(Value::as_str);
                 if engine_state(home, path, cwd) {
-                    return deny("Goals, units, claims and evidence change only through the engine.");
+                    return deny(
+                        "Goals, units, claims and evidence change only through the engine.",
+                    );
                 }
                 if restricted && !inside(home, path, cwd) {
                     return deny("Writes outside the data home are not allowed for this caller or goal mode.");
@@ -625,11 +720,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 }
                 match goal::mark_asked(home, session) {
                     Ok(true) => (),
-                    Ok(false) => {
-                        return deny(
-                            "Questions are unavailable in this session or exceed the limit of four.",
-                        )
-                    }
+                    Ok(false) => return deny(
+                        "Questions are unavailable in this session or exceed the limit of four.",
+                    ),
                     Err(_) => return deny("Could not record the question."),
                 }
             }
@@ -641,18 +734,28 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 return deny("Could not record dispatch.");
             }
             if dispatcher && !agent && g.status == "active" {
-                match start_dispatcher(home, &g, input) {
+                match start_dispatcher(home, session, &g, input) {
                     Some(Err(reason)) => return deny(&reason),
-                    Some(Ok(updated)) => return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}})),
+                    Some(Ok(updated)) => {
+                        return Some(
+                            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}}),
+                        )
+                    }
                     None => (),
                 }
             }
             if agent && g.status == "active" && context::in_dispatcher(event) {
-                if let Some(text) = after_compaction(home, &g, event, input) {
-                    return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":text}}));
+                if let Some(mut text) = after_compaction(home, &g, event, input) {
+                    if let Some(line) = warning {
+                        text.push('\n');
+                        text.push_str(&line);
+                    }
+                    return Some(
+                        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":text}}),
+                    );
                 }
             }
-            None
+            warning.map(|line| json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":line}}))
         }
         _ => None,
     }
