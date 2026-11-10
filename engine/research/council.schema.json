@@ -1,0 +1,100 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "question", "members", "rounds", "claims", "cost", "dropped", "degraded"],
+  "properties": {
+    "key": {"type": "string"},
+    "question": {"type": "string"},
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "model", "family", "status", "tokens", "usd"],
+        "properties": {
+          "name": {"type": "string", "enum": ["astra", "fable", "argon"]},
+          "model": {"type": "string"},
+          "family": {"type": "string"},
+          "status": {"type": "string", "enum": ["ok", "missing", "quota", "timeout", "budget_cut", "malformed", "failed"]},
+          "tokens": {"type": "integer"},
+          "usd": {},
+          "detail": {"type": "string"}
+        }
+      }
+    },
+    "rounds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["n", "positions"],
+        "properties": {
+          "n": {"type": "integer"},
+          "positions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["member", "path", "sha256"],
+              "properties": {
+                "member": {"type": "string"},
+                "path": {"type": "string"},
+                "sha256": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "evidence", "stances", "dissent", "status", "ruling"],
+        "properties": {
+          "id": {"type": "string"},
+          "text": {"type": "string"},
+          "evidence": {"type": "string"},
+          "stances": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["astra", "fable", "argon"],
+            "properties": {
+              "astra": {"type": "string", "enum": ["author", "agree", "concede", "disagree", "unsupported", "absent"]},
+              "fable": {"type": "string", "enum": ["author", "agree", "concede", "disagree", "unsupported", "absent"]},
+              "argon": {"type": "string", "enum": ["author", "agree", "concede", "disagree", "unsupported", "absent"]}
+            }
+          },
+          "dissent": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["member", "evidence"],
+              "properties": {
+                "member": {"type": "string"},
+                "evidence": {"type": "string"}
+              }
+            }
+          },
+          "status": {"type": "string", "enum": ["consensus", "majority", "disputed"]},
+          "ruling": {}
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["usd", "cap_usd", "unpriced_tokens", "cut"],
+      "properties": {
+        "usd": {"type": "number"},
+        "cap_usd": {"type": "number"},
+        "unpriced_tokens": {"type": "integer"},
+        "cut": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "dropped": {"type": "integer"},
+    "degraded": {"type": "boolean"}
+  }
+}

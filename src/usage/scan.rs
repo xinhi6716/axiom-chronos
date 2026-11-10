@@ -78,6 +78,16 @@ impl From<RawUsage> for CallUsage {
     }
 }
 
+/// One `usage` object of a stream-json or transcript event; None when it is absent or unreadable.
+pub(crate) fn call_usage(value: &Value) -> Option<CallUsage> {
+    if !value.is_object() {
+        return None;
+    }
+    serde_json::from_value::<RawUsage>(value.clone())
+        .ok()
+        .map(Into::into)
+}
+
 #[derive(Deserialize)]
 struct ToolLine {
     message: ToolMessage,

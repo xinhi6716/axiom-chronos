@@ -9,6 +9,7 @@ mod report;
 mod scan;
 
 pub use report::render;
+pub(crate) use scan::call_usage;
 
 use crate::base::{self, Failure, Res};
 use scan::{Call, FileScan};

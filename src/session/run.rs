@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    codegraph, engine, goal, hook, provenance,
+    codegraph, council, engine, goal, hook, provenance,
 };
 use serde_json::{json, Value};
 use std::{
@@ -324,6 +324,7 @@ fn run_inner(
         out,
         resume,
         &mut |_| {},
+        &Launch::default(),
     )
 }
 pub(super) fn run_observed(
@@ -336,10 +337,11 @@ pub(super) fn run_observed(
     out: &mut dyn Write,
     resume: Option<&str>,
     observe: &mut dyn FnMut(&serde_json::Value),
+    launch: &Launch,
 ) -> Res<i32> {
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();
-    let spawned = spawn(config, skill, text, project, max_turns, resume)?;
+    let spawned = spawn_with(config, skill, text, project, max_turns, resume, launch)?;
     forward_input(Arc::clone(&spawned.writer), input);
     drive(spawned, config, out, &INTERRUPTED, observe)
 }
@@ -363,6 +365,14 @@ pub struct Spawned {
     skill: String,
     project: PathBuf,
     max_turns: Option<u32>,
+    advanced_research: bool,
+}
+
+/// What a launch opts in to. The default is a launch exactly as it has always been.
+#[derive(Debug, Clone, Default)]
+pub struct Launch {
+    /// Advanced research: the council of Astra, Fable 5.2 and Argon. Costs real money.
+    pub advanced_research: bool,
 }
 
 pub fn spawn(
@@ -373,9 +383,44 @@ pub fn spawn(
     max_turns: Option<u32>,
     resume: Option<&str>,
 ) -> Res<Spawned> {
+    spawn_with(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        resume,
+        &Launch::default(),
+    )
+}
+
+pub fn spawn_with(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    resume: Option<&str>,
+    launch: &Launch,
+) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
     let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
+    let advanced_research = launch.advanced_research
+        || resume.is_some_and(|id| council::switch_remembered(&config.home, id));
+    if advanced_research {
+        if let Some(tools) = argv
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .map(|i| i + 1)
+        {
+            argv[tools] = format!("{},{}", argv[tools], council::TOOL);
+        }
+        argv.extend([
+            "--append-system-prompt".into(),
+            council::SYSTEM_PROMPT.into(),
+        ]);
+    }
     if let Some(id) = resume {
         argv.extend(["--resume".into(), id.into()]);
     }
@@ -410,7 +455,8 @@ pub fn spawn(
     );
     log.write_all(provenance.log_line().as_bytes())
         .map_err(failure)?;
-    let mut child = base::proc::command(&argv)
+    let mut child = base::proc::command(&argv);
+    child
         .current_dir(project)
         .env("AXIOM_DATA_HOME", &config.home)
         .env("AXIOM_HEADLESS", "1")
@@ -419,8 +465,13 @@ pub fn spawn(
         .env(provenance::ENV, provenance.to_value().to_string())
         .env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
         .env_remove("AXIOM_PYTHON")
+        .env_remove(council::ENV)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+    if advanced_research {
+        child.env(council::ENV, "1");
+    }
+    let mut child = child
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
     let mut stdin = child.stdin.take().unwrap();
@@ -464,6 +515,7 @@ pub fn spawn(
         skill: skill.to_owned(),
         project: project.to_path_buf(),
         max_turns,
+        advanced_research,
     })
 }
 
@@ -583,6 +635,7 @@ fn drive_once(
         mut log,
         log_path,
         provenance,
+        advanced_research,
         ..
     } = spawned;
     let mut renderer = Renderer::new();
@@ -608,6 +661,9 @@ fn drive_once(
                 };
                 if event["type"] == "system" && event["subtype"] == "init" {
                     session = event["session_id"].as_str().map(str::to_owned);
+                    if let (true, Some(id)) = (advanced_research, session.as_deref()) {
+                        council::remember_switch(&config.home, id);
+                    }
                 }
                 renderer.event(&event, out);
                 observe(&event);

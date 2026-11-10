@@ -1,12 +1,15 @@
 use crate::base::{self, Failure, Res};
 use crate::codex::AppServer;
-use crate::{goal, provenance};
+use crate::{council, goal, provenance};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
 };
 
@@ -31,6 +34,9 @@ pub struct Bridge {
     codex: Mutex<Option<Arc<AppServer>>>,
     client_version: OnceLock<String>,
     recorded: Mutex<HashSet<String>>,
+    council: Option<council::Setup>,
+    council_running: AtomicBool,
+    council_stop: AtomicBool,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
@@ -39,7 +45,31 @@ impl Bridge {
             codex: Mutex::new(None),
             client_version: OnceLock::new(),
             recorded: Mutex::new(HashSet::new()),
+            council: None,
+            council_running: AtomicBool::new(false),
+            council_stop: AtomicBool::new(false),
         }
+    }
+    /// Offers the `council` tool. Only a session launched with the switch gets here.
+    pub fn with_council(mut self, setup: council::Setup) -> Self {
+        self.council = Some(setup);
+        self
+    }
+    pub fn council_setup(&self) -> Option<&council::Setup> {
+        self.council.as_ref()
+    }
+    pub fn council_flags(&self) -> (&AtomicBool, &AtomicBool) {
+        (&self.council_running, &self.council_stop)
+    }
+    /// The tools this session is served: the fixed list, plus the council when opted in.
+    pub fn tool_list(&self) -> Value {
+        let mut list = tools();
+        if self.council.is_some() {
+            list.as_array_mut()
+                .unwrap()
+                .push(super::council_tool::descriptor());
+        }
+        list
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {
         let mut lock = self.codex.lock().unwrap_or_else(|e| e.into_inner());
@@ -101,6 +131,7 @@ impl Bridge {
         Ok(())
     }
     pub fn cancel(&self) {
+        self.council_stop.store(true, Ordering::SeqCst);
         if let Some(c) = self
             .codex
             .lock()
@@ -173,7 +204,11 @@ pub fn call_body(body: impl FnOnce() -> Res<Value>) -> Value {
     json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&payload).unwrap()}],"structuredContent":payload,"isError":failed})
 }
 pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
-    let bridge = Arc::new(Bridge::new(config));
+    let mut bridge = Bridge::new(config);
+    if let Some(setup) = council::Setup::from_env() {
+        bridge = bridge.with_council(setup);
+    }
+    let bridge = Arc::new(bridge);
     let out = Arc::new(Mutex::new(output));
     let mut jobs = Vec::new();
     for line in input.lines() {
@@ -225,7 +260,7 @@ pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 's
                 json!({"protocolVersion":params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),"capabilities":{"tools":{}},"serverInfo":{"name":"chronos-bridge","version":env!("CARGO_PKG_VERSION")}})
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools":tools()}),
+            "tools/list" => json!({"tools":bridge.tool_list()}),
             _ => {
                 write_msg(
                     &out,

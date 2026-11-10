@@ -65,6 +65,7 @@ fn batch(a: &Value) -> Res<Option<goal::Batch>> {
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
+        "council" => super::council_tool::council(b, a),
         "orch" => {
             let path = store(b, s(a, "project"))?;
             std::fs::create_dir_all(path.parent().unwrap())
