@@ -376,16 +376,30 @@ fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
             new.track, old.track
         )));
     }
-    let scope = match unit_brief(store, id) {
-        Ok(brief) => brief.scope,
-        Err(e) if e.kind == "no_brief" => vec![],
-        Err(e) => return Err(e),
-    };
+    // The replacement inherits the completion of `id` and of every unit that already stands on it.
+    let mut scope: Vec<String> = vec![];
+    for u in rows
+        .iter()
+        .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == id))
+    {
+        match unit_brief(store, &u.id) {
+            Ok(brief) => scope.extend(brief.scope),
+            Err(e) if e.kind == "no_brief" => {}
+            Err(e) => return Err(e),
+        }
+    }
     let replacement = unit_brief(store, by)?.scope;
-    if !scope.is_empty() && !crate::orch::overlaps(&scope, &replacement) {
+    let mut missing: Vec<&str> = scope
+        .iter()
+        .filter(|path| !crate::orch::covers(&replacement, path))
+        .map(String::as_str)
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if !missing.is_empty() {
         return Err(fail(format!(
-            "unit {by} shares no file with {id}; its SCOPE must cover some of {}",
-            scope.join(", ")
+            "unit {by} does not cover {} of the SCOPE it would take over from {id}; a replacement's SCOPE must cover every file of the units it replaces",
+            missing.join(", ")
         )));
     }
     let row = rows.iter_mut().find(|u| u.id == id).unwrap();

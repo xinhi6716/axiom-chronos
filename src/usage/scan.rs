@@ -211,7 +211,7 @@ pub(super) fn parse_ms(s: &str) -> Option<i64> {
     {
         return None;
     }
-    let (body, fraction) = match s[19..].strip_suffix('Z')? {
+    let (body, fraction) = match s.get(19..)?.strip_suffix('Z')? {
         "" => (&s[..19], 0),
         rest => {
             let digits = rest.strip_prefix('.')?;
@@ -387,12 +387,19 @@ impl FileScan {
                 }
                 own
             });
-            self.large_reads.retain(|r| !copied.contains(&r.message));
-            self.codex_runs.retain(|r| !copied.contains(&r.message));
         }
-        let before = self.calls.len();
-        self.calls.retain(|call| !call.usage.is_zero());
-        let zeroed = (before - self.calls.len()) as u64;
+        let mut zeroed = HashSet::new();
+        self.calls.retain(|call| {
+            if call.usage.is_zero() {
+                zeroed.insert(call.id.clone());
+            }
+            !call.usage.is_zero()
+        });
+        self.large_reads
+            .retain(|r| !copied.contains(&r.message) && !zeroed.contains(&r.message));
+        self.codex_runs
+            .retain(|r| !copied.contains(&r.message) && !zeroed.contains(&r.message));
+        let zeroed = zeroed.len() as u64;
         if self.api_requests.is_empty() {
             self.inseparable_copies = zeroed;
         }

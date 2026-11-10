@@ -7,13 +7,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{
-    io::Read,
-    path::Path,
-    process::Stdio,
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::{path::Path, process::Stdio, time::Duration};
 
 /// Carries a launcher's record to the bridge it starts, so a run has one record, not two.
 pub const ENV: &str = "AXIOM_PROVENANCE";
@@ -48,18 +42,9 @@ pub struct Output {
     pub stderr: String,
 }
 
-fn drain(mut stream: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stream.read_to_end(&mut bytes);
-        let _ = tx.send(bytes);
-    });
-    rx
-}
-
 /// None when the program cannot start or has not finished within `limit`. The streams are read
-/// under the same limit because a background process it leaves behind can hold them open.
+/// under the same limit because a background process it leaves behind can hold them open; at the
+/// limit everything the program started is killed (see `proc::capture`).
 pub fn run_bounded(argv: &[String], cwd: Option<&Path>, limit: Duration) -> Option<Output> {
     if argv.is_empty() {
         return None;
@@ -68,32 +53,20 @@ pub fn run_bounded(argv: &[String], cwd: Option<&Path>, limit: Duration) -> Opti
     if let Some(cwd) = cwd {
         program.current_dir(cwd);
     }
-    let mut child = program
+    let child = program
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
-    let stdout = drain(child.stdout.take()?);
-    let stderr = drain(child.stderr.take()?);
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                proc::kill_tree(&mut child);
-                return None;
-            }
-        }
-    };
-    let remaining = || limit.saturating_sub(start.elapsed());
-    let stdout = stdout.recv_timeout(remaining()).ok()?;
-    let stderr = stderr.recv_timeout(remaining()).ok()?;
+    let run = proc::capture(child, limit).ok()?;
+    if run.timed_out {
+        return None;
+    }
     Some(Output {
-        success: status.success(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        success: run.exit_code == 0,
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
     })
 }
 

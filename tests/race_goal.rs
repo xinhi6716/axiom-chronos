@@ -187,3 +187,71 @@ fn ordinary_sessions_get_no_lock_or_goal_directory() {
     assert!(goal::interject(t.path(), "s", "hello").unwrap().is_none());
     assert!(!t.path().join("goals").exists());
 }
+
+fn waiting_on_batch(home: &Path) -> goal::Batch {
+    let batch = goal::Batch {
+        progress_file: home.join("progress.txt").to_string_lossy().into_owned(),
+        marker_file: home.join("done.flag").to_string_lossy().into_owned(),
+        pid: 77,
+    };
+    goal::open(home, "s", "wish", None).unwrap();
+    goal::set_status_with_batch(home, "s", "waiting", Some("batch"), Some(batch.clone())).unwrap();
+    batch
+}
+
+#[test]
+fn concurrent_waits_resume_a_batch_once() {
+    for _ in 0..100 {
+        let t = tempfile::tempdir().unwrap();
+        let batch = waiting_on_batch(t.path());
+        let results = at_once(
+            t.path(),
+            (0..4)
+                .map(|_| {
+                    let batch = batch.clone();
+                    Box::new(move |h: &Path| {
+                        goal::batch_ended(h, "s", &batch, goal::BatchEnd::Finished).unwrap()
+                    }) as Box<dyn FnOnce(&Path) -> bool + Send>
+                })
+                .collect(),
+        );
+        assert_eq!(
+            results.iter().filter(|resumed| **resumed).count(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(loaded(t.path()).status, "active");
+    }
+}
+
+#[test]
+fn wait_processes_resume_a_batch_once() {
+    const WAITERS: usize = 6;
+    if let Some((dir, i)) = child() {
+        let batch = goal::Batch {
+            progress_file: dir.join("progress.txt").to_string_lossy().into_owned(),
+            marker_file: dir.join("done.flag").to_string_lossy().into_owned(),
+            pid: 77,
+        };
+        if goal::batch_ended(&dir, "s", &batch, goal::BatchEnd::Finished).unwrap() {
+            std::fs::write(dir.join(format!("resumed-{i}")), "").unwrap();
+        }
+        return;
+    }
+    for _ in 0..5 {
+        let t = tempfile::tempdir().unwrap();
+        waiting_on_batch(t.path());
+        children("wait_processes_resume_a_batch_once", t.path(), WAITERS);
+        let resumed = std::fs::read_dir(t.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("resumed-")
+            })
+            .count();
+        assert_eq!(resumed, 1, "processes that resumed the same batch");
+    }
+}
