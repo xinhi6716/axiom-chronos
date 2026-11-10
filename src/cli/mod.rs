@@ -1,4 +1,4 @@
-mod doctor;
+pub(crate) mod doctor;
 use crate::{base, bridge, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 

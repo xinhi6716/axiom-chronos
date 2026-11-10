@@ -36,6 +36,8 @@ const TABLE: i18n::Table = &[
     ("Nothing is running right now.", "目前沒有正在進行的工作。"),
     ("Stopped until you respond.", "已暫停，等你回應。"),
     ("Waiting for the background batch to finish.", "正在等背景批次完成。"),
+    ("Waiting for the usage limit to reset.", "正在等用量額度恢復。"),
+    ("It stopped before finishing. Resume to continue.", "它在完成前就停止了。可以接續。"),
     ("This wish has ended. {done} of {total} units verified.", "這個願望已結束。已驗收 {done} / {total} 個單元。"),
     ("{stage}: in progress", "{stage} 進行中"),
     ("Interjection", "插話"),
@@ -225,7 +227,7 @@ fn module_state(run: &Run, module: &Module) -> UnitState {
 
 /// Units that are really moving: a run that stopped for the user is not running anything.
 fn running_units(run: &Run) -> Vec<usize> {
-    if !matches!(run.status, RunStatus::Active | RunStatus::Waiting) {
+    if !matches!(run.status, RunStatus::Active | RunStatus::Waiting | RunStatus::LimitWait) {
         return Vec::new();
     }
     (0..run.units.len()).filter(|&i| run.units[i].state == UnitState::Running).collect()
@@ -743,6 +745,8 @@ impl Detail {
             Some(match run.status {
                 RunStatus::Blocked => tr(cx, TABLE, "Stopped until you respond.").into(),
                 RunStatus::Waiting => tr(cx, TABLE, "Waiting for the background batch to finish.").into(),
+                RunStatus::LimitWait => tr(cx, TABLE, "Waiting for the usage limit to reset.").into(),
+                RunStatus::Interrupted => tr(cx, TABLE, "It stopped before finishing. Resume to continue.").into(),
                 RunStatus::Done => {
                     let done = run.count(UnitState::Verified).to_string();
                     let total = run.units.len().to_string();
@@ -888,7 +892,7 @@ impl Detail {
                                     .text_xs()
                                     .text_color(t.muted)
                                     .child(div().flex_none().font_family(mono.clone()).child(line.time.clone()))
-                                    .child(div().min_w_0().truncate().child(line.source.clone())),
+                                    .child(div().min_w_0().truncate().child(super::control::source_label(&line.source, cx))),
                             )
                             .child(
                                 div()

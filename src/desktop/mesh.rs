@@ -22,6 +22,8 @@ const TABLE: Table = &[
     ("The architect is splitting the work into modules…", "正在把工作切成模組…"),
     ("Getting ready…", "正在準備…"),
     ("Waiting for the background batch…", "正在等待背景批次…"),
+    ("Waiting for the usage limit to reset…", "正在等待用量額度恢復…"),
+    ("It stopped before a plan was made.", "在做出計畫之前就停止了。"),
     ("Stopped before a plan was made.", "在計畫完成前就停下了。"),
     ("This run ended without a plan.", "這次執行沒有產生計畫就結束了。"),
     ("Modules and units appear here once the plan is ready.", "計畫完成後，模組和單元會出現在這裡。"),
@@ -477,6 +479,8 @@ fn planning_line(run: &Run) -> &'static str {
     match run.status {
         RunStatus::Blocked => return "Stopped before a plan was made.",
         RunStatus::Waiting => return "Waiting for the background batch…",
+        RunStatus::LimitWait => return "Waiting for the usage limit to reset…",
+        RunStatus::Interrupted => return "It stopped before a plan was made.",
         RunStatus::Done => return "This run ended without a plan.",
         RunStatus::Active => {}
     }

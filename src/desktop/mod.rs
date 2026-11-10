@@ -5,6 +5,7 @@ mod detail;
 pub mod demo;
 mod doctor;
 pub mod i18n;
+mod live;
 mod memory;
 mod mesh;
 pub mod model;
@@ -124,6 +125,9 @@ pub fn run(options: Options) -> i32 {
         }
         initial.view = options.view.unwrap_or(prefs.last_screen);
         let state = cx.new(|_| initial);
+        if !options.demo {
+            live::connect(state.clone(), cx);
+        }
         let default_size = options.size.unwrap_or_else(|| size(px(1440.), px(900.)));
         let min_size = size(px(1100.), px(700.));
         let bounds = if options.offscreen {

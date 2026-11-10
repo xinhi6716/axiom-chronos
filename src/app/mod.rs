@@ -274,7 +274,7 @@ fn attention(session: &str, goal: &Goal, out: &mut Vec<Attention>) {
         });
     }
 }
-fn unmarked(wish: &str) -> &str {
+pub(crate) fn unmarked(wish: &str) -> &str {
     let mut rest = wish.trim_start();
     while rest.starts_with('[') {
         let Some(end) = rest.find(']') else { break };

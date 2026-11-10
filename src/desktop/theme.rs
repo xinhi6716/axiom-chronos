@@ -112,7 +112,7 @@ impl Tokens {
 
     pub fn phase(&self, phase: Phase) -> Hsla {
         match phase {
-            Phase::Waiting => self.idle,
+            Phase::Waiting | Phase::Skipped => self.idle,
             Phase::Running => self.run,
             Phase::Done => self.ok,
             Phase::Failed => self.fail,
@@ -122,9 +122,18 @@ impl Tokens {
     pub fn status(&self, status: RunStatus) -> Hsla {
         match status {
             RunStatus::Active => self.run,
-            RunStatus::Waiting => self.review,
-            RunStatus::Blocked => self.fail,
+            RunStatus::Waiting | RunStatus::LimitWait => self.review,
+            RunStatus::Interrupted | RunStatus::Blocked => self.fail,
             RunStatus::Done => self.ok,
+        }
+    }
+
+    /// The status color of a run: an ending that was not verified is never drawn as a success.
+    pub fn outcome(&self, status: RunStatus, verified_end: bool) -> Hsla {
+        if status == RunStatus::Done && !verified_end {
+            self.review
+        } else {
+            self.status(status)
         }
     }
 

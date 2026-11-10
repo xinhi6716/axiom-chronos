@@ -40,6 +40,8 @@ const T: Table = &[
     ("This wish needs you before it can go on.", "這個願望需要你處理後才能繼續。"),
     ("This wish ended before the plan was split into modules.", "這個願望在切分模組前就結束了。"),
     ("Waiting on a background batch.", "正在等待背景批次。"),
+    ("Waiting for the usage limit to reset.", "正在等待用量額度恢復。"),
+    ("This wish stopped before it finished.", "這個願望在完成前就停止了。"),
     ("This wish needs you before it can plan.", "這個願望需要你處理後才能規劃。"),
     ("This wish ended without a plan.", "這個願望結束時沒有產生計畫。"),
     ("Make a wish and its goals will be listed here.", "許願後，目標會列在這裡。"),
@@ -595,6 +597,8 @@ fn plan_note(run: &Run) -> PlanNote {
     }
     match run.status {
         RunStatus::Waiting => return say("Waiting on a background batch."),
+        RunStatus::LimitWait => return say("Waiting for the usage limit to reset."),
+        RunStatus::Interrupted => return say("This wish stopped before it finished."),
         RunStatus::Blocked => {
             return say(if planned { "This wish needs you before it can go on." } else { "This wish needs you before it can plan." })
         }

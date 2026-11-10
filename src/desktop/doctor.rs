@@ -191,12 +191,8 @@ impl DoctorView {
     fn start_recheck(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let before = snapshot(&state.checks);
-        let wait = if let Some(backend) = &state.backend {
-            backend.refresh();
-            RECHECK_TIMEOUT
-        } else {
-            RECHECK_ACKNOWLEDGE
-        };
+        let wait = if state.backend.is_some() { RECHECK_TIMEOUT } else { RECHECK_ACKNOWLEDGE };
+        self.state.update(cx, |state, cx| state.recheck(cx));
         let timeout = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |this, cx| {

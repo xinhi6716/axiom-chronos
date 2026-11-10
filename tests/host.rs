@@ -348,7 +348,7 @@ fn resume_continues_a_blocked_goal() {
     let setup = Setup::new("resume");
     goal::open(&setup.home, SESSION, "original", setup.project().to_str()).unwrap();
     goal::set_status(&setup.home, SESSION, "blocked", Some("stopped")).unwrap();
-    let wish = Wish::resume(setup.config(), SESSION, Some(17)).unwrap();
+    let wish = Wish::resume(setup.config(), SESSION, None, Some(17)).unwrap();
     assert_eq!(
         collect(&wish),
         [
@@ -383,15 +383,30 @@ fn resume_continues_a_blocked_goal() {
         "done"
     );
 
-    let err = Wish::resume(setup.config(), SESSION, None).unwrap_err();
+    let err = Wish::resume(setup.config(), SESSION, None, None).unwrap_err();
     assert_eq!(err.kind, "invalid_argument");
     assert!(err.message.contains("already done"));
     assert_eq!(
-        Wish::resume(setup.config(), "missing", None)
+        Wish::resume(setup.config(), "missing", None, None)
             .unwrap_err()
             .kind,
         "not_found"
     );
+}
+
+#[test]
+fn resume_sends_the_note_as_the_first_message() {
+    let setup = Setup::new("resume-note");
+    goal::open(&setup.home, SESSION, "original", setup.project().to_str()).unwrap();
+    goal::set_status(&setup.home, SESSION, "blocked", Some("stopped")).unwrap();
+    let wish = Wish::resume(setup.config(), SESSION, Some("use the staging key"), None).unwrap();
+    let _ = collect(&wish);
+    wish.wait().unwrap();
+    let prompt = setup.record()["messages"][0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(prompt, "use the staging key");
 }
 
 const LIMIT_MESSAGE: &str = "You've hit your session limit · resets 4:40am (Asia/Taipei)";

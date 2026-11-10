@@ -33,6 +33,8 @@ pub struct Summary {
     pub duration_ms: Option<u64>,
     pub num_turns: Option<u64>,
     pub is_error: bool,
+    /// The session's final message.
+    pub result: Option<String>,
     pub models: BTreeMap<String, ModelUsage>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +198,7 @@ fn summary(event: &Value) -> Summary {
         duration_ms: event["duration_ms"].as_u64(),
         num_turns: event["num_turns"].as_u64(),
         is_error: event["is_error"].as_bool().unwrap_or(false),
+        result: event["result"].as_str().map(str::to_owned),
         models,
     }
 }
