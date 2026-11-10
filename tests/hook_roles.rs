@@ -148,6 +148,53 @@ fn engine_files_are_protected_under_any_case_on_windows() {
     ));
 }
 
+/// A directory link: a symlink, or on Windows without Developer Mode a junction.
+fn dir_link(link: &Path, target: &Path) -> bool {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link).is_ok();
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_dir(target, link).is_ok()
+        || std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success() && link.is_dir());
+}
+
+#[test]
+fn a_link_cannot_disguise_where_a_write_lands() {
+    let d = tempfile::tempdir().unwrap();
+    let h = &d.path().join("home");
+    change_goal(h);
+    let alias = h.join("alias");
+    let outside = d.path().join("elsewhere");
+    let project = d.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    if !dir_link(&alias, &h.join("goals"))
+        || !dir_link(&outside, h)
+        || !dir_link(&h.join("out"), &project)
+    {
+        eprintln!("SKIPPED a_link_cannot_disguise_where_a_write_lands: neither a symlink nor a junction can be created here");
+        return;
+    }
+    assert!(alias.join("s.json").is_file());
+    for path in [
+        alias.join("s.json"),
+        alias.join("new.json"),
+        outside.join("goals/s.json"),
+        outside.join("orchestrate/p/units.tsv"),
+    ] {
+        assert!(denied(h, &write(&path)), "core wrote {}", path.display());
+        assert!(denied(h, &sub(write(&path))), "agent wrote {}", path.display());
+    }
+    let through = h.join("out/file.txt");
+    assert!(denied(h, &write(&through)), "the core reached the project through the data home");
+    assert!(!denied(h, &sub(write(&through))), "a change-mode agent may write the project");
+    assert!(!denied(h, &write(&outside.join("orchestrate/p/decisions.md"))));
+    assert!(!denied(h, &write(&h.join("orchestrate/p/decisions.md"))));
+}
+
 #[test]
 fn an_unreadable_goal_closes_the_gates() {
     let d = tempfile::tempdir().unwrap();

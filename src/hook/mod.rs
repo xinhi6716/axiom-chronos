@@ -1,6 +1,7 @@
 use crate::{
     base, engine,
     goal::{self, Goal},
+    orch::Handoff,
 };
 use serde_json::{json, Value};
 use std::{
@@ -50,11 +51,36 @@ fn absolute(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
         cwd.map(|cwd| normalize(&Path::new(cwd).join(p)))
     }
 }
-fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
-    absolute(path, cwd).is_some_and(|p| p.starts_with(normalize(home)))
+/// Where a write to `path` lands: its longest existing ancestor with symlinks and junctions resolved.
+fn real(path: &Path) -> PathBuf {
+    let mut base = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(found) = std::fs::canonicalize(base) {
+            return rest.iter().rev().fold(found, |p, name| p.join(name));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
-/// Goals, units, claims and evidence change only through the engine's own gates.
+fn inside(home: &Path, path: &str, cwd: Option<&str>) -> bool {
+    absolute(path, cwd).is_some_and(|p| real(&p).starts_with(real(&normalize(home))))
+}
+/// Goals, units, claims and evidence change only through the engine's own gates, under the
+/// path as written or the one a link leads to.
 fn engine_state(home: &Path, path: &str, cwd: Option<&str>) -> bool {
+    let Some(path) = absolute(path, cwd) else {
+        return false;
+    };
+    let home = normalize(home);
+    state_file(&home, &path) || state_file(&real(&home), &real(&path))
+}
+fn state_file(home: &Path, path: &Path) -> bool {
     let fold = |p: &Path| -> PathBuf {
         if cfg!(windows) {
             p.to_string_lossy().to_lowercase().into()
@@ -62,10 +88,7 @@ fn engine_state(home: &Path, path: &str, cwd: Option<&str>) -> bool {
             p.to_path_buf()
         }
     };
-    let Some(path) = absolute(path, cwd).map(|p| fold(&p)) else {
-        return false;
-    };
-    let Ok(rest) = path.strip_prefix(fold(&normalize(home))) else {
+    let Ok(rest) = fold(path).strip_prefix(fold(home)).map(Path::to_path_buf) else {
         return false;
     };
     let parts: Vec<_> = rest.iter().map(|c| c.to_string_lossy()).collect();
@@ -287,44 +310,109 @@ fn names_module(prompt: &str, module: &str) -> bool {
             && !prompt[i + module.len()..].chars().next().is_some_and(word)
     })
 }
-/// Why no fresh dispatcher may start on a module its prompt names: it keeps handing off without progress.
-fn stalled_module(home: &Path, g: &Goal, input: &Value) -> Option<String> {
-    let store = store_of(home, g.project.as_deref())?;
-    let prompt = input.get("prompt")?.as_str()?;
-    crate::orch::pending_handoffs(&store)
-        .ok()?
-        .iter()
-        .filter(|h| h.module.as_deref().is_some_and(|m| names_module(prompt, m)))
-        .find_map(|h| crate::orch::stalled_out(&store, h))
+/// The work a fresh dispatcher carries out, judged by module names in its prompt.
+enum Target {
+    /// No module is named: the whole wish.
+    Wish,
+    Module(String),
+    /// Several are named and the description does not single one out.
+    Unclear(Vec<String>),
 }
-/// A fresh dispatcher's input with the pending handoff of the module its prompt names appended.
-fn with_handoff(home: &Path, g: &Goal, input: &Value) -> Option<Value> {
+/// The only module the prompt names; among several, the only one the description names too.
+/// Other names are background or exclusions, never assignments.
+fn target(store: &Path, input: &Value, pending: &[Handoff]) -> Target {
+    let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
+    let mut modules = crate::orch::map_modules(store)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    modules.extend(pending.iter().filter_map(|h| h.module.clone()));
+    modules.sort();
+    modules.dedup();
+    let named: Vec<String> = modules
+        .into_iter()
+        .filter(|m| names_module(text("prompt"), m))
+        .collect();
+    let described: Vec<String> = named
+        .iter()
+        .filter(|m| names_module(text("description"), m))
+        .cloned()
+        .collect();
+    match (named.len(), described.len()) {
+        (0, _) => Target::Wish,
+        (1, _) => Target::Module(named[0].clone()),
+        (_, 1) => Target::Module(described[0].clone()),
+        _ => Target::Unclear(named),
+    }
+}
+const HANDED_OFF: &str = "\n\nA previous dispatcher handed this work off when its context grew too large. Continue from its handoff and the store; do not redo verified units.\n";
+/// A fresh dispatcher's input with the pending handoff of the work it carries out appended, or
+/// why it may not start. The note stays pending until the dispatcher is seen running with it.
+fn start_dispatcher(home: &Path, g: &Goal, input: &Value) -> Option<Result<Value, String>> {
     let store = store_of(home, g.project.as_deref())?;
     let prompt = input.get("prompt")?.as_str()?;
     let pending = crate::orch::pending_handoffs(&store).ok()?;
-    let named: Vec<_> = pending
-        .iter()
-        .filter(|h| h.module.as_deref().is_some_and(|m| names_module(prompt, m)))
-        .collect();
-    let chosen = if named.is_empty() {
-        pending.iter().filter(|h| h.module.is_none()).collect()
-    } else {
-        named
+    if pending.is_empty() {
+        return None;
+    }
+    let chosen: Vec<&Handoff> = match target(&store, input, &pending) {
+        Target::Wish => pending.iter().filter(|h| h.module.is_none()).collect(),
+        Target::Module(m) => pending
+            .iter()
+            .filter(|h| h.module.as_deref() == Some(m.as_str()))
+            .collect(),
+        Target::Unclear(named) => {
+            if pending
+                .iter()
+                .any(|h| h.module.as_ref().is_some_and(|m| named.contains(m)))
+            {
+                return Some(Err(format!(
+                    "This dispatcher's prompt names modules {}; name the one it carries out in its description, so it gets that module's handoff.",
+                    named.join(", ")
+                )));
+            }
+            Vec::new()
+        }
     };
+    if let Some(reason) = chosen
+        .iter()
+        .find_map(|h| crate::orch::stalled_out(&store, h))
+    {
+        return Some(Err(reason));
+    }
     if chosen.is_empty() {
         return None;
     }
     let mut text = prompt.to_string();
     for h in chosen {
         let repo = h.repo.as_deref().or(g.cwd.as_deref()).map(Path::new);
-        let resume = crate::orch::resume_text(&store, repo, h.module.as_deref()).ok()?;
-        text.push_str("\n\nA previous dispatcher handed this work off when its context grew too large. Continue from its handoff and the store; do not redo verified units.\n");
-        text.push_str(&resume);
-        crate::orch::take_handoff(&store, h.module.as_deref()).ok()?;
+        text.push_str(HANDED_OFF);
+        text.push_str(&crate::orch::resume_text(&store, repo, h.module.as_deref()).ok()?);
     }
     let mut updated = input.clone();
     updated["prompt"] = json!(text);
-    Some(updated)
+    Some(Ok(updated))
+}
+/// Marks taken each pending handoff this dispatcher was started with: its transcript opens with
+/// the prompt that carried it, so a launch that failed or was cancelled consumes nothing.
+fn confirm_handoffs(home: &Path, g: &Goal, event: &Value) {
+    let Some(store) = store_of(home, g.project.as_deref()) else {
+        return;
+    };
+    let pending = crate::orch::pending_handoffs(&store).unwrap_or_default();
+    if pending.is_empty() {
+        return;
+    }
+    let Some(opening) = context::agent_transcript(event).and_then(|t| context::opening_text(&t))
+    else {
+        return;
+    };
+    for h in pending {
+        let delivered = format!("{HANDED_OFF}{}", crate::orch::handoff_header(&h));
+        if opening.contains(&delivered) {
+            let _ = crate::orch::take_delivered(&store, &h);
+        }
+    }
 }
 /// After Claude Code compacts a dispatcher, its next gated call brings back the work state once.
 fn after_compaction(home: &Path, g: &Goal, event: &Value, input: &Value) -> Option<String> {
@@ -446,6 +534,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 }
             };
             if g.status == "active" {
+                if context::in_dispatcher(event) {
+                    confirm_handoffs(home, &g, event);
+                }
                 if !agent
                     && matches!(tool, "Agent" | "Task")
                     && !subagent.is_some_and(|s| s.starts_with("chronos:"))
@@ -544,11 +635,10 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 return deny("Could not record dispatch.");
             }
             if dispatcher && !agent && g.status == "active" {
-                if let Some(reason) = stalled_module(home, &g, input) {
-                    return deny(&reason);
-                }
-                if let Some(updated) = with_handoff(home, &g, input) {
-                    return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}}));
+                match start_dispatcher(home, &g, input) {
+                    Some(Err(reason)) => return deny(&reason),
+                    Some(Ok(updated)) => return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}})),
+                    None => (),
                 }
             }
             if agent && g.status == "active" && context::in_dispatcher(event) {
