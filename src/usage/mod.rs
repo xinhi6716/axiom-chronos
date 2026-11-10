@@ -25,6 +25,7 @@ pub const CONTEXT_WARN: u64 = 500_000;
 pub const LARGE_CACHE_WRITE: u64 = 50_000;
 pub const CACHE_GAP_MS: i64 = 5 * 60 * 1000;
 pub const LARGE_READ_BYTES: u64 = 50_000;
+pub const DAY_MS: i64 = 86_400_000;
 
 const MAIN: &str = "main";
 const UNKNOWN_AGENT: &str = "unknown";
@@ -194,6 +195,37 @@ pub struct Ledger {
     pub claude_code_usd: Option<f64>,
     pub prices: Prices,
     pub thresholds: Thresholds,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PeriodRun {
+    pub session: String,
+    pub cwd: Option<String>,
+    pub skill: Option<String>,
+    pub first_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+    pub ledger: Ledger,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct RunCost {
+    pub session: String,
+    pub skill: Option<String>,
+    pub last_ms: Option<i64>,
+    pub calls: u64,
+    pub usd: Option<f64>,
+    pub priced_usd: f64,
+    pub unpriced_calls: u64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Period {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub runs: Vec<PeriodRun>,
+    pub history: Vec<RunCost>,
+    pub undated_calls: u64,
+    pub skipped_lines: u64,
 }
 
 pub struct Locations {
@@ -428,7 +460,22 @@ fn mark_gap_rewrites(calls: &mut [Call]) {
     }
 }
 
-fn build(session: String, run: Run) -> Res<Ledger> {
+struct Built {
+    ledger: Ledger,
+    history: Tally,
+    history_last_ms: Option<i64>,
+    first_ms: Option<i64>,
+    last_ms: Option<i64>,
+    undated_calls: u64,
+}
+
+fn in_window(ms: Option<i64>, window: Option<(i64, i64)>) -> bool {
+    window.map_or(true, |(start, end)| {
+        ms.is_some_and(|ms| (start..=end).contains(&ms))
+    })
+}
+
+fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
     let transcript_source = run.transcript.is_some();
     let mut sources = Vec::new();
     if let Some(transcript) = &run.transcript {
@@ -518,6 +565,9 @@ fn build(session: String, run: Run) -> Res<Ledger> {
             if !seen_tools.insert(read.tool_use_id.clone()) {
                 continue;
             }
+            if !in_window(read.ms, window) {
+                continue;
+            }
             let at = attribute(&mut agents, read.parent.as_deref());
             let key = (
                 agents.agents[at].agent_type.clone(),
@@ -530,6 +580,9 @@ fn build(session: String, run: Run) -> Res<Ledger> {
         }
         for run in codex_runs {
             if !seen_tools.insert(run.tool_use_id.clone()) {
+                continue;
+            }
+            if !in_window(run.ms, window) {
                 continue;
             }
             let Some(tokens) = run.tokens else {
@@ -557,14 +610,35 @@ fn build(session: String, run: Run) -> Res<Ledger> {
     };
     let mut rows = BTreeMap::<(String, String), Tally>::new();
     let mut instances = Vec::new();
+    let mut history = Tally {
+        usd: Some(0.0),
+        ..Tally::default()
+    };
+    let (mut history_last_ms, mut first_ms, mut last_ms) = (None::<i64>, None::<i64>, None::<i64>);
+    let mut undated_calls = 0;
     for agent in &mut agents.agents {
         if agent.calls.is_empty() {
             continue;
         }
         mark_gap_rewrites(&mut agent.calls);
+        for call in &agent.calls {
+            history.add(call);
+            history_last_ms = history_last_ms.max(call.last_ms);
+            if call.first_ms.is_none() {
+                undated_calls += 1;
+            }
+        }
+        agent.calls.retain(|call| in_window(call.first_ms, window));
+        if agent.calls.is_empty() {
+            continue;
+        }
         let mut instance = Tally::default();
         let mut peak_model = "";
         for call in &agent.calls {
+            if let Some(ms) = call.first_ms {
+                first_ms = Some(first_ms.map_or(ms, |first| first.min(ms)));
+            }
+            last_ms = last_ms.max(call.last_ms);
             if call.usage.context() > instance.peak_context {
                 peak_model = &call.model;
             }
@@ -626,35 +700,46 @@ fn build(session: String, run: Run) -> Res<Ledger> {
     ));
     warnings.sort_by_key(|w| std::cmp::Reverse(w.severity()));
 
-    Ok(Ledger {
-        session,
-        cwd: run.cwd,
-        source: if transcript_source {
-            "transcript"
-        } else {
-            "log"
-        },
-        subagent_files,
-        output_tokens_partial: !transcript_source,
-        totals,
-        by_agent,
-        instances,
-        codex: codex.into_values().collect(),
-        codex_runs_without_usage,
-        warnings,
-        copied_calls,
-        compactions,
-        skipped_lines,
-        claude_code_usd,
-        prices: Prices {
-            as_of: price::PRICES_AS_OF,
-            source: price::PRICES_SOURCE,
-        },
-        thresholds: Thresholds {
-            context_warn: CONTEXT_WARN,
-            large_cache_write: LARGE_CACHE_WRITE,
-            cache_gap_seconds: CACHE_GAP_MS / 1000,
-            large_read_bytes: LARGE_READ_BYTES,
+    Ok(Built {
+        history,
+        history_last_ms,
+        first_ms,
+        last_ms,
+        undated_calls,
+        ledger: Ledger {
+            session,
+            cwd: run.cwd,
+            source: if transcript_source {
+                "transcript"
+            } else {
+                "log"
+            },
+            subagent_files,
+            output_tokens_partial: !transcript_source,
+            totals,
+            by_agent,
+            instances,
+            codex: codex.into_values().collect(),
+            codex_runs_without_usage,
+            warnings,
+            copied_calls,
+            compactions,
+            skipped_lines,
+            claude_code_usd: if window.is_some() {
+                None
+            } else {
+                claude_code_usd
+            },
+            prices: Prices {
+                as_of: price::PRICES_AS_OF,
+                source: price::PRICES_SOURCE,
+            },
+            thresholds: Thresholds {
+                context_warn: CONTEXT_WARN,
+                large_cache_write: LARGE_CACHE_WRITE,
+                cache_gap_seconds: CACHE_GAP_MS / 1000,
+                large_read_bytes: LARGE_READ_BYTES,
+            },
         },
     })
 }
@@ -666,5 +751,94 @@ pub fn ledger(locations: &Locations, session: Option<&str>) -> Res<Ledger> {
             run.cwd = scan::transcript_cwd(transcript);
         }
     }
-    build(session, run)
+    Ok(build(session, run, None)?.ledger)
+}
+
+fn log_skill(run: &Run) -> Option<String> {
+    run.logs.iter().find_map(|path| {
+        let name = path.file_stem()?.to_str()?;
+        let mut parts = name.split('-');
+        parts.next()?;
+        parts.next()?;
+        match parts.next()? {
+            skill @ ("wish" | "research") => Some(skill.to_owned()),
+            _ => None,
+        }
+    })
+}
+
+pub fn period(locations: &Locations, now_ms: i64, since_days: u32) -> Res<Period> {
+    if since_days == 0 {
+        return Err(Failure::new(
+            "invalid_argument",
+            "since_days must be greater than zero",
+        ));
+    }
+    let start_ms = now_ms
+        .checked_sub(i64::from(since_days) * DAY_MS)
+        .ok_or_else(|| Failure::new("invalid_argument", "period start is out of range"))?;
+    let mut runs = discover(locations)?;
+    let dirs = match std::fs::read_dir(&locations.projects) {
+        Ok(dirs) => Some(dirs),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io_failure(&locations.projects, e)),
+    };
+    if let Some(dirs) = dirs {
+        let mut dirs = dirs
+            .map(|entry| {
+                entry
+                    .map(|e| e.path())
+                    .map_err(|e| io_failure(&locations.projects, e))
+            })
+            .collect::<Res<Vec<_>>>()?;
+        dirs.sort();
+        for dir in dirs.into_iter().filter(|path| path.is_dir()) {
+            for path in entries_with_suffix(&dir, ".jsonl")? {
+                let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let run = runs.entry(session.to_owned()).or_default();
+                if run.transcript.is_none() {
+                    run.transcript = Some(path);
+                }
+            }
+        }
+    }
+    let mut result = Period {
+        start_ms,
+        end_ms: now_ms,
+        runs: Vec::new(),
+        history: Vec::new(),
+        undated_calls: 0,
+        skipped_lines: 0,
+    };
+    for (session, mut run) in runs.into_iter().filter(|(_, run)| run.has_records()) {
+        let skill = log_skill(&run);
+        if run.cwd.is_none() {
+            run.cwd = run.transcript.as_deref().and_then(scan::transcript_cwd);
+        }
+        let built = build(session.clone(), run, Some((start_ms, now_ms)))?;
+        result.undated_calls += built.undated_calls;
+        result.skipped_lines += built.ledger.skipped_lines;
+        result.history.push(RunCost {
+            session: session.clone(),
+            skill: skill.clone(),
+            last_ms: built.history_last_ms,
+            calls: built.history.calls,
+            usd: built.history.usd,
+            priced_usd: built.history.priced_usd,
+            unpriced_calls: built.history.unpriced_calls,
+        });
+        if built.ledger.totals.calls > 0 {
+            result.runs.push(PeriodRun {
+                session,
+                cwd: built.ledger.cwd.clone(),
+                skill,
+                first_ms: built.first_ms,
+                last_ms: built.last_ms,
+                ledger: built.ledger,
+            });
+        }
+    }
+    Ok(result)
 }

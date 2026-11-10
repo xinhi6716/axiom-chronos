@@ -8,6 +8,7 @@ pub mod council;
 #[cfg(feature = "app")]
 pub mod desktop;
 pub mod engine;
+pub mod evolve;
 pub mod goal;
 pub mod hook;
 pub mod host;

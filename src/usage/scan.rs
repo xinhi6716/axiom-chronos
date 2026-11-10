@@ -170,12 +170,14 @@ pub(super) struct LargeRead {
     pub path: String,
     pub bytes: u64,
     pub parent: Option<String>,
+    pub ms: Option<i64>,
     message: String,
 }
 pub(super) struct CodexRun {
     pub tool_use_id: String,
     pub model: Option<String>,
     pub tokens: Option<CodexTokens>,
+    pub ms: Option<i64>,
     message: String,
 }
 
@@ -245,9 +247,11 @@ impl FileScan {
         };
         match head.kind.as_str() {
             "assistant" => self.assistant(line, head, number),
-            "user" if contains(line, b"\"tool_result\"") => {
-                self.tool_results(line, head.parent_tool_use_id)
-            }
+            "user" if contains(line, b"\"tool_result\"") => self.tool_results(
+                line,
+                head.parent_tool_use_id,
+                head.timestamp.as_deref().and_then(parse_ms),
+            ),
             "api-request" => {
                 if let Some(id) = head.id {
                     self.api_requests.insert(id);
@@ -335,7 +339,7 @@ impl FileScan {
         }
     }
 
-    fn tool_results(&mut self, line: &[u8], parent: Option<String>) {
+    fn tool_results(&mut self, line: &[u8], parent: Option<String>, ms: Option<i64>) {
         let Ok(parsed) = serde_json::from_slice::<ToolLine>(line) else {
             return;
         };
@@ -356,6 +360,7 @@ impl FileScan {
                             path,
                             bytes,
                             parent: parent.clone(),
+                            ms,
                             message: pending.message,
                         });
                     }
@@ -366,6 +371,7 @@ impl FileScan {
                         tool_use_id: block.tool_use_id,
                         model: report["model"].as_str().map(str::to_owned),
                         tokens: CodexTokens::from_report(&report["usage"]),
+                        ms,
                         message: pending.message,
                     });
                 }
