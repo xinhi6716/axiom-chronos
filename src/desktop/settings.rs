@@ -342,7 +342,7 @@ impl Store {
 
 pub fn set_language(choice: LanguageChoice, window: &mut Window, cx: &mut App) {
     Store::edit(cx, |s| s.language = choice);
-    cx.set_global(choice.resolve());
+    i18n::set(choice.resolve(), cx);
     window.refresh();
 }
 

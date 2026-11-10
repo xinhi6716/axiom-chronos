@@ -1690,6 +1690,7 @@ mod tests {
             report: None,
             elapsed: None,
             warnings: vec![],
+            notes: vec![],
         }
     }
 

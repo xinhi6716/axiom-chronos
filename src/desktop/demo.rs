@@ -109,6 +109,7 @@ pub fn sample_run() -> Run {
         report: None,
         elapsed: Some("4 h 36 m".into()),
         warnings: vec![],
+        notes: vec![],
     };
     for (m, (id, purpose, depends, units)) in modules.iter().enumerate() {
         let mut indices = vec![];
