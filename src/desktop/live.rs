@@ -1219,37 +1219,55 @@ fn claude_models(wish: &app::Wish, ledger: Option<&Ledger>) -> Vec<ModelCost> {
         _ => None,
     };
     if let Some(summary) = single {
-        return summary
+        let mut rows: Vec<ModelCost> = summary
             .models
             .iter()
             .map(|(name, model)| ModelCost {
                 model: name.clone().into(),
                 usd: model.cost_usd,
                 input: model.input,
-                cached: sum_u64(model.cache_read, model.cache_creation),
+                cached: model.cache_read,
+                cache_write: model.cache_creation,
                 output: model.output,
+                total: sum_u64(sum_u64(model.input, model.cache_read), sum_u64(model.cache_creation, model.output)),
             })
             .collect();
+        if let Some(ledger) = ledger {
+            for row in &ledger.by_agent {
+                if !rows.iter().any(|m| m.model.as_ref() == row.model) {
+                    rows.push(ModelCost { model: row.model.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None });
+                }
+            }
+        }
+        return rows;
     }
     if let Some(ledger) = ledger {
         let mut rows: Vec<ModelCost> = vec![];
         for row in &ledger.by_agent {
             let tally = &row.tally;
-            let cached = tally.cache_read + tally.cache_write;
             match rows.iter_mut().find(|r| r.model.as_ref() == row.model.as_str()) {
                 Some(found) => {
                     found.usd = add_known(found.usd, tally.usd);
-                    found.input = sum_u64(found.input, Some(tally.input));
-                    found.cached = sum_u64(found.cached, Some(cached));
-                    found.output = sum_u64(found.output, Some(tally.output));
+                    found.input = sum_u64(found.input, (!tally.missing[0]).then_some(tally.input));
+                    found.cached = sum_u64(found.cached, (!tally.missing[1]).then_some(tally.cache_read));
+                    found.cache_write = sum_u64(found.cache_write, (!tally.missing[2]).then_some(tally.cache_write));
+                    found.output = sum_u64(found.output, (!tally.missing[3]).then_some(tally.output));
+                    found.total = sum_u64(found.total, (!tally.missing.iter().any(|m| *m)).then_some(tally.input + tally.cache_read + tally.cache_write + tally.output));
                 }
                 None => rows.push(ModelCost {
                     model: row.model.clone().into(),
                     usd: tally.usd,
-                    input: Some(tally.input),
-                    cached: Some(cached),
-                    output: Some(tally.output),
+                    input: (!tally.missing[0]).then_some(tally.input),
+                    cached: (!tally.missing[1]).then_some(tally.cache_read),
+                    cache_write: (!tally.missing[2]).then_some(tally.cache_write),
+                    output: (!tally.missing[3]).then_some(tally.output),
+                    total: (!tally.missing.iter().any(|m| *m)).then_some(tally.input + tally.cache_read + tally.cache_write + tally.output),
                 }),
+            }
+        }
+        for name in wish.runs.iter().filter_map(|r| r.summary.as_ref()).flat_map(|s| s.models.keys()) {
+            if !rows.iter().any(|m| m.model.as_ref() == name.as_str()) {
+                rows.push(ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None });
             }
         }
         return rows;
@@ -1259,19 +1277,21 @@ fn claude_models(wish: &app::Wish, ledger: Option<&Ledger>) -> Vec<ModelCost> {
     names.dedup();
     names
         .into_iter()
-        .map(|name| ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, output: None })
+        .map(|name| ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None })
         .collect()
 }
 
 /// Codex rows. Codex's input count includes its cached tokens; the screens add the columns
 /// together, so the cached part is taken out of input here.
 fn codex_models(wish: &app::Wish, ledger: Option<&Ledger>) -> Vec<ModelCost> {
-    let row = |model: &str, input: u64, cached: u64, output: u64| ModelCost {
+    let row = |model: &str, input: u64, cached: u64, output: u64, missing: [bool; 3]| ModelCost {
         model: model.to_owned().into(),
-        usd: None,
-        input: Some(input.saturating_sub(cached)),
-        cached: Some(cached),
-        output: Some(output),
+        usd: (!missing.iter().any(|m| *m)).then(|| crate::usage::price::codex_usd(model, &crate::usage::price::CodexUsage { input, cached_input: cached, output })).flatten(),
+        input: (!missing[0] && !missing[1]).then_some(input.saturating_sub(cached)),
+        cached: (!missing[1]).then_some(cached),
+        cache_write: None,
+        output: (!missing[2]).then_some(output),
+        total: (!missing[0] && !missing[2]).then_some(input + output),
     };
     let scans: Vec<&app::Scan> = wish.runs.iter().filter_map(|r| r.scan.as_ref()).collect();
     if !scans.is_empty() && scans.len() == wish.runs.len() && scans.iter().all(|s| s.complete) {
@@ -1281,19 +1301,50 @@ fn codex_models(wish: &app::Wish, ledger: Option<&Ledger>) -> Vec<ModelCost> {
             total.input += tokens.input;
             total.cached += tokens.cached;
             total.output += tokens.output;
+            for (missing, part) in total.missing.iter_mut().zip(tokens.missing) { *missing |= part; }
         }
-        return totals.iter().map(|(name, t)| row(name, t.input, t.cached, t.output)).collect();
+        let mut rows: Vec<ModelCost> = totals.iter().map(|(name, t)| row(name, t.input, t.cached, t.output, t.missing)).collect();
+        if let Some(ledger) = ledger {
+            for c in &ledger.codex {
+                if !rows.iter().any(|m| m.model.as_ref() == c.model) {
+                    rows.push(row(&c.model, c.tokens.input, c.tokens.cached_input, c.tokens.output, c.tokens.missing));
+                }
+            }
+            add_missing_codex_models(&mut rows, ledger);
+        }
+        return rows;
     }
     if let Some(ledger) = ledger {
-        return ledger.codex.iter().map(|c| row(&c.model, c.tokens.input, c.tokens.cached_input, c.tokens.output)).collect();
+        let mut rows: Vec<ModelCost> = ledger.codex.iter().map(|c| row(&c.model, c.tokens.input, c.tokens.cached_input, c.tokens.output, c.tokens.missing)).collect();
+        add_missing_codex_models(&mut rows, ledger);
+        for name in scans.iter().flat_map(|s| s.codex.keys()) {
+            if !rows.iter().any(|m| m.model.as_ref() == name.as_str()) {
+                rows.push(ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None });
+            }
+        }
+        return rows;
     }
     let mut names: Vec<&String> = scans.iter().flat_map(|s| s.codex.keys()).collect();
     names.sort();
     names.dedup();
     names
         .into_iter()
-        .map(|name| ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, output: None })
+        .map(|name| ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None })
         .collect()
+}
+
+fn add_missing_codex_models(rows: &mut Vec<ModelCost>, ledger: &Ledger) {
+    for name in &ledger.codex_missing_models {
+        if let Some(row) = rows.iter_mut().find(|row| row.model.as_ref() == name) {
+            row.usd = None;
+            row.input = None;
+            row.cached = None;
+            row.output = None;
+            row.total = None;
+        } else {
+            rows.push(ModelCost { model: name.clone().into(), usd: None, input: None, cached: None, cache_write: None, output: None, total: None });
+        }
+    }
 }
 
 fn roles_of(ledger: &Ledger) -> Vec<RoleCost> {
@@ -1345,9 +1396,11 @@ fn usage_of(wish: &app::Wish, ledger: Option<&Ledger>) -> Usage {
         _ => None,
     };
     let mut models = claude_models(wish, ledger);
-    models.extend(codex_models(wish, ledger));
+    let codex = codex_models(wish, ledger);
+    let codex_usd: f64 = codex.iter().filter_map(|m| m.usd).sum();
+    models.extend(codex);
     Usage {
-        total_usd: reported.or_else(|| ledger.and_then(|l| l.totals.usd)),
+        total_usd: reported.or_else(|| ledger.and_then(|l| l.totals.usd)).map(|usd| usd + codex_usd),
         models,
         roles: ledger.map(roles_of).unwrap_or_default(),
         contexts: contexts_of(wish, ledger),
@@ -1644,6 +1697,140 @@ mod tests {
         let text: String = events.iter().map(|e| format!("{e}\n")).collect();
         write(&dir.join("logs").join(name), &text);
         let _ = session;
+    }
+
+
+    #[test]
+    fn summary_splits_cache_and_preserves_missing_and_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        goal_file(dir.path(), "s1", base_goal("done"));
+        log_with(dir.path(), "s1", "20261109-100000-wish.jsonl", &[
+            json!({"type":"system","subtype":"init","session_id":"s1"}),
+            json!({"type":"result","modelUsage":{
+                "complete":{"inputTokens":0,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"outputTokens":5},
+                "partial":{"inputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}
+            }})
+        ]);
+        let run = map_one(dir.path(), None, SystemTime::now());
+        let m = |name: &str| run.usage.models.iter().find(|m| m.model.as_ref() == name).unwrap();
+        assert_eq!((m("complete").input, m("complete").cached, m("complete").cache_write, m("complete").total), (Some(0), Some(3), Some(4), Some(12)));
+        assert_eq!((m("partial").input, m("partial").cache_write, m("partial").total), (Some(0), None, None));
+    }
+
+    fn codex_events(session: &str, model: &str, input: u64, cached: u64, output: u64) -> Vec<Value> {
+        vec![
+            json!({"type":"system","subtype":"init","session_id":session,"cwd":"E:/project"}),
+            json!({"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":10,"cache_read_input_tokens":30,"cache_creation_input_tokens":20,"output_tokens":40},"content":[{"type":"tool_use","id":"c","name":"mcp__plugin_chronos_bridge__codex_run","input":{}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c","content":json!({"status":"completed","model":model,"usage":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,"reasoningOutputTokens":output/2,"totalTokens":input+output}}).to_string()}]}}),
+        ]
+    }
+
+    #[test]
+    fn actual_ledger_splits_claude_and_prices_codex_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let events = codex_events(session, "gpt-6.1-terra", 1_000_000, 400_000, 200_000);
+        let contents: String = events.iter().map(|e| format!("{e}\n")).collect();
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let wish = Poller::new(&home).poll().wishes.remove(0);
+        let usage = usage_of(&wish, Some(&ledger));
+        let claude = usage.models.iter().find(|m| m.model.as_ref() == "claude-sonnet-5-5").unwrap();
+        assert_eq!((claude.input, claude.cached, claude.cache_write, claude.output, claude.total), (Some(10), Some(30), Some(20), Some(40), Some(100)));
+        let codex = usage.models.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        assert_eq!((codex.input, codex.cached, codex.cache_write, codex.output, codex.total), (Some(600_000), Some(400_000), None, Some(200_000), Some(1_200_000)));
+        assert!((codex.usd.unwrap() - 1.62).abs() < 1e-9);
+        assert!((usage.total_usd.unwrap() - ledger.totals.usd.unwrap() - 1.62).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ledger_distinguishes_missing_claude_fields_from_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let events = [json!({"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"cache_read_input_tokens":3,"output_tokens":4},"content":[]}})];
+        let contents: String = events.iter().map(|e| format!("{e}\n")).collect();
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let wish = Poller::new(&home).poll().wishes.remove(0);
+        let rows = claude_models(&wish, Some(&ledger));
+        let model = rows.iter().find(|m| m.model.as_ref() == "claude-sonnet-5-5").unwrap();
+        assert_eq!((model.input, model.cached, model.cache_write, model.output, model.total), (Some(0), Some(3), None, Some(4), None));
+    }
+
+    #[test]
+    fn actual_scans_sum_models_across_runs_and_keep_unknown_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        goal_file(dir.path(), "s1", base_goal("active"));
+        log_with(dir.path(), "s1", "20261109-100000-wish.jsonl", &codex_events("s1", "gpt-6.1-terra", 100, 40, 20));
+        let mut second = codex_events("s1", "gpt-6.1-terra", 200, 50, 30);
+        let mut unknown = codex_events("s1", "gpt-unpriced", 10, 2, 4);
+        second.append(&mut unknown);
+        log_with(dir.path(), "s1", "20261109-110000-wish.jsonl", &second);
+        let wish = Poller::new(dir.path()).poll().wishes.remove(0);
+        assert_eq!(wish.runs.len(), 2);
+        assert!(wish.runs.iter().all(|r| r.scan.as_ref().is_some_and(|s| s.complete)));
+        let rows = codex_models(&wish, None);
+        let priced = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        assert_eq!((priced.input, priced.cached, priced.output, priced.total), (Some(210), Some(90), Some(50), Some(350)));
+        let unknown = rows.iter().find(|m| m.model.as_ref() == "gpt-unpriced").unwrap();
+        assert_eq!(unknown.usd, None);
+        assert_eq!(Usage { models: rows, ..Default::default() }.unpriced(), vec![SharedString::from("gpt-unpriced")]);
+    }
+
+    #[test]
+    fn codex_missing_fields_and_zero_survive_scan_and_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let mut events = codex_events(session, "gpt-6.1-terra", 0, 0, 0);
+        let report = json!({"status":"completed","model":"gpt-6.1-terra","usage":{"inputTokens":0,"outputTokens":0}});
+        events[2]["message"]["content"][0]["content"] = report.to_string().into();
+        let contents: String = events.iter().map(|e| format!("{e}\n")).collect();
+        write(&home.join("logs").join("20261109-100000-wish.jsonl"), &contents);
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let wish = Poller::new(&home).poll().wishes.remove(0);
+        for rows in [codex_models(&wish, None), codex_models(&wish, Some(&ledger))] {
+            let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+            assert_eq!((model.input, model.cached, model.output, model.total, model.usd), (None, None, Some(0), Some(0), None));
+        }
+        // Force the ledger path rather than the complete scan path.
+        let mut incomplete = wish.clone();
+        incomplete.runs[0].scan.as_mut().unwrap().complete = false;
+        let rows = codex_models(&incomplete, Some(&ledger));
+        let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        assert_eq!((model.input, model.cached, model.output, model.total, model.usd), (None, None, Some(0), Some(0), None));
+    }
+
+    #[test]
+    fn codex_model_without_usage_is_retained_on_scan_and_ledger_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let projects = dir.path().join("projects");
+        let session = "11111111-2222-3333-4444-555555555555";
+        goal_file(&home, session, json!({"wish":"w","status":"active","cwd":"E:/project"}));
+        let mut events = codex_events(session, "gpt-6.1-terra", 0, 0, 0);
+        events[2]["message"]["content"][0]["content"] = json!({"model":"gpt-6.1-terra"}).to_string().into();
+        let contents: String = events.iter().map(|e| format!("{e}\n")).collect();
+        write(&home.join("logs").join("20261109-100000-wish.jsonl"), &contents);
+        write(&projects.join("E--project").join(format!("{session}.jsonl")), &contents);
+        let ledger = crate::usage::ledger(&crate::usage::Locations { home: home.clone(), projects }, Some(session)).unwrap();
+        let mut wish = Poller::new(&home).poll().wishes.remove(0);
+        let rows = codex_models(&wish, None);
+        let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        assert_eq!((model.input, model.total, model.usd), (None, None, None));
+        wish.runs[0].scan.as_mut().unwrap().complete = false;
+        let rows = codex_models(&wish, Some(&ledger));
+        let model = rows.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        assert_eq!((model.input, model.total, model.usd), (None, None, None));
     }
 
     #[test]

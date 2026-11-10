@@ -1,6 +1,8 @@
 //! Design tokens. Every color a screen uses comes from here, so both themes stay consistent.
 use super::model::{CheckStatus, LogLevel, Phase, RunStatus, UnitState};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use super::motion::mix;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{theme::ThemeToken, ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +24,20 @@ pub struct Tokens {
 }
 
 impl Global for Tokens {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    Normal,
+    Hover,
+    Pressed,
+}
+
+pub struct GoldLeaf {
+    pub top: Hsla,
+    pub bottom: Hsla,
+    pub highlight: Hsla,
+    pub label: Hsla,
+}
 
 // Aged pigments, dark enough to read on parchment and light enough to read on the night sky.
 const MODULE_HUES: [u32; 10] = [
@@ -111,6 +127,24 @@ impl Tokened for App {
 }
 
 impl Tokens {
+    pub fn rail_ink(&self, lit: f32) -> Hsla {
+        mix(self.muted, self.gold, lit)
+    }
+
+    pub fn gold_leaf(&self, press: Press) -> GoldLeaf {
+        let (top, bottom) = match press {
+            Press::Normal => (0.20, 0.0),
+            Press::Hover => (0.30, 0.10),
+            Press::Pressed => (0.0, 0.08),
+        };
+        GoldLeaf {
+            top: mix(self.gold, self.text, top),
+            bottom: mix(self.gold, self.text, bottom),
+            highlight: mix(self.gold, self.text, 0.4),
+            label: if self.surface.l < 0.5 { self.canvas } else { self.surface },
+        }
+    }
+
     pub fn unit(&self, state: UnitState) -> Hsla {
         match state {
             UnitState::Pending => self.idle,
@@ -166,6 +200,44 @@ impl Tokens {
     }
 }
 
+fn leaf_gradient(leaf: &GoldLeaf) -> Background {
+    linear_gradient(180.0, linear_color_stop(leaf.top, 0.0), linear_color_stop(leaf.bottom, 1.0))
+}
+
+pub(crate) struct PrimaryTokens {
+    normal: ThemeToken,
+    hover: ThemeToken,
+    pressed: ThemeToken,
+    foreground: Hsla,
+}
+
+pub(crate) fn primary_tokens(t: &Tokens) -> PrimaryTokens {
+    let token = |press| {
+        let leaf = t.gold_leaf(press);
+        ThemeToken::new(mix(leaf.top, leaf.bottom, 0.5), leaf_gradient(&leaf))
+    };
+    PrimaryTokens {
+        normal: token(Press::Normal),
+        hover: token(Press::Hover),
+        pressed: token(Press::Pressed),
+        foreground: t.gold_leaf(Press::Normal).label,
+    }
+}
+
+/// Restyle the existing button, retaining its identity and behavior. The primary theme
+/// supplies the state gradients; the kit derives disabled colors from its normal primary
+/// background because Button does not expose its disabled state or a disabled color hook.
+pub fn gold_leaf(button: Button, t: &Tokens) -> Button {
+    let leaf = t.gold_leaf(Press::Normal);
+    // Button replays instance styles after its disabled foreground, so text_color here
+    // would override the kit's disabled style; the theme supplies the label instead.
+    button
+        .primary()
+        .border_0()
+        .border_t_1()
+        .border_color(leaf.highlight)
+}
+
 /// The interface font on Windows. The kit's default, `.SystemUIFont`, resolves to the system's
 /// icon-title font, which on Chinese Windows is Microsoft JhengHei UI. That font has no glyph for
 /// characters such as the subscript in "HfO₂", and at semibold and bold weights gpui draws the
@@ -197,10 +269,14 @@ pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         theme.primary_hover = t.gold.opacity(0.9);
         theme.primary_active = t.gold.opacity(0.8);
         theme.primary_foreground = t.canvas;
-        theme.button_primary = t.gold;
-        theme.button_primary_hover = t.gold.opacity(0.9);
-        theme.button_primary_active = t.gold.opacity(0.8);
-        theme.button_primary_foreground = t.canvas;
+        let primary = primary_tokens(&t);
+        theme.button_primary = primary.normal.color;
+        theme.button_primary_hover = primary.hover.color;
+        theme.button_primary_active = primary.pressed.color;
+        theme.button_primary_foreground = primary.foreground;
+        theme.tokens.button_primary = primary.normal;
+        theme.tokens.button_primary_hover = primary.hover;
+        theme.tokens.button_primary_active = primary.pressed;
         theme.success = t.ok;
         theme.warning = t.review;
         theme.danger = t.fail;
@@ -228,7 +304,7 @@ pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     // Named imports: a glob would bring in gpui's own `test` macro.
-    use super::{module_color, Hsla, Rgba, DARK, LIGHT, MODULE_HUES};
+    use super::{hex, linear_color_stop, linear_gradient, mix, module_color, primary_tokens, Hsla, Press, Rgba, DARK, LIGHT, MODULE_HUES};
 
     fn luminance(c: Hsla) -> f32 {
         let c = Rgba::from(c);
@@ -239,6 +315,71 @@ mod tests {
     fn contrast(a: Hsla, b: Hsla) -> f32 {
         let (a, b) = (luminance(a), luminance(b));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn gold_leaf_labels_meet_aa_at_every_stop() {
+        for t in [DARK, LIGHT] {
+            for press in [Press::Normal, Press::Hover, Press::Pressed] {
+                let leaf = t.gold_leaf(press);
+                for bg in [leaf.top, leaf.bottom, mix(leaf.top, leaf.bottom, 0.5)] {
+                    let ratio = contrast(leaf.label, bg);
+                    assert!(ratio >= 4.5, "{press:?} label {:?} on {bg:?}: {ratio}", leaf.label);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rail_ink_is_visible_on_surface() {
+        for t in [DARK, LIGHT] {
+            for lit in [0.0, 0.5, 1.0] {
+                let ratio = contrast(t.rail_ink(lit), t.surface);
+                assert!(ratio >= 3.0, "lit {lit} on {:?}: {ratio}", t.surface);
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_rejects_a_low_contrast_pair() {
+        assert!(contrast(DARK.gold, DARK.text) < 4.5);
+        assert!(contrast(hex(0x000000), hex(0xffffff)) > 4.5);
+    }
+
+    #[test]
+    fn primary_tokens_match_gold_leaf_and_expected_colours() {
+        let expected = [
+            [
+                Hsla { h: 0.113695, s: 0.544304, l: 0.721176, a: 1.0 },
+                Hsla { h: 0.113553, s: 0.549849, l: 0.740392, a: 1.0 },
+                Hsla { h: 0.113772, s: 0.541329, l: 0.709647, a: 1.0 },
+            ],
+            [
+                Hsla { h: 0.108279, s: 0.490070, l: 0.306078, a: 1.0 },
+                Hsla { h: 0.110417, s: 0.434783, l: 0.288627, a: 1.0 },
+                Hsla { h: 0.107302, s: 0.520317, l: 0.316549, a: 1.0 },
+            ],
+        ];
+        for (t, expected) in [DARK, LIGHT].into_iter().zip(expected) {
+            let primary = primary_tokens(&t);
+            let tokens = [primary.normal, primary.hover, primary.pressed];
+            for ((token, press), expected) in tokens.into_iter()
+                .zip([Press::Normal, Press::Hover, Press::Pressed]).zip(expected)
+            {
+                let leaf = t.gold_leaf(press);
+                assert_eq!(token.color, mix(leaf.top, leaf.bottom, 0.5));
+                for (actual, expected) in [token.color.h, token.color.s, token.color.l, token.color.a]
+                    .into_iter().zip([expected.h, expected.s, expected.l, expected.a])
+                {
+                    assert!((actual - expected).abs() <= 0.005, "{press:?}: {actual} != {expected}");
+                }
+                assert_eq!(token.background, linear_gradient(180.0,
+                    linear_color_stop(leaf.top, 0.0), linear_color_stop(leaf.bottom, 1.0)));
+            }
+            assert_ne!(primary.normal.color, primary.hover.color);
+            assert_ne!(primary.hover.color, primary.pressed.color);
+            assert_eq!(primary.foreground, t.gold_leaf(Press::Normal).label);
+        }
     }
 
     #[test]

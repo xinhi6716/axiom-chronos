@@ -153,6 +153,7 @@ const MIN_REACHABLE_STRIP: f32 = 2880.0;
 pub struct Settings {
     pub language: LanguageChoice,
     pub theme: ThemeChoice,
+    pub plain_words: bool,
     /// `None` follows the system's own setting.
     pub reduce_motion: Option<bool>,
     pub window: Option<WindowPlacement>,
@@ -168,6 +169,7 @@ impl Default for Settings {
         Self {
             language: LanguageChoice::default(),
             theme: ThemeChoice::default(),
+            plain_words: true,
             reduce_motion: None,
             window: None,
             last_screen: Screen::Run,
@@ -185,6 +187,7 @@ impl Settings {
         Self {
             language: value_of(&LANGUAGE_KEYS, word("language")).unwrap_or_default(),
             theme: value_of(&THEME_KEYS, word("theme")).unwrap_or_default(),
+            plain_words: root.get("plain_words").and_then(Value::as_bool).unwrap_or(true),
             reduce_motion: root.get("reduce_motion").and_then(Value::as_bool),
             window: root.get("window").and_then(WindowPlacement::parse),
             last_screen: value_of(&SCREEN_KEYS, word("last_screen")).unwrap_or(Screen::Run),
@@ -213,6 +216,7 @@ impl Settings {
         let body = json!({
             "language": key_of(&LANGUAGE_KEYS, self.language),
             "theme": key_of(&THEME_KEYS, self.theme),
+            "plain_words": self.plain_words,
             "reduce_motion": self.reduce_motion,
             "window": window,
             "last_screen": key_of(&SCREEN_KEYS, self.last_screen),
@@ -397,6 +401,8 @@ pub fn has_recent_project(cx: &App) -> bool {
     !Store::current(cx).recent_projects.is_empty()
 }
 
+// called by the screens
+#[allow(dead_code)]
 pub fn recent_projects(cx: &App) -> &[PathBuf] {
     &Store::current(cx).recent_projects
 }
@@ -420,6 +426,7 @@ mod tests {
         Settings {
             language: LanguageChoice::English,
             theme: ThemeChoice::Light,
+            plain_words: false,
             reduce_motion: Some(true),
             window: Some(WindowPlacement { x: -40.0, y: 12.5, width: 1280.0, height: 800.0, maximized: true }),
             last_screen: Screen::Doctor,
@@ -443,6 +450,14 @@ mod tests {
     #[test]
     fn every_setting_survives_a_round_trip() {
         assert_eq!(Settings::parse(&sample().to_json()), sample());
+    }
+
+    #[test]
+    fn plain_words_defaults_on_and_round_trips() {
+        assert!(Settings::parse("{}").plain_words);
+        assert!(Settings::parse(r#"{"plain_words":"no"}"#).plain_words);
+        assert!(!Settings::parse(&sample().to_json()).plain_words);
+        assert!(Settings::parse(&Settings::default().to_json()).plain_words);
     }
 
     #[test]

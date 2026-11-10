@@ -4,7 +4,8 @@ use super::i18n::{tr, Table};
 use super::model::*;
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament;
-use super::theme::{Tokened as _, Tokens};
+use super::plain_text;
+use super::theme::{self, Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1093,10 +1094,7 @@ impl Backdrop {
         let graph = &self.graph;
         let view = &self.view;
         let core = graph.core(view_h, view);
-        // The sky first: fixed stars and the faint orbits around the core. The stars never move;
-        // the orbits stay centred on the core.
-        let stars = ornament::star_field(view_w, view_h);
-        ornament::paint_stars(window, (origin.x, origin.y), &stars, self.t.text);
+        // The faint orbits stay centred on the core over the shared backdrop.
         let arc_color = self.t.orbit.opacity((if self.dark { 0.55 } else { 0.7 }) * self.orbit_in);
         for r in orbit_radii(graph) {
             ornament::paint_orbit_arc(window, origin.x + core.x, origin.y + core.y, r * view.zoom, -88.0, 88.0, arc_color);
@@ -1295,6 +1293,19 @@ pub struct Mesh {
 
 fn glyph_side(r: Rect, zoom: f32) -> f32 {
     (24.0 * zoom).clamp(8.0, 40.0).min(r.h - 4.0).max(4.0)
+}
+
+fn unit_chip_label(unit: &Unit, title: &plain_text::Plain) -> SharedString {
+    if unit.title.is_empty() { unit.id.clone() } else { title.shown.clone() }
+}
+
+fn unit_tooltip_lines(unit: &Unit, title: plain_text::Plain) -> Vec<SharedString> {
+    let mut lines = Vec::new();
+    if unit.title != unit.id || title.original.is_some() {
+        lines.push(title.shown);
+    }
+    lines.extend(title.original);
+    lines
 }
 
 impl Mesh {
@@ -1732,14 +1743,16 @@ impl Mesh {
         }
         let text_px = (12.0 * zoom).clamp(12.0, 18.0);
         let label: SharedString = match chip.node {
-            Node::Unit(u) => run.units[u].id.clone(),
+            Node::Unit(u) => {
+                let unit = &run.units[u];
+                unit_chip_label(unit, &plain_text::plain(cx, &unit.title))
+            }
             Node::Folded(_, state) => {
                 let word = if state == UnitState::Verified { "verified" } else { "pending" };
                 format!("+{} {}", chip.count, tr(cx, TABLE, word)).into()
             }
             _ => SharedString::default(),
         };
-        let mono = matches!(chip.node, Node::Unit(_));
         let retries: Option<SharedString> = match chip.node {
             Node::Unit(u) if r.w >= CHIP_MIN_W && run.units[u].attempts > 1 => Some(format!("×{}", run.units[u].attempts).into()),
             _ => None,
@@ -1766,7 +1779,6 @@ impl Mesh {
                     .min_w_0()
                     .truncate()
                     .text_size(px(text_px))
-                    .when(mono, |this| this.font_family(cx.theme().mono_font_family.clone()))
                     .text_color(look.text)
                     .child(label),
             )
@@ -1813,10 +1825,11 @@ impl Mesh {
             }
             Node::Unit(u) => {
                 let unit = run.units.get(u)?;
+                let lines = unit_tooltip_lines(unit, plain_text::plain(cx, &unit.title));
                 let attempts = (unit.attempts > 0).then(|| fmt_a(tr(cx, TABLE, "Attempt {a}"), unit.attempts).into());
                 let module = run.modules.get(unit.module).map(|m| fmt_a(tr(cx, TABLE, "Module {a}"), m.id.as_ref()));
                 body.child(heading(unit.id.clone(), true))
-                    .when(unit.title != unit.id, |this| this.child(note(unit.title.clone())))
+                    .children(lines.into_iter().map(note))
                     .child(state_line(unit.state, attempts))
                     .when_some(module, |this, line| this.child(note(line.into())))
             }
@@ -2254,7 +2267,6 @@ fn empty_state(t: &Tokens, dark: bool, height: f32) -> Div {
         .items_center()
         .justify_center()
         .gap(px(8.))
-        .bg(t.canvas)
         .child(div().mb(px(-side * 0.1)).child(ornament::portrait_backdrop(t, side, dark)))
 }
 
@@ -2278,10 +2290,12 @@ impl Render for Mesh {
                 )
                 .child(
                     div().mt_2().child(
-                        Button::new("mesh-make-wish")
-                            .primary()
-                            .label(tr(cx, TABLE, "Make a wish"))
-                            .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))),
+                        theme::gold_leaf(
+                            Button::new("mesh-make-wish")
+                                .label(tr(cx, TABLE, "Make a wish"))
+                                .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))),
+                            &t,
+                        ),
                     ),
                 )
                 .into_any_element();
@@ -2308,7 +2322,6 @@ impl Render for Mesh {
         let this = cx.entity();
         v_flex()
             .size_full()
-            .bg(t.canvas)
             .child(legend)
             .when_some(finished, |this, card| this.child(card))
             .child(
@@ -2383,6 +2396,54 @@ mod tests {
     use UnitState::*;
 
     const WIDTHS: [f32; 4] = [300.0, 640.0, 1120.0, 1900.0];
+
+    #[test]
+    fn unit_title_uses_plain_words_and_keeps_original_in_tooltip() {
+        let mut unit = sample_run().units[0].clone();
+        unit.id = "unit-1".into();
+        unit.title = "Technical title".into();
+        let title = plain_text::Plain { shown: "Plain title".into(), original: Some("Technical title".into()) };
+
+        assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Plain title");
+        assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Plain title"), "Technical title".into()]);
+
+        // Even a title matching the ID needs both lines when it was translated.
+        unit.title = unit.id.clone();
+        let title = plain_text::Plain { shown: "Plain ID".into(), original: Some(unit.id.clone()) };
+        assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Plain ID"), unit.id.clone()]);
+    }
+
+    #[test]
+    fn unit_title_without_translation_keeps_existing_tooltip_fallback() {
+        let mut unit = sample_run().units[0].clone();
+        unit.id = "unit-1".into();
+        unit.title = "Technical title".into();
+        let title = plain_text::Plain { shown: unit.title.clone(), original: None };
+
+        assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Technical title");
+        assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Technical title")]);
+
+        let title = plain_text::Plain { shown: "Supplied text".into(), original: None };
+        assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Supplied text");
+        assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Supplied text")]);
+
+        unit.title = unit.id.clone();
+        let title = plain_text::Plain { shown: unit.title.clone(), original: None };
+        assert!(unit_tooltip_lines(&unit, title).is_empty());
+    }
+
+    #[test]
+    fn empty_unit_title_uses_id_for_chip() {
+        let mut unit = sample_run().units[0].clone();
+        unit.id = "unit-1".into();
+        unit.title = "".into();
+        let title = plain_text::Plain { shown: "".into(), original: None };
+        assert_eq!(unit_chip_label(&unit, &title).as_ref(), "unit-1");
+
+        unit.title = "Technical title".into();
+        let title = plain_text::Plain { shown: "Plain title".into(), original: Some(unit.title.clone()) };
+        assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Plain title");
+    }
 
     fn run_of(lanes: &[&[UnitState]]) -> Run {
         let mut run = sample_run();

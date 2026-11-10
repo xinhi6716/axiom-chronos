@@ -5,11 +5,12 @@ use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Lang, Table};
 use super::launch::{self, Launch, Square};
 use super::model::*;
-use super::motion::{self, lerp, mix, Curve, Driver, Pace, Tween};
+use super::motion::{self, mix, Curve, Driver, Pace, Tween};
+use super::ornament::Emblem;
 use super::palette::{self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target};
 use super::settings::{LanguageChoice, ThemeChoice};
 use super::{ornament, settings};
-use super::theme::{Tokened as _, Tokens};
+use super::theme::{self, Tokened as _, Tokens};
 use super::{composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView, usage::UsageView, wishes::WishesView};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
@@ -663,8 +664,7 @@ impl Shell {
                                 }),
                         )
                         .child(
-                            Button::new("keep-working")
-                                .primary()
+                            theme::gold_leaf(Button::new("keep-working"), &t)
                                 .label(tr(cx, T, "Keep working"))
                                 .disabled(stopping)
                                 .on_click(move |_, window, cx| {
@@ -806,7 +806,7 @@ impl Shell {
     fn nav_item(
         &self,
         id: &'static str,
-        icon: IconName,
+        kind: Emblem,
         label: &'static str,
         hint: SharedString,
         view: Screen,
@@ -817,13 +817,14 @@ impl Shell {
         let t = cx.tokens();
         let active = self.state.read(cx).view == view;
         let state = self.state.clone();
-        // The selection and hover glows fade in and out rather than snapping.
+        // Glow and underline follow selection (lit); hover only tints the face.
         let face = mix(t.raised.opacity(0.0), t.raised, lit.max(hover));
-        let colors = ButtonCustomVariant::new(cx).color(face).foreground(mix(t.muted, t.gold, lit)).hover(face).active(face);
-        let mark = lerp(0.35, 1.0, lit);
+        let colors = ButtonCustomVariant::new(cx).color(face).foreground(t.rail_ink(lit)).hover(face).active(face);
         div()
             .id(("nav-glow", slot(view)))
             .relative()
+            .rounded(px(8.))
+            .when(lit > 0.01, |this| this.shadow(ornament::gold_glow(&t, lit)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.hovered = Some(view);
@@ -848,35 +849,24 @@ impl Shell {
                             .items_center()
                             .gap_1()
                             .text_size(px(11.))
+                            .text_color(t.rail_ink(lit))
                             .child(
                                 div()
                                     .relative()
-                                    .child(Icon::new(icon).size(px(18.)))
+                                    .child(ornament::emblem(kind, 20., t.rail_ink(lit)))
                                     .when(count > 0, |this| this.child(count_badge(count, &t))),
                             )
                             .child(tr(cx, &[], label)),
                     ),
             )
-            .when(lit > 0.01, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(-8.))
-                        .top(px(14. + 12. * (1. - mark)))
-                        .w(px(3.))
-                        .h(px(24. * mark))
-                        .rounded_r(px(3.))
-                        .bg(t.gold.opacity(lit)),
-                )
-            })
+            .when(shows_underline(lit), |this| this.child(div().absolute().left_0().bottom_0().w_full().child(ornament::orbit_underline(t.gold, lit))))
     }
 
     fn new_wish_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let blocked = blocking_check(&self.state.read(cx).checks).map(|check| (check.name.clone(), check.detail.clone()));
         let label = tr(cx, &[], "New wish");
-        let button = Button::new("new-wish")
-            .primary()
+        let button = theme::gold_leaf(Button::new("new-wish"), &t)
             .w(px(64.))
             .h(px(52.))
             .rounded(px(8.))
@@ -974,6 +964,10 @@ impl Shell {
     }
 }
 
+fn shows_underline(lit: f32) -> bool {
+    lit > 0.01
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
@@ -1018,11 +1012,11 @@ impl Render for Shell {
         let search = self.search_button(cx);
         let new_wish = self.new_wish_button(cx);
         let g = |screen: Screen| glows[slot(screen)];
-        let run_item = self.nav_item("nav-run", IconName::LayoutDashboard, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), cx);
-        let wishes_item = self.nav_item("nav-wishes", IconName::Inbox, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), cx);
-        let memory_item = self.nav_item("nav-memory", IconName::BookOpen, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), cx);
-        let usage_item = self.nav_item("nav-usage", IconName::ChartPie, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), cx);
-        let settings_item = self.nav_item("nav-doctor", IconName::Settings, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), cx);
+        let run_item = self.nav_item("nav-run", Emblem::Hourglass, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), cx);
+        let wishes_item = self.nav_item("nav-wishes", Emblem::Scroll, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), cx);
+        let memory_item = self.nav_item("nav-memory", Emblem::StarBook, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), cx);
+        let usage_item = self.nav_item("nav-usage", Emblem::Astrolabe, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), cx);
+        let settings_item = self.nav_item("nav-doctor", Emblem::Armillary, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), cx);
         let rail_cell = self.rail_portrait.clone();
         // Hidden while the launch's keeper is on its way to this spot.
         let rail_portrait = div()
@@ -1118,13 +1112,14 @@ impl Render for Shell {
                             .min_w_0()
                             .h_full()
                             .relative()
+                            .child(ornament::backdrop(&tokens, cx.theme().is_dark()))
                             .children(leaving.map(|screen| div().absolute().top_0().left_0().size_full().child(screen)))
                             .child(
                                 div()
                                     .relative()
                                     .size_full()
                                     .top(px(SCREEN_DRIFT * (1.0 - switch)))
-                                    .when(switch < 1.0, |this| this.bg(tokens.canvas).opacity(switch))
+                                    .when(switch < 1.0, |this| this.opacity(switch))
                                     .child(content),
                             ),
                     ),
@@ -1141,6 +1136,56 @@ mod tests {
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
     use crate::desktop::demo::sample_run;
+
+    #[test]
+    fn backdrop_stays_behind_the_crossfade() {
+        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
+        let render = source.split("impl Render for Shell {").nth(1).expect("shell render");
+        assert_eq!(render.matches("ornament::backdrop(").count(), 1);
+        let backdrop = render.find("ornament::backdrop(").expect("backdrop");
+        let content_end = backdrop + render[backdrop..].find(".child(content)").expect("content") + ".child(content)".len();
+        let content_area = &render[backdrop..content_end];
+        let backdrop = content_area.find("ornament::backdrop(").unwrap();
+        assert!(backdrop < content_area.find("leaving.map(").expect("leaving screen"));
+        assert!(backdrop < content_area.find(".child(content)").expect("content"));
+        assert!(!content_area.contains(".bg(tokens.canvas)"));
+        assert!(!content_area.contains(".bg("));
+
+        let ornament = include_str!("ornament.rs");
+        let backdrop_fn = ornament.split("pub fn backdrop(").nth(1).expect("backdrop function").split("\npub ").next().unwrap();
+        assert!(backdrop_fn.contains(".absolute().top_0().left_0().size_full()"));
+    }
+
+    #[test]
+    fn underline_visibility_follows_lit_threshold() {
+        assert!(!shows_underline(0.0));
+        assert!(!shows_underline(0.01));
+        assert!(shows_underline(0.02));
+        assert!(shows_underline(1.0));
+    }
+
+    #[test]
+    fn orbit_underline_uses_visibility_rule() {
+        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
+        let rail_item = source.split("    fn nav_item(").nth(1).expect("rail item").split("    fn new_wish_button(").next().unwrap();
+        let underline = rail_item.lines().find(|line| line.contains("ornament::orbit_underline(")).expect("orbit underline");
+        assert!(underline.contains(".when(shows_underline(lit)"));
+        assert!(!rail_item.contains(".when(lit > 0.01, |this| this.child(div().absolute()"));
+    }
+
+    #[test]
+    fn wish_and_keep_working_buttons_use_gold_leaf() {
+        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
+        for (id, end) in [("new-wish", "let Some((name, detail))"), ("keep-working", "fn stop_and_close(")] {
+            let marker = format!("Button::new(\"{id}\")");
+            assert_eq!(source.matches(&marker).count(), 1);
+            let position = source.find(&marker).unwrap();
+            let start = source[..position].rfind('\n').unwrap() + 1;
+            let builder = source[start..].split(end).next().unwrap();
+            assert!(builder.contains("gold_leaf("), "{id} must use gold_leaf");
+            assert!(!builder.contains(".primary()"), "{id} must not use primary");
+        }
+    }
 
     fn run_with(session: &'static str, status: RunStatus) -> Run {
         let mut run = sample_run();
@@ -1303,10 +1348,17 @@ mod tests {
             let key = capture[1].replace("\\\"", "\"");
             assert!(T.iter().any(|(en, _)| *en == key), "missing translation: {key}");
         }
-        let labels = regex::Regex::new(r#"IconName::\w+, "(\w+)""#).unwrap();
+        let labels = regex::Regex::new(r#"Emblem::\w+, "(\w+)""#).unwrap();
         for capture in labels.captures_iter(source) {
             let key = &capture[1];
             assert!(super::super::i18n::COMMON.iter().any(|(en, _)| *en == key), "missing translation: {key}");
         }
+    }
+
+    #[test]
+    fn every_nav_call_site_has_an_emblem() {
+        let source = include_str!("shell.rs");
+        let labels = regex::Regex::new(r#"self\.nav_item\("nav-[\w-]+", Emblem::\w+, "(\w+)""#).unwrap();
+        assert_eq!(labels.captures_iter(source).count(), 5);
     }
 }

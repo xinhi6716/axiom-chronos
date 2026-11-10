@@ -45,6 +45,8 @@ pub fn sample_run() -> Run {
         ("causal", "Causal models", &[9, 10], &[("causal", UnitState::Failed, 2), ("causal_fix", UnitState::Pending, 0)]),
         ("candidates", "Six candidate recipes", &[11], &[("candidates_tm", UnitState::Pending, 0)]),
     ];
+    let codex = crate::usage::price::CodexUsage { input: 22_106_711, cached_input: 10_462_720, output: 195_816 };
+    let codex_usd = crate::usage::price::codex_usd("gpt-6.1-terra", &codex).unwrap();
     let mut run = Run {
         session: "2584a4de-1b34-4066-9ea5-837eb58ea565".into(),
         project: "ml_hfo2".into(),
@@ -73,12 +75,13 @@ pub fn sample_run() -> Run {
         modules: vec![],
         units: vec![],
         usage: Usage {
-            total_usd: Some(116.12),
+            total_usd: Some(116.12 + codex_usd),
             models: vec![
-                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: Some(0), cached: Some(226_026_522), output: Some(802_372) },
-                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: Some(0), cached: Some(36_001_210), output: Some(128_398) },
-                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: Some(0), cached: Some(633_994), output: Some(26_655) },
-                ModelCost { model: "gpt-6.1-terra".into(), usd: None, input: Some(11_643_991), cached: Some(10_462_720), output: Some(195_816) },
+                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: Some(0), cached: Some(226_026_522), cache_write: Some(0), output: Some(802_372), total: Some(226_828_894) },
+                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: Some(0), cached: Some(36_001_210), cache_write: Some(0), output: Some(128_398), total: Some(36_129_608) },
+                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: Some(0), cached: Some(633_994), cache_write: Some(0), output: Some(26_655), total: Some(660_649) },
+                ModelCost { model: "gpt-6.1-terra".into(), usd: Some(codex_usd), input: Some(11_643_991), cached: Some(10_462_720), cache_write: None, output: Some(195_816), total: Some(22_302_527) },
+                ModelCost { model: "gpt-unknown".into(), usd: None, input: Some(4200), cached: Some(1200), cache_write: None, output: Some(600), total: Some(6000) },
             ],
             roles: vec![
                 RoleCost { role: "chronos:dispatcher".into(), usd: Some(78.41), input: 0, cached: 198_312_906, output: 612_044 },
@@ -149,7 +152,11 @@ fn scale_usage(usage: &mut Usage, cost: f64, context: f64) {
     usage.total_usd = usage.total_usd.map(|usd| usd * cost);
     for model in &mut usage.models {
         model.usd = model.usd.map(|usd| usd * cost);
-        [&mut model.input, &mut model.cached, &mut model.output].into_iter().flatten().for_each(tokens);
+        [&mut model.input, &mut model.cached, &mut model.cache_write, &mut model.output].into_iter().flatten().for_each(tokens);
+        model.total = match (model.total, model.input, model.cached, model.output) {
+            (Some(_), Some(input), Some(cached), Some(output)) => Some(input + cached + model.cache_write.unwrap_or(0) + output),
+            _ => None,
+        };
     }
     for role in &mut usage.roles {
         role.usd = role.usd.map(|usd| usd * cost);
@@ -186,6 +193,7 @@ fn finished_run() -> Run {
         stage.note = None;
     }
     run.usage.models.truncate(3);
+    run.usage.total_usd = Some(116.12);
     run.usage.roles.truncate(4);
     scale_usage(&mut run.usage, 6.89 / 116.12, 0.22);
     run.goals.truncate(2);
@@ -242,10 +250,22 @@ fn blocked_run() -> Run {
     run
 }
 
+fn empty_run() -> Run {
+    let mut run = finished_run();
+    run.session = "demo-empty".into();
+    run.project = "new-project".into();
+    run.cwd = None;
+    run.units.clear();
+    run.modules.clear();
+    run.goals.clear();
+    run.usage = Usage::default();
+    run
+}
+
 pub fn state() -> AppState {
     AppState {
         view: Screen::Run,
-        runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run()],
+        runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()],
         current: Some(0),
         selection: Selection::None,
         memory: vec![
@@ -295,5 +315,28 @@ pub fn advance(run: &mut Run) {
     });
     if let Some(m) = run.modules.get_mut(module) {
         m.units.push(index);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn sample_prices_codex_and_keeps_an_unpriced_model_and_empty_run() {
+        let state = state();
+        let run = &state.runs[0];
+        let priced = run.usage.models.iter().find(|m| m.model.as_ref() == "gpt-6.1-terra").unwrap();
+        let expected = crate::usage::price::codex_usd("gpt-6.1-terra", &crate::usage::price::CodexUsage {
+            input: priced.input.unwrap() + priced.cached.unwrap(), cached_input: priced.cached.unwrap(), output: priced.output.unwrap(),
+        }).unwrap();
+        assert_eq!(priced.usd, Some(expected));
+        assert!((run.usage.total_usd.unwrap() - 116.12 - expected).abs() < 1e-9);
+        assert_eq!(run.usage.unpriced(), vec![SharedString::from("gpt-unknown")]);
+        assert!(state.runs.last().unwrap().units.is_empty());
+        for model in state.runs.iter().flat_map(|run| &run.usage.models) {
+            assert_eq!(model.total, Some(model.input.unwrap() + model.cached.unwrap() + model.cache_write.unwrap_or(0) + model.output.unwrap()));
+        }
     }
 }

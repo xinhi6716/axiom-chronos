@@ -13,6 +13,7 @@ pub mod model;
 mod motion;
 mod ornament;
 mod palette;
+pub mod plain_text;
 mod run_view;
 mod settings;
 mod shell;
@@ -117,6 +118,12 @@ pub fn run(options: Options) -> i32 {
         theme::apply(mode, None, cx);
         i18n::set(if options.english { i18n::Lang::En } else { prefs.language.resolve() }, cx);
         cx.set_global(store);
+        let source = if ephemeral {
+            plain_text::Source::Fake(std::sync::Arc::new(plain_text::DemoRunner))
+        } else {
+            plain_text::Source::Claude { cache: crate::base::axiom_home().join("desktop").join("plain-text.json") }
+        };
+        plain_text::install(cx, prefs.plain_words, source);
         settings::Store::save_on_quit(cx);
         if let Some(on) = prefs.reduce_motion {
             cx.set_reduce_motion(on);

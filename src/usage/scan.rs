@@ -145,6 +145,7 @@ pub(super) struct Call {
     pub id: String,
     pub model: String,
     pub usage: CallUsage,
+    pub reported: [bool; 4],
     pub first_ms: Option<i64>,
     pub last_ms: Option<i64>,
     pub parent: Option<String>,
@@ -155,6 +156,7 @@ pub(super) struct Call {
 impl Call {
     pub fn merge(&mut self, other: &Call) {
         self.usage.merge(&other.usage);
+        for (reported, part) in self.reported.iter_mut().zip(other.reported) { *reported |= part; }
         self.first_ms = min_some(self.first_ms, other.first_ms);
         self.last_ms = self.last_ms.max(other.last_ms);
     }
@@ -276,10 +278,12 @@ impl FileScan {
             return;
         }
         let ms = head.timestamp.as_deref().and_then(parse_ms);
+        let reported = message.usage.as_ref().map_or([false; 4], |u| [u.input_tokens.is_some(), u.cache_read_input_tokens.is_some(), u.cache_creation_input_tokens.is_some(), u.output_tokens.is_some()]);
         let call = Call {
             id: id.clone(),
             model,
             usage: message.usage.map(CallUsage::from).unwrap_or_default(),
+            reported,
             first_ms: ms,
             last_ms: ms,
             parent: head.parent_tool_use_id,

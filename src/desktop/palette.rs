@@ -1456,7 +1456,7 @@ mod tests {
         assert!(modules.len() >= 2, "the demo runs share their modules");
         assert!(modules[0].current && modules[1..].iter().all(|m| !m.current));
         assert_eq!(modules[0].target, Target::Module(state.runs[0].session.clone(), "pdftext".into()));
-        state.current = Some(4);
+        state.current = Some(5);
         let items = index(&state, Lang::En, true);
         let first = search(&items, "pdftext", LIMIT).into_iter().map(|h| &items[h.item]).find(|i| i.kind == Kind::Module).unwrap();
         assert_eq!(first.target, Target::Module("twin".into(), "pdftext".into()));

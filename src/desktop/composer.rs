@@ -1465,7 +1465,7 @@ impl Composer {
                     )
                     .child(
                         Button::new("composer-start")
-                            .primary()
+                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                             .label(tr(cx, T, "Start"))
                             .disabled(blocked.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
@@ -1896,6 +1896,6 @@ mod tests {
         for (i, run) in many.iter_mut().enumerate() {
             run.cwd = Some(PathBuf::from(format!("C:\\p{i}")));
         }
-        assert_eq!(recent_projects(&many).len(), 4);
+        assert_eq!(recent_projects(&many).len(), 5);
     }
 }

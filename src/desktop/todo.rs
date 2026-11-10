@@ -1,6 +1,7 @@
 //! The checklist: what the wish has to do, what is finished and what is happening now.
 use super::i18n::{tr, Table};
 use super::model::*;
+use super::plain_text;
 use super::motion::{self, ease_out, Curve, Driver, Pace, Tween};
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -338,6 +339,7 @@ struct Row {
     /// For a goal, its number and title, the number taking the first `badge_len` bytes.
     title: SharedString,
     badge_len: usize,
+    original: Option<SharedString>,
     progress: Progress,
     tally: Tally,
     attempts: u32,
@@ -354,6 +356,7 @@ impl Row {
             key,
             title,
             badge_len: 0,
+            original: None,
             progress,
             tally,
             attempts: 0,
@@ -830,6 +833,18 @@ impl Todo {
         if self.viewport.get() != self.measured {
             self.request(Rebuild::Viewport);
         }
+        if self.rebuild.is_none() {
+            let state = self.state.read(cx);
+            let changed = state.run().is_some_and(|run| self.rows.iter().any(|row| {
+                let RowKey::Unit { unit, .. } = row.key else { return false };
+                let Some(unit) = run.units.get(unit) else { return false };
+                let plain = plain_text::plain(cx, &unit.title);
+                plain.shown != row.title || plain.original != row.original
+            }));
+            if changed {
+                self.request(Rebuild::Viewport);
+            }
+        }
         if let Some(rebuild) = self.rebuild.take() {
             self.rebuild_rows(rebuild, window, cx);
         }
@@ -846,6 +861,13 @@ impl Todo {
             return;
         };
         let mut rows = build_rows(run, &self.expansion, self.filter, &state.selection);
+        for row in &mut rows {
+            if matches!(row.key, RowKey::Unit { .. }) {
+                let plain = plain_text::plain(cx, &row.title);
+                row.title = plain.shown;
+                row.original = plain.original;
+            }
+        }
         self.measured = self.viewport.get();
         let width = if self.measured.0 > 0.0 { self.measured.0 } else { FALLBACK_WIDTH };
         measure(&mut rows, width, window);
@@ -1147,7 +1169,7 @@ impl Todo {
             }
             _ => None,
         };
-        let tooltip_text = row.clipped.then(|| row.title.clone());
+        let tooltip_text = row.original.clone().or_else(|| row.clipped.then(|| row.title.clone()));
         let mark_top = tier.pad + (tier.line - tier.size) / 2.0;
         let accent = if row.selected {
             Some(t.gold)

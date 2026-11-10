@@ -1,7 +1,8 @@
 //! Every run, newest first: filter, search, open. Filtering and sorting are pure and sit apart from drawing.
 use super::i18n::{tr, Lang, Table};
 use super::model::*;
-use super::theme::{Tokened as _, Tokens};
+use super::{ornament, theme};
+use super::theme::Tokened as _;
 use gpui_kit::base::actions::{SelectFirst, SelectLast, SelectPageDown, SelectPageUp};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{
@@ -24,6 +25,7 @@ use std::path::PathBuf;
 gpui_kit::actions!(chronos_lists, [FocusSearch]);
 
 const T: Table = &[
+    ("Wishes", "願望"),
     ("All", "全部"),
     ("Status", "狀態"),
     ("Project", "專案"),
@@ -162,6 +164,61 @@ pub fn visible_runs(runs: &[Run], filter: Filter, terms: &[String], this_month: 
     rows
 }
 
+/// Runs grouped in ledger order, preserving the order supplied within each state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunGroup {
+    pub status: RunStatus,
+    pub runs: Vec<usize>,
+}
+
+pub const GROUP_ORDER: [RunStatus; 6] = [
+    RunStatus::Blocked, RunStatus::Active, RunStatus::Waiting,
+    RunStatus::LimitWait, RunStatus::Interrupted, RunStatus::Done,
+];
+
+pub fn group_runs(runs: &[Run], visible: &[usize]) -> Vec<RunGroup> {
+    GROUP_ORDER.into_iter().filter_map(|status| {
+        let indices: Vec<_> = visible.iter().copied().filter(|&i| runs[i].status == status).collect();
+        (!indices.is_empty()).then_some(RunGroup { status, runs: indices })
+    }).collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerRow {
+    Divider { status: RunStatus, count: usize },
+    Card(usize),
+}
+
+pub fn ledger_rows(groups: &[RunGroup]) -> Vec<LedgerRow> {
+    groups.iter().flat_map(|group| {
+        std::iter::once(LedgerRow::Divider { status: group.status, count: group.runs.len() })
+            .chain(group.runs.iter().copied().map(LedgerRow::Card))
+    }).collect()
+}
+
+/// Move over cards only, clamping at either end. With no current card, start at the first.
+pub fn step_cards(rows: &[LedgerRow], from: Option<usize>, step: isize) -> Option<usize> {
+    let cards: Vec<_> = rows.iter().filter_map(|row| match row {
+        LedgerRow::Card(index) => Some(*index),
+        LedgerRow::Divider { .. } => None,
+    }).collect();
+    if cards.is_empty() { return None; }
+    let current = from.and_then(|index| cards.iter().position(|&i| i == index)).unwrap_or(0);
+    Some(cards[current.saturating_add_signed(step).min(cards.len() - 1)])
+}
+
+fn index_path(groups: &[RunGroup], index: usize) -> Option<IndexPath> {
+    groups.iter().enumerate().find_map(|(section, group)| {
+        group.runs.iter().position(|&i| i == index).map(|row| IndexPath::new(row).section(section))
+    })
+}
+
+fn selected_index(groups: &[RunGroup], runs: &[Run], session: Option<&SharedString>) -> Option<usize> {
+    let indices = groups.iter().flat_map(|group| group.runs.iter().copied());
+    session.and_then(|session| indices.clone().find(|&i| runs[i].session == *session))
+        .or_else(|| indices.into_iter().next())
+}
+
 /// The start time as the interface language writes it; anything unreadable stays as written.
 pub fn started_label(started: &SharedString, lang: Lang) -> SharedString {
     match (lang, parse_started(started)) {
@@ -271,11 +328,16 @@ pub(super) fn select_row<D: ListDelegate>(
     });
 }
 
+fn select_ix(list: &Entity<ListState<RunList>>, ix: IndexPath, window: &mut Window, cx: &mut App) {
+    list.update(cx, |list, cx| {
+        list.set_selected_index(Some(ix), window, cx);
+        list.scroll_to_selected_item(window, cx);
+    });
+}
+
 const PAGE_ROWS: usize = 10;
-const ROW_HEIGHT: Pixels = px(44.);
-const STATUS_WIDTH: Pixels = px(120.);
+const ROW_HEIGHT: Pixels = px(60.);
 const PROJECT_WIDTH: Pixels = px(132.);
-const PROGRESS_WIDTH: Pixels = px(68.);
 const COST_WIDTH: Pixels = px(72.);
 const STARTED_WIDTH: Pixels = px(104.);
 const MENU_WIDTH: Pixels = px(24.);
@@ -284,33 +346,13 @@ fn cell(width: Pixels) -> Div {
     div().flex_none().w(width).min_w_0()
 }
 
-fn status_icon(status: RunStatus, verified_end: bool) -> IconName {
+fn glyph_state(status: RunStatus, verified_end: bool) -> UnitState {
     match status {
-        RunStatus::Active => IconName::LoaderCircle,
-        RunStatus::Waiting | RunStatus::LimitWait => IconName::Pause,
-        RunStatus::Interrupted | RunStatus::Blocked => IconName::CircleAlert,
-        RunStatus::Done if verified_end => IconName::CircleCheck,
-        RunStatus::Done => IconName::TriangleAlert,
-    }
-}
-
-fn status_cell(status: RunStatus, label: &'static str, verified_end: bool, cx: &App) -> impl IntoElement {
-    let color = cx.tokens().outcome(status, verified_end);
-    h_flex()
-        .gap_1p5()
-        .text_xs()
-        .text_color(color)
-        .child(Icon::new(status_icon(status, verified_end)).size(px(14.)))
-        .child(div().truncate().child(tr(cx, T, label)))
-}
-
-fn progress_color(status: RunStatus, verified: usize, total: usize, t: &Tokens) -> Hsla {
-    if total > 0 && verified == total {
-        t.ok
-    } else if total > 0 && status == RunStatus::Done {
-        t.review
-    } else {
-        t.muted
+        RunStatus::Active => UnitState::Running,
+        RunStatus::Done if verified_end => UnitState::Verified,
+        RunStatus::Done | RunStatus::Blocked => UnitState::Built,
+        RunStatus::Waiting | RunStatus::LimitWait => UnitState::Pending,
+        RunStatus::Interrupted => UnitState::Failed,
     }
 }
 
@@ -365,8 +407,8 @@ impl RowActions {
 
 struct RunList {
     state: Entity<AppState>,
-    rows: Vec<usize>,
-    selected: Option<usize>,
+    groups: Vec<RunGroup>,
+    selected: Option<IndexPath>,
     selected_session: Option<SharedString>,
     focus: Option<FocusHandle>,
 }
@@ -374,8 +416,18 @@ struct RunList {
 impl ListDelegate for RunList {
     type Item = ListItem;
 
-    fn items_count(&self, _: usize, _: &App) -> usize {
-        self.rows.len()
+    fn sections_count(&self, _: &App) -> usize {
+        self.groups.len().max(1)
+    }
+
+    fn items_count(&self, section: usize, _: &App) -> usize {
+        self.groups.get(section).map_or(0, |group| group.runs.len())
+    }
+
+    fn render_section_header(&mut self, section: usize, _: &mut Window, cx: &mut Context<ListState<Self>>) -> Option<impl IntoElement> {
+        let group = self.groups.get(section)?;
+        let label = format!("{} {}", tr(cx, T, group.status.label()), group.runs.len());
+        Some(h_flex().h(px(40.)).items_center().child(ornament::section_label(&cx.tokens(), &label)))
     }
 
     fn render_item(
@@ -384,15 +436,16 @@ impl ListDelegate for RunList {
         window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
-        let index = *self.rows.get(ix.row)?;
+        let index = *self.groups.get(ix.section)?.runs.get(ix.row)?;
         let t = cx.tokens();
         let lang = *cx.global::<Lang>();
         let run = self.state.read(cx).runs.get(index)?;
-        let selected = self.selected == Some(ix.row);
+        let selected = self.selected == Some(ix);
         let focused = selected && self.focus.as_ref().is_some_and(|f| f.is_focused(window));
         let (verified, total) = (run.count(UnitState::Verified), run.units.len());
         let status = run.status;
-        let (status_label, verified_end) = (run.status_label(), run.verified_end());
+        let verified_end = run.verified_end();
+        let full_wish = run.wish.clone();
         let wish = one_line(&run.wish);
         let project = run.project.clone();
         let place = run
@@ -413,20 +466,24 @@ impl ListDelegate for RunList {
         let context_actions = actions.clone();
 
         Some(
-            ListItem::new(ix.row)
+            ListItem::new(ix)
                 .accessibility_label(name)
                 .h(ROW_HEIGHT)
                 .py_0()
                 .px_0()
-                .border_b_1()
-                .border_color(t.border.opacity(0.45))
                 .cursor_pointer()
                 .child(
                     h_flex()
-                        .id(("wish-row", ix.row))
+                        .id(("wish-row", index))
                         .relative()
                         .w_full()
-                        .h(ROW_HEIGHT - px(1.))
+                        .h(ROW_HEIGHT - px(6.))
+                        .mb(px(6.))
+                        .rounded(px(8.))
+                        .bg(t.surface)
+                        .border_1()
+                        .border_color(t.border)
+                        .hover(|style| style.shadow(ornament::gold_glow(&t, 0.7)))
                         .px_3()
                         .gap_3()
                         .context_menu(move |menu, _, cx| context_actions.add_to(menu, cx))
@@ -442,10 +499,15 @@ impl ListDelegate for RunList {
                                     .bg(t.gold),
                             )
                         })
-                        .child(cell(STATUS_WIDTH).child(status_cell(status, status_label, verified_end, cx)))
+                        .child(ornament::glyph(glyph_state(status, verified_end), 20.0, t.outcome(status, verified_end), 0.0))
+                        .when_some(ornament::progress_ring(&t, verified, total, 24.0), |this, ring| this.child(ring))
                         .child(
                             cell(PROJECT_WIDTH)
-                                .id(("wish-project", ix.row))
+                                .id(("wish-project", index))
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(6.))
+                                .bg(t.raised)
                                 .text_sm()
                                 .text_color(t.muted)
                                 .truncate()
@@ -461,20 +523,20 @@ impl ListDelegate for RunList {
                                 .gap_1p5()
                                 .child(
                                     div()
-                                        .id(("wish-text", ix.row))
+                                        .id(("wish-text", index))
                                         .min_w_0()
                                         .truncate()
                                         .text_sm()
                                         .text_color(t.text)
                                         .child(wish.clone())
                                         .tooltip(move |window, cx| {
-                                            Tooltip::new(wish.clone()).build(window, cx)
+                                            Tooltip::new(full_wish.clone()).build(window, cx)
                                         }),
                                 )
                                 .when_some(warning, |this, warning| {
                                     this.child(
                                         div()
-                                            .id(("wish-warning", ix.row))
+                                            .id(("wish-warning", index))
                                             .flex_none()
                                             .text_color(t.review)
                                             .child(
@@ -485,13 +547,6 @@ impl ListDelegate for RunList {
                                             }),
                                     )
                                 }),
-                        )
-                        .child(
-                            cell(PROGRESS_WIDTH)
-                                .text_right()
-                                .text_sm()
-                                .text_color(progress_color(status, verified, total, &t))
-                                .child(progress_label(verified, total)),
                         )
                         .child(
                             cell(COST_WIDTH)
@@ -510,7 +565,7 @@ impl ListDelegate for RunList {
                         )
                         .child(
                             cell(MENU_WIDTH).child(
-                                Button::new(("wish-menu", ix.row))
+                                Button::new(("wish-menu", index))
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Ellipsis)
@@ -531,15 +586,15 @@ impl ListDelegate for RunList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) {
-        self.selected = ix.map(|ix| ix.row);
+        self.selected = ix;
         self.selected_session = ix
-            .and_then(|ix| self.rows.get(ix.row))
+            .and_then(|ix| self.groups.get(ix.section)?.runs.get(ix.row))
             .and_then(|&index| self.state.read(cx).runs.get(index))
             .map(|run| run.session.clone());
     }
 
     fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<ListState<Self>>) {
-        if let Some(&index) = self.selected.and_then(|row| self.rows.get(row)) {
+        if let Some(&index) = self.selected.and_then(|ix| self.groups.get(ix.section)?.runs.get(ix.row)) {
             self.state.update(cx, |state, cx| state.open_run(index, cx));
         }
     }
@@ -576,7 +631,7 @@ impl WishesView {
             ListState::new(
                 RunList {
                     state: state.clone(),
-                    rows: Vec::new(),
+                    groups: Vec::new(),
                     selected: None,
                     selected_session: None,
                     focus: None,
@@ -654,20 +709,14 @@ impl WishesView {
     fn apply(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
         let runs = &self.state.read(cx).runs;
         self.counts = filter_counts(runs, &self.terms);
-        let rows = visible_runs(runs, self.filter, &self.terms, this_month());
-        let keep = if reset {
-            None
-        } else {
-            let delegate = self.list.read(cx).delegate();
-            delegate.selected_session.as_ref().and_then(|session| {
-                rows.iter().position(|&i| runs[i].session == *session)
-            })
-        };
-        let selected = keep.or((!rows.is_empty()).then_some(0));
+        let visible = visible_runs(runs, self.filter, &self.terms, this_month());
+        let groups = group_runs(runs, &visible);
+        let session = if reset { None } else { self.list.read(cx).delegate().selected_session.as_ref() };
+        let selected = selected_index(&groups, runs, session).and_then(|index| index_path(&groups, index));
         self.list.update(cx, |list, cx| {
-            list.delegate_mut().rows = rows;
-            list.set_selected_index(selected.map(IndexPath::new), window, cx);
-            if reset {
+            list.delegate_mut().groups = groups;
+            list.set_selected_index(selected, window, cx);
+            if reset && selected.is_some() {
                 list.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx);
             }
             cx.notify();
@@ -697,11 +746,7 @@ impl WishesView {
     }
 
     fn row_count(&self, cx: &App) -> usize {
-        self.list.read(cx).delegate().rows.len()
-    }
-
-    fn selected_row(&self, cx: &App) -> usize {
-        self.list.read(cx).delegate().selected.unwrap_or(0)
+        self.list.read(cx).delegate().groups.iter().map(|group| group.runs.len()).sum()
     }
 
     fn filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -736,32 +781,6 @@ impl WishesView {
             ))
     }
 
-    fn column_headers(&self, cx: &App) -> impl IntoElement {
-        let t = cx.tokens();
-        let label = |width: Pixels, en: &'static str, right: bool| {
-            cell(width)
-                .when(right, |this| this.text_right())
-                .truncate()
-                .child(tr(cx, T, en))
-        };
-        h_flex()
-            .flex_none()
-            .h(px(32.))
-            .gap_3()
-            .px(px(14.))
-            .text_xs()
-            .text_color(t.muted)
-            .border_b_1()
-            .border_color(t.border)
-            .child(label(STATUS_WIDTH, "Status", false))
-            .child(label(PROJECT_WIDTH, "Project", false))
-            .child(div().flex_1().min_w_0().truncate().child(tr(cx, T, "Wish")))
-            .child(label(PROGRESS_WIDTH, "Verified", true))
-            .child(label(COST_WIDTH, "Cost", true))
-            .child(label(STARTED_WIDTH, "Started", true))
-            .child(cell(MENU_WIDTH))
-    }
-
     fn nothing_yet(&self, cx: &mut Context<Self>) -> Empty {
         let state = self.state.clone();
         let blocker = wish_blocker(&self.state.read(cx).checks)
@@ -777,7 +796,7 @@ impl WishesView {
         let action = v_flex()
             .items_center()
             .gap_2()
-            .child(button)
+            .child(theme::gold_leaf(button, &t))
             .when_some(blocker, |this, reason| {
                 this.child(div().text_xs().text_color(t.review).child(reason))
             })
@@ -813,34 +832,32 @@ impl WishesView {
         }
     }
 
-    fn move_selection(
-        &mut self,
-        row: impl FnOnce(usize, usize) -> usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let count = self.row_count(cx);
-        if count > 0 {
-            let target = row(self.selected_row(cx), count - 1);
-            select_row(&self.list, target, window, cx);
+    fn move_selection(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let delegate = self.list.read(cx).delegate();
+        let current = delegate.selected.and_then(|ix| delegate.groups.get(ix.section)?.runs.get(ix.row).copied());
+        let target = step_cards(&ledger_rows(&delegate.groups), current, step)
+            .and_then(|index| index_path(&delegate.groups, index));
+        if let Some(ix) = target {
+            select_ix(&self.list, ix, window, cx);
         }
     }
 
     fn first_row(&mut self, _: &SelectFirst, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(|_, _| 0, window, cx);
+        self.move_selection(isize::MIN, window, cx);
     }
 
     fn last_row(&mut self, _: &SelectLast, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(|_, last| last, window, cx);
+        self.move_selection(isize::MAX, window, cx);
     }
 
     fn page_up(&mut self, _: &SelectPageUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(|row, _| row.saturating_sub(PAGE_ROWS), window, cx);
+        self.move_selection(-(PAGE_ROWS as isize), window, cx);
     }
 
     fn page_down(&mut self, _: &SelectPageDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(|row, last| (row + PAGE_ROWS).min(last), window, cx);
+        self.move_selection(PAGE_ROWS as isize, window, cx);
     }
+
 }
 
 fn fill_for_stress(state: &mut AppState) {
@@ -883,6 +900,7 @@ impl Render for WishesView {
             .pt_5()
             .px_6()
             .gap_4()
+            .child(ornament::page_title(&t, tr(cx, T, "Wishes")).flex_none())
             .when(no_runs, |this| this.child(self.nothing_yet(cx)))
             .when(!no_runs, |this| {
                 this.child(
@@ -916,7 +934,6 @@ impl Render for WishesView {
                         v_flex()
                             .flex_1()
                             .min_h_0()
-                            .child(self.column_headers(cx))
                             .child(
                                 div()
                                     .key_context("WishList")
@@ -957,6 +974,54 @@ mod tests {
             run("Migrate billing", "billing", RunStatus::Blocked, "Nov 2, 19:33"),
             run("Done one", "chronos-r5", RunStatus::Done, "Nov 3, 00:42"),
         ]
+    }
+
+    #[test]
+    fn grouping_covers_every_run_in_all_six_states_and_preserves_input_order() {
+        let statuses = [RunStatus::Done, RunStatus::Waiting, RunStatus::Blocked,
+            RunStatus::Active, RunStatus::LimitWait, RunStatus::Interrupted, RunStatus::Active];
+        let runs: Vec<_> = statuses.into_iter().map(|status| run("wish", "project", status, "Nov 1, 00:00")).collect();
+        let groups = group_runs(&runs, &[6, 5, 4, 3, 2, 1, 0]);
+        assert_eq!(groups.iter().map(|g| g.status).collect::<Vec<_>>(), GROUP_ORDER);
+        assert_eq!(groups.iter().map(|g| g.runs.clone()).collect::<Vec<_>>(),
+            vec![vec![2], vec![6, 3], vec![1], vec![4], vec![5], vec![0]]);
+        let mut all: Vec<_> = groups.iter().flat_map(|g| g.runs.iter().copied()).collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..runs.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn grouping_follows_filter_and_search_and_omits_empty_groups() {
+        let runs = sample_runs();
+        let visible = visible_runs(&runs, Filter::Running, &search_terms("rram"), 11);
+        assert_eq!(group_runs(&runs, &visible), vec![RunGroup { status: RunStatus::Waiting, runs: vec![1] }]);
+        assert!(group_runs(&runs, &[]).is_empty());
+    }
+
+    #[test]
+    fn movement_skips_dividers_and_clamps_to_cards() {
+        let groups = group_runs(&sample_runs(), &[1, 0, 3, 2]);
+        let rows = ledger_rows(&groups);
+        assert_eq!(rows[0], LedgerRow::Divider { status: RunStatus::Blocked, count: 1 });
+        assert_eq!(step_cards(&rows, Some(2), 1), Some(0));
+        assert_eq!(step_cards(&rows, Some(0), -1), Some(2));
+        assert_eq!(step_cards(&rows, Some(1), isize::MIN), Some(2));
+        assert_eq!(step_cards(&rows, Some(1), isize::MAX), Some(3));
+        assert_eq!(step_cards(&[], None, 1), None);
+    }
+
+    #[test]
+    fn selection_follows_session_across_regroup() {
+        let mut runs = sample_runs();
+        for (i, run) in runs.iter_mut().enumerate() { run.session = format!("session-{i}").into(); }
+        let before = group_runs(&runs, &[1, 0, 3, 2]);
+        let session = runs[0].session.clone();
+        assert_eq!(index_path(&before, selected_index(&before, &runs, Some(&session)).unwrap()), Some(IndexPath::new(0).section(1)));
+        runs[0].status = RunStatus::Done;
+        let after = group_runs(&runs, &[1, 0, 3, 2]);
+        let selected = selected_index(&after, &runs, Some(&session));
+        assert_eq!(selected, Some(0));
+        assert_eq!(index_path(&after, selected.unwrap()), Some(IndexPath::new(0).section(2)));
     }
 
     #[test]

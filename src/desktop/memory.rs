@@ -1,7 +1,8 @@
 //! What Chronos has learned from verified units: filter by project, search, read, correct, delete.
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
-use super::theme::Tokened as _;
+use super::ornament;
+use super::theme::{gold_leaf, Tokened as _};
 use super::wishes::{
     bind_list_keys, empty_state, matches_terms, one_line, search_terms, select_row, started_label,
 };
@@ -757,12 +758,15 @@ impl MemoryView {
                             .on_click(cx.listener(|this, _, window, cx| this.stop_correcting(window, cx))),
                     )
                     .child(
-                        Button::new("memory-save")
-                            .primary()
-                            .small()
-                            .label(tr(cx, T, "Save correction"))
-                            .disabled(problem.is_some())
-                            .on_click(cx.listener(move |this, _, window, cx| this.save_correction(id, window, cx))),
+                        gold_leaf(
+                            Button::new("memory-save")
+                                .primary()
+                                .small()
+                                .label(tr(cx, T, "Save correction"))
+                                .disabled(problem.is_some())
+                                .on_click(cx.listener(move |this, _, window, cx| this.save_correction(id, window, cx))),
+                            &t,
+                        ),
                     ),
             )
             .into_any_element()
@@ -966,14 +970,7 @@ impl Render for MemoryView {
             .px_6()
             .pb_5()
             .gap_4()
-            .child(
-                div()
-                    .flex_none()
-                    .text_lg()
-                    .font_semibold()
-                    .text_color(t.text)
-                    .child(tr(cx, T, "What Chronos has learned")),
-            )
+            .child(ornament::page_title(&t, tr(cx, T, "What Chronos has learned")).flex_none())
             .when(no_entries, |this| this.child(self.nothing_yet(cx)))
             .when(!no_entries, |this| {
                 this.child(

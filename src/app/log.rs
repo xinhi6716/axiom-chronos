@@ -63,6 +63,8 @@ pub struct Tokens {
     pub input: u64,
     pub cached: u64,
     pub output: u64,
+    #[serde(skip)]
+    pub missing: [bool; 3],
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentView {
@@ -423,18 +425,19 @@ impl ScanState {
                     let Ok(report) = serde_json::from_str::<Value>(&text) else {
                         continue;
                     };
-                    let Some(u) = report["usage"].as_object() else {
-                        continue;
-                    };
-                    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                     let key = s(&report["model"])
                         .or(call.kind)
                         .unwrap_or_else(|| "codex".into());
+                    let u = report["usage"].as_object();
+                    let n = |k: &str| u.and_then(|u| u.get(k)).and_then(Value::as_u64);
                     let t = self.codex.entry(key).or_default();
                     t.calls += 1;
-                    t.input += n("inputTokens");
-                    t.cached += n("cachedInputTokens");
-                    t.output += n("outputTokens");
+                    for (ix, value) in [n("inputTokens"), n("cachedInputTokens"), n("outputTokens")].iter().enumerate() {
+                        t.missing[ix] |= value.is_none();
+                    }
+                    t.input += n("inputTokens").unwrap_or(0);
+                    t.cached += n("cachedInputTokens").unwrap_or(0);
+                    t.output += n("outputTokens").unwrap_or(0);
                 }
                 _ => {}
             }
