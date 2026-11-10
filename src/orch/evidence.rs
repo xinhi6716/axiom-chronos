@@ -177,10 +177,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
 }
+/// The tree of the paths in `scope` as they are now. A path that does not exist (deleted, or
+/// not yet created) is left out, since `git add` refuses a pathspec that matches nothing.
 pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     if git(repo, &["rev-parse", "--is-inside-work-tree"]) != "true" {
         return String::new();
     }
+    let scope: Vec<&String> = scope
+        .iter()
+        .filter(|path| repo.join(path).exists())
+        .collect();
     let index = std::env::temp_dir().join(format!(
         "orch-index-{}-{}",
         std::process::id(),
@@ -199,7 +205,7 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         }
         if !scope.is_empty() {
             let mut args = vec!["add", "-A", "--"];
-            args.extend(scope.iter().map(String::as_str));
+            args.extend(scope.iter().map(|path| path.as_str()));
             if !run(&args).ok()?.status.success() {
                 return None;
             }
@@ -220,12 +226,7 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
 }
 /// The tree of `scope` before a worker runs. Paths the worker has yet to create are left out.
 pub fn base_snapshot(repo: &Path, scope: &[String]) -> String {
-    let present: Vec<String> = scope
-        .iter()
-        .filter(|path| repo.join(path).exists())
-        .cloned()
-        .collect();
-    snapshot(repo, &present)
+    snapshot(repo, scope)
 }
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;

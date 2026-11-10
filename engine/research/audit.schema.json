@@ -20,7 +20,7 @@
         "additionalProperties": false,
         "required": ["id", "area", "location", "evidence", "problem", "change", "verify"],
         "properties": {
-          "id": {"type": "string"},
+          "id": {"type": "string", "description": "One word without spaces or commas, unique in this plan, such as C1."},
           "area": {"type": "string", "enum": ["design", "feature", "algorithm", "correctness", "performance", "tests"]},
           "location": {"type": "string"},
           "evidence": {"type": "string"},

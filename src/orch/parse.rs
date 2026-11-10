@@ -167,24 +167,29 @@ fn backtick(s: &str) -> Option<String> {
     let (_, tail) = s.split_once('`')?;
     Some(tail.split_once('`')?.0.to_string())
 }
+/// A plan item id is the `id` of a change in `astra/plan.json`, which the schema leaves free:
+/// any one word, without the spaces and commas that separate ids in SERVES.
 fn is_plan_id(s: &str) -> bool {
-    s.len() <= 32
-        && s.chars().any(|c| c.is_ascii_digit())
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    !s.is_empty() && !s.contains(|c: char| c.is_whitespace() || c == ',')
 }
-/// Plan items in order: each `### <id> <title>` heading whose id is a plain token with a digit. Anything else is skipped.
+/// Plan items in order: each `### <id> <title>` heading outside the `## Coverage` section, whose
+/// read and not-read lists may have `###` headings of their own.
 pub fn parse_plan(text: &str) -> Vec<PlanItem> {
     let mut items: Vec<PlanItem> = Vec::new();
+    let mut coverage = false;
     for line in text.lines() {
-        let Some(rest) = line.strip_prefix("### ") else {
+        if let Some(section) = line.strip_prefix("## ") {
+            coverage = section.trim_start().starts_with("Coverage");
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("### ").filter(|_| !coverage) else {
             continue;
         };
         let rest = rest.trim();
         let (id, title) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let id = id.trim_end_matches(':');
         let title = title.trim().trim_start_matches([':', '-', ' ']).trim();
-        if is_plan_id(id) && !title.is_empty() && !items.iter().any(|i| i.id == id) {
+        if !id.is_empty() && !items.iter().any(|i| i.id == id) {
             items.push(PlanItem {
                 id: id.into(),
                 title: title.into(),

@@ -204,15 +204,15 @@ fn path_coverage_and_overlap() {
 fn serving(ids: &str) -> String {
     format!("{}SERVES {ids}\n", section("m", "src/m/", "none", "m, test"))
 }
-const PLAN_TEXT: &str = "## Coverage\n### A1 First\n### A2: Second\n### A3 - Third\n";
+const PLAN_TEXT: &str = "### A1 First\n### A2: Second\n### A3 - Third\n## Coverage\n### read\n";
 
 #[test]
 fn plan_items_come_from_id_headings_only() {
     use axiom::orch::parse_plan;
-    let items = parse_plan("### A1 First\n### A1 Again\n### two words\n### B2:\n## H Skip\n### B3: Third thing\n");
+    let items = parse_plan("### A1 First\n### A1 Again\n### two words\n### B2:\n## H Skip\n### B3: Third thing\n## Coverage\n### Read\n## After\n### C4 Last\n");
     assert_eq!(
         items.iter().map(|i| (i.id.as_str(), i.title.as_str())).collect::<Vec<_>>(),
-        [("A1", "First"), ("B3", "Third thing")]
+        [("A1", "First"), ("two", "words"), ("B2", ""), ("B3", "Third thing"), ("C4", "Last")]
     );
     assert!(parse_plan("prose only\n").is_empty());
 }
@@ -252,4 +252,25 @@ fn goal_check_refuses_unknown_and_unserved_plan_items() {
     assert_eq!(check_goals(&unknown_out, &plan).unwrap_err(), "OUT OF SCOPE names unknown plan item Z9");
     // old map against a plan without items passes
     check_goals(&parse_map(&section("m", "src/m/", "none", "m, test")).unwrap(), &[]).unwrap();
+}
+
+#[test]
+fn plan_ids_need_no_digit_and_coverage_headings_are_not_items() {
+    use axiom::orch::{check_goals, parse_plan};
+    let audit = axiom::engine::FILES.iter().find(|(p, _)| *p == "research/audit.schema.json").unwrap().1;
+    let audit: serde_json::Value = serde_json::from_str(audit).unwrap();
+    let id = &audit["properties"]["changes"]["items"]["properties"]["id"];
+    assert!(id["description"].as_str().unwrap().starts_with("One word without spaces or commas"));
+    let plan = parse_plan("# Plan\n### cache 清除快取\n### R4-01: Progress\n### 清除 Drop it\n## Coverage\n### read\n- src\n### not_read\n- docs\n");
+    assert_eq!(
+        plan.iter().map(|i| (i.id.as_str(), i.title.as_str())).collect::<Vec<_>>(),
+        [("cache", "清除快取"), ("R4-01", "Progress"), ("清除", "Drop it")]
+    );
+    let map = parse_map(&format!("{}OUT OF SCOPE 清除 later\n", serving("cache, R4-01"))).unwrap();
+    assert_eq!(map.modules[0].serves, ["cache", "R4-01"]);
+    check_goals(&map, &plan).unwrap();
+    assert_eq!(
+        check_goals(&parse_map(&serving("R4-01")).unwrap(), &plan).unwrap_err(),
+        "plan item cache (清除快取) is not served by any module and not listed as OUT OF SCOPE"
+    );
 }

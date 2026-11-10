@@ -267,7 +267,7 @@ fn a_verdict_needs_a_pack_of_the_verified_tree() {
     let f = Fixture::new();
     f.built();
     record_accept(&f.store, "m", &f.repo).unwrap();
-    let verdict = f.verdict("u", &json!({"unit":"u","verdict":"pass","findings":[]}));
+    let verdict = f.verdict("u", &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}));
     let before = evidence(&f.store, "u").unwrap().len();
     let refused = f.review("u", &verdict);
     assert_eq!(refused.exit_code, 1);
@@ -295,7 +295,7 @@ fn review_stays_cross_family_with_a_pack() {
     );
     record_accept(&f.store, "m", &f.repo).unwrap();
     review_pack(&f.store, "u", &f.repo).unwrap();
-    let verdict = f.verdict("u", &json!({"unit":"u","verdict":"pass","findings":[]}));
+    let verdict = f.verdict("u", &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}));
     assert!(f.review("u", &verdict).stderr.contains("same family"));
 }
 
@@ -314,7 +314,7 @@ fn digest_carries_what_the_final_report_lists() {
     f.built();
     record_accept(&f.store, "m", &f.repo).unwrap();
     review_pack(&f.store, "u", &f.repo).unwrap();
-    let fail = json!({"unit":"u","verdict":"fail","findings":[
+    let fail = json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"fail","findings":[
         {"check":"untested","severity":"major","location":"a.txt:100","evidence":"no test covers it","fix":"add one"},
         {"check":"platform","severity":"minor","location":"a.txt:1","evidence":"small thing","fix":"x"}
     ]});
@@ -415,7 +415,7 @@ fn digest_stays_bounded_however_large_the_run() {
     review_pack(&f.store, "u", &f.repo).unwrap();
     let verdict = f.verdict(
         "u",
-        &json!({"unit":"u","verdict":"fail","findings":findings}),
+        &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"fail","findings":findings}),
     );
     assert_eq!(f.review("u", &verdict).exit_code, 0);
     let reports: u64 = fs::read_dir(f.store.join("reports"))
@@ -425,9 +425,135 @@ fn digest_stays_bounded_however_large_the_run() {
     assert!(reports > 1_000_000, "{reports}");
     let text = report(&f, &[]);
     assert!(text.chars().count() < 45_000, "{}", text.chars().count());
-    assert!(text.contains("changed files (600):"));
-    assert!(text.contains("... 400 more in reports/<unit>.json"));
+    // 600 reported paths, plus a.txt, which only git shows
+    assert!(text.contains("changed files (601):"));
+    assert!(text.contains("... 401 more in reports/<unit>.json"));
     assert!(text.contains("... 170 more in reports/<unit>.verdict.json"));
     assert!(text.contains("cut at 16000 characters; the rest is in"));
     assert!(text.contains("decisions.md"));
+}
+
+fn verified_tree(store: &Path, unit: &str) -> String {
+    evidence(store, unit)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|r| r.kind == "verify")
+        .unwrap()
+        .commit
+}
+
+#[test]
+fn an_old_verdict_cannot_pass_a_new_pack() {
+    let f = Fixture::new();
+    f.built();
+    record_accept(&f.store, "m", &f.repo).unwrap();
+    let pack = review_pack(&f.store, "u", &f.repo).unwrap();
+    let first = pack.tree;
+    assert!(fs::read_to_string(&pack.path)
+        .unwrap()
+        .contains(&format!("\nTree reviewed: {first}\n")));
+    let old = f.verdict("u", &json!({"unit":"u","tree":first,"verdict":"pass","findings":[]}));
+    fs::write(f.repo.join("a.txt"), "rewritten after the first review\n").unwrap();
+    assert_eq!(record_verify(&f.store, "u", &f.repo).unwrap().exit_code, 0);
+    record_accept(&f.store, "m", &f.repo).unwrap();
+    let second = review_pack(&f.store, "u", &f.repo).unwrap().tree;
+    assert_ne!(first, second);
+    let before = evidence(&f.store, "u").unwrap().len();
+    let refused = f.review("u", &old);
+    assert_eq!(refused.exit_code, 1, "{}", refused.stdout);
+    assert!(refused.stderr.contains(&format!("the verdict reviewed {first}")), "{}", refused.stderr);
+    assert_eq!(evidence(&f.store, "u").unwrap().len(), before);
+    let untreed = f.verdict("u", &json!({"unit":"u","verdict":"pass","findings":[]}));
+    assert!(f.review("u", &untreed).stderr.contains("missing tree"));
+    let current = f.verdict("u", &json!({"unit":"u","tree":second,"verdict":"pass","findings":[]}));
+    let accepted = f.review("u", &current);
+    assert_eq!(accepted.exit_code, 0, "{}", accepted.stderr);
+    assert!(accepted.stdout.contains("u\tverified"));
+}
+
+#[test]
+fn a_large_deletion_keeps_its_last_version_readable() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.repo.join("sub")).unwrap();
+    fs::write(f.repo.join("sub/a.txt"), "a\n").unwrap();
+    fs::write(f.repo.join("sub/big.txt"), "big line of text\n".repeat(8000)).unwrap();
+    f.add("u", "m", "sub/");
+    f.work(
+        "u",
+        "gpt-6.1-terra",
+        |repo| {
+            fs::write(repo.join("sub/a.txt"), "changed\n").unwrap();
+            fs::remove_file(repo.join("sub/big.txt")).unwrap();
+        },
+        json!({"status":"completed"}),
+    );
+    let info = review_pack(&f.store, "u", &f.repo).unwrap();
+    assert_eq!(info.omitted, ["sub/big.txt"]);
+    let text = fs::read_to_string(&info.path).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("- sub/big.txt  +0 -8000"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let (_, kept) = line
+        .split_once("deleted; its last version is at ")
+        .unwrap_or_else(|| panic!("{line}"));
+    let kept = kept.trim_end_matches(')');
+    assert_eq!(
+        fs::read_to_string(kept).unwrap(),
+        "big line of text\n".repeat(8000)
+    );
+    assert!(!text.contains("big line of text"));
+    assert!(text.contains("+changed"));
+}
+
+#[test]
+fn a_unit_that_deletes_a_file_named_in_scope_gets_a_snapshot() {
+    let f = Fixture::new();
+    fs::write(f.repo.join("gone.txt"), "old\n").unwrap();
+    f.add("u", "m", "a.txt gone.txt");
+    f.work(
+        "u",
+        "gpt-6.1-terra",
+        |repo| fs::remove_file(repo.join("gone.txt")).unwrap(),
+        json!({"status":"completed"}),
+    );
+    assert!(verified_tree(&f.store, "u").starts_with("tree:"));
+    let info = review_pack(&f.store, "u", &f.repo).unwrap();
+    let text = fs::read_to_string(&info.path).unwrap();
+    assert!(text.contains("- gone.txt  +0 -1\n"), "{text}");
+    assert!(text.contains("-old\n"), "{text}");
+}
+
+#[test]
+fn digest_lists_changes_the_worker_did_not_report() {
+    let f = Fixture::new();
+    fs::write(f.repo.join(".gitignore"), "sub/ignored.txt\n").unwrap();
+    f.add("u", "m", "a.txt new.txt sub/");
+    f.work(
+        "u",
+        "gpt-6.1-terra",
+        |repo| {
+            fs::write(repo.join("a.txt"), "changed\n").unwrap();
+            fs::write(repo.join("new.txt"), "new\n").unwrap();
+            fs::create_dir_all(repo.join("sub")).unwrap();
+            fs::write(repo.join("sub/ignored.txt"), "hidden from git\n").unwrap();
+        },
+        json!({"status":"completed","file_changes":[{"path":"sub/ignored.txt"}]}),
+    );
+    let text = report(&f, &[]);
+    assert!(
+        text.contains("changed files (3):\n  a.txt\n  new.txt\n  sub/ignored.txt\n"),
+        "{text}"
+    );
+    let path = f.store.join("reports/u.evidence.tsv");
+    let rows = fs::read_to_string(&path).unwrap();
+    let tree = verified_tree(&f.store, "u");
+    fs::write(&path, rows.replace(&tree, "tree:0123456789")).unwrap();
+    let text = report(&f, &[]);
+    assert!(text.contains("changed files (1):\n"), "{text}");
+    assert!(
+        text.contains("u: git cannot compare its snapshots"),
+        "{text}"
+    );
 }
