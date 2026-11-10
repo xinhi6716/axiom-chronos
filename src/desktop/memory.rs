@@ -552,6 +552,7 @@ impl MemoryView {
             let state = state.clone();
             alert
                 .confirm()
+                .entrance(super::motion::DIALOG_ENTRANCE)
                 .title(tr(cx, T, "Delete this memory?"))
                 .description(
                     v_flex()

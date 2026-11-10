@@ -91,6 +91,11 @@ pub fn both() -> [Tokens; 2] {
     [DARK, LIGHT]
 }
 
+/// The night tokens, whatever the theme: the launch always opens in darkness.
+pub fn night() -> Tokens {
+    DARK
+}
+
 pub fn module_color(index: usize) -> Hsla {
     rgb(MODULE_HUES[index % MODULE_HUES.len()]).into()
 }
@@ -215,6 +220,8 @@ pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         theme.list_hover = t.raised;
         theme.list_active = t.raised;
         theme.list_active_border = t.gold;
+        // Dialogs fade in and out quickly; their content settles with the app's own spring.
+        theme.motion.duration_normal = super::motion::Pace::Close.duration();
     });
 }
 

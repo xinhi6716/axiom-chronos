@@ -5,10 +5,12 @@ mod detail;
 pub mod demo;
 mod doctor;
 pub mod i18n;
+mod launch;
 mod live;
 mod memory;
 mod mesh;
 pub mod model;
+mod motion;
 mod ornament;
 mod palette;
 mod run_view;
@@ -148,8 +150,19 @@ pub fn run(options: Options) -> i32 {
             ..Default::default()
         };
         let may_flash = !options.offscreen;
+        // The launch starts with the window; a scene that holds it freezes the motion clock there.
+        let start = std::time::Instant::now();
+        let scene = options.scene.as_deref();
+        if let Some(ms) = launch::held_ms(scene) {
+            motion::freeze(start + Duration::from_millis(ms), cx);
+        }
+        let opening = if launch::plays(options.offscreen, scene, cx.reduce_motion()) {
+            launch::Launch::start(start)
+        } else {
+            launch::Launch::none()
+        };
         gpui_kit::open_window(window, cx, |window, cx| {
-            cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx))
+            cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening))
         })
         .expect("could not open the main window");
         if let Some(seconds) = options.quit_after {

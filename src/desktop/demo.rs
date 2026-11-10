@@ -270,3 +270,30 @@ pub fn state() -> AppState {
         address: None,
     }
 }
+
+/// Demo only: one step of work, as a live run takes it. The running unit is verified, the next
+/// pending one starts, and the busy module gains a unit, so a capture can show values gliding,
+/// a state blending and a new row arriving.
+pub fn advance(run: &mut Run) {
+    let Some(i) = run.units.iter().position(|u| u.state == UnitState::Running) else { return };
+    run.units[i].state = UnitState::Verified;
+    run.units[i].raw_state = "verified".into();
+    if let Some(j) = (0..run.units.len()).find(|&j| run.units[j].state == UnitState::Pending) {
+        run.units[j].state = UnitState::Running;
+        run.units[j].raw_state = "running".into();
+    }
+    let module = run.units[i].module;
+    let index = run.units.len();
+    run.units.push(Unit {
+        id: "u-late-findings".into(),
+        title: "Fold the late findings into the summary".into(),
+        module,
+        state: UnitState::Pending,
+        raw_state: "pending".into(),
+        attempts: 0,
+        files: UnitFiles::default(),
+    });
+    if let Some(m) = run.modules.get_mut(module) {
+        m.units.push(index);
+    }
+}

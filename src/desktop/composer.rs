@@ -3,6 +3,7 @@
 use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Table};
 use super::model::*;
+use super::motion::{self, Driver};
 use super::palette::{self, fuzzy, in_area, key_cap, marked, Area};
 use super::superswitch::{self, Activation, Members};
 use super::theme::Tokened as _;
@@ -25,7 +26,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 const T: Table = &[
     ("Choose folder…", "選擇資料夾…"),
@@ -671,9 +674,9 @@ impl Composer {
                     this.focus_first(window, cx);
                 }
                 // Frames are asked for only while the activation plays; once it settles, none.
-                if this.research.wants_frame(Instant::now(), this.state.read(cx).reduce_motion) {
-                    window.request_animation_frame();
-                }
+                let mut frames = Driver::new(this.state.read(cx).reduce_motion, cx);
+                frames.keep(this.research.wants_frame(frames.now(), frames.reduce()));
+                frames.finish(window);
                 this.fill(dialog, cx)
             })
         });
@@ -918,8 +921,9 @@ impl Composer {
                 let _ = view.update(cx, |this, cx| this.cancel(window, cx));
                 false
             })
+            .entrance(motion::DIALOG_ENTRANCE)
             .title(tr(cx, T, "New wish"))
-            .child(self.form(cx))
+            .child(motion::settle_in("composer-form", self.form(cx)))
             .footer(self.footer(cx))
     }
 
@@ -1304,7 +1308,7 @@ impl Composer {
 
     fn research_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
-        let look = self.research.look(Instant::now(), self.state.read(cx).reduce_motion);
+        let look = self.research.look(motion::now(cx), self.state.read(cx).reduce_motion);
         let shortfall = self.members.and_then(Members::shortfall).map(|text| tr(cx, T, text));
         div()
             .id("composer-research")
@@ -1349,7 +1353,7 @@ impl Composer {
                             .checked(self.research.is_on())
                             .accessibility_label(tr(cx, T, "Advanced research"))
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.research.set(*checked, Instant::now());
+                                this.research.set(*checked, motion::now(cx));
                                 cx.notify();
                             })),
                     ),
@@ -1498,7 +1502,7 @@ impl Composer {
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(Duration::from_millis(1500)).await;
                     let _ = this.update(cx, |this, cx| {
-                        this.research.set(true, Instant::now());
+                        this.research.set(true, motion::now(cx));
                         cx.notify();
                     });
                 })
@@ -1508,12 +1512,12 @@ impl Composer {
                 fill(self, window, cx);
                 self.members_probe = None;
                 self.members = Some(Members { fable: true, argon: false });
-                self.research.set(true, Instant::now());
+                self.research.set(true, motion::now(cx));
             }
             "-research-reduced" => {
                 fill(self, window, cx);
                 self.state.update(cx, |s, _| s.reduce_motion = true);
-                self.research.set(true, Instant::now());
+                self.research.set(true, motion::now(cx));
             }
             held if held.starts_with("-research-at-") => {
                 fill(self, window, cx);

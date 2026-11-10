@@ -1,6 +1,7 @@
 //! The checklist: what the wish has to do, what is finished and what is happening now.
 use super::i18n::{tr, Table};
 use super::model::*;
+use super::motion::{self, ease_out, Curve, Driver, Pace, Tween};
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::ListItem;
@@ -14,9 +15,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 const T: Table = &[
     ("All", "全部"),
@@ -276,7 +278,7 @@ impl Expansion {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum RowKey {
     Goal(usize),
     Section,
@@ -726,6 +728,17 @@ pub struct Todo {
     /// The scroll position when the last frame was prepainted, to notice the user scrolling.
     painted_scroll: Rc<Cell<f32>>,
     forced_width: Option<f32>,
+    /// The header's figures, gliding to each new count: verified, review, running, failed, total.
+    figures: [Tween; 5],
+    /// Rows that arrived while the list was on screen, and when; they ease in.
+    arrivals: Vec<(RowKey, Instant)>,
+}
+
+/// How far a new row slides in from the left as it fades in.
+const ROW_DRIFT: f32 = 10.0;
+
+fn figures_of(tally: Tally) -> [f32; 5] {
+    [tally.verified, tally.review, tally.running, tally.failed, tally.total()].map(|n| n as f32)
 }
 
 impl Todo {
@@ -756,6 +769,8 @@ impl Todo {
             measured: (0.0, 0.0),
             painted_scroll: Rc::new(Cell::new(0.0)),
             forced_width: None,
+            figures: [Tween::rest(0.0, Pace::Change, Curve::EaseOut); 5],
+            arrivals: vec![],
         };
         this.apply_scene(cx);
         this
@@ -842,6 +857,25 @@ impl Todo {
             .iter()
             .filter(|g| goal_summary(g, &tallies).1 == Progress::Done)
             .count();
+
+        // Counts glide to their new figures; rows that were not there before ease in. A fresh
+        // list (another run, another filter) simply appears, since nothing in it is news.
+        let (now, reduce) = (motion::now(cx), state.reduce_motion);
+        let fresh = rebuild == Rebuild::Fresh || self.rows.is_empty();
+        for (tween, value) in self.figures.iter_mut().zip(figures_of(self.tally)) {
+            if fresh {
+                tween.jump(value);
+            } else {
+                tween.set(value, now, reduce);
+            }
+        }
+        if !fresh && !reduce {
+            let before: HashSet<RowKey> = self.rows.iter().map(|r| r.key).collect();
+            self.arrivals.retain(|(_, at)| now.saturating_duration_since(*at) < Pace::Row.duration());
+            self.arrivals.extend(rows.iter().map(|r| r.key).filter(|key| *key != RowKey::Section && !before.contains(key)).map(|key| (key, now)));
+        } else {
+            self.arrivals.clear();
+        }
 
         let viewport = self.measured.1;
         let mut scroll = self.scroll_pos();
@@ -1123,10 +1157,12 @@ impl Todo {
             None
         };
 
+        let arrival = self.arrival(key, cx);
         div()
             .w_full()
             .h(px(height))
             .px(px(4.0))
+            .when(arrival < 1.0, |this| this.relative().left(px(-ROW_DRIFT * (1.0 - arrival))).opacity(arrival))
             .child(
                 ListItem::new(key.id())
                     .selected(row.selected)
@@ -1237,22 +1273,33 @@ impl Todo {
             .into_any_element()
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// How far a row has eased in, 0..1; 1 for every row that was already there.
+    fn arrival(&self, key: RowKey, cx: &App) -> f32 {
+        let Some((_, at)) = self.arrivals.iter().find(|(k, _)| *k == key) else { return 1.0 };
+        let reduce = self.state.read(cx).reduce_motion;
+        let mut row = Tween::rest(0.0, Pace::Row, Curve::EaseOut);
+        row.set(1.0, *at, reduce);
+        ease_out(row.progress(motion::now(cx), reduce))
+    }
+
+    fn render_header(&self, glide: [f32; 5], cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let tally = self.tally;
         let filter = self.filter;
+        let [verified, review, running, failed, total] = glide;
+        // The figure counts up with the bar; the words beside it are always the true counts.
         let figure = if tally.total() == 0 {
             "— / —".to_owned()
         } else {
-            format!("{} / {}", tally.verified, tally.total())
+            format!("{} / {}", verified.round() as usize, total.round() as usize)
         };
         let goals = (self.goals_total > 0).then(|| format!("{} {} / {}", tr(cx, T, "Goals"), self.goals_done, self.goals_total));
-        let total = tally.total().max(1) as f32;
-        let segment = |count: usize, color: Hsla| {
-            (count > 0).then(|| {
+        let total = total.max(1.0);
+        let segment = |count: f32, color: Hsla| {
+            (count > 0.01).then(|| {
                 div()
                     .h_full()
-                    .w(relative(count as f32 / total))
+                    .w(relative(count / total))
                     .rounded(px(1.5))
                     .bg(color)
             })
@@ -1296,10 +1343,10 @@ impl Todo {
                     .gap(px(1.0))
                     .rounded_full()
                     .bg(t.border)
-                    .children(segment(tally.verified, t.ok))
-                    .children(segment(tally.review, t.review))
-                    .children(segment(tally.running, t.run))
-                    .children(segment(tally.failed, t.fail)),
+                    .children(segment(verified, t.ok))
+                    .children(segment(review, t.review))
+                    .children(segment(running, t.run))
+                    .children(segment(failed, t.fail)),
             )
             .child(
                 h_flex().w_full().flex_wrap().gap(px(2.0)).children(Filter::ALL.into_iter().map(|option| {
@@ -1548,6 +1595,11 @@ impl Render for Todo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
         let t = cx.tokens();
+        let mut frames = Driver::new(self.state.read(cx).reduce_motion, cx);
+        let glide = self.figures.map(|tween| frames.value(&tween));
+        let arriving = self.arrivals.iter().any(|(_, at)| frames.now().saturating_duration_since(*at) < Pace::Row.duration());
+        frames.keep(arriving);
+        frames.finish(window);
         let state = self.state.read(cx);
         let Some(run) = state.run() else {
             return self
@@ -1577,7 +1629,7 @@ impl Render for Todo {
                 .into_any_element();
         }
         self.frame(&t)
-            .child(self.render_header(cx))
+            .child(self.render_header(glide, cx))
             .when_some(building_note, |this, note| {
                 this.child(
                     h_flex()

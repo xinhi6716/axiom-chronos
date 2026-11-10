@@ -1,6 +1,7 @@
 //! The control bar at the foot of the Run screen: what this run offers right now, and its event log.
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
+use super::motion;
 use super::theme::{Tokened as _, Tokens};
 use crate::base::Res;
 use crate::session::local_offset_secs;
@@ -458,8 +459,9 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
             .close_button(false)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
+            .entrance(motion::DIALOG_ENTRANCE)
             .title(question.title)
-            .child(div().text_sm().text_color(muted).child(question.detail))
+            .child(motion::settle_in("ask-detail", div().text_sm().text_color(muted).child(question.detail)))
             .footer(
                 DialogFooter::new()
                     .child(
@@ -825,7 +827,7 @@ impl Control {
         }
         let view = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
-            view.update(cx, |this, cx| this.fill_report(dialog, window, cx))
+            view.update(cx, |this, cx| this.fill_report(dialog.entrance(motion::DIALOG_ENTRANCE), window, cx))
         });
     }
 
