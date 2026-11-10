@@ -16,6 +16,17 @@ pub const HANDOFF_ENV: &str = "AXIOM_HANDOFF_TOKENS";
 pub const TAIL_BYTES: u64 = 1 << 20;
 const HEAD_BYTES: u64 = 256 * 1024;
 pub const DISPATCHER: &str = "chronos:dispatcher";
+pub const ORCH: &str = "mcp__plugin_chronos_bridge__orch";
+pub const LOCKED_ALLOWED: [&str; 4] = ["handoff", "report", "status", "resume"];
+
+/// Whether a tool call is permitted by the dispatcher's handoff lock.
+pub fn lock_allows(tool: &str, input: &Value) -> bool {
+    tool == ORCH
+        && input.get("args").and_then(Value::as_array)
+            .and_then(|args| args.first())
+            .and_then(Value::as_str)
+            .is_some_and(|action| LOCKED_ALLOWED.contains(&action))
+}
 
 /// The handoff threshold: `AXIOM_HANDOFF_TOKENS`, 0 to turn handoffs off, 150k when unset.
 pub fn handoff_limit() -> Option<u64> {

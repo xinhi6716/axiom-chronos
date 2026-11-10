@@ -69,7 +69,7 @@ fn every_tool_the_hook_gates_reaches_the_hook() {
         CODEX,
         GOAL,
     ] {
-        assert!(routed.contains(&name), "{name} never reaches the hook");
+        assert!(matcher == "*" || routed.contains(&name), "{name} never reaches the hook");
     }
 }
 

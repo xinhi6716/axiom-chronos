@@ -88,18 +88,13 @@ fn report_is_written_in_plain_language() {
     assert!(!text.to_lowercase().contains("rewrite"));
     assert!(!text.contains("stage:"));
     for phrase in [
-        "Write the report yourself, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for the user.",
-        "the changed files",
-        "the per-module acceptance results if there was a map",
-        "the full test result and whether sol ran",
-        "the choices the dispatcher decided",
-        "what the memory keeper recorded",
-        "Astra's coverage read and not-read lists",
-        "every unit whose state is not `verified` with its state (`failed`, `accept-failed`, `review-failed`, or `unreviewed`)",
-        "never call such a unit done",
+        "Give `chronos:narrator` the `orch` `[\"report\"]` digest",
+        "Do not reprint its text.",
+        "The rulings stay yours; step 7 closes the goal.",
     ] {
         let has = |value: &str| value.contains(phrase);
         assert!(has(text), "missing {phrase}");
+        assert_eq!(text.matches(phrase).count(), 1);
         assert!(!has(&text.replace(phrase, "")));
     }
     let steps: Vec<_> = text
@@ -142,7 +137,10 @@ fn a_long_batch_is_piloted_then_waited_on_without_a_model() {
     }
     let pilot = step.find("one pilot unit").unwrap();
     assert!(pilot < step.find("launch the full batch").unwrap());
-    assert!(step.find("launch the full batch").unwrap() < step.find("`waiting`").unwrap());
+    assert!(
+        step.find("launch the full batch").unwrap()
+            < step.find("Close the goal as `waiting`").unwrap()
+    );
 
     let dispatcher = file("agents/dispatcher.md");
     let phrase = "report its progress file, completion marker and pid";
@@ -178,7 +176,7 @@ fn the_core_reads_a_digest_not_the_reports_directory() {
     assert!(step.contains("Never read `<store>/reports/` file by file"));
     assert!(!text.contains("Read every file in `<store>/reports/`"));
     let report = text.lines().find(|l| l.starts_with("6. ")).unwrap();
-    assert!(report.contains("list from the digest the changed files"));
+    assert!(report.contains("chronos:narrator"));
     let hand_off = text.lines().find(|l| l.starts_with("4. ")).unwrap();
     assert!(hand_off.contains("Never poll, sleep or watch files while an agent runs"));
 }

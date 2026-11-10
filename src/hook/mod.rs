@@ -491,6 +491,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
         }
         "PreToolUse" => {
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
+            let previously_routed = matches!(tool, "Write" | "Edit" | "NotebookEdit" | "Bash" | "PowerShell" | "Read" | "AskUserQuestion" | "Agent" | "Task" | CODEX | GOAL);
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
             let subagent = input.get("subagent_type").and_then(Value::as_str);
@@ -526,6 +527,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 Ok(Some(g)) => g,
                 Ok(None) => return None,
                 Err(e) if e.kind == "invalid_argument" => return None,
+                Err(_) if !previously_routed => return None,
                 Err(e) => {
                     return deny(&format!(
                         "The goal could not be read, so this call cannot be checked: {}",
@@ -554,7 +556,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                         return deny(&reason);
                     }
                 }
-                if agent && matches!(tool, CODEX | "Agent" | "Task") {
+                if agent && !context::lock_allows(tool, input) {
                     if let Some(limit) = context::handoff_limit() {
                         let module = agent_module(home, &g, input, event);
                         if let Some(reason) =
@@ -563,6 +565,10 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                             return deny(&reason);
                         }
                     }
+                }
+                // Calls newly routed by the wildcard have no other hook behavior.
+                if !previously_routed {
+                    return None;
                 }
             }
             let mode = g.mode.as_deref();

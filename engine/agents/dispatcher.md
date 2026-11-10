@@ -2,6 +2,7 @@
 name: dispatcher
 description: Carries out a wish on a codebase by splitting it into Codex worker units, dispatching each through the axiom bridge, verifying the results and reporting back. Give it the wish and the project's absolute directory.
 model: sonnet
+autoCompactWindow: 200000
 tools: Read, Glob, Grep, Write, Bash, Agent, mcp__plugin_chronos_bridge__codex_run, mcp__plugin_chronos_bridge__orch, mcp__plugin_chronos_bridge__memory_search, mcp__plugin_chronos_bridge__memory_get, mcp__plugin_chronos_bridge__run_on_linux, mcp__codegraph__codegraph_explore
 ---
 

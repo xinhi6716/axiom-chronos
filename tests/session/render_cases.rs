@@ -108,6 +108,15 @@ fn agent_finish() {
     assert_eq!(String::from_utf8(out).unwrap(), "< worker finished\n");
 }
 #[test]
+fn narrator_finish_with_text_blocks() {
+    let mut r = Renderer::new();
+    let mut out = Vec::new();
+    r.event(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"n","name":"Agent","input":{"subagent_type":"chronos:narrator"}}]}}), &mut out);
+    out.clear();
+    r.event(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"n","content":[{"type":"text","text":"Hi"}]}]}}), &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "< chronos:narrator finished\n\nHi\n\n");
+}
+#[test]
 fn codex_briefs() {
     let name = format!("{BRIDGE}codex_run");
     assert_eq!(
