@@ -1,6 +1,6 @@
 //! Auto-evolve preview and explicit confirmation.
 use super::i18n::{self, tr};
-use super::model::{AppState, EvolveOutcome, Verdict};
+use super::model::{AppState, EvolveOutcome, EvolveState, Verdict};
 use super::theme::Tokened as _;
 use super::{ornament, theme};
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
@@ -10,7 +10,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{v_flex, Disableable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TEXT: i18n::Table = &[
     ("Auto-evolve", "自動演進"),
@@ -81,6 +81,16 @@ fn cost_wording(cost: Option<f64>, cannot_estimate: &str) -> String {
     }
 }
 
+fn confirm_disabled(evolve: &EvolveState, open: bool, repo: Option<&Path>) -> bool {
+    !open || evolve.checking || evolve.starting || evolve.outcome.is_some() || repo.is_none()
+        || evolve.preview.as_ref().is_none_or(|p| p.issues.is_empty())
+}
+
+fn start_repo(evolve: &EvolveState, open: bool, picked: Option<&PathBuf>) -> Option<PathBuf> {
+    let repo = picked.or_else(|| evolve.preview.as_ref().and_then(|p| p.repo.as_ref()));
+    if confirm_disabled(evolve, open, repo.map(PathBuf::as_path)) { None } else { repo.cloned() }
+}
+
 pub struct EvolvePanel {
     state: Entity<AppState>,
     open: bool,
@@ -143,9 +153,7 @@ impl EvolvePanel {
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
         let evolve = &self.state.read(cx).evolve;
-        let Some(preview) = evolve.preview.as_ref() else { return };
-        if !self.open || evolve.checking || evolve.starting || evolve.outcome.is_some() || preview.issues.is_empty() { return; }
-        let Some(repo) = self.picked.clone().or_else(|| preview.repo.clone()) else { return };
+        let Some(repo) = start_repo(evolve, self.open, self.picked.as_ref()) else { return };
         self.state.update(cx, |state, cx| { state.evolve_start(repo, cx); });
     }
 
@@ -153,28 +161,35 @@ impl EvolvePanel {
         let t = cx.tokens();
         let evolve = self.state.read(cx).evolve.clone();
         let repo = self.picked.as_ref().or_else(|| evolve.preview.as_ref().and_then(|p| p.repo.as_ref()));
-        let disabled = evolve.checking || evolve.starting || evolve.outcome.is_some() || repo.is_none()
-            || evolve.preview.as_ref().is_none_or(|p| p.issues.is_empty());
+        let disabled = confirm_disabled(&evolve, true, repo.map(PathBuf::as_path));
         let mut body = v_flex().gap_3().w_full().text_sm().text_color(t.text);
         if evolve.checking { body = body.child(tr(cx, TEXT, "Checking for issues…")); }
         if evolve.starting { body = body.child(tr(cx, TEXT, "Starting…")); }
         if let Some(preview) = &evolve.preview {
             let mut issues = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Issues")));
-            for issue in &preview.issues {
-                issues = issues.child(tr(cx, TEXT, "{title} — {count} occurrences")
-                    .replace("{title}", &issue.title).replace("{count}", &issue.count.to_string()));
+            for (ix, issue) in preview.issues.iter().enumerate() {
+                let line: SharedString = tr(cx, TEXT, "{title} — {count} occurrences")
+                    .replace("{title}", &issue.title).replace("{count}", &issue.count.to_string()).into();
+                issues = issues.child(div().id(("evolve-issue", ix)).role(Role::Label).aria_label(line.clone())
+                    .child(line.clone().test_text(line)).test_support());
             }
             if preview.issues.is_empty() { issues = issues.child(tr(cx, TEXT, "No issues found.")); }
             if preview.more_issues > 0 {
-                issues = issues.child(tr(cx, TEXT, "and {n} more").replace("{n}", &preview.more_issues.to_string()));
+                let line: SharedString = tr(cx, TEXT, "and {n} more").replace("{n}", &preview.more_issues.to_string()).into();
+                issues = issues.child(div().id("evolve-more").role(Role::Label).aria_label(line.clone())
+                    .child(line.clone().test_text(line)).test_support());
             }
+            let cost: SharedString = cost_wording(preview.estimate_usd, tr(cx, TEXT, "Cannot estimate")).into();
             body = body.child(issues)
                 .child(v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Estimated cost")))
-                    .child(cost_wording(preview.estimate_usd, tr(cx, TEXT, "Cannot estimate"))));
+                    .child(div().id("evolve-cost").role(Role::Label).aria_label(cost.clone())
+                        .child(cost.clone().test_text(cost)).test_support()));
             if !preview.gaps.is_empty() {
                 let mut gaps = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Source gaps")));
-                for gap in &preview.gaps {
-                    gaps = gaps.child(format!("{} — {} — {}", gap.family, gap.location, gap.reason));
+                for (ix, gap) in preview.gaps.iter().enumerate() {
+                    let line: SharedString = format!("{} — {} — {}", gap.family, gap.location, gap.reason).into();
+                    gaps = gaps.child(div().id(("evolve-gap", ix)).role(Role::Label).aria_label(line.clone())
+                        .child(line.clone().test_text(line)).test_support());
                 }
                 body = body.child(gaps);
             }
@@ -192,17 +207,20 @@ impl EvolvePanel {
         }
         if let Some(error) = &evolve.error {
             let message = error.message.clone();
+            let wording: SharedString = tr(cx, TEXT, failure_wording(&error.kind)).into();
             body = body.child(v_flex().gap_1().text_color(t.fail)
-                .child(tr(cx, TEXT, failure_wording(&error.kind)))
+                .child(div().id("evolve-error").role(Role::Label).aria_label(wording.clone())
+                    .child(wording.clone().test_text(wording)).test_support())
                 .child(Button::new("evolve-copy").label(tr(cx, TEXT, "Copy details"))
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.to_string())))));
         }
         if let Some(outcome) = &evolve.outcome {
-            let result = match outcome {
+            let result: SharedString = match outcome {
                 EvolveOutcome::NoOp { reason } => tr(cx, TEXT, "No changes were made: {reason}").replace("{reason}", reason),
                 EvolveOutcome::Ran { exit_code } => tr(cx, TEXT, "Auto-evolve finished with exit code {code}.").replace("{code}", &exit_code.to_string()),
-            };
-            body = body.child(result);
+            }.into();
+            body = body.child(div().id("evolve-outcome").role(Role::Label).aria_label(result.clone())
+                .child(result.clone().test_text(result)).test_support());
         }
         let mut runs = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Past runs")));
         if evolve.runs.is_empty() { runs = runs.child(tr(cx, TEXT, "No past runs.")); }
@@ -216,12 +234,16 @@ impl EvolvePanel {
                 .test_support());
         }
         body = body.child(runs);
+        let confirm_label: SharedString = tr(cx, TEXT, "Start auto-evolve").into();
         let footer = DialogFooter::new()
             .child(Button::new("evolve-cancel").label(tr(cx, TEXT, "Cancel"))
                 .track_focus(&self.cancel_focus)
                 .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))))
             .child(Button::new("evolve-confirm").map(|b| theme::gold_leaf(b, &t))
-                .label(tr(cx, TEXT, "Start auto-evolve")).disabled(disabled)
+                .accessibility_label(confirm_label.clone())
+                .child(div().min_w_0().whitespace_nowrap().text_ellipsis()
+                    .child(confirm_label.clone().test_text(confirm_label)))
+                .disabled(disabled)
                 .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))));
         let viewport = window.viewport_size();
         let mut backdrop = t.canvas;
@@ -249,8 +271,62 @@ impl Render for EvolvePanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{cost_wording, failure_wording, verdict_label, Verdict, TEXT};
+    use super::{confirm_disabled, cost_wording, failure_wording, start_repo, verdict_label, EvolveOutcome, EvolveState, Verdict, TEXT};
+    use super::super::model::{EvolveIssue, EvolvePreview};
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    fn ready_evolve() -> EvolveState {
+        EvolveState {
+            preview: Some(EvolvePreview {
+                issues: vec![EvolveIssue { id: "issue".into(), title: "Issue".into(), count: 1, cost_usd: None }],
+                more_issues: 0, estimate_usd: None, estimate_samples: 0, gaps: vec![],
+                repo: Some(PathBuf::from("preview-repo")), text: "".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn confirmation_selects_picked_repo_before_preview_repo() {
+        let mut evolve = ready_evolve();
+        let preview_repo = PathBuf::from("preview-repo");
+        let picked = PathBuf::from("picked-repo");
+        assert!(!confirm_disabled(&evolve, true, Some(preview_repo.as_path())));
+        assert_eq!(start_repo(&evolve, true, None), Some(preview_repo));
+        assert_eq!(start_repo(&evolve, true, Some(&picked)), Some(picked.clone()));
+        evolve.preview.as_mut().unwrap().repo = None;
+        assert!(!confirm_disabled(&evolve, true, Some(picked.as_path())));
+        assert_eq!(start_repo(&evolve, true, Some(&picked)), Some(picked));
+    }
+
+    #[test]
+    fn confirmation_rejects_each_blocking_condition() {
+        let ready = ready_evolve();
+        let picked = PathBuf::from("picked-repo");
+        let mut checking = ready.clone();
+        checking.checking = true;
+        let mut starting = ready.clone();
+        starting.starting = true;
+        let mut finished = ready.clone();
+        finished.outcome = Some(EvolveOutcome::NoOp { reason: "done".into() });
+        let mut missing_preview = ready.clone();
+        missing_preview.preview = None;
+        let mut no_issues = ready.clone();
+        no_issues.preview.as_mut().unwrap().issues.clear();
+        for (name, evolve, open) in [
+            ("closed", &ready, false), ("checking", &checking, true), ("starting", &starting, true),
+            ("finished", &finished, true), ("missing preview", &missing_preview, true),
+            ("no issues", &no_issues, true),
+        ] {
+            assert!(confirm_disabled(evolve, open, Some(picked.as_path())), "{name}");
+            assert_eq!(start_repo(evolve, open, Some(&picked)), None, "{name}");
+        }
+        let mut no_repo = ready;
+        no_repo.preview.as_mut().unwrap().repo = None;
+        assert!(confirm_disabled(&no_repo, true, None));
+        assert_eq!(start_repo(&no_repo, true, None), None);
+    }
 
     #[test]
     fn translations_cover_drawn_strings_and_placeholders() {
