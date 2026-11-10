@@ -140,6 +140,8 @@ impl Drop for CloseOnExit {
 
 struct LiveBackend {
     commands: mpsc::Sender<Command>,
+    /// Receives one message, or disconnects, when the worker has finished and dropped everything it owned.
+    finished: Mutex<mpsc::Receiver<()>>,
 }
 
 impl LiveBackend {
@@ -186,6 +188,13 @@ impl Backend for LiveBackend {
     fn follow(&self, session: &str) -> Res<()> {
         self.send(Command::Follow(session.into()))
     }
+
+    fn shutdown(&self, wait: Duration) {
+        let _ = self.commands.send(Command::Quit);
+        // Dropping a hosted wish waits for its process tree, so the worker needs a moment.
+        let finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = finished.recv_timeout(wait);
+    }
 }
 
 impl Drop for LiveBackend {
@@ -194,21 +203,34 @@ impl Drop for LiveBackend {
     }
 }
 
-/// Starts the worker and keeps `state` up to date from it.
+/// Runs `engine` on its own thread. The returned backend's `shutdown` ends it and waits.
+fn launch(engine: Engine, commands: mpsc::Sender<Command>, receiver: mpsc::Receiver<Command>) -> LiveBackend {
+    let (done, finished) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("chronos-engine".into())
+        .spawn(move || {
+            // `run` owns the engine, so every hosted wish is gone when it returns.
+            engine.run(receiver);
+            let _ = done.send(());
+        })
+        .expect("could not start the engine worker");
+    LiveBackend { commands, finished: Mutex::new(finished) }
+}
+
+/// Starts the worker and keeps `state` up to date from it. The task holds `state` weakly: the
+/// state owns the backend, and the worker only exits once the backend has told it to quit.
 pub fn connect(state: Entity<AppState>, cx: &mut App) {
     let (commands, receiver) = mpsc::channel();
     let inbox = Inbox::default();
     let locations = Locations::from_env();
     let engine = Engine::new(locations.home, locations.projects, Box::new(Config::from_env), commands.clone(), inbox.clone());
-    std::thread::Builder::new()
-        .name("chronos-engine".into())
-        .spawn(move || engine.run(receiver))
-        .expect("could not start the engine worker");
-    state.update(cx, |s, _| s.backend = Some(Box::new(LiveBackend { commands })));
+    let backend = launch(engine, commands, receiver);
+    state.update(cx, |s, _| s.backend = Some(Box::new(backend)));
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let mut followed: Option<SharedString> = None;
         while let Some(updates) = inbox.next().await {
-            let _ = cx.update(|cx| {
+            let alive = cx.update(|cx| {
                 state.update(cx, |s, cx| {
                     apply(s, updates);
                     let viewing = s.run().map(|run| run.session.clone());
@@ -219,6 +241,9 @@ pub fn connect(state: Entity<AppState>, cx: &mut App) {
                     cx.notify();
                 })
             });
+            if alive.is_err() {
+                return;
+            }
         }
         let _ = cx.update(|cx| {
             state.update(cx, |s, cx| {
@@ -323,7 +348,7 @@ struct Engine {
     ledgers: HashMap<String, LedgerEntry>,
     ledger_busy: bool,
     memory_busy: bool,
-    memory_read: Option<(Instant, Option<SystemTime>)>,
+    memory_read: Option<Instant>,
     memory_dirty: bool,
     memory: Vec<MemoryEntry>,
     followed: Option<String>,
@@ -785,24 +810,23 @@ impl Engine {
         });
     }
 
-    /// Listing hashes every file an entry names, so it runs off this thread and only on change.
+    /// Listing hashes every file an entry names, so it runs off this thread and at most every `MEMORY_EVERY`.
     fn schedule_memory(&mut self) {
         if self.memory_busy {
             return;
         }
-        let stamp = std::fs::metadata(self.home.join("memory").join("memory.db"))
-            .and_then(|m| m.modified())
-            .ok();
+        // Whether an entry is stale depends on its source files, which the database's own time
+        // does not show, so it is listed again on this cadence even when the database is unchanged.
         let due = self.memory_dirty
             || match self.memory_read {
                 None => true,
-                Some((at, seen)) => seen != stamp && at.elapsed() >= MEMORY_EVERY,
+                Some(at) => at.elapsed() >= MEMORY_EVERY,
             };
         if !due {
             return;
         }
         self.memory_dirty = false;
-        self.memory_read = Some((Instant::now(), stamp));
+        self.memory_read = Some(Instant::now());
         self.memory_busy = true;
         let (home, commands) = (self.home.clone(), self.commands.clone());
         std::thread::spawn(move || {
@@ -2046,6 +2070,83 @@ SERVES     G2"),
         let shown: Vec<(&str, &str, Vec<usize>)> =
             run.goals.iter().map(|g| (g.id.as_ref(), g.title.as_ref(), g.modules.clone())).collect();
         assert_eq!(shown, [("G1", "Render every page", vec![0]), ("G2", "Split the table", vec![1])]);
+    }
+
+    /// A worker with a real thread whose engine owns a sentinel that reports when it is dropped.
+    struct DropFlag(mpsc::Sender<&'static str>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            let _ = self.0.send("engine dropped");
+        }
+    }
+
+    #[test]
+    fn shutdown_reaches_the_worker_and_waits_until_it_has_dropped_what_it_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, projects) = (dir.path().to_path_buf(), dir.path().join("projects"));
+        let (dropped, seen) = mpsc::channel();
+        let flag = DropFlag(dropped);
+        let config_home = home.clone();
+        let config = Box::new(move || {
+            let _ = &flag;
+            Config {
+                claude: Err(Failure::new("not_installed", "no claude in tests")),
+                home: config_home.clone(),
+                bin: PathBuf::new(),
+                clock: session::Clock::system(),
+            }
+        });
+        let (commands, receiver) = mpsc::channel();
+        let inbox = Inbox::default();
+        let engine = Engine::new(home, projects, config, commands.clone(), inbox.clone());
+        let backend = launch(engine, commands, receiver);
+        backend.shutdown(Duration::from_secs(30));
+        assert_eq!(
+            seen.try_recv(),
+            Ok("engine dropped"),
+            "shutdown returned before the worker had dropped its engine and hosted wishes"
+        );
+        assert!(inbox.lock().closed, "the screen is told the worker is gone");
+        backend.shutdown(Duration::from_secs(30));
+        assert!(backend.refresh().is_err(), "nothing listens any more");
+    }
+
+    #[test]
+    fn a_stale_source_is_noticed_while_the_database_is_unchanged() {
+        use sha2::{Digest, Sha256};
+        let mut rig = rig();
+        let home = rig.engine.home.clone();
+        let project = rig._dir.path().join("src-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("a.txt"), "one").unwrap();
+        Memory::open(&home).unwrap();
+        let db = rusqlite::Connection::open(home.join("memory/memory.db")).unwrap();
+        let files = json!([{"path":"a.txt","sha256":format!("{:x}", Sha256::digest(b"one"))}]).to_string();
+        db.execute(
+            "INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created) VALUES ('proj', 'u1', 't', 's', 'b', '', 'w', ?, ?, 1000.0)",
+            [files, project.display().to_string()],
+        )
+        .unwrap();
+        drop(db);
+        let listed = |rig: &mut Rig| {
+            rig.engine.schedule_memory();
+            match rig._receiver.recv_timeout(Duration::from_secs(30)) {
+                Ok(Command::Memory(result)) => {
+                    rig.engine.memory_busy = false;
+                    result.unwrap()
+                }
+                _ => panic!("the memory list was not read"),
+            }
+        };
+        assert!(!listed(&mut rig)[0].stale);
+        let db_stamp = fs::metadata(home.join("memory/memory.db")).unwrap().modified().unwrap();
+        fs::write(project.join("a.txt"), "changed").unwrap();
+        assert_eq!(fs::metadata(home.join("memory/memory.db")).unwrap().modified().unwrap(), db_stamp, "the database is untouched");
+
+        rig.engine.schedule_memory();
+        assert!(!rig.engine.memory_busy, "not read again on every poll");
+        rig.engine.memory_read = Some(Instant::now() - MEMORY_EVERY - Duration::from_secs(1));
+        assert!(listed(&mut rig)[0].stale, "the changed source is noticed on the next cadence");
     }
 
     #[test]

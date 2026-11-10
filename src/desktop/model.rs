@@ -4,6 +4,7 @@ use crate::base::Res;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -394,6 +395,9 @@ pub trait Backend: 'static {
     fn recheck(&self) -> Res<()>;
     /// The user is looking at this run: read its logs and usage in full.
     fn follow(&self, session: &str) -> Res<()>;
+    /// The window is closing: end the engine, which stops every wish this app hosts, and wait at
+    /// most `wait` for that to finish. Safe to call more than once.
+    fn shutdown(&self, _wait: Duration) {}
 }
 
 /// Words to put in the interjection box of one run, naming what the person is talking about.

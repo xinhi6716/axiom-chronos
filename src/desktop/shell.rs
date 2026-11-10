@@ -80,6 +80,8 @@ const T: Table = &[
 
 /// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
 const STOP_DEADLINE: Duration = Duration::from_secs(10);
+/// How long closing the window waits for the engine to drop its wishes before giving up.
+const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
 const TOAST_MESSAGE_CHARS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -536,6 +538,7 @@ impl Shell {
             return false;
         }
         if running_here(&self.state.read(cx).runs).is_empty() {
+            self.end_engine(cx);
             settings::remember_window(window.window_bounds(), cx);
             return true;
         }
@@ -620,7 +623,15 @@ impl Shell {
         window.refresh();
     }
 
+    /// The engine owns every wish started here; ending it is what stops their `claude` processes.
+    fn end_engine(&self, cx: &mut Context<Self>) {
+        if let Some(backend) = self.state.read(cx).backend.as_deref() {
+            backend.shutdown(ENGINE_DEADLINE);
+        }
+    }
+
     fn finish_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_engine(cx);
         settings::remember_window(window.window_bounds(), cx);
         window.remove_window();
     }
