@@ -175,7 +175,8 @@ fn models_and_binary_configuration() {
         json!({"command":"${AXIOM_BIN:-axiom}","args":["bridge"]})
     );
     let hooks = json_asset("hooks/hooks.json");
-    for event in ["UserPromptSubmit", "Stop", "PreToolUse"] {
+    assert_eq!(hooks["hooks"]["SessionStart"][0]["matcher"], "compact");
+    for event in ["UserPromptSubmit", "SessionStart", "Stop", "PreToolUse"] {
         assert_eq!(
             hooks["hooks"][event][0]["hooks"][0]["command"],
             "\"${AXIOM_BIN:-axiom}\" hook"

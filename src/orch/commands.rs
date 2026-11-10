@@ -6,7 +6,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
     if ![
         "ready", "verify", "accept", "fulltest", "review", "evidence", "release", "report",
-        "review-pack",
+        "review-pack", "handoff", "resume",
     ]
     .contains(&cmd)
     {
@@ -35,6 +35,31 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 };
                 let text = digest(store, repo, module)?;
                 Ok((0, text.clone(), serde_json::json!({"digest":text})))
+            }
+            "handoff" => {
+                let note = record_handoff(store, args)?;
+                Ok((
+                    0,
+                    format!(
+                        "handoff recorded for {}; return your report now",
+                        note.module.as_deref().unwrap_or("the whole wish")
+                    ),
+                    serde_json::to_value(&note).unwrap(),
+                ))
+            }
+            "resume" => {
+                let module = if has("--module") {
+                    Some(option("--module")?)
+                } else {
+                    None
+                };
+                let repo = if has("--repo") {
+                    Some(Path::new(option("--repo")?))
+                } else {
+                    None
+                };
+                let text = resume_text(store, repo, module)?;
+                Ok((0, text.clone(), serde_json::json!({"resume":text})))
             }
             "review-pack" => {
                 let repo = Path::new(option("--repo")?);

@@ -284,6 +284,16 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
             out.push_str(&format!("  {}  {}\n", u.id, label(&u.state)));
         }
     }
+    for h in pending_handoffs(store)?
+        .iter()
+        .filter(|h| module.is_none() || h.module.as_deref() == module)
+    {
+        out.push_str(&format!(
+            "handoff pending ({}): next: {}\n",
+            h.module.as_deref().unwrap_or("whole wish"),
+            h.next
+        ));
+    }
     if store.join("modules.md").exists() {
         let map = parse_map(&std::fs::read_to_string(store.join("modules.md")).map_err(io)?)
             .map_err(|e| Failure::new("invalid_argument", e))?;
