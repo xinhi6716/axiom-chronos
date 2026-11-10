@@ -2,7 +2,7 @@
 
 --fake-log=<path> appends one JSON line per call. --fake-scenario=<a,b,...> scripts the call:
 quota, crash, garbage, wrong-shape, no-usage, unpriced, r1-near-cap, r1-over-cap, r2-over-cap,
-r2-garbage, r2-quota, disagree, disagree-bare, hang, shape-top, shape-object, huge, argon-tokens.
+r2-garbage, r2-quota, result-only, disagree, disagree-bare, hang, shape-top, shape-object, huge, argon-tokens.
 """
 import json
 import os
@@ -114,7 +114,7 @@ if 'r1-over-cap' in scenario and not round2 or 'r2-over-cap' in scenario and rou
 usage = {'input_tokens': 1000, 'cache_read_input_tokens': 2000, 'cache_creation_input_tokens': 4000, 'output_tokens': 500}
 model = 'claude-experimental-x' if 'unpriced' in scenario else 'claude-fable-5-2'
 message_id = 'r2' if round2 else 'r1'
-if 'no-usage' not in scenario:
+if 'no-usage' not in scenario and 'result-only' not in scenario:
     # Stream-json repeats a message's usage on each content block.
     for _ in range(3):
         emit({'type': 'assistant', 'message': {'id': message_id, 'model': model, 'content': [], 'usage': usage}})
@@ -128,4 +128,7 @@ closing = {'type': 'result', 'is_error': False, 'result': json.dumps(answer, ens
 if 'r1-near-cap' in scenario and not round2:
     # The true total arrives only here, as it does from stream-json.
     closing['usage'] = {'input_tokens': 1000, 'output_tokens': 115_000}
+if 'result-only' in scenario:
+    # Usage only in the closing event: 75k output tokens, $3.00 a run.
+    closing['usage'] = {'input_tokens': 0, 'output_tokens': 75_000}
 emit(closing)
