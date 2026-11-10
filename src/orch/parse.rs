@@ -20,12 +20,29 @@ pub struct Module {
     pub contract: String,
     pub accept_file: String,
     pub accept_command: String,
+    /// Plan item ids this module delivers (`SERVES`); empty in maps written before the field existed.
+    #[serde(default)]
+    pub serves: Vec<String>,
+}
+/// A plan item the map records as not built: `OUT OF SCOPE <id> <reason>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutOfScope {
+    pub id: String,
+    pub reason: String,
+}
+/// One item of `astra/plan-final.md`, a heading `### <id> <title>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub id: String,
+    pub title: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Map {
     pub preamble: String,
     pub modules: Vec<Module>,
     pub full_test: Option<String>,
+    #[serde(default)]
+    pub out_of_scope: Vec<OutOfScope>,
 }
 const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 const TIERS: [&str; 1] = ["luna"];
@@ -150,11 +167,85 @@ fn backtick(s: &str) -> Option<String> {
     let (_, tail) = s.split_once('`')?;
     Some(tail.split_once('`')?.0.to_string())
 }
+fn is_plan_id(s: &str) -> bool {
+    s.len() <= 32
+        && s.chars().any(|c| c.is_ascii_digit())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+/// Plan items in order: each `### <id> <title>` heading whose id is a plain token with a digit. Anything else is skipped.
+pub fn parse_plan(text: &str) -> Vec<PlanItem> {
+    let mut items: Vec<PlanItem> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("### ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let (id, title) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let id = id.trim_end_matches(':');
+        let title = title.trim().trim_start_matches([':', '-', ' ']).trim();
+        if is_plan_id(id) && !title.is_empty() && !items.iter().any(|i| i.id == id) {
+            items.push(PlanItem {
+                id: id.into(),
+                title: title.into(),
+            });
+        }
+    }
+    items
+}
+/// Every plan item must be served by a module or recorded out of scope, and the map may name no other item.
+pub fn check_goals(map: &Map, plan: &[PlanItem]) -> Result<(), String> {
+    if plan.is_empty() {
+        return Ok(());
+    }
+    let known = |id: &str| plan.iter().any(|i| i.id == id);
+    for m in &map.modules {
+        if let Some(id) = m.serves.iter().find(|id| !known(id)) {
+            return Err(format!("module {}: SERVES unknown plan item {id}", m.id));
+        }
+    }
+    if let Some(o) = map.out_of_scope.iter().find(|o| !known(&o.id)) {
+        return Err(format!("OUT OF SCOPE names unknown plan item {}", o.id));
+    }
+    for item in plan {
+        let served = map.modules.iter().any(|m| m.serves.contains(&item.id));
+        let out = map.out_of_scope.iter().any(|o| o.id == item.id);
+        if !served && !out {
+            return Err(format!(
+                "plan item {} ({}) is not served by any module and not listed as OUT OF SCOPE",
+                item.id, item.title
+            ));
+        }
+    }
+    Ok(())
+}
 pub fn parse_map(text: &str) -> Result<Map, String> {
     let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut full_test = None;
+    let mut out_of_scope: Vec<OutOfScope> = Vec::new();
     for line in text.lines() {
+        if let Some(v) = line
+            .strip_prefix("OUT OF SCOPE")
+            .filter(|v| v.starts_with(char::is_whitespace))
+        {
+            let (id, reason) = v.trim().split_once(char::is_whitespace).unwrap_or((v.trim(), ""));
+            let id = id.trim_end_matches(':');
+            if !is_plan_id(id) || reason.trim().is_empty() {
+                return Err(format!(
+                    "OUT OF SCOPE needs a plan item id and a reason, got {:?}",
+                    line.trim()
+                ));
+            }
+            if out_of_scope.iter().any(|o| o.id == id) {
+                return Err(format!("OUT OF SCOPE {id}: duplicate"));
+            }
+            out_of_scope.push(OutOfScope {
+                id: id.into(),
+                reason: reason.trim().into(),
+            });
+            continue;
+        }
         if let Some(v) = line
             .strip_prefix("FULL TEST")
             .filter(|v| v.is_empty() || v.starts_with(char::is_whitespace))
@@ -176,7 +267,7 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
     for (id, body) in sections {
         let f = fields(
             &body,
-            &["PURPOSE", "PATHS", "DEPENDS", "CONTRACT", "ACCEPT"],
+            &["PURPOSE", "PATHS", "DEPENDS", "CONTRACT", "ACCEPT", "SERVES"],
         );
         if modules.iter().any(|m| m.id == id) {
             return Err(format!("module {id}: duplicate id"));
@@ -223,8 +314,19 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
         if first.is_empty() || command.is_empty() {
             return Err(format!("module {id}: missing ACCEPT"));
         }
+        let serves = words(f.get("SERVES").map_or("", String::as_str));
+        if let Some(bad) = serves.iter().find(|s| !is_plan_id(s)) {
+            return Err(format!("module {id}: invalid SERVES item {bad:?}"));
+        }
+        if f.contains_key("SERVES") && serves.is_empty() {
+            return Err(format!("module {id}: empty SERVES; omit the field instead"));
+        }
+        if let Some(s) = serves.iter().find(|s| out_of_scope.iter().any(|o| &o.id == *s)) {
+            return Err(format!("module {id}: SERVES {s}, which is also OUT OF SCOPE"));
+        }
         modules.push(Module {
             id,
+            serves,
             purpose: f["PURPOSE"].clone(),
             paths,
             depends,
@@ -237,5 +339,6 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
         preamble,
         modules,
         full_test,
+        out_of_scope,
     })
 }

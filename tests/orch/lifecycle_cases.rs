@@ -701,6 +701,20 @@ fn map_and_review_errors() {
     assert_eq!(call(&["map"], false).stdout, "m\t\ta.txt\n");
     let map: serde_json::Value = serde_json::from_str(&call(&["map"], true).stdout).unwrap();
     assert_eq!(map["modules"][0]["id"], "m");
+    fs::create_dir_all(store.join("astra")).unwrap();
+    fs::write(store.join("astra/plan-final.md"), "### P1 One
+### P2 Two
+").unwrap();
+    let refused = call(&["map"], false);
+    assert_ne!(refused.exit_code, 0);
+    assert!(refused.stderr.contains("plan item P1"), "{}", refused.stderr);
+    let map = fs::read_to_string(store.join("modules.md")).unwrap();
+    fs::write(store.join("modules.md"), format!("{map}SERVES P1
+OUT OF SCOPE P2 later
+")).unwrap();
+    assert_eq!(call(&["map"], false).exit_code, 0);
+    fs::write(store.join("modules.md"), map).unwrap();
+    fs::remove_dir_all(store.join("astra")).unwrap();
     assert_eq!(call(&["evidence", "missing"], false).exit_code, 2);
     let verdict = store.join("verdict.json");
     let path = verdict.to_str().unwrap();

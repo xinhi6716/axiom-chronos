@@ -200,3 +200,56 @@ fn path_coverage_and_overlap() {
     assert!(overlaps(&["./tests/a.rs".into()], &[r"tests\a.rs".into()]));
     assert!(!overlaps(&paths, &["src/b/".into()]));
 }
+
+fn serving(ids: &str) -> String {
+    format!("{}SERVES {ids}\n", section("m", "src/m/", "none", "m, test"))
+}
+const PLAN_TEXT: &str = "## Coverage\n### A1 First\n### A2: Second\n### A3 - Third\n";
+
+#[test]
+fn plan_items_come_from_id_headings_only() {
+    use axiom::orch::parse_plan;
+    let items = parse_plan("### A1 First\n### A1 Again\n### two words\n### B2:\n## H Skip\n### B3: Third thing\n");
+    assert_eq!(
+        items.iter().map(|i| (i.id.as_str(), i.title.as_str())).collect::<Vec<_>>(),
+        [("A1", "First"), ("B3", "Third thing")]
+    );
+    assert!(parse_plan("prose only\n").is_empty());
+}
+
+#[test]
+fn serves_and_out_of_scope_are_parsed_and_validated() {
+    let map = parse_map(&format!("{}OUT OF SCOPE A3 too big\nFULL TEST `x`\n", serving("A1, A2"))).unwrap();
+    assert_eq!(map.modules[0].serves, ["A1", "A2"]);
+    assert_eq!((map.out_of_scope[0].id.as_str(), map.out_of_scope[0].reason.as_str()), ("A3", "too big"));
+    // old format: no SERVES
+    let old = parse_map(&section("m", "src/m/", "none", "m, test")).unwrap();
+    assert!(old.modules[0].serves.is_empty() && old.out_of_scope.is_empty());
+    for (input, reason) in [
+        (format!("{}OUT OF SCOPE A1 x\n", serving("A1")), "module m: SERVES A1, which is also OUT OF SCOPE"),
+        ("OUT OF SCOPE A1\n".to_string(), "OUT OF SCOPE needs a plan item id and a reason, got \"OUT OF SCOPE A1\""),
+        ("OUT OF SCOPE A1 x\nOUT OF SCOPE A1 y\n".to_string(), "OUT OF SCOPE A1: duplicate"),
+        (format!("{}SERVES\n", section("m", "src/m/", "none", "m, test")), "module m: empty SERVES; omit the field instead"),
+    ] {
+        assert_eq!(parse_map(&input).unwrap_err(), reason);
+    }
+}
+
+#[test]
+fn goal_check_refuses_unknown_and_unserved_plan_items() {
+    use axiom::orch::{check_goals, parse_plan};
+    let plan = parse_plan(PLAN_TEXT);
+    let full = parse_map(&format!("{}OUT OF SCOPE A3 later\n", serving("A1, A2"))).unwrap();
+    check_goals(&full, &plan).unwrap();
+    let dropped = parse_map(&serving("A1, A2")).unwrap();
+    assert_eq!(
+        check_goals(&dropped, &plan).unwrap_err(),
+        "plan item A3 (Third) is not served by any module and not listed as OUT OF SCOPE"
+    );
+    let unknown = parse_map(&format!("{}OUT OF SCOPE A3 later\n", serving("A1, A2, Z9"))).unwrap();
+    assert_eq!(check_goals(&unknown, &plan).unwrap_err(), "module m: SERVES unknown plan item Z9");
+    let unknown_out = parse_map(&format!("{}OUT OF SCOPE Z9 x\n", serving("A1, A2, A3"))).unwrap();
+    assert_eq!(check_goals(&unknown_out, &plan).unwrap_err(), "OUT OF SCOPE names unknown plan item Z9");
+    // old map against a plan without items passes
+    check_goals(&parse_map(&section("m", "src/m/", "none", "m, test")).unwrap(), &[]).unwrap();
+}

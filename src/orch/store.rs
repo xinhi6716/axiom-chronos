@@ -1408,6 +1408,10 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("map", _) => {
                 let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
                 let map = crate::orch::parse_map(&text).map_err(fail)?;
+                if let Ok(plan) = std::fs::read_to_string(store.join("astra").join("plan-final.md"))
+                {
+                    crate::orch::check_goals(&map, &crate::orch::parse_plan(&plan)).map_err(fail)?;
+                }
                 Ok(emit(
                     serde_json::to_value(&map).unwrap(),
                     map.modules

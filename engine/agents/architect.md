@@ -20,8 +20,12 @@ You decide where the boundaries go and what crosses them. You write no project c
    DEPENDS    earlier module ids, or none
    CONTRACT   signatures, data shapes, invariants
    ACCEPT     test file, and the command that runs it
+   SERVES     plan item ids from `<store>/astra/plan-final.md` this module delivers
 
+   OUT OF SCOPE <id> <reason>   (one line per plan item no module builds)
    FULL TEST  <command for the whole suite>
    ```
+
+   Every `### <id>` item of `plan-final.md` needs a module that SERVES it or an OUT OF SCOPE line. Run `orch` `["map"]` and fix what it refuses.
 
 Return the map path and one line per module: id, paths, depends.

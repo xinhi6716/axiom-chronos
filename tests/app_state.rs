@@ -580,3 +580,71 @@ fn finished_wishes_read_only_the_log_tail() {
     assert_eq!(scan.events, 3004);
     assert_eq!(scan.agents[0].peak_context, Some(5000));
 }
+
+const PLAN: &str = "# Plan\n\n### C1 Parse the flag\ndetail\n\n### C2: Print the report\n\n### C3 - Drop the cache\n\n## Coverage\n### Plain heading without an id\n";
+const GOALS_MAP: &str = "## m1\nPURPOSE core\nPATHS src/a/\nDEPENDS none\nCONTRACT a\nACCEPT tests/a.py `pytest`\nSERVES C1, C2\n\n## m2\nPURPOSE second\nPATHS src/b/\nDEPENDS m1\nCONTRACT b\nACCEPT tests/b.py `pytest`\nSERVES C2\n\nOUT OF SCOPE C3 needs a database\n\nFULL TEST `pytest`\n";
+
+fn goals_of(files: &[(&str, &str)]) -> (Vec<(String, String, Vec<String>)>, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    goal(home, "g1", 0, json!({"wish":"w","status":"active","project":"gp"}));
+    let s = store(home, "gp");
+    for (name, text) in files {
+        write(&s.join(name), text);
+    }
+    let snap = app::snapshot(home);
+    let w = wish(&snap, "g1");
+    (
+        w.goals
+            .iter()
+            .map(|g| (g.id.clone(), g.title.clone(), g.modules.clone()))
+            .collect(),
+        snap.warnings,
+    )
+}
+fn goal_row(id: &str, title: &str, modules: &[&str]) -> (String, String, Vec<String>) {
+    (id.into(), title.into(), modules.iter().map(|m| m.to_string()).collect())
+}
+
+#[test]
+fn goals_map_plan_items_to_modules_from_store_files() {
+    let (goals, warnings) = goals_of(&[("astra/plan-final.md", PLAN), ("modules.md", GOALS_MAP)]);
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(
+        goals,
+        [
+            goal_row("C1", "Parse the flag", &["m1"]),
+            goal_row("C2", "Print the report", &["m1", "m2"]),
+            goal_row("C3", "Drop the cache", &[]),
+        ]
+    );
+}
+
+#[test]
+fn goals_without_map_or_with_old_or_bad_data_never_error_or_invent() {
+    // plan only: goals without modules
+    let (goals, _) = goals_of(&[("astra/plan-final.md", PLAN)]);
+    assert_eq!(goals.len(), 3);
+    assert!(goals.iter().all(|g| g.2.is_empty()));
+    // map only, or nothing: no goals
+    assert!(goals_of(&[("modules.md", GOALS_MAP)]).0.is_empty());
+    assert!(goals_of(&[]).0.is_empty());
+    // old-format map (no SERVES): plan items stay, no modules
+    let (goals, warnings) = goals_of(&[("astra/plan-final.md", PLAN), ("modules.md", MAP)]);
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(goals.len(), 3);
+    assert!(goals.iter().all(|g| g.2.is_empty()));
+    // map naming an unknown item: it is ignored, no goal invented
+    let unknown = GOALS_MAP.replace("SERVES C1, C2", "SERVES C1, C9");
+    let (goals, _) = goals_of(&[("astra/plan-final.md", PLAN), ("modules.md", &unknown)]);
+    assert_eq!(goals[0], goal_row("C1", "Parse the flag", &["m1"]));
+    assert!(goals.iter().all(|g| g.0 != "C9"));
+    // malformed map: warning, plan items without modules
+    let (goals, warnings) = goals_of(&[("astra/plan-final.md", PLAN), ("modules.md", "## m1\nPURPOSE x\n")]);
+    assert_eq!(goals.len(), 3);
+    assert!(goals.iter().all(|g| g.2.is_empty()));
+    assert_eq!(warnings.len(), 1);
+    // plan with no parsable headings, or binary junk
+    assert!(goals_of(&[("astra/plan-final.md", "just prose\n- item\n")]).0.is_empty());
+    assert!(goals_of(&[("astra/plan-final.md", "\u{0}\u{1}### \n###\n")]).0.is_empty());
+}
