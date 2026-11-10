@@ -133,9 +133,9 @@ fn handoff(r: &Run, module: &str, next: &str) {
 fn a_dispatcher_past_the_threshold_is_refused_with_the_handoff_instruction() {
     let r = run();
     transcript(&r.own, &[30_000, 120_000, 210_000]);
-    let reason = refusal(&r, &codex(&r)).expect("codex_run past 200k is refused");
+    let reason = refusal(&r, &codex(&r)).expect("codex_run past 150k is refused");
     assert!(
-        reason.contains("210k tokens, past the 200k handoff limit"),
+        reason.contains("210k tokens, past the 150k handoff limit"),
         "{reason}"
     );
     assert!(
@@ -161,7 +161,7 @@ fn a_dispatcher_past_the_threshold_is_refused_with_the_handoff_instruction() {
 #[test]
 fn no_refusal_below_the_threshold_for_the_core_or_for_other_agents() {
     let r = run();
-    transcript(&r.own, &[30_000, 199_000]);
+    transcript(&r.own, &[30_000, 149_000]);
     assert_eq!(refusal(&r, &codex(&r)), None);
     assert_eq!(refusal(&r, &reviewer(&r)), None);
 

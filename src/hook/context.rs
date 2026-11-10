@@ -9,14 +9,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const DEFAULT_HANDOFF_TOKENS: u64 = 200_000;
+// Below the roughly 167k at which Claude Code compacts a 200k-window agent on its own.
+pub const DEFAULT_HANDOFF_TOKENS: u64 = 150_000;
 pub const HANDOFF_ENV: &str = "AXIOM_HANDOFF_TOKENS";
 /// Bytes read from the end of a transcript; the rest of the file is never read.
 pub const TAIL_BYTES: u64 = 1 << 20;
 const HEAD_BYTES: u64 = 256 * 1024;
 pub const DISPATCHER: &str = "chronos:dispatcher";
 
-/// The handoff threshold: `AXIOM_HANDOFF_TOKENS`, 0 to turn handoffs off, 200k when unset.
+/// The handoff threshold: `AXIOM_HANDOFF_TOKENS`, 0 to turn handoffs off, 150k when unset.
 pub fn handoff_limit() -> Option<u64> {
     let raw = std::env::var(HANDOFF_ENV).unwrap_or_default();
     let raw = raw.trim();
