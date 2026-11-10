@@ -140,8 +140,14 @@ impl Wish {
         let spawned = session::spawn(&config, "wish", &text, project, options.max_turns, None)?;
         Ok(Self::drive(config, spawned))
     }
-    pub fn resume(config: Config, session: &str, max_turns: Option<u32>) -> Res<Self> {
-        let (prompt, cwd) = session::resume_target(&config, session, None)?;
+    /// `message` is sent as the first prompt; without one the session gets the continuation prompt.
+    pub fn resume(
+        config: Config,
+        session: &str,
+        message: Option<&str>,
+        max_turns: Option<u32>,
+    ) -> Res<Self> {
+        let (prompt, cwd) = session::resume_target(&config, session, message)?;
         let spawned = session::spawn(&config, "wish", &prompt, &cwd, max_turns, Some(session))?;
         Ok(Self::drive(config, spawned))
     }

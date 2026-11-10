@@ -2,6 +2,7 @@
 use super::i18n::{tr, Table};
 use super::model::*;
 use super::theme::{Tokened as _, Tokens};
+use crate::base::Res;
 use crate::session::local_offset_secs;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Dialog, DialogFooter};
@@ -45,6 +46,7 @@ const T: Table = &[
     ("Not connected to a session, so it was not resumed.", "目前沒有連上工作階段，沒有接續。"),
     ("No answer from the session yet. You can try again.", "工作階段還沒有回應，可以再試一次。"),
     ("You", "你"),
+    ("It continues by itself when the limit resets.", "額度恢復後會自動繼續。"),
     ("Event log", "事件紀錄"),
     ("Show the event log", "顯示事件紀錄"),
     ("Hide the event log", "隱藏事件紀錄"),
@@ -70,6 +72,8 @@ const REPORT_LIMIT: usize = 256 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Primary {
     Send,
+    /// Waiting on a usage limit: nothing can be said to claude, but the wish can be stopped.
+    StopOnly,
     Resume,
     ResumeNow,
     AnotherWish,
@@ -121,7 +125,13 @@ pub(super) fn offer(status: RunStatus, hosted: bool, has_folder: bool, has_repor
             ..nothing
         },
         RunStatus::Active => Offer { view_only: true, ..nothing },
-        RunStatus::Blocked => Offer {
+        RunStatus::LimitWait if hosted => Offer {
+            primary: Some(Primary::StopOnly),
+            stop: true,
+            ..nothing
+        },
+        RunStatus::LimitWait => Offer { view_only: true, ..nothing },
+        RunStatus::Blocked | RunStatus::Interrupted => Offer {
             primary: Some(Primary::Resume),
             entry: Entry::Reply,
             open_folder: has_folder,
@@ -147,6 +157,15 @@ pub(super) fn sendable(text: &str) -> Option<&str> {
     (!text.is_empty()).then_some(text)
 }
 
+/// The source column: the engine does not know the language, so its "You" is translated here.
+pub(super) fn source_label(source: &SharedString, cx: &App) -> SharedString {
+    if source.as_ref() == YOU {
+        tr(cx, T, YOU).into()
+    } else {
+        source.clone()
+    }
+}
+
 fn you_line(text: &str, time: SharedString, you: &'static str) -> LogLine {
     LogLine {
         time,
@@ -161,7 +180,7 @@ fn clock(local_secs: i64) -> String {
     format!("{:02}:{:02}:{:02}", day / 3600, day % 3600 / 60, day % 60)
 }
 
-fn now_clock() -> SharedString {
+pub(super) fn now_clock() -> SharedString {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
@@ -400,6 +419,8 @@ pub struct Control {
     notice: Option<Notice>,
     pending: Option<Pending>,
     pending_timeout: Option<Task<()>>,
+    /// The newest entry of `AppState::errors` this bar has looked at.
+    errors_seen: u64,
     log: LogPanel,
     report: Option<ReportView>,
     _subscriptions: Vec<Subscription>,
@@ -438,6 +459,7 @@ impl Control {
             notice: None,
             pending: None,
             pending_timeout: None,
+            errors_seen: 0,
             report: None,
             _subscriptions: subscriptions,
         }
@@ -465,7 +487,25 @@ impl Control {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let facts = self.facts(cx);
         let session = facts.as_ref().map(|f| f.session.clone());
-        if session != self.session {
+        let state = self.state.read(cx);
+        let failed = state
+            .errors
+            .iter()
+            .any(|e| e.id > self.errors_seen && e.session.is_some() && e.session == self.session);
+        let renamed = match (&self.session, &session) {
+            (Some(old), Some(new)) => state.renames.get(new) == Some(old),
+            _ => false,
+        };
+        self.errors_seen = state.next_error;
+        if failed {
+            // The failure is already on screen; there is no answer left to wait for.
+            self.pending = None;
+            self.pending_timeout = None;
+        }
+        if renamed {
+            // Only the provisional id changed. It is the same run, so the draft stays in the box.
+            self.session = session;
+        } else if session != self.session {
             let draft = self.input.read(cx).value();
             if let Some(old) = self.session.take() {
                 if draft.trim().is_empty() {
@@ -620,7 +660,8 @@ impl Control {
             cx.notify();
             return;
         }
-        self.wait_for(PendingKind::Stopping, RunStatus::Active, cx);
+        let status = self.facts(cx).map_or(RunStatus::Active, |f| f.status);
+        self.wait_for(PendingKind::Stopping, status, cx);
         self.state.update(cx, |s, cx| s.stop_current(cx));
     }
 
@@ -907,10 +948,44 @@ impl Control {
             .on_click(cx.listener(|this, _, window, cx| this.resume(window, cx)))
     }
 
-    fn render_running(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let blank = sendable(&self.input.read(cx).value()).is_none();
+    fn stop_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let stopping = matches!(&self.pending, Some(p) if p.kind == PendingKind::Stopping);
         let t = cx.tokens();
+        Button::new("control-stop")
+            .ghost()
+            .small()
+            .icon(Icon::new(IconName::Square).text_color(t.fail))
+            .label(if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop") })
+            .loading(stopping)
+            .disabled(self.pending.is_some())
+            .on_click(cx.listener(|this, _, window, cx| this.ask_stop(window, cx)))
+    }
+
+    fn render_limit_wait(&mut self, facts: &Facts, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.tokens();
+        h_flex()
+            .size_full()
+            .justify_between()
+            .gap_4()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(Icon::new(IconName::Pause).size(px(20.)).text_color(t.status(facts.status)))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().text_sm().child(tr(cx, T, "Waiting on usage limit")))
+                            .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "It continues by itself when the limit resets."))),
+                    ),
+            )
+            .child(h_flex().gap_1().child(self.log_toggle(facts.log_lines, cx)).child(self.stop_button(cx)))
+            .into_any_element()
+    }
+
+    fn render_running(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let blank = sendable(&self.input.read(cx).value()).is_none();
         let _ = window;
         v_flex()
             .size_full()
@@ -926,16 +1001,7 @@ impl Control {
                         h_flex()
                             .gap_1()
                             .child(self.log_toggle(facts.log_lines, cx))
-                            .child(
-                                Button::new("control-stop")
-                                    .ghost()
-                                    .small()
-                                    .icon(Icon::new(IconName::Square).text_color(t.fail))
-                                    .label(if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop") })
-                                    .loading(stopping)
-                                    .disabled(self.pending.is_some())
-                                    .on_click(cx.listener(|this, _, window, cx| this.ask_stop(window, cx))),
-                            ),
+                            .child(self.stop_button(cx)),
                     ),
             )
             .child(
@@ -1150,7 +1216,7 @@ impl Control {
                     .truncate()
                     .text_color(t.muted)
                     .tooltip(move |window, cx| Tooltip::new(source.clone()).build(window, cx))
-                    .child(line.source.clone()),
+                    .child(source_label(&line.source, cx)),
             )
             .child(div().flex_1().min_w_0().text_color(t.text).child(line.text.clone()))
             .into_any_element()
@@ -1294,12 +1360,33 @@ fn level_icon(level: LogLevel) -> IconName {
 struct SceneBackend;
 
 impl Backend for SceneBackend {
-    fn start_wish(&self, _request: WishRequest) {}
-    fn interject(&self, _session: &str, _text: &str) {}
-    fn stop(&self, _session: &str) {}
-    fn resume(&self, _session: &str, _note: Option<&str>) {}
-    fn delete_memory(&self, _id: i64) {}
-    fn refresh(&self) {}
+    fn start_wish(&self, _request: WishRequest) -> Res<()> {
+        Ok(())
+    }
+    fn interject(&self, _session: &str, _text: &str) -> Res<()> {
+        Ok(())
+    }
+    fn stop(&self, _session: &str) -> Res<()> {
+        Ok(())
+    }
+    fn resume(&self, _session: &str, _note: Option<&str>) -> Res<()> {
+        Ok(())
+    }
+    fn delete_memory(&self, _id: i64) -> Res<()> {
+        Ok(())
+    }
+    fn correct_memory(&self, _id: i64, _text: &str) -> Res<()> {
+        Ok(())
+    }
+    fn refresh(&self) -> Res<()> {
+        Ok(())
+    }
+    fn recheck(&self) -> Res<()> {
+        Ok(())
+    }
+    fn follow(&self, _session: &str) -> Res<()> {
+        Ok(())
+    }
 }
 
 impl Render for Control {
@@ -1315,6 +1402,7 @@ impl Render for Control {
                 .into_any_element(),
             Some(f) => match f.offer.primary {
                 Some(Primary::Send) => self.render_running(f, window, cx),
+                Some(Primary::StopOnly) => self.render_limit_wait(f, cx),
                 Some(Primary::Resume) => self.render_blocked(f, window, cx),
                 Some(Primary::ResumeNow) => self.render_waiting(f, window, cx),
                 Some(Primary::AnotherWish) => self.render_done(f, cx),

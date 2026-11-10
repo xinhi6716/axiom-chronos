@@ -101,6 +101,8 @@ enum StageState {
     Failed,
     NeedsYou,
     OnBatch,
+    OnLimit,
+    Skipped,
     Unfinished,
 }
 
@@ -109,11 +111,13 @@ impl StageState {
         match (phase, status) {
             (Phase::Done, _) => Self::Done,
             (Phase::Failed, _) => Self::Failed,
+            (Phase::Skipped, _) => Self::Skipped,
             (_, RunStatus::Done) => Self::Unfinished,
             (Phase::Waiting, _) => Self::Waiting,
             (Phase::Running, RunStatus::Active) => Self::Running,
             (Phase::Running, RunStatus::Waiting) => Self::OnBatch,
-            (Phase::Running, RunStatus::Blocked) => Self::NeedsYou,
+            (Phase::Running, RunStatus::LimitWait) => Self::OnLimit,
+            (Phase::Running, RunStatus::Blocked | RunStatus::Interrupted) => Self::NeedsYou,
         }
     }
 
@@ -125,6 +129,8 @@ impl StageState {
             Self::Failed => "Failed",
             Self::NeedsYou => RunStatus::Blocked.label(),
             Self::OnBatch => RunStatus::Waiting.label(),
+            Self::OnLimit => RunStatus::LimitWait.label(),
+            Self::Skipped => "Skipped",
             Self::Unfinished => "Not finished",
         }
     }
@@ -133,14 +139,14 @@ impl StageState {
         match self {
             Self::Done => t.ok,
             Self::Running => t.run,
-            Self::Waiting | Self::Unfinished => t.idle,
+            Self::Waiting | Self::Unfinished | Self::Skipped => t.idle,
             Self::Failed | Self::NeedsYou => t.fail,
-            Self::OnBatch => t.review,
+            Self::OnBatch | Self::OnLimit => t.review,
         }
     }
 
     fn is_current(self) -> bool {
-        matches!(self, Self::Running | Self::Failed | Self::NeedsYou | Self::OnBatch)
+        matches!(self, Self::Running | Self::Failed | Self::NeedsYou | Self::OnBatch | Self::OnLimit)
     }
 }
 
@@ -338,8 +344,8 @@ fn stage_icon(state: StageState, animate: bool, t: &Tokens) -> AnyElement {
         StageState::Running => icon(IconName::LoaderCircle),
         StageState::Failed => icon(IconName::CircleX),
         StageState::NeedsYou => icon(IconName::CircleAlert),
-        StageState::OnBatch => icon(IconName::Pause),
-        StageState::Unfinished => icon(IconName::Dash),
+        StageState::OnBatch | StageState::OnLimit => icon(IconName::Pause),
+        StageState::Unfinished | StageState::Skipped => icon(IconName::Dash),
         StageState::Waiting => div()
             .size(px(14.))
             .m(px(1.))
@@ -449,8 +455,8 @@ fn status_pill(run: &Run, cx: &App) -> impl IntoElement {
     let clean = Summary::of(run).verdict == Verdict::Clean;
     let (word, color, icon) = match run.status {
         RunStatus::Active => (run.status.label(), t.run, IconName::LoaderCircle),
-        RunStatus::Waiting => (run.status.label(), t.review, IconName::Pause),
-        RunStatus::Blocked => (run.status.label(), t.fail, IconName::CircleAlert),
+        RunStatus::Waiting | RunStatus::LimitWait => (run.status.label(), t.review, IconName::Pause),
+        RunStatus::Interrupted | RunStatus::Blocked => (run.status.label(), t.fail, IconName::CircleAlert),
         RunStatus::Done if clean => (run.status.label(), t.ok, IconName::CircleCheck),
         RunStatus::Done => ("Ended, needs attention", t.review, IconName::TriangleAlert),
     };
@@ -841,12 +847,7 @@ impl RunView {
                                     .icon(IconName::RefreshCw)
                                     .label(tr(cx, TEXT, "Check again"))
                                     .on_click(move |_, _, cx| {
-                                        state.update(cx, |s, cx| {
-                                            if let Some(backend) = &s.backend {
-                                                backend.refresh();
-                                            }
-                                            cx.notify();
-                                        })
+                                        state.update(cx, |s, cx| s.recheck(cx))
                                     }),
                             ),
                     ),

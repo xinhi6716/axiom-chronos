@@ -45,6 +45,29 @@ const T: Table = &[
     ("Keep working", "繼續工作"),
     ("Stop and close", "停止並關閉"),
     ("Stopping…", "正在停止…"),
+    ("The wish could not start", "願望無法開始"),
+    ("Your message was not delivered", "你的訊息沒有送達"),
+    ("The wish was not stopped", "願望沒有停止"),
+    ("The wish did not resume", "願望沒有接續"),
+    ("The memory was not deleted", "記憶沒有刪除"),
+    ("The correction was not saved", "更正沒有儲存"),
+    ("The runs could not be refreshed", "無法更新執行狀態"),
+    ("The environment could not be checked", "無法檢查環境"),
+    ("A wish stopped with an error", "有個願望因錯誤而停止"),
+    ("Some saved data could not be read", "有些儲存的資料讀不到"),
+    ("The connection to the engine stopped", "與引擎的連線已中斷"),
+    ("Nothing was changed. Check Settings, then try again.", "沒有任何變更。請到設定檢查後再試一次。"),
+    ("The run did not receive it. Check that it is still going, then send it again.", "這次執行沒有收到。請確認它還在進行，再送一次。"),
+    ("It may still be working. Try again, or stop it where it was started.", "它可能還在工作。請再試一次，或到啟動它的地方停止。"),
+    ("It is still stopped. Read the details, then try again.", "它仍然是停止的。請看詳細內容後再試一次。"),
+    ("It is still stored. Try again.", "它還在，請再試一次。"),
+    ("The old text is still in use. Try again.", "仍在使用舊的內容，請再試一次。"),
+    ("What you see may be out of date.", "畫面上的內容可能不是最新的。"),
+    ("The results shown may be out of date.", "顯示的結果可能不是最新的。"),
+    ("Open it to see how far it got. It can be resumed.", "打開來看看進行到哪裡，之後可以接續。"),
+    ("The rest of the app keeps working; the affected panel may be incomplete.", "其他功能不受影響，相關面板可能不完整。"),
+    ("Nothing will update any more. Restart Chronos.", "畫面不會再更新，請重新啟動 Chronos。"),
+    ("Copy details", "複製詳細內容"),
 ];
 
 /// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
@@ -74,8 +97,8 @@ pub fn run_alerts(seen: &mut HashMap<SharedString, RunStatus>, runs: &[Run]) -> 
             continue;
         }
         let kind = match run.status {
-            RunStatus::Active => continue,
-            RunStatus::Blocked => AlertKind::Blocked,
+            RunStatus::Active | RunStatus::LimitWait => continue,
+            RunStatus::Blocked | RunStatus::Interrupted => AlertKind::Blocked,
             RunStatus::Waiting => AlertKind::Waiting,
             RunStatus::Done => AlertKind::Finished,
         };
@@ -87,8 +110,8 @@ pub fn run_alerts(seen: &mut HashMap<SharedString, RunStatus>, runs: &[Run]) -> 
 /// What the Wishes badge counts.
 pub fn needs_user(run: &Run) -> bool {
     match run.status {
-        RunStatus::Blocked | RunStatus::Waiting => true,
-        RunStatus::Active => !run.needs.is_empty(),
+        RunStatus::Blocked | RunStatus::Waiting | RunStatus::Interrupted => true,
+        RunStatus::Active | RunStatus::LimitWait => !run.needs.is_empty(),
         RunStatus::Done => false,
     }
 }
@@ -100,11 +123,7 @@ pub fn blocking_check(checks: &[Check]) -> Option<&Check> {
 
 /// Wishes this app started that are still working: the ones closing the window would stop.
 pub fn running_here(runs: &[Run]) -> Vec<&Run> {
-    runs.iter().filter(|run| run.hosted && run.status == RunStatus::Active).collect()
-}
-
-fn fully_verified(run: &Run) -> bool {
-    !run.units.is_empty() && run.count(UnitState::Verified) == run.units.len()
+    runs.iter().filter(|run| run.hosted && matches!(run.status, RunStatus::Active | RunStatus::LimitWait)).collect()
 }
 
 fn clipped(text: &str, max_chars: usize) -> String {
@@ -144,6 +163,7 @@ fn open_session(state: &Entity<AppState>, session: &str, cx: &mut App) {
 
 struct NeedsYouToast;
 struct SetupToast;
+struct ErrorToast;
 
 pub struct Shell {
     state: Entity<AppState>,
@@ -160,6 +180,8 @@ pub struct Shell {
     asking_close: bool,
     stopping: bool,
     stop_deadline: Option<Task<()>>,
+    /// The newest entry of `AppState::errors` already shown.
+    errors_shown: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -214,6 +236,7 @@ impl Shell {
             asking_close: false,
             stopping: false,
             stop_deadline: None,
+            errors_shown: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -240,6 +263,7 @@ impl Shell {
             .cloned()
             .collect();
         let all_stopped = running_here(&state.runs).is_empty();
+        let errors: Vec<AppError> = state.errors.iter().filter(|error| error.id > self.errors_shown).cloned().collect();
 
         self.viewing = viewing;
         settings::remember_screen(screen, cx);
@@ -251,6 +275,7 @@ impl Shell {
             window.remove_notification1::<NeedsYouToast>(session, cx);
         }
         self.show_alerts(alerts, window, cx);
+        self.show_errors(errors, window, cx);
         if self.stopping && all_stopped {
             self.finish_close(window, cx);
         }
@@ -272,6 +297,29 @@ impl Shell {
         }
     }
 
+    fn show_errors(&mut self, errors: Vec<AppError>, window: &mut Window, cx: &mut Context<Self>) {
+        for error in errors {
+            self.errors_shown = error.id;
+            let advice = tr(cx, T, error.action.advice());
+            let raw = error.message.clone();
+            let copy = tr(cx, T, "Copy details");
+            window.push_notification(
+                Notification::new()
+                    .id1::<ErrorToast>(error.id as usize)
+                    .with_type(NotificationType::Error)
+                    .title(tr(cx, T, error.action.headline()))
+                    .message(clipped(&format!("{advice} {}", error.message), TOAST_MESSAGE_CHARS))
+                    .action(move |_, _, cx| {
+                        let raw = raw.clone();
+                        Button::new("copy-error").label(copy).on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(raw.to_string()));
+                        }))
+                    }),
+                cx,
+            );
+        }
+    }
+
     fn toast_for(&self, alert: &RunAlert, cx: &App) -> Option<Notification> {
         let run = self.state.read(cx).runs.iter().find(|run| run.session == alert.session)?;
         let need = || run.needs.first().map(|need| if need.title.is_empty() { need.note.clone() } else { need.title.clone() });
@@ -286,7 +334,7 @@ impl Shell {
                 } else {
                     fill(tr(cx, T, "{} of {} units verified"), &[&verified, &total]).into()
                 };
-                let kind = if fully_verified(run) { NotificationType::Success } else { NotificationType::Warning };
+                let kind = if run.verified_end() { NotificationType::Success } else { NotificationType::Warning };
                 (kind, tr(cx, T, "Finished: {}"), summary)
             }
         };
@@ -410,14 +458,12 @@ impl Shell {
 
     fn stop_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let running = running_here(&state.runs);
-        let Some(backend) = state.backend.as_ref().filter(|_| !running.is_empty()) else {
+        let running: Vec<SharedString> = running_here(&state.runs).iter().map(|run| run.session.clone()).collect();
+        if running.is_empty() || state.backend.is_none() {
             self.finish_close(window, cx);
             return;
-        };
-        for run in running {
-            backend.stop(&run.session);
         }
+        self.state.update(cx, |state, _| running.iter().for_each(|session| state.stop(session)));
         self.stopping = true;
         self.stop_deadline = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(STOP_DEADLINE).await;
@@ -582,8 +628,8 @@ impl Shell {
         let t = cx.tokens();
         let state = self.state.read(cx);
         let run = state.run()?;
-        let color = t.status(run.status);
-        let (project, label) = (run.project.clone(), tr(cx, &[], run.status.label()));
+        let color = t.outcome(run.status, run.verified_end());
+        let (project, label) = (run.project.clone(), tr(cx, &[], run.status_label()));
         Some(
             h_flex()
                 .gap_2()
@@ -806,15 +852,19 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_run_counts_as_verified_only_when_every_unit_is() {
+    fn a_finished_run_counts_as_verified_only_when_every_unit_is_and_the_full_test_passed() {
         let mut run = run_with("a", RunStatus::Done);
-        assert!(!fully_verified(&run));
+        assert!(!run.verified_end());
         for unit in &mut run.units {
             unit.state = UnitState::Verified;
         }
-        assert!(fully_verified(&run));
+        assert!(!run.verified_end(), "the full test has not passed yet");
+        assert_eq!(run.status_label(), "Ended, needs attention");
+        run.stages.iter_mut().filter(|stage| stage.name == "Full test").for_each(|stage| stage.phase = Phase::Done);
+        assert!(run.verified_end());
+        assert_eq!(run.status_label(), "Done");
         run.units.clear();
-        assert!(!fully_verified(&run));
+        assert!(!run.verified_end());
     }
 
     #[test]

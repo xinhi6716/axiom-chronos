@@ -88,7 +88,7 @@ const TEXT: i18n::Table = &[
 ];
 
 /// An agent past this many tokens of context is flagged: every step re-reads all of it.
-const CONTEXT_WARNING_TOKENS: u64 = 300_000;
+const CONTEXT_WARNING_TOKENS: u64 = crate::usage::CONTEXT_WARN;
 
 const UNKNOWN: &str = "—";
 
@@ -127,6 +127,8 @@ struct CostRow {
     input: u64,
     cached: u64,
     output: u64,
+    /// Some part did not report its tokens, so the counts are lower bounds.
+    tokens_missing: bool,
 }
 
 impl CostRow {
@@ -163,6 +165,8 @@ struct Summary {
     input: u64,
     cached: u64,
     output: u64,
+    /// Some model did not report its tokens, so the counts are lower bounds.
+    tokens_missing: bool,
     models: Vec<CostRow>,
     roles: Vec<CostRow>,
     contexts: Vec<ContextRow>,
@@ -184,16 +188,17 @@ fn run_cost(usage: &Usage) -> Option<f64> {
     })
 }
 
-fn add_cost(rows: &mut Vec<CostRow>, name: &SharedString, usd: Option<f64>, tokens: [u64; 3]) {
+fn add_cost(rows: &mut Vec<CostRow>, name: &SharedString, usd: Option<f64>, tokens: [Option<u64>; 3]) {
     let at = rows.iter().position(|row| row.name == *name).unwrap_or_else(|| {
         rows.push(CostRow { name: name.clone(), ..Default::default() });
         rows.len() - 1
     });
     let row = &mut rows[at];
     row.usd.add(usd);
-    row.input += tokens[0];
-    row.cached += tokens[1];
-    row.output += tokens[2];
+    row.input += tokens[0].unwrap_or(0);
+    row.cached += tokens[1].unwrap_or(0);
+    row.output += tokens[2].unwrap_or(0);
+    row.tokens_missing |= tokens.iter().any(Option::is_none);
 }
 
 /// Largest spend first, then rows with tokens but no dollars, largest first.
@@ -217,12 +222,13 @@ fn summarize(runs: &[Run]) -> Summary {
         summary.cost.add(run_cost(usage));
         for model in &usage.models {
             add_cost(&mut summary.models, &model.model, model.usd, [model.input, model.cached, model.output]);
-            summary.input += model.input;
-            summary.cached += model.cached;
-            summary.output += model.output;
+            summary.input += model.input.unwrap_or(0);
+            summary.cached += model.cached.unwrap_or(0);
+            summary.output += model.output.unwrap_or(0);
+            summary.tokens_missing |= [model.input, model.cached, model.output].iter().any(Option::is_none);
         }
         for role in &usage.roles {
-            add_cost(&mut summary.roles, &role.role, role.usd, [role.input, role.cached, role.output]);
+            add_cost(&mut summary.roles, &role.role, role.usd, [Some(role.input), Some(role.cached), Some(role.output)]);
         }
         let mut peaks: BTreeMap<&SharedString, u64> = BTreeMap::new();
         for context in usage.contexts.iter().filter(|context| context.peak_tokens > 0) {
@@ -278,6 +284,8 @@ struct RunRow {
     /// Position in `AppState::runs`, for opening the run.
     index: usize,
     status: RunStatus,
+    label: &'static str,
+    verified_end: bool,
     project: SharedString,
     wish: SharedString,
     started: SharedString,
@@ -295,12 +303,14 @@ fn run_rows(runs: &[Run]) -> Vec<RunRow> {
         .map(|(index, run)| RunRow {
             index,
             status: run.status,
+            label: run.status_label(),
+            verified_end: run.verified_end(),
             project: run.project.clone(),
             wish: run.wish.clone(),
             started: run.started.clone(),
             started_at: run.started_at,
             cost: run_cost(&run.usage),
-            tokens: run.usage.models.iter().map(|m| m.input + m.cached + m.output).sum(),
+            tokens: run.usage.models.iter().flat_map(|m| [m.input, m.cached, m.output]).flatten().sum(),
             peak: run.usage.contexts.iter().map(|c| c.peak_tokens).max().unwrap_or(0),
         })
         .collect();
@@ -343,6 +353,15 @@ fn fmt_dollars(dollars: Dollars) -> String {
     match dollars.known {
         Some(known) if dollars.missing > 0 => format!("{}+", fmt_usd(known)),
         known => fmt_cost(known),
+    }
+}
+
+/// A sum that is missing some parts is a lower bound, marked the way dollars are.
+fn fmt_sum(tokens: u64, missing: bool) -> String {
+    if missing && tokens > 0 {
+        format!("{}+", fmt_tokens(tokens))
+    } else {
+        fmt_tokens(tokens)
     }
 }
 
@@ -498,9 +517,9 @@ fn totals(summary: &Summary, cx: &App) -> Div {
     });
     let tiles = [
         tile(t, tr(cx, TEXT, "Cost at API prices"), fmt_dollars(summary.cost), t.gold, cost_note.map(|note| (note, t.muted))),
-        tile(t, tr(cx, TEXT, "Input"), fmt_tokens(summary.input), t.text, None),
-        tile(t, tr(cx, TEXT, "Cached"), fmt_tokens(summary.cached), t.text, None),
-        tile(t, tr(cx, TEXT, "Output"), fmt_tokens(summary.output), t.text, None),
+        tile(t, tr(cx, TEXT, "Input"), fmt_sum(summary.input, summary.tokens_missing), t.text, None),
+        tile(t, tr(cx, TEXT, "Cached"), fmt_sum(summary.cached, summary.tokens_missing), t.text, None),
+        tile(t, tr(cx, TEXT, "Output"), fmt_sum(summary.output, summary.tokens_missing), t.text, None),
         tile(
             t,
             tr(cx, TEXT, "Peak context"),
@@ -769,8 +788,8 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
                         .text_color(if row.usd.known.is_some() { t.text } else { t.muted })
                         .child(fmt_dollars(row.usd)),
                 ))
-                .child(data_cell(2, cols[2], div().text_color(t.muted).child(fmt_tokens(row.input))))
-                .child(data_cell(3, cols[3], div().text_color(t.muted).child(fmt_tokens(row.cached))))
+                .child(data_cell(2, cols[2], div().text_color(t.muted).child(fmt_sum(row.input, row.tokens_missing))))
+                .child(data_cell(3, cols[3], div().text_color(t.muted).child(fmt_sum(row.cached, row.tokens_missing))))
                 .child(data_cell(4, cols[4], div().text_color(t.muted).child(fmt_tokens(row.output))))
         })))
 }
@@ -869,8 +888,8 @@ impl UsageView {
                         h_flex()
                             .min_w_0()
                             .gap_1p5()
-                            .child(div().size_2().rounded_full().flex_shrink_0().bg(t.status(row.status)))
-                            .child(div().min_w_0().truncate().text_color(t.text).child(tr(cx, TEXT, row.status.label()))),
+                            .child(div().size_2().rounded_full().flex_shrink_0().bg(t.outcome(row.status, row.verified_end)))
+                            .child(div().min_w_0().truncate().text_color(t.text).child(tr(cx, TEXT, row.label))),
                     ))
                     .child(data_cell(1, RUN_COLS[1], div().min_w_0().truncate().text_color(t.text).child(row.project.clone())))
                     .child(data_cell(
@@ -1033,7 +1052,7 @@ mod tests {
     }
 
     fn model(name: &'static str, usd: Option<f64>, tokens: [u64; 3]) -> ModelCost {
-        ModelCost { model: name.into(), usd, input: tokens[0], cached: tokens[1], output: tokens[2] }
+        ModelCost { model: name.into(), usd, input: Some(tokens[0]), cached: Some(tokens[1]), output: Some(tokens[2]) }
     }
 
     #[test]
@@ -1148,7 +1167,7 @@ mod tests {
     #[test]
     fn peaks_keep_the_worst_run_for_each_agent_largest_first() {
         let runs = [
-            with_usage("small", Usage { contexts: vec![agent("dispatcher", 400_000), agent("main", 90_000)], ..Default::default() }),
+            with_usage("small", Usage { contexts: vec![agent("dispatcher", 600_000), agent("main", 90_000)], ..Default::default() }),
             with_usage("big", Usage { contexts: vec![agent("dispatcher", 965_312), agent("reviewer", 44_120)], ..Default::default() }),
         ];
         let summary = summarize(&runs);
@@ -1161,10 +1180,10 @@ mod tests {
 
     #[test]
     fn two_agents_with_one_name_in_a_run_count_as_one_run() {
-        let usage = Usage { contexts: vec![agent("dispatcher", 500_000), agent("dispatcher", 100_000)], ..Default::default() };
+        let usage = Usage { contexts: vec![agent("dispatcher", 600_000), agent("dispatcher", 100_000)], ..Default::default() };
         let summary = summarize(&[with_usage("a", usage)]);
         assert_eq!(summary.contexts.len(), 1);
-        assert_eq!(summary.contexts[0].peak, 500_000);
+        assert_eq!(summary.contexts[0].peak, 600_000);
         assert_eq!((summary.contexts[0].runs_seen, summary.contexts[0].runs_over), (1, 1));
     }
 
@@ -1187,14 +1206,14 @@ mod tests {
 
     #[test]
     fn the_965k_dispatcher_is_flagged_first_and_warnings_the_run_carries_follow() {
-        let usage = Usage { contexts: vec![agent("reviewer", 310_000), agent("dispatcher", 965_312)], ..Default::default() };
+        let usage = Usage { contexts: vec![agent("reviewer", 510_000), agent("dispatcher", 965_312)], ..Default::default() };
         let mut flagged = with_usage("a", usage);
         flagged.warnings = vec!["Log was cut short".into()];
         let summary = summarize(&[flagged]);
         assert!(matches!(&summary.warnings[0], Warning::ContextTooLarge { agent, peak: 965_312, .. } if agent.as_ref() == "dispatcher"));
         assert!(matches!(&summary.warnings[1], Warning::ContextTooLarge { agent, .. } if agent.as_ref() == "reviewer"));
         assert_eq!(summary.warnings[2], Warning::Reported { project: "a".into(), text: "Log was cut short".into() });
-        assert_eq!(fmt_ratio(965_312), "3.2");
+        assert_eq!(fmt_ratio(965_312), "1.9");
     }
 
     #[test]
@@ -1227,9 +1246,9 @@ mod tests {
 
     #[test]
     fn the_warning_line_is_always_inside_the_chart() {
-        assert_eq!(chart_scale(&[]), 375_000);
+        assert_eq!(chart_scale(&[]), 625_000);
         let row = |peak| ContextRow { agent: "a".into(), peak, project: "p".into(), runs_seen: 1, runs_over: 0 };
-        assert_eq!(chart_scale(&[row(10)]), 375_000);
+        assert_eq!(chart_scale(&[row(10)]), 625_000);
         assert_eq!(chart_scale(&[row(965_312), row(10)]), 965_312);
     }
 

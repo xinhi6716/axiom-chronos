@@ -73,8 +73,8 @@ impl Filter {
     pub fn admits(self, status: RunStatus) -> bool {
         match self {
             Filter::All => true,
-            Filter::Running => matches!(status, RunStatus::Active | RunStatus::Waiting),
-            Filter::NeedsYou => status == RunStatus::Blocked,
+            Filter::Running => matches!(status, RunStatus::Active | RunStatus::Waiting | RunStatus::LimitWait),
+            Filter::NeedsYou => matches!(status, RunStatus::Blocked | RunStatus::Interrupted),
             Filter::Done => status == RunStatus::Done,
         }
     }
@@ -186,7 +186,7 @@ pub fn cost_label(usd: Option<f64>) -> String {
 }
 
 pub fn can_resume(status: RunStatus) -> bool {
-    matches!(status, RunStatus::Blocked | RunStatus::Waiting)
+    matches!(status, RunStatus::Blocked | RunStatus::Waiting | RunStatus::Interrupted)
 }
 
 /// `text` on a single line, for rows that have room for only one.
@@ -284,23 +284,24 @@ fn cell(width: Pixels) -> Div {
     div().flex_none().w(width).min_w_0()
 }
 
-fn status_icon(status: RunStatus) -> IconName {
+fn status_icon(status: RunStatus, verified_end: bool) -> IconName {
     match status {
         RunStatus::Active => IconName::LoaderCircle,
-        RunStatus::Waiting => IconName::Pause,
-        RunStatus::Blocked => IconName::CircleAlert,
-        RunStatus::Done => IconName::CircleCheck,
+        RunStatus::Waiting | RunStatus::LimitWait => IconName::Pause,
+        RunStatus::Interrupted | RunStatus::Blocked => IconName::CircleAlert,
+        RunStatus::Done if verified_end => IconName::CircleCheck,
+        RunStatus::Done => IconName::TriangleAlert,
     }
 }
 
-fn status_cell(status: RunStatus, cx: &App) -> impl IntoElement {
-    let color = cx.tokens().status(status);
+fn status_cell(status: RunStatus, label: &'static str, verified_end: bool, cx: &App) -> impl IntoElement {
+    let color = cx.tokens().outcome(status, verified_end);
     h_flex()
         .gap_1p5()
         .text_xs()
         .text_color(color)
-        .child(Icon::new(status_icon(status)).size(px(14.)))
-        .child(div().truncate().child(tr(cx, T, status.label())))
+        .child(Icon::new(status_icon(status, verified_end)).size(px(14.)))
+        .child(div().truncate().child(tr(cx, T, label)))
 }
 
 fn progress_color(status: RunStatus, verified: usize, total: usize, t: &Tokens) -> Hsla {
@@ -391,6 +392,7 @@ impl ListDelegate for RunList {
         let focused = selected && self.focus.as_ref().is_some_and(|f| f.is_focused(window));
         let (verified, total) = (run.count(UnitState::Verified), run.units.len());
         let status = run.status;
+        let (status_label, verified_end) = (run.status_label(), run.verified_end());
         let wish = one_line(&run.wish);
         let project = run.project.clone();
         let place = run
@@ -440,7 +442,7 @@ impl ListDelegate for RunList {
                                     .bg(t.gold),
                             )
                         })
-                        .child(cell(STATUS_WIDTH).child(status_cell(status, cx)))
+                        .child(cell(STATUS_WIDTH).child(status_cell(status, status_label, verified_end, cx)))
                         .child(
                             cell(PROJECT_WIDTH)
                                 .id(("wish-project", ix.row))

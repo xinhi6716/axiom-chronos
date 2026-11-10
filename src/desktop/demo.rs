@@ -75,10 +75,10 @@ pub fn sample_run() -> Run {
         usage: Usage {
             total_usd: Some(116.12),
             models: vec![
-                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: 0, cached: 226_026_522, output: 802_372 },
-                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: 0, cached: 36_001_210, output: 128_398 },
-                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: 0, cached: 633_994, output: 26_655 },
-                ModelCost { model: "gpt-6.1-terra".into(), usd: None, input: 11_643_991, cached: 10_462_720, output: 195_816 },
+                ModelCost { model: "claude-sonnet-5-5".into(), usd: Some(91.85), input: Some(0), cached: Some(226_026_522), output: Some(802_372) },
+                ModelCost { model: "claude-opus-5-5".into(), usd: Some(23.82), input: Some(0), cached: Some(36_001_210), output: Some(128_398) },
+                ModelCost { model: "claude-haiku-5-5".into(), usd: Some(0.45), input: Some(0), cached: Some(633_994), output: Some(26_655) },
+                ModelCost { model: "gpt-6.1-terra".into(), usd: None, input: Some(11_643_991), cached: Some(10_462_720), output: Some(195_816) },
             ],
             roles: vec![
                 RoleCost { role: "chronos:dispatcher".into(), usd: Some(78.41), input: 0, cached: 198_312_906, output: 612_044 },
@@ -148,7 +148,7 @@ fn scale_usage(usage: &mut Usage, cost: f64, context: f64) {
     usage.total_usd = usage.total_usd.map(|usd| usd * cost);
     for model in &mut usage.models {
         model.usd = model.usd.map(|usd| usd * cost);
-        [&mut model.input, &mut model.cached, &mut model.output].into_iter().for_each(tokens);
+        [&mut model.input, &mut model.cached, &mut model.output].into_iter().flatten().for_each(tokens);
     }
     for role in &mut usage.roles {
         role.usd = role.usd.map(|usd| usd * cost);
@@ -263,5 +263,8 @@ pub fn state() -> AppState {
         composing: false,
         backend: None,
         scene: None,
+        errors: vec![],
+        next_error: 0,
+        renames: Default::default(),
     }
 }

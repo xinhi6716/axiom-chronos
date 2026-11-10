@@ -7,11 +7,11 @@ use std::{
     process::Stdio,
 };
 
-struct Check {
-    label: &'static str,
-    ok: bool,
-    required: bool,
-    detail: String,
+pub(crate) struct Check {
+    pub label: &'static str,
+    pub ok: bool,
+    pub required: bool,
+    pub detail: String,
 }
 
 fn resolve(env: &str, executable: &str, fix: &str) -> Result<Vec<String>, String> {
@@ -262,7 +262,8 @@ fn plugin() -> Vec<Check> {
         .collect()
 }
 
-pub fn doctor(out: &mut dyn Write) -> i32 {
+/// Every environment check. This starts programs, so never call it on a UI thread.
+pub(crate) fn checks() -> Vec<Check> {
     let mut checks = vec![
         tool(
             "claude",
@@ -282,6 +283,11 @@ pub fn doctor(out: &mut dyn Write) -> i32 {
     {
         checks.extend([windows_shell(), linux()]);
     }
+    checks
+}
+
+pub fn doctor(out: &mut dyn Write) -> i32 {
+    let checks = checks();
     let failed = checks.iter().any(|c| !c.ok && c.required);
     for c in checks {
         let mark = if c.ok {
