@@ -516,6 +516,26 @@ impl MemoryView {
         self.search.read(cx).focus_handle(cx).focus(window, cx);
     }
 
+    /// Selects one entry, as the command palette asks, and puts the keyboard on the list. A filter
+    /// that would hide the entry is cleared first; one that shows it is left alone.
+    pub(super) fn reveal(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = {
+            let memory = &self.state.read(cx).memory;
+            visible_memories(memory, self.project_filter.as_deref(), &self.terms).iter().any(|&i| memory[i].id == id)
+        };
+        if !shown {
+            self.search.update(cx, |search, cx| search.set_value("", window, cx));
+            self.query = SharedString::default();
+            self.terms.clear();
+            self.project_filter = None;
+            self.project.update(cx, |select, cx| select.set_selected_index(Some(IndexPath::default()), window, cx));
+        }
+        self.list.update(cx, |list, _| list.delegate_mut().selected_id = Some(id));
+        self.apply(false, window, cx);
+        self.list.update(cx, |list, cx| list.scroll_to_selected_item(window, cx));
+        self.focus_list(window, cx);
+    }
+
     fn selected_entry<'a>(&self, cx: &'a App) -> Option<&'a MemoryEntry> {
         let delegate = self.list.read(cx).delegate();
         let row = delegate.selected?;

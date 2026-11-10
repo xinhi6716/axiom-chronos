@@ -1,7 +1,11 @@
 //! The window frame: title bar, navigation rail and the active screen. It also owns what applies
-//! across screens: Ctrl+N, Needs you notifications and the question asked before closing.
-use super::i18n::{fill, tr, Table};
+//! across screens: the window-wide shortcuts (Ctrl+N, Ctrl+K and ?), the command palette's jumps,
+//! Needs you notifications and the question asked before closing.
+use super::control::{ask, Ask};
+use super::i18n::{fill, tr, Lang, Table};
 use super::model::*;
+use super::palette::{self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target};
+use super::settings::{LanguageChoice, ThemeChoice};
 use super::{ornament, settings};
 use super::theme::{Tokened as _, Tokens};
 use super::{composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView, usage::UsageView, wishes::WishesView};
@@ -14,8 +18,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-
-gpui_kit::actions!(chronos, [NewWish]);
 
 const T: Table = &[
     ("What the current wish is doing", "目前的願望進行到哪裡"),
@@ -68,6 +70,12 @@ const T: Table = &[
     ("The rest of the app keeps working; the affected panel may be incomplete.", "其他功能不受影響，相關面板可能不完整。"),
     ("Nothing will update any more. Restart Chronos.", "畫面不會再更新，請重新啟動 Chronos。"),
     ("Copy details", "複製詳細內容"),
+    ("Search", "搜尋"),
+    ("Search wishes, goals, modules, units and memory, or run a command", "搜尋願望、目標、模組、單元與記憶，或執行指令"),
+    ("Stop this wish?", "要停止這個願望嗎？"),
+    ("It can be resumed later.", "之後可以接續。"),
+    ("Keep running", "繼續執行"),
+    ("Not connected to the engine, so nothing was sent.", "沒有連上引擎，所以沒有送出任何指令。"),
 ];
 
 /// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
@@ -153,6 +161,20 @@ fn count_badge(count: usize, t: &Tokens) -> impl IntoElement {
         .child(if count > 9 { "9+".to_string() } else { count.to_string() })
 }
 
+/// Sends a stop or resume for the run on screen; without an engine, says that nothing was sent.
+fn command_or_report(state: &mut AppState, action: super::model::Action, offline: &'static str, cx: &mut Context<AppState>) {
+    let session = state.run().map(|run| run.session.clone());
+    if state.backend.is_none() {
+        state.report(action, session, offline);
+        cx.notify();
+        return;
+    }
+    match action {
+        super::model::Action::Stop => state.stop_current(cx),
+        _ => state.resume_current(None, cx),
+    }
+}
+
 fn open_session(state: &Entity<AppState>, session: &str, cx: &mut App) {
     state.update(cx, |state, cx| {
         if let Some(index) = state.runs.iter().position(|run| run.session.as_ref() == session) {
@@ -173,6 +195,7 @@ pub struct Shell {
     usage: Entity<UsageView>,
     doctor: Entity<DoctorView>,
     composer: Entity<Composer>,
+    palette: Entity<Palette>,
     may_flash: bool,
     seen: HashMap<SharedString, RunStatus>,
     toasts: HashSet<SharedString>,
@@ -182,6 +205,9 @@ pub struct Shell {
     stop_deadline: Option<Task<()>>,
     /// The newest entry of `AppState::errors` already shown.
     errors_shown: u64,
+    /// Holds the keyboard when nothing else does, so window-wide keys see a key context; `?`
+    /// is bound outside text boxes, which needs one.
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -198,17 +224,19 @@ impl Shell {
                 settings::system_appearance_changed(window, cx);
             }),
         ];
-        cx.bind_keys([KeyBinding::new(if cfg!(target_os = "macos") { "cmd-n" } else { "ctrl-n" }, NewWish, None)]);
-        let (shell, handle) = (cx.weak_entity(), window.window_handle());
-        App::on_action(cx, move |_: &NewWish, cx: &mut App| {
-            // A key press runs inside the window's own update, which cannot be re-entered.
-            let shell = shell.clone();
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, cx| {
-                    let _ = shell.update(cx, |shell, cx| shell.new_wish(window, cx));
-                });
-            });
-        });
+        // The window-wide keys come from the shortcut table, so the overlay can never disagree with them.
+        cx.bind_keys(palette::global_bindings());
+        Self::on_global::<NewWish>(window, cx, Self::new_wish);
+        Self::on_global::<OpenPalette>(window, cx, Self::toggle_palette);
+        Self::on_global::<ShowShortcuts>(window, cx, Self::toggle_shortcuts);
+        let palette = cx.new(|cx| Palette::new(state.clone(), window, cx));
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let mut subscriptions = subscriptions;
+        subscriptions.push(cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
+            let PaletteEvent::Chose(target) = event;
+            this.go_to(target.clone(), window, cx);
+        }));
         let shell = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             shell.update(cx, |shell, cx| shell.should_close(window, cx)).unwrap_or(true)
@@ -228,6 +256,7 @@ impl Shell {
             usage: cx.new(|cx| UsageView::new(state.clone(), window, cx)),
             doctor: cx.new(|cx| DoctorView::new(state.clone(), window, cx)),
             composer: cx.new(|cx| Composer::new(state.clone(), window, cx)),
+            palette,
             state,
             may_flash,
             seen,
@@ -237,6 +266,7 @@ impl Shell {
             stopping: false,
             stop_deadline: None,
             errors_shown: 0,
+            focus,
             _subscriptions: subscriptions,
         }
     }
@@ -356,8 +386,126 @@ impl Shell {
         )
     }
 
+    /// Runs `act` when the window-wide action `A` fires.
+    fn on_global<A: gpui_kit::Action>(window: &mut Window, cx: &mut Context<Self>, act: fn(&mut Self, &mut Window, &mut Context<Self>)) {
+        let (shell, handle) = (cx.weak_entity(), window.window_handle());
+        App::on_action(cx, move |_: &A, cx: &mut App| {
+            // A key press runs inside the window's own update, which cannot be re-entered.
+            let shell = shell.clone();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = shell.update(cx, |shell, cx| act(shell, window, cx));
+                });
+            });
+        });
+    }
+
+    /// A dialog or the New wish form has the keyboard; window-wide overlays wait for it.
+    fn dialog_open(&self, window: &mut Window, cx: &mut App) -> bool {
+        window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.state.read(cx).composing
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) {
+            return;
+        }
+        self.palette.update(cx, |palette, cx| match palette.overlay() {
+            Overlay::Search => palette.close(window, cx),
+            _ => palette.open(window, cx),
+        });
+    }
+
+    fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) {
+            return;
+        }
+        self.palette.update(cx, |palette, cx| match palette.overlay() {
+            Overlay::Shortcuts => palette.close(window, cx),
+            _ => palette.show_shortcuts(window, cx),
+        });
+    }
+
+    /// Opens a run and selects something in it, found by id so a refresh in between does not
+    /// change what is selected.
+    fn open_at(&mut self, session: &SharedString, select: impl FnOnce(&Run) -> Selection, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            let Some(index) = state.runs.iter().position(|run| run.session == *session) else { return };
+            let selection = select(&state.runs[index]);
+            state.open_run(index, cx);
+            state.select(selection, cx);
+        });
+    }
+
+    /// Where a palette result leads.
+    fn go_to(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            Target::Command(command) => self.run_command(command, window, cx),
+            Target::Run(session) => open_session(&self.state, &session, cx),
+            Target::Goal(session, id) => self.open_at(
+                &session,
+                |run| {
+                    let lead = run.goals.iter().find(|goal| goal.id == id).and_then(|goal| palette::goal_lead(run, goal));
+                    lead.map_or(Selection::None, Selection::Module)
+                },
+                cx,
+            ),
+            Target::Module(session, id) => self.open_at(
+                &session,
+                |run| run.modules.iter().position(|m| m.id == id).map_or(Selection::None, Selection::Module),
+                cx,
+            ),
+            Target::Unit(session, id) => self.open_at(
+                &session,
+                |run| run.units.iter().position(|u| u.id == id).map_or(Selection::None, Selection::Unit),
+                cx,
+            ),
+            Target::Memory(id) => {
+                self.state.update(cx, |state, cx| state.set_view(Screen::Memory, cx));
+                self.memory.update(cx, |memory, cx| memory.reveal(id, window, cx));
+            }
+        }
+    }
+
+    fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            Command::NewWish => self.new_wish(window, cx),
+            Command::Open(screen) => self.state.update(cx, |state, cx| state.set_view(screen, cx)),
+            Command::ToggleTheme => {
+                let choice = if cx.theme().is_dark() { ThemeChoice::Light } else { ThemeChoice::Dark };
+                settings::set_theme(choice, window, cx);
+            }
+            Command::ToggleLanguage => {
+                let choice = if *cx.global::<Lang>() == Lang::En { LanguageChoice::ZhTw } else { LanguageChoice::English };
+                settings::set_language(choice, window, cx);
+            }
+            Command::Stop => {
+                let state = self.state.clone();
+                let offline = tr(cx, T, "Not connected to the engine, so nothing was sent.");
+                ask(
+                    Ask {
+                        title: tr(cx, T, "Stop this wish?"),
+                        detail: tr(cx, T, "It can be resumed later."),
+                        confirm: tr(cx, &[], "Stop"),
+                        back: tr(cx, T, "Keep running"),
+                        danger: true,
+                        focus_confirm: false,
+                    },
+                    window,
+                    cx,
+                    move |_, cx| state.update(cx, |state, cx| command_or_report(state, super::model::Action::Stop, offline, cx)),
+                );
+            }
+            Command::Resume => {
+                let offline = tr(cx, T, "Not connected to the engine, so nothing was sent.");
+                self.state.update(cx, |state, cx| command_or_report(state, super::model::Action::Resume, offline, cx));
+            }
+            Command::Shortcuts => self.palette.update(cx, |palette, cx| palette.show_shortcuts(window, cx)),
+        }
+    }
+
     fn new_wish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.state.read(cx).composing {
+        self.palette.update(cx, |palette, cx| palette.close(window, cx));
+        if self.dialog_open(window, cx) {
             return;
         }
         let blocked = blocking_check(&self.state.read(cx).checks).map(|check| (check.name.clone(), check.detail.clone()));
@@ -505,6 +653,26 @@ impl Shell {
                 state.checks[1].detail = "not signed in: run `codex login`".into();
                 cx.notify();
             }),
+            "palette" => self.palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+                palette.type_query("read", window, cx);
+            }),
+            "palette-empty" => self.palette.update(cx, |palette, cx| palette.open(window, cx)),
+            "palette-none" => self.palette.update(cx, |palette, cx| {
+                palette.open(window, cx);
+                palette.type_query("qqzz", window, cx);
+            }),
+            "shortcuts" => self.toggle_shortcuts(window, cx),
+            // Types a query and presses Enter, to show where a result leads.
+            jump if jump.starts_with("palette-go-") => {
+                let query = jump["palette-go-".len()..].replace('_', " ");
+                let query = if query == "d10 scorer" { "d10_scorer".to_owned() } else { query };
+                self.palette.update(cx, |palette, cx| {
+                    palette.open(window, cx);
+                    palette.type_query(&query, window, cx);
+                    palette.choose_selected(window, cx);
+                });
+            }
             "version-mismatch" => self.state.update(cx, |state, cx| {
                 state.checks.push(Check { name: "plugin".into(), status: CheckStatus::Ok, detail: "0.9.4".into() });
                 cx.notify();
@@ -624,6 +792,32 @@ impl Shell {
             )
     }
 
+    /// The palette's door in the title bar, for people who have not learned Ctrl+K yet.
+    fn search_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let label = tr(cx, T, "Search");
+        h_flex()
+            .id("title-search")
+            .flex_none()
+            .h(px(26.))
+            .px_2()
+            .gap_2()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(t.border)
+            .text_xs()
+            .text_color(t.muted)
+            .cursor_pointer()
+            .hover(|this| this.bg(t.raised))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tr(cx, T, "Search wishes, goals, modules, units and memory, or run a command")).build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)))
+            .child(Icon::new(IconName::Search).size(px(13.)))
+            .child(label)
+            .child(palette::key_cap(palette::keys_of(palette::Global::Palette)))
+    }
+
     fn title_status(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let t = cx.tokens();
         let state = self.state.read(cx);
@@ -669,6 +863,7 @@ impl Render for Shell {
             fill(tr(cx, T, "Every wish, newest first. {} need you."), &[&waiting.to_string()]).into()
         };
         let status = self.title_status(cx);
+        let search = self.search_button(cx);
         let new_wish = self.new_wish_button(cx);
         let run_item = self.nav_item("nav-run", IconName::LayoutDashboard, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, cx);
         let wishes_item = self.nav_item("nav-wishes", IconName::Inbox, "Wishes", wishes_hint, Screen::Wishes, waiting, cx);
@@ -678,6 +873,8 @@ impl Render for Shell {
         v_flex()
             .size_full()
             .relative()
+            .key_context("ChronosShell")
+            .track_focus(&self.focus)
             .bg(tokens.canvas)
             .text_color(tokens.text)
             .child(
@@ -694,7 +891,9 @@ impl Render for Shell {
                             .pr_2()
                             .gap_2()
                             .child(div().flex_shrink_0().text_sm().font_medium().text_color(tokens.gold).child("Axiom Chronos"))
-                            .children(status),
+                            .children(status)
+                            .child(div().flex_1())
+                            .child(search),
                     ),
             )
             .child(
@@ -727,6 +926,7 @@ impl Render for Shell {
                     .child(div().flex_1().min_w_0().h_full().child(content)),
             )
             .when(composing, |this| this.child(self.composer.clone()))
+            .child(self.palette.clone())
     }
 }
 

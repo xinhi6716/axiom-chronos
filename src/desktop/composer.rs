@@ -1,22 +1,29 @@
-//! The New wish dialog: choose a project, say what you want, start.
+//! The New wish dialog: choose a project, say what you want, start. Typing `@` in the wish offers
+//! the project's files and folders, so a wish can name exactly what it is about.
 use super::control::{ask, Ask};
-use super::i18n::{tr, Table};
+use super::i18n::{fill, tr, Table};
 use super::model::*;
+use super::palette::{self, fuzzy, in_area, key_cap, marked, Area};
 use super::superswitch::{self, Activation, Members};
 use super::theme::Tokened as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Dialog, DialogFooter};
-use gpui_kit::component::input::{Enter, IndentInline, Input, InputEvent, InputState, OutdentInline, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, OutdentInline, Textarea, TextareaState,
+};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _};
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
+use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::mpsc;
+use std::process::{Command, Output, Stdio};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const T: Table = &[
@@ -63,10 +70,30 @@ const T: Table = &[
     ("What you wrote will be lost.", "你寫的內容不會保留。"),
     ("Discard", "捨棄"),
     ("Keep writing", "繼續寫"),
+    ("Type @ to point at a file or folder.", "輸入 @ 可以指向檔案或資料夾。"),
+    ("Files in {}", "{} 裡的檔案"),
+    ("Showing the first {} files.", "只列出前 {} 個檔案。"),
+    ("Reading the project's files…", "正在讀取專案的檔案…"),
+    ("No file or folder matches “{}”.", "沒有符合「{}」的檔案或資料夾。"),
+    ("Choose a project folder first to point at its files.", "請先選擇專案資料夾，才能指向其中的檔案。"),
+    ("The project's files could not be listed: {}", "無法列出專案的檔案：{}"),
 ];
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(6);
 const RECENT_LIMIT: usize = 5;
+/// The most entries the `@` list reads from a git repository, and from a folder walked by hand.
+const FILE_CAP: usize = 200_000;
+const WALK_CAP: usize = 50_000;
+const WALK_DEPTH: usize = 16;
+const LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Folders a hand walk never enters: hidden ones, and these.
+const SKIP_DIRS: [&str; 3] = ["node_modules", "__pycache__", "target"];
+const MENTION_LIMIT: usize = 50;
+/// Up to this many entries are ranked on the main thread; more are ranked in the background.
+const MENTION_SYNC: usize = 4000;
+const MENTION_ROW_H: f32 = 30.;
+const MENTION_ROWS: f32 = 7.5;
+const WISH_H: f32 = 132.;
 
 /// What a git probe found about the chosen folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,27 +214,34 @@ fn classify_git(success: bool, stdout: &str, stderr: &str) -> FolderCheck {
     FolderCheck::Unknown(stderr.lines().next().unwrap_or("git failed").trim().to_owned())
 }
 
-/// Runs on a background thread. Git is given a deadline so a hung drive cannot hold the dialog.
-fn check_folder(folder: &Path) -> FolderCheck {
-    if !folder.is_dir() {
-        return FolderCheck::Missing;
-    }
+/// A git command in `folder` that takes no locks and opens no console window.
+fn git(folder: &Path, args: &[&str]) -> Command {
     let mut git = crate::base::proc::cmd("git");
-    git.args(["status", "--porcelain=v2", "--branch"])
-        .current_dir(folder)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null());
+    git.args(args).current_dir(folder).env("GIT_OPTIONAL_LOCKS", "0").stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         git.creation_flags(CREATE_NO_WINDOW);
     }
+    git
+}
+
+/// Runs a command with a deadline, so a hung drive cannot hold the dialog. `Err` is the deadline.
+fn output_within(mut command: Command, deadline: Duration) -> Result<std::io::Result<Output>, ()> {
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = send.send(git.output());
+        let _ = send.send(command.output());
     });
-    match receive.recv_timeout(GIT_TIMEOUT) {
+    receive.recv_timeout(deadline).map_err(|_| ())
+}
+
+/// Runs on a background thread.
+fn check_folder(folder: &Path) -> FolderCheck {
+    if !folder.is_dir() {
+        return FolderCheck::Missing;
+    }
+    match output_within(git(folder, &["status", "--porcelain=v2", "--branch"]), GIT_TIMEOUT) {
         Ok(Ok(output)) => classify_git(
             output.status.success(),
             &String::from_utf8_lossy(&output.stdout),
@@ -217,6 +251,266 @@ fn check_folder(folder: &Path) -> FolderCheck {
         Ok(Err(error)) => FolderCheck::Unknown(error.to_string()),
         Err(_) => FolderCheck::Unknown("git did not answer in time".to_owned()),
     }
+}
+
+/// The `@word` being typed at the cursor: the byte range of the whole word, `@` included, and the
+/// part typed so far after the `@`. An `@` right after a letter or digit, as in an email address,
+/// does not start one.
+pub(super) fn mention_at(text: &str, cursor: usize) -> Option<(Range<usize>, &str)> {
+    let before = text.get(..cursor)?;
+    let at = before.rfind('@')?;
+    let query = &before[at + 1..];
+    if query.contains(char::is_whitespace) {
+        return None;
+    }
+    if before[..at].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '@') {
+        return None;
+    }
+    let rest = &text[cursor..];
+    let end = cursor + rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some((at..end, query))
+}
+
+/// What replaces the `@word`: the path, quoted when it holds spaces, and a space after it unless
+/// one already follows.
+pub(super) fn mention_insert(path: &str, space_follows: bool) -> String {
+    let path = if path.contains(char::is_whitespace) { format!("\"{path}\"") } else { path.to_owned() };
+    if space_follows {
+        path
+    } else {
+        format!("{path} ")
+    }
+}
+
+/// A project's files and the folders that hold them, as relative paths with `/`. Folders end
+/// with `/`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Listing {
+    pub entries: Vec<String>,
+    /// More files existed than were read.
+    pub truncated: bool,
+}
+
+/// The listing for some files: each file, and every folder on the way to one.
+pub(super) fn listing_from_files<'a>(files: impl IntoIterator<Item = &'a str>, cap: usize) -> Listing {
+    let mut entries = BTreeSet::new();
+    let mut truncated = false;
+    let mut count = 0;
+    for file in files {
+        let file = file.trim_start_matches("./");
+        if file.is_empty() || file.ends_with('/') {
+            continue;
+        }
+        if count == cap {
+            truncated = true;
+            break;
+        }
+        count += 1;
+        for (at, _) in file.match_indices('/') {
+            entries.insert(file[..=at].to_owned());
+        }
+        entries.insert(file.to_owned());
+    }
+    Listing { entries: entries.into_iter().collect(), truncated }
+}
+
+/// One line of a `.gitignore`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Rule {
+    pattern: String,
+    dir_only: bool,
+    anchored: bool,
+    negate: bool,
+}
+
+/// The rules of a top-level `.gitignore`, for folders that are not git repositories. Inside a
+/// repository git itself answers, with every `.gitignore` and exclude file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct IgnoreRules(Vec<Rule>);
+
+impl IgnoreRules {
+    pub(super) fn parse(text: &str) -> Self {
+        let rules = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let (negate, line) = line.strip_prefix('!').map_or((false, line), |rest| (true, rest));
+                let (dir_only, line) = line.strip_suffix('/').map_or((false, line), |rest| (true, rest));
+                let line = line.strip_prefix("**/").unwrap_or(line);
+                let anchored = line.contains('/');
+                Rule { pattern: line.trim_start_matches('/').to_owned(), dir_only, anchored, negate }
+            })
+            .collect();
+        Self(rules)
+    }
+
+    /// Whether `rel`, a path relative to the folder, is ignored. The last rule that matches wins.
+    pub(super) fn ignored(&self, rel: &str, is_dir: bool) -> bool {
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        let mut ignored = false;
+        for rule in &self.0 {
+            if rule.dir_only && !is_dir {
+                continue;
+            }
+            if glob(&rule.pattern, if rule.anchored { rel } else { name }) {
+                ignored = !rule.negate;
+            }
+        }
+        ignored
+    }
+}
+
+/// Shell-style matching: `*` within one path segment, `**` across segments, `?` one character.
+pub(super) fn glob(pattern: &str, text: &str) -> bool {
+    fn matches(p: &[char], t: &[char]) -> bool {
+        match p {
+            [] => t.is_empty(),
+            ['*', '*', rest @ ..] => {
+                let rest = rest.strip_prefix(&['/']).unwrap_or(rest);
+                (0..=t.len()).any(|i| matches(rest, &t[i..]))
+            }
+            ['*', rest @ ..] => (0..=t.len()).take_while(|&i| i == 0 || t[i - 1] != '/').any(|i| matches(rest, &t[i..])),
+            ['?', rest @ ..] => t.first().is_some_and(|&c| c != '/') && matches(rest, &t[1..]),
+            [c, rest @ ..] => t.first() == Some(c) && matches(rest, &t[1..]),
+        }
+    }
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    matches(&p, &t)
+}
+
+/// Lists a folder that git does not track by walking it, skipping hidden folders, the usual
+/// build and dependency folders and what its top-level `.gitignore` names.
+pub(super) fn walk(root: &Path, cap: usize) -> Listing {
+    let rules = IgnoreRules::parse(&std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default());
+    let mut entries = vec![];
+    let mut truncated = false;
+    let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
+    'walk: while let Some((dir, prefix, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut children: Vec<(String, bool)> = read
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                // Symbolic links are listed but never followed, so a loop cannot trap the walk.
+                let is_dir = entry.file_type().ok()?.is_dir();
+                Some((entry.file_name().into_string().ok()?, is_dir))
+            })
+            .collect();
+        children.sort();
+        for (name, is_dir) in children {
+            if name.starts_with('.') || (is_dir && SKIP_DIRS.contains(&name.as_str())) {
+                continue;
+            }
+            let rel = format!("{prefix}{name}");
+            if rules.ignored(&rel, is_dir) {
+                continue;
+            }
+            if entries.len() == cap {
+                truncated = true;
+                break 'walk;
+            }
+            if is_dir {
+                entries.push(format!("{rel}/"));
+                if depth + 1 < WALK_DEPTH {
+                    stack.push((dir.join(&name), format!("{rel}/"), depth + 1));
+                }
+            } else {
+                entries.push(rel);
+            }
+        }
+    }
+    entries.sort();
+    Listing { entries, truncated }
+}
+
+/// The files `@` can offer. In a git repository git lists them, tracked and untracked but not
+/// ignored, which stays fast on big repositories; any other folder is walked.
+fn list_files(folder: &Path) -> Result<Listing, String> {
+    if !folder.is_dir() {
+        return Err("the folder does not exist".to_owned());
+    }
+    let command = git(folder, &["-c", "core.quotepath=off", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+    match output_within(command, LIST_TIMEOUT) {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(listing_from_files(stdout.split('\0'), FILE_CAP))
+        }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.to_ascii_lowercase().contains("not a git repository") {
+                Ok(walk(folder, WALK_CAP))
+            } else {
+                Err(stderr.lines().next().unwrap_or("git failed").trim().to_owned())
+            }
+        }
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(walk(folder, WALK_CAP)),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(()) => Err("git did not answer in time".to_owned()),
+    }
+}
+
+/// One path offered for an `@word`, with the byte offsets of its matched characters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PathHit {
+    pub entry: usize,
+    pub marks: Vec<usize>,
+}
+
+fn path_depth(path: &str) -> usize {
+    path.trim_end_matches('/').matches('/').count()
+}
+
+/// The entries that best match `query`, best first. A match in the file or folder name counts
+/// double; a query with `/` in it is matched against the whole path. Ties go to the shorter path.
+/// An empty query lists the top of the project, folders first.
+pub(super) fn rank_paths(entries: &[String], query: &str, limit: usize) -> Vec<PathHit> {
+    let query = query.replace('\\', "/");
+    if query.is_empty() {
+        let mut top: Vec<usize> = (0..entries.len()).filter(|&i| path_depth(&entries[i]) == 0).collect();
+        top.sort_by_key(|&i| (!entries[i].ends_with('/'), entries[i].to_lowercase()));
+        return top.into_iter().take(limit).map(|entry| PathHit { entry, marks: vec![] }).collect();
+    }
+    let by_path_only = query.contains('/');
+    let mut scored: Vec<(i32, usize, Vec<usize>)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, path)| {
+            let trimmed = path.trim_end_matches('/');
+            let name_at = trimmed.rfind('/').map_or(0, |slash| slash + 1);
+            let by_name = (!by_path_only)
+                .then(|| fuzzy(&query, &trimmed[name_at..]))
+                .flatten()
+                .map(|m| (m.score * 2, m.positions.into_iter().map(|p| p + name_at).collect::<Vec<_>>()));
+            let by_path = fuzzy(&query, trimmed).map(|m| (m.score, m.positions));
+            let (score, marks) = match (by_name, by_path) {
+                (Some(name), Some(path)) => if name.0 >= path.0 { name } else { path },
+                (name, path) => name.or(path)?,
+            };
+            Some((score, i, marks))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0).then(entries[a.1].len().cmp(&entries[b.1].len())).then(entries[a.1].cmp(&entries[b.1]))
+    });
+    scored.into_iter().take(limit).map(|(_, entry, marks)| PathHit { entry, marks }).collect()
+}
+
+/// What the `@` list knows about the chosen folder's files.
+#[derive(Clone, Debug)]
+enum Files {
+    None,
+    Loading(PathBuf),
+    Ready(PathBuf, Arc<Listing>),
+    Failed(PathBuf, String),
+}
+
+/// The `@word` being completed and the paths offered for it.
+struct Mention {
+    query: String,
+    hits: Vec<PathHit>,
+    /// The listing `hits` index into; `None` until the first ranking arrives.
+    listing: Option<Arc<Listing>>,
+    selected: usize,
 }
 
 /// The folders of past runs, one entry each, in the order the runs are listed.
@@ -249,6 +543,11 @@ pub struct Composer {
     members_probe: Option<Task<()>>,
     advanced: bool,
     not_connected: bool,
+    files: Files,
+    files_task: Option<Task<()>>,
+    mention: Option<Mention>,
+    mention_task: Option<Task<()>>,
+    mention_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -273,7 +572,14 @@ impl Composer {
                     this.recheck(cx);
                 }
             }),
-            cx.subscribe_in(&wish, window, move |this, _, event, _, cx| changed(this, event, cx)),
+            cx.subscribe_in(&wish, window, move |this, _, event, _, cx| {
+                changed(this, event, cx);
+                match event {
+                    InputEvent::Change => this.update_mention(cx),
+                    InputEvent::Blur => this.close_mention(cx),
+                    _ => {}
+                }
+            }),
             cx.subscribe_in(&turns, window, move |this, _, event, _, cx| changed(this, event, cx)),
         ];
         cx.defer_in(window, |this, window, cx| this.apply_scene(window, cx));
@@ -292,6 +598,11 @@ impl Composer {
             members_probe: None,
             advanced: false,
             not_connected: false,
+            files: Files::None,
+            files_task: None,
+            mention: None,
+            mention_task: None,
+            mention_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -318,6 +629,9 @@ impl Composer {
         self.look_for_members(cx);
         self.advanced = false;
         self.not_connected = false;
+        self.close_mention(cx);
+        // Read the files again each time the dialog opens: they change between wishes.
+        self.files = Files::None;
         let (wish_hint, turns_hint) = (
             tr(cx, T, "Say what you want done and how you will know it is done."),
             tr(cx, T, "No limit"),
@@ -375,6 +689,132 @@ impl Composer {
     fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         self.folder = folder;
         self.recheck(cx);
+        self.load_files(cx);
+    }
+
+    /// Reads the chosen folder's files in the background, once per folder.
+    fn load_files(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.folder.clone() else {
+            self.files = Files::None;
+            self.files_task = None;
+            return;
+        };
+        if matches!(&self.files, Files::Loading(f) | Files::Ready(f, _) | Files::Failed(f, _) if *f == folder) {
+            return;
+        }
+        self.files = Files::Loading(folder.clone());
+        let probe = cx.background_spawn({
+            let folder = folder.clone();
+            async move { list_files(&folder) }
+        });
+        self.files_task = Some(cx.spawn(async move |this, cx| {
+            let found = probe.await;
+            let _ = this.update(cx, |this, cx| {
+                if !matches!(&this.files, Files::Loading(f) if *f == folder) {
+                    return;
+                }
+                this.files = match found {
+                    Ok(listing) => Files::Ready(folder, Arc::new(listing)),
+                    Err(error) => Files::Failed(folder, error),
+                };
+                this.rank_mention(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Follows the text and cursor of the wish box: opens, narrows or closes the `@` list.
+    fn update_mention(&mut self, cx: &mut Context<Self>) {
+        let (text, cursor) = {
+            let wish = self.wish.read(cx);
+            (wish.value().to_string(), wish.cursor())
+        };
+        let Some((_, query)) = mention_at(&text, cursor) else {
+            self.close_mention(cx);
+            return;
+        };
+        if self.mention.as_ref().is_some_and(|m| m.query == query) {
+            return;
+        }
+        let keep = self.mention.as_ref().and_then(|m| m.listing.clone());
+        self.mention = Some(Mention { query: query.to_owned(), hits: vec![], listing: keep, selected: 0 });
+        self.load_files(cx);
+        self.rank_mention(cx);
+        cx.notify();
+    }
+
+    fn close_mention(&mut self, cx: &mut Context<Self>) {
+        self.mention_task = None;
+        if self.mention.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Ranks the files for the current `@word`; a big project is ranked off the main thread and
+    /// only the newest word's answer is kept.
+    fn rank_mention(&mut self, cx: &mut Context<Self>) {
+        let (Some(mention), Files::Ready(_, listing)) = (&self.mention, &self.files) else { return };
+        let (listing, query) = (listing.clone(), mention.query.clone());
+        if listing.entries.len() <= MENTION_SYNC {
+            let hits = rank_paths(&listing.entries, &query, MENTION_LIMIT);
+            self.take_hits(&query, listing, hits, cx);
+            return;
+        }
+        self.mention_task = Some(cx.spawn(async move |this, cx| {
+            let (ranked, word) = (listing.clone(), query.clone());
+            let hits = cx.background_spawn(async move { rank_paths(&ranked.entries, &word, MENTION_LIMIT) }).await;
+            let _ = this.update(cx, |this, cx| this.take_hits(&query, listing, hits, cx));
+        }));
+    }
+
+    fn take_hits(&mut self, query: &str, listing: Arc<Listing>, hits: Vec<PathHit>, cx: &mut Context<Self>) {
+        let Some(mention) = self.mention.as_mut().filter(|m| m.query == query) else { return };
+        mention.hits = hits;
+        mention.listing = Some(listing);
+        mention.selected = 0;
+        self.mention_scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    fn mention_open(&self) -> bool {
+        self.mention.as_ref().is_some_and(|m| !m.hits.is_empty())
+    }
+
+    fn step_mention(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some(mention) = self.mention.as_mut() else { return };
+        let count = mention.hits.len() as isize;
+        if count == 0 {
+            return;
+        }
+        mention.selected = (mention.selected as isize + by).rem_euclid(count) as usize;
+        self.mention_scroll.scroll_to_item(mention.selected);
+        cx.notify();
+    }
+
+    /// Puts the chosen path where the `@word` was. Returns false when there was nothing to insert,
+    /// so the key can do what it normally does.
+    fn accept_mention(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(mention) = &self.mention else { return false };
+        let Some(listing) = &mention.listing else { return false };
+        let Some(hit) = mention.hits.get(index.unwrap_or(mention.selected)) else { return false };
+        let path = listing.entries[hit.entry].clone();
+        let (text, cursor) = {
+            let wish = self.wish.read(cx);
+            (wish.value().to_string(), wish.cursor())
+        };
+        let Some((span, _)) = mention_at(&text, cursor) else {
+            self.close_mention(cx);
+            return false;
+        };
+        let insert = mention_insert(&path, text[span.end..].starts_with(char::is_whitespace));
+        self.close_mention(cx);
+        self.wish.update(cx, |wish, cx| {
+            wish.set_selected_range(span, cx);
+            wish.replace(insert, window, cx);
+            wish.focus(window, cx);
+        });
+        cx.notify();
+        true
     }
 
     fn recheck(&mut self, cx: &mut Context<Self>) {
@@ -477,16 +917,38 @@ impl Composer {
         v_flex()
             .w_full()
             .gap_4()
-            .capture_action(cx.listener(|this, action: &Enter, _, cx| {
+            .capture_action(cx.listener(|this, action: &Enter, window, cx| {
                 if action.secondary {
                     cx.stop_propagation();
                     this.start(cx);
+                } else if !action.shift && this.mention_open() && this.accept_mention(None, window, cx) {
+                    cx.stop_propagation();
                 }
             }))
-            .capture_action(|_: &IndentInline, window, cx| {
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
                 cx.stop_propagation();
-                window.focus_next(cx);
-            })
+                if !(this.mention_open() && this.accept_mention(None, window, cx)) {
+                    window.focus_next(cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                if this.mention_open() {
+                    cx.stop_propagation();
+                    this.step_mention(-1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                if this.mention_open() {
+                    cx.stop_propagation();
+                    this.step_mention(1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                if this.mention.is_some() {
+                    cx.stop_propagation();
+                    this.close_mention(cx);
+                }
+            }))
             .capture_action(|_: &OutdentInline, window, cx| {
                 cx.stop_propagation();
                 window.focus_prev(cx);
@@ -660,7 +1122,136 @@ impl Composer {
     }
 
     fn wish_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().gap_2().child(self.label("Wish", cx)).child(Textarea::new(&self.wish).h(px(132.)))
+        let t = cx.tokens();
+        let popup = self.mention_popup(cx);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_3()
+                    .child(self.label("Wish", cx))
+                    .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Type @ to point at a file or folder."))),
+            )
+            .child(div().relative().child(Textarea::new(&self.wish).h(px(WISH_H))).children(popup))
+    }
+
+    /// The `@` list, drawn over the controls below the wish box.
+    fn mention_popup(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mention = self.mention.as_ref()?;
+        let t = cx.tokens();
+        let note = |text: String| div().px_3().py_2().text_xs().text_color(t.muted).child(text);
+        let mut rows: Vec<AnyElement> = vec![];
+        let header: Option<String>;
+        let mut footer = false;
+        match (&self.files, &mention.listing) {
+            (Files::None, _) => header = Some(tr(cx, T, "Choose a project folder first to point at its files.").to_owned()),
+            (Files::Failed(_, error), _) => header = Some(fill(tr(cx, T, "The project's files could not be listed: {}"), &[error])),
+            (Files::Loading(_), None) | (Files::Ready(..), None) => header = Some(tr(cx, T, "Reading the project's files…").to_owned()),
+            (files, Some(listing)) => {
+                let folder = match files {
+                    Files::Ready(folder, _) | Files::Loading(folder) => folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                if mention.hits.is_empty() {
+                    header = Some(fill(tr(cx, T, "No file or folder matches “{}”."), &[&mention.query]));
+                } else {
+                    let mut text = fill(tr(cx, T, "Files in {}"), &[&folder]);
+                    if listing.truncated {
+                        text = format!("{text} {}", fill(tr(cx, T, "Showing the first {} files."), &[&listing.entries.len().to_string()]));
+                    }
+                    header = Some(text);
+                    footer = true;
+                    for (ix, hit) in mention.hits.iter().enumerate() {
+                        rows.push(self.mention_row(ix, ix == mention.selected, &listing.entries[hit.entry], &hit.marks, cx).into_any_element());
+                    }
+                }
+            }
+        }
+        let panel = v_flex()
+            .id("composer-mention")
+            .absolute()
+            .top(px(WISH_H + 4.))
+            .left_0()
+            .right_0()
+            .occlude()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.surface)
+            .shadow_md()
+            .py_1()
+            .children(header.map(note))
+            .when(!rows.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id("composer-mention-rows")
+                        .max_h(px(MENTION_ROW_H * MENTION_ROWS))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.mention_scroll)
+                        .children(rows),
+                )
+            })
+            .when(footer, |this| {
+                this.child(
+                    h_flex()
+                        .mt_1()
+                        .px_3()
+                        .pt_1()
+                        .gap_4()
+                        .border_t_1()
+                        .border_color(t.border)
+                        // The same rows the shortcuts overlay shows, so the two never disagree.
+                        .children(in_area(Area::Files).map(|shortcut| {
+                            h_flex()
+                                .gap_1()
+                                .children(shortcut.keys.iter().map(|&keys| key_cap(keys)))
+                                .child(div().pl_1().text_xs().text_color(t.muted).child(tr(cx, palette::T, shortcut.does)))
+                        })),
+                )
+            });
+        // Above the dialog, which is itself drawn late, at priority 10 and up.
+        // `test_support` lets the headless keyboard tests see the list; it is nothing in the app.
+        Some(deferred(panel.test_support()).with_priority(gpui_kit::base::POPUP_PRIORITY).into_any_element())
+    }
+
+    fn mention_row(&self, ix: usize, selected: bool, path: &str, marks: &[usize], cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let folder = path.ends_with('/');
+        let trimmed = path.trim_end_matches('/');
+        let name_at = trimmed.rfind('/').map_or(0, |slash| slash + 1);
+        let (dir, name) = (&path[..name_at], &path[name_at..]);
+        let dir_marks: Vec<usize> = marks.iter().copied().filter(|&m| m < name_at).collect();
+        let name_marks: Vec<usize> = marks.iter().filter(|&&m| m >= name_at).map(|&m| m - name_at).collect();
+        let strong = if selected { t.gold } else { t.text };
+        h_flex()
+            .id(("composer-mention-row", ix))
+            .relative()
+            .h(px(MENTION_ROW_H))
+            .px_3()
+            .gap_2()
+            .cursor_pointer()
+            .when(selected, |this| this.bg(t.raised))
+            .hover(|this| this.bg(t.raised))
+            .when(selected, |this| this.child(div().absolute().left_0().top(px(7.)).w(px(2.)).h(px(16.)).bg(t.gold)))
+            // On mouse down, before the wish box hears that it lost the keyboard and closes the list.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.accept_mention(Some(ix), window, cx);
+                }),
+            )
+            .child(Icon::new(if folder { IconName::Folder } else { IconName::File }).size(px(13.)).text_color(t.muted))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .text_sm()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(div().flex_shrink(1.).min_w_0().truncate().text_color(t.muted).child(marked(dir.to_owned().into(), &dir_marks, t.text)))
+                    .child(div().flex_none().text_color(strong).child(marked(name.to_owned().into(), &name_marks, strong))),
+            )
     }
 
     fn creative_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -899,6 +1490,16 @@ impl Composer {
                     self.research.hold(ms as f32 / 1000.0);
                 }
             }
+            "-at" => {
+                // Points the dialog at this source tree and types the start of a file name.
+                let text = "讓指令面板先列出名稱完全相同的結果，參考 @desk";
+                self.set_folder(Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))), cx);
+                self.wish.update(cx, |s, cx| {
+                    s.set_value(text, window, cx);
+                    s.set_selected_range(text.len()..text.len(), cx);
+                });
+                self.update_mention(cx);
+            }
             "-not-connected" => {
                 fill(self, window, cx);
                 self.probe = None;
@@ -1028,6 +1629,165 @@ mod tests {
     #[test]
     fn a_folder_that_cannot_be_found_is_missing() {
         assert_eq!(check_folder(Path::new("Z:\\no\\such\\folder\\anywhere")), FolderCheck::Missing);
+    }
+
+    #[test]
+    fn an_at_sign_after_a_space_or_chinese_text_starts_a_mention() {
+        let text = "see @src/pa";
+        assert_eq!(mention_at(text, text.len()), Some((4..11, "src/pa")));
+        assert_eq!(mention_at("@", 1), Some((0..1, "")));
+        let zh = "參考@desk";
+        assert_eq!(mention_at(zh, zh.len()), Some(("參考".len()..zh.len(), "desk")));
+        // The cursor in the middle of a word: the query is what was typed before it, the span the whole word.
+        assert_eq!(mention_at("x @src/lib.rs y", 6), Some((2..13, "src")));
+    }
+
+    #[test]
+    fn an_email_address_or_finished_word_is_not_a_mention() {
+        assert_eq!(mention_at("mail a@b.com", 12), None);
+        assert_eq!(mention_at("@src/lib.rs done", 16), None);
+        assert_eq!(mention_at("no at sign", 5), None);
+        assert_eq!(mention_at("@@x", 3), None);
+        assert_eq!(mention_at("abc", 99), None, "a cursor past the end is ignored");
+    }
+
+    #[test]
+    fn the_inserted_path_is_quoted_when_it_has_spaces_and_spaced_from_what_follows() {
+        assert_eq!(mention_insert("src/lib.rs", false), "src/lib.rs ");
+        assert_eq!(mention_insert("src/lib.rs", true), "src/lib.rs");
+        assert_eq!(mention_insert("docs/My Notes.md", false), "\"docs/My Notes.md\" ");
+        let text = "fix @src/li please";
+        let (span, _) = mention_at(text, 11).unwrap();
+        let replaced = format!("{}{}{}", &text[..span.start], mention_insert("src/lib.rs", text[span.end..].starts_with(' ')), &text[span.end..]);
+        assert_eq!(replaced, "fix src/lib.rs please");
+    }
+
+    #[test]
+    fn a_listing_holds_every_file_and_the_folders_on_the_way() {
+        let listing = listing_from_files(["src/desktop/palette.rs", "src/lib.rs", "README.md", "", "src/lib.rs"], 100);
+        assert_eq!(listing.entries, vec!["README.md", "src/", "src/desktop/", "src/desktop/palette.rs", "src/lib.rs"]);
+        assert!(!listing.truncated);
+        let capped = listing_from_files(["a", "b", "c"], 2);
+        assert_eq!(capped.entries, vec!["a", "b"]);
+        assert!(capped.truncated);
+    }
+
+    #[test]
+    fn gitignore_rules_follow_git() {
+        let rules = IgnoreRules::parse("# build\ntarget/\n*.log\n/notes.txt\ndocs/**/draft*\n!keep.log\n");
+        assert!(rules.ignored("target", true));
+        assert!(!rules.ignored("target", false), "target/ names folders only");
+        assert!(rules.ignored("a/b/run.log", false));
+        assert!(!rules.ignored("keep.log", false), "a later ! rule brings a file back");
+        assert!(rules.ignored("notes.txt", false));
+        assert!(!rules.ignored("sub/notes.txt", false), "a leading / anchors to the top");
+        assert!(rules.ignored("docs/a/b/draft-1.md", false));
+        assert!(!rules.ignored("src/draft.md", false));
+    }
+
+    #[test]
+    fn globs_stop_single_stars_at_slashes() {
+        assert!(glob("*.rs", "lib.rs"));
+        assert!(!glob("*.rs", "src/lib.rs"));
+        assert!(glob("src/**/*.rs", "src/a/b/lib.rs"));
+        assert!(glob("src/**/lib.rs", "src/lib.rs"));
+        assert!(glob("?at", "cat"));
+        assert!(!glob("?at", "/at"));
+    }
+
+    #[test]
+    fn a_folder_outside_git_is_walked_without_what_it_ignores() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        for dir in ["src", "build", "node_modules/pkg", ".hidden"] {
+            std::fs::create_dir_all(p.join(dir)).unwrap();
+        }
+        for file in [".gitignore", "src/main.rs", "src/debug.log", "build/out.bin", "node_modules/pkg/index.js", ".hidden/x", "README.md"] {
+            std::fs::write(p.join(file), if file == ".gitignore" { "build/\n*.log\n" } else { "x" }).unwrap();
+        }
+        let listing = walk(p, 100);
+        assert_eq!(listing.entries, vec!["README.md", "src/", "src/main.rs"]);
+        assert!(!walk(p, 2).entries.contains(&"src/main.rs".to_owned()));
+        assert!(walk(p, 2).truncated);
+    }
+
+    #[test]
+    fn a_git_repository_lists_tracked_and_new_files_but_not_ignored_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        let run = |args: &[&str]| git(p, args).output().map(|o| o.status.success()).unwrap_or(false);
+        assert!(run(&["init", "-q"]), "git must be installed to list repositories");
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::create_dir_all(p.join("target/debug")).unwrap();
+        std::fs::write(p.join(".gitignore"), "target/\n*.tmp\n").unwrap();
+        for file in ["src/lib.rs", "target/debug/app.exe", "scratch.tmp", "notes with space.md"] {
+            std::fs::write(p.join(file), "x").unwrap();
+        }
+        assert!(run(&["add", "src/lib.rs"]));
+        let listing = list_files(p).expect("listed");
+        assert_eq!(listing.entries, vec![".gitignore", "notes with space.md", "src/", "src/lib.rs"]);
+        assert!(list_files(&p.join("nope")).is_err());
+    }
+
+    fn paths(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn ranked(entries: &[String], query: &str) -> Vec<String> {
+        rank_paths(entries, query, 10).into_iter().map(|hit| entries[hit.entry].clone()).collect()
+    }
+
+    #[test]
+    fn a_name_match_beats_a_match_spread_along_the_path() {
+        let entries = paths(&["src/desktop/", "src/desktop/palette.rs", "src/desktop/superswitch.rs", "src/pal/notes.md", "docs/app-design.md"]);
+        assert_eq!(ranked(&entries, "pal")[0], "src/desktop/palette.rs");
+        assert_eq!(ranked(&entries, "desk")[0], "src/desktop/", "folders are offered too");
+        assert!(!ranked(&entries, "pal").contains(&"docs/app-design.md".to_owned()));
+    }
+
+    #[test]
+    fn equal_names_go_to_the_shorter_path_and_slashes_match_the_whole_path() {
+        let entries = paths(&["src/desktop/model.rs", "src/desktop/mod.rs", "tests/mod.rs"]);
+        assert_eq!(ranked(&entries, "mod"), vec!["tests/mod.rs", "src/desktop/mod.rs", "src/desktop/model.rs"]);
+        assert_eq!(ranked(&entries, "desk/mod")[..2], ["src/desktop/mod.rs", "src/desktop/model.rs"]);
+        assert_eq!(ranked(&entries, "desk\\mod")[0], "src/desktop/mod.rs", "Windows separators work");
+    }
+
+    #[test]
+    fn marks_point_at_the_matched_characters_of_the_path() {
+        let entries = paths(&["src/desktop/palette.rs"]);
+        let hit = &rank_paths(&entries, "pal", 10)[0];
+        assert_eq!(hit.marks, vec![12, 13, 14]);
+    }
+
+    #[test]
+    fn an_empty_query_lists_the_top_of_the_project_folders_first() {
+        let entries = paths(&["README.md", "src/", "src/lib.rs", "Cargo.toml", "docs/"]);
+        assert_eq!(ranked(&entries, ""), vec!["docs/", "src/", "Cargo.toml", "README.md"]);
+    }
+
+    #[test]
+    fn a_big_repository_is_ranked_quickly() {
+        let entries: Vec<String> = (0..60_000).map(|i| format!("crates/c{}/src/module_{}/file_{i}.rs", i % 97, i % 31)).collect();
+        let started = Instant::now();
+        let hits = rank_paths(&entries, "file_4242", MENTION_LIMIT);
+        let took = started.elapsed();
+        assert_eq!(entries[hits[0].entry], "crates/c71/src/module_26/file_4242.rs");
+        // It runs off the main thread; this only guards against it becoming quadratic.
+        assert!(took < Duration::from_secs(3), "{took:?} for {} paths", entries.len());
+    }
+
+    #[test]
+    fn every_translation_key_used_here_exists() {
+        let source = include_str!("composer.rs");
+        let used = regex::Regex::new(r#"tr\(cx, T, "((?:[^"\\]|\\.)*)"\)"#).unwrap();
+        let mut found = 0;
+        for capture in used.captures_iter(source) {
+            found += 1;
+            let known = T.iter().chain(super::super::i18n::COMMON.iter()).any(|(en, _)| *en == &capture[1]);
+            assert!(known, "missing translation: {}", &capture[1]);
+        }
+        assert!(found > 20);
     }
 
     #[test]
