@@ -13,6 +13,7 @@ fn required_phrases_are_present() {
         ("agents/dispatcher.md", "`cargo fetch --locked`"),
         ("agents/dispatcher.md", "`cargo test --locked --offline`"),
         ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
+        ("skills/wish/SKILL.md", "or the report shows `handoff pending`"),
         ("skills/wish/SKILL.md", "`[creative]`"),
         ("skills/wish/SKILL.md", "only when the ruling chose a candidate"),
         ("skills/wish/SKILL.md", "`chronos:memory-keeper` agent in the foreground"),

@@ -10,7 +10,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, release <unit> --attempt <id>, unit supersede <unit> --by <unit>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {

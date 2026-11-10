@@ -324,6 +324,21 @@ pub fn set_status_with_batch(
         }
     }
     if status == "blocked" {
+        if let Some(project) = &goal.project {
+            let pending = crate::orch::pending_handoffs(&crate::orch::store_for(home, project)?)?;
+            if let Some(h) = pending.first() {
+                let whom = h
+                    .module
+                    .as_deref()
+                    .map_or("a fresh chronos:dispatcher".to_string(), |m| {
+                        format!("a fresh chronos:dispatcher that names module {m}")
+                    });
+                return Err(Failure::new(
+                    "handoff_pending",
+                    format!("a dispatcher handed off its work instead of finishing; start {whom} before closing the goal"),
+                ));
+            }
+        }
         leave_waiting(&mut goal, None);
     } else {
         goal.waited = None;

@@ -9,6 +9,8 @@ use std::{
     sync::OnceLock,
 };
 
+pub mod context;
+
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
 const GOAL: &str = "mcp__plugin_chronos_bridge__goal";
 
@@ -258,6 +260,80 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
     ))
 }
 
+fn store_of(home: &Path, project: Option<&str>) -> Option<PathBuf> {
+    crate::orch::store_for(home, project?).ok()
+}
+/// The module this agent was bound to by its first `codex_run`, if any.
+fn agent_module(home: &Path, g: &Goal, input: &Value, event: &Value) -> Option<String> {
+    let key = context::agent_key(event)?;
+    [input.get("project").and_then(Value::as_str), g.project.as_deref()]
+        .into_iter()
+        .filter_map(|p| store_of(home, p))
+        .find_map(|store| {
+            let module = std::fs::read_to_string(store.join("agents").join(&key)).ok()?;
+            let module = module.trim();
+            (!module.is_empty()).then(|| module.to_string())
+        })
+}
+/// The engine's record of the work: the module's latest handoff and digest, or the whole wish's.
+fn recall(home: &Path, g: &Goal, module: Option<&str>) -> Option<String> {
+    let store = store_of(home, g.project.as_deref())?;
+    crate::orch::resume_text(&store, g.cwd.as_deref().map(Path::new), module).ok()
+}
+fn names_module(prompt: &str, module: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    prompt.match_indices(module).any(|(i, _)| {
+        !prompt[..i].chars().next_back().is_some_and(word)
+            && !prompt[i + module.len()..].chars().next().is_some_and(word)
+    })
+}
+/// A fresh dispatcher's input with the pending handoff of the module its prompt names appended.
+fn with_handoff(home: &Path, g: &Goal, input: &Value) -> Option<Value> {
+    let store = store_of(home, g.project.as_deref())?;
+    let prompt = input.get("prompt")?.as_str()?;
+    let pending = crate::orch::pending_handoffs(&store).ok()?;
+    let named: Vec<_> = pending
+        .iter()
+        .filter(|h| h.module.as_deref().is_some_and(|m| names_module(prompt, m)))
+        .collect();
+    let chosen = if named.is_empty() {
+        pending.iter().filter(|h| h.module.is_none()).collect()
+    } else {
+        named
+    };
+    if chosen.is_empty() {
+        return None;
+    }
+    let mut text = prompt.to_string();
+    for h in chosen {
+        let repo = h.repo.as_deref().or(g.cwd.as_deref()).map(Path::new);
+        let resume = crate::orch::resume_text(&store, repo, h.module.as_deref()).ok()?;
+        text.push_str("\n\nA previous dispatcher handed this work off when its context grew too large. Continue from its handoff and the store; do not redo verified units.\n");
+        text.push_str(&resume);
+        crate::orch::take_handoff(&store, h.module.as_deref()).ok()?;
+    }
+    let mut updated = input.clone();
+    updated["prompt"] = json!(text);
+    Some(updated)
+}
+/// After Claude Code compacts a dispatcher, its next gated call brings back the work state once.
+fn after_compaction(home: &Path, g: &Goal, event: &Value, input: &Value) -> Option<String> {
+    let store = store_of(home, g.project.as_deref())?;
+    let key = context::agent_key(event)?;
+    let boundary = context::last_compaction(&context::agent_transcript(event)?)?;
+    let marker = store.join("agents").join(format!("{key}.compact"));
+    if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == boundary) {
+        return None;
+    }
+    let module = agent_module(home, g, input, event);
+    let text = recall(home, g, module.as_deref())?;
+    std::fs::create_dir_all(store.join("agents")).ok()?;
+    base::atomic_write(&marker, boundary.as_bytes()).ok()?;
+    Some(format!(
+        "Your context was compacted. Your work state, from the engine:\n{text}"
+    ))
+}
+
 fn wish_text(prompt: &str) -> Option<&str> {
     static WISH: OnceLock<regex::Regex> = OnceLock::new();
     let re = WISH.get_or_init(|| regex::Regex::new(r"(?s)^\s*/chronos:wish\b(.*)").unwrap());
@@ -292,6 +368,23 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 goal::interject(home, session, prompt).ok()??;
                 context(format!("This message amends Chronos goal {session}. The user's words take precedence over the plan. Classify it with the bridge goal tool as amend, answer or stop."))
             }
+        }
+        "SessionStart" => {
+            if event.get("source").and_then(Value::as_str) != Some("compact") {
+                return None;
+            }
+            let home = home?;
+            let g = goal::load(home, session).ok()??;
+            if !matches!(g.status.as_str(), "active" | "waiting") {
+                return None;
+            }
+            let module = agent_module(home, &g, &Value::Null, event);
+            let text = recall(home, &g, module.as_deref())
+                .unwrap_or_else(|| "No work state is recorded yet.\n".into());
+            Some(json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":format!(
+                "Context was compacted. Chronos goal {session} is {}; its work state, from the engine:\n{text}",
+                g.status
+            )}}))
         }
         "Stop" => {
             let g = goal::load(home?, session).ok()??;
@@ -358,6 +451,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 if tool == CODEX {
                     if let Some(reason) = other_module(home, event, input) {
                         return deny(&reason);
+                    }
+                }
+                if agent && matches!(tool, CODEX | "Agent" | "Task") {
+                    if let Some(limit) = context::handoff_limit() {
+                        let module = agent_module(home, &g, input, event);
+                        if let Some(reason) =
+                            context::handoff_refusal(event, limit, module.as_deref())
+                        {
+                            return deny(&reason);
+                        }
                     }
                 }
             }
@@ -430,6 +533,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             {
                 return deny("Could not record dispatch.");
             }
+            if dispatcher && !agent && g.status == "active" {
+                if let Some(updated) = with_handoff(home, &g, input) {
+                    return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Chronos added the pending handoff to the dispatcher's prompt.","updatedInput":updated}}));
+                }
+            }
+            if agent && g.status == "active" && context::in_dispatcher(event) {
+                if let Some(text) = after_compaction(home, &g, event, input) {
+                    return Some(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":text}}));
+                }
+            }
             None
         }
         _ => None,
@@ -487,7 +600,7 @@ pub fn main_stdin() -> i32 {
     };
     if !matches!(
         event.get("hook_event_name").and_then(Value::as_str),
-        Some("UserPromptSubmit" | "Stop" | "PreToolUse")
+        Some("UserPromptSubmit" | "Stop" | "PreToolUse" | "SessionStart")
     ) {
         eprintln!("Unknown hook event");
         return 0;

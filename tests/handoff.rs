@@ -1,0 +1,459 @@
+use axiom::{goal, hook, hook::context, orch};
+use serde_json::{json, Value};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
+
+fn section(id: &str) -> String {
+    format!("## {id}\nPURPOSE purpose\nPATHS src/{id}/\nDEPENDS none\nCONTRACT\n  contract\nACCEPT tests/{id}.rs, `cargo test`\n")
+}
+
+struct Run {
+    _dir: tempfile::TempDir,
+    home: PathBuf,
+    project: PathBuf,
+    store: PathBuf,
+    main: PathBuf,
+    own: PathBuf,
+}
+
+/// A change goal for project `demo` with modules m1 and m2, and a dispatcher `d1` whose
+/// transcript lives where Claude Code keeps subagent transcripts.
+fn run() -> Run {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("demo");
+    fs::create_dir_all(&project).unwrap();
+    goal::open(&home, "s", "wish", Some(project.to_str().unwrap())).unwrap();
+    goal::set_mode(&home, "s", "change").unwrap();
+    let store = orch::store_for(&home, "demo").unwrap();
+    assert_eq!(
+        orch::run(&store, &["init".to_string()], false, false).exit_code,
+        0
+    );
+    fs::write(
+        store.join("modules.md"),
+        format!("{}\n{}", section("m1"), section("m2")),
+    )
+    .unwrap();
+    fs::write(
+        store.join("units.tsv"),
+        "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\na1\tm1\tfailed\t\t\t\t\nb1\tm2\tpending\t\t\t\t\n",
+    )
+    .unwrap();
+    let main = dir.path().join("projects").join("sess.jsonl");
+    let own = dir.path().join("projects/sess/subagents/agent-d1.jsonl");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&main, assistant(900_000)).unwrap();
+    Run {
+        _dir: dir,
+        home,
+        project,
+        store,
+        main,
+        own,
+    }
+}
+
+fn assistant(context: u64) -> String {
+    format!(
+        "{}\n",
+        json!({"type":"assistant","message":{"id":format!("msg_{context}"),"model":"claude-sonnet-4-5","usage":{"input_tokens":10,"cache_creation_input_tokens":90,"cache_read_input_tokens":context - 100,"output_tokens":7}}})
+    )
+}
+fn transcript(path: &Path, contexts: &[u64]) {
+    fs::write(
+        path,
+        contexts.iter().map(|c| assistant(*c)).collect::<String>(),
+    )
+    .unwrap();
+}
+
+fn tool(r: &Run, name: &str, input: Value) -> Value {
+    json!({"hook_event_name":"PreToolUse","session_id":"s","tool_name":name,"tool_input":input,"transcript_path":r.main})
+}
+fn in_dispatcher(mut e: Value) -> Value {
+    e["agent_id"] = json!("d1");
+    e["agent_type"] = json!("chronos:dispatcher");
+    e
+}
+fn codex(r: &Run) -> Value {
+    in_dispatcher(tool(
+        r,
+        CODEX,
+        json!({"project":"demo","unit":"a1","role":"terra","cwd":r.project}),
+    ))
+}
+fn reviewer(r: &Run) -> Value {
+    in_dispatcher(tool(
+        r,
+        "Agent",
+        json!({"subagent_type":"chronos:reviewer","prompt":"review a1"}),
+    ))
+}
+fn call(r: &Run, e: &Value) -> Option<Value> {
+    hook::handle(e, Some(&r.home), false)
+}
+fn refusal(r: &Run, e: &Value) -> Option<String> {
+    call(r, e).and_then(|v| {
+        (v["hookSpecificOutput"]["permissionDecision"] == "deny").then(|| {
+            v["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+    })
+}
+fn args(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+fn handoff(r: &Run, module: &str, next: &str) {
+    let out = orch::run(
+        &r.store,
+        &args(&[
+            "handoff",
+            "--module",
+            module,
+            "--repo",
+            r.project.to_str().unwrap(),
+            "--next",
+            next,
+        ]),
+        false,
+        false,
+    );
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+}
+
+#[test]
+fn a_dispatcher_past_the_threshold_is_refused_with_the_handoff_instruction() {
+    let r = run();
+    transcript(&r.own, &[30_000, 120_000, 210_000]);
+    let reason = refusal(&r, &codex(&r)).expect("codex_run past 200k is refused");
+    assert!(
+        reason.contains("210k tokens, past the 200k handoff limit"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(r#"["handoff", "--module", "m1", "--repo""#),
+        "{reason}"
+    );
+    assert!(reason.contains("then return your report"), "{reason}");
+    assert!(refusal(&r, &reviewer(&r)).is_some_and(|why| why.contains("handoff")));
+    let read = in_dispatcher(tool(
+        &r,
+        "Read",
+        json!({"file_path": r.store.join("units.tsv")}),
+    ));
+    assert_eq!(refusal(&r, &read), None, "reading the store stays open");
+    let threshold = |limit| context::handoff_refusal(&codex(&r), limit, None);
+    assert!(
+        threshold(300_000).is_none(),
+        "the threshold is configurable"
+    );
+    assert!(threshold(100_000).is_some());
+}
+
+#[test]
+fn no_refusal_below_the_threshold_for_the_core_or_for_other_agents() {
+    let r = run();
+    transcript(&r.own, &[30_000, 199_000]);
+    assert_eq!(refusal(&r, &codex(&r)), None);
+    assert_eq!(refusal(&r, &reviewer(&r)), None);
+
+    transcript(&r.own, &[30_000, 400_000]);
+    let core = tool(
+        &r,
+        "Agent",
+        json!({"subagent_type":"chronos:dispatcher","prompt":"module m2"}),
+    );
+    assert_eq!(
+        refusal(&r, &core),
+        None,
+        "the core is never refused for its context"
+    );
+
+    let mut astra = codex(&r);
+    astra["agent_type"] = json!("chronos:astra");
+    astra["tool_input"] =
+        json!({"project":"demo","role":"astra","brief":"b","cwd":r.project,"sandbox":"read-only"});
+    assert_eq!(refusal(&r, &astra), None, "only dispatchers hand off");
+
+    transcript(&r.own, &[150_000, 400_000]);
+    assert_eq!(
+        refusal(&r, &codex(&r)),
+        None,
+        "a dispatcher that started near the limit would hand off forever"
+    );
+}
+
+#[test]
+fn a_malformed_or_missing_transcript_never_blocks_work() {
+    let r = run();
+    let garbage: &[&[u8]] = &[
+        b"",
+        b"not json at all\n{\"type\":\"assistant\"\n",
+        b"{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":\"many\"}}}\n",
+        b"{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":900000,\"cache_read",
+        b"{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"usage\":{\"input_tokens\":900000}}}\n",
+        &[0xff, 0xfe, 0x00, b'\n', 0x80, 0x81],
+    ];
+    for bytes in garbage {
+        fs::write(&r.own, bytes).unwrap();
+        assert_eq!(refusal(&r, &codex(&r)), None);
+    }
+    fs::remove_file(&r.own).unwrap();
+    assert_eq!(refusal(&r, &codex(&r)), None, "missing subagent transcript");
+    let mut no_path = codex(&r);
+    no_path.as_object_mut().unwrap().remove("transcript_path");
+    assert_eq!(refusal(&r, &no_path), None);
+    let mut dir_path = codex(&r);
+    dir_path["transcript_path"] = json!(r.project);
+    assert_eq!(refusal(&r, &dir_path), None);
+}
+
+#[test]
+fn a_large_transcript_is_read_by_its_tail_only() {
+    let r = run();
+    let mut file = fs::File::create(&r.own).unwrap();
+    file.write_all(assistant(900_000).as_bytes()).unwrap();
+    let filler = format!(
+        "{}\n",
+        json!({"type":"user","message":{"content":"x".repeat(4000)}})
+    );
+    let mut written = 0u64;
+    while written <= context::TAIL_BYTES + 64 * 1024 {
+        file.write_all(filler.as_bytes()).unwrap();
+        written += filler.len() as u64;
+    }
+    drop(file);
+    assert_eq!(
+        context::last_context(&r.own),
+        None,
+        "the only assistant line sits before the tail and must not be read"
+    );
+    assert_eq!(refusal(&r, &codex(&r)), None);
+    let (start, tail) = context::read_tail(&r.own, context::TAIL_BYTES).unwrap();
+    assert!(start > 0);
+    assert!(tail.len() as u64 <= context::TAIL_BYTES);
+    let first = tail.split(|b| *b == b'\n').next().unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(first).is_ok(),
+        "the tail starts at a line boundary"
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&r.own)
+        .unwrap()
+        .write_all(assistant(230_000).as_bytes())
+        .unwrap();
+    assert_eq!(context::last_context(&r.own), Some(230_000));
+}
+
+#[test]
+fn a_handoff_is_written_and_read_back_intact() {
+    let r = run();
+    let repo = r.project.to_str().unwrap();
+    let fields = [
+        (
+            "--next",
+            "dispatch fix unit a1-fix with the VERIFY output of a1",
+        ),
+        ("--in-flight", "a1 failed VERIFY; b1 untouched"),
+        ("--stuck", "a1: the parser rejects CRLF briefs (換行)"),
+        (
+            "--decisions",
+            "kept the old flag name; logged in decisions.md",
+        ),
+    ];
+    let mut call = args(&["handoff", "--module", "m1", "--repo", repo]);
+    for (flag, value) in fields {
+        call.extend(args(&[flag, value]));
+    }
+    let out = orch::run(&r.store, &call, true, false);
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    let note = orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap();
+    assert_eq!(note.module.as_deref(), Some("m1"));
+    assert_eq!(note.repo.as_deref(), Some(repo));
+    assert_eq!(note.next, fields[0].1);
+    assert_eq!(note.in_flight, fields[1].1);
+    assert_eq!(note.stuck, fields[2].1);
+    assert_eq!(note.decisions, fields[3].1);
+    assert!(!note.taken);
+
+    let resume = orch::run(&r.store, &args(&["resume", "--module", "m1"]), false, false);
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
+    for (_, value) in fields {
+        assert!(
+            resume.stdout.contains(value),
+            "{value} missing from {}",
+            resume.stdout
+        );
+    }
+    assert!(
+        resume.stdout.contains("DIGEST\nunits: 1 (failed 1)"),
+        "{}",
+        resume.stdout
+    );
+    assert!(
+        !resume.stdout.contains("b1  pending"),
+        "another module's units stay out"
+    );
+    let report = orch::digest(&r.store, &r.project, Some("m1")).unwrap();
+    assert!(report.contains("handoff pending (m1): next: dispatch fix unit a1-fix"));
+
+    for (bad, why) in [
+        (
+            args(&["handoff", "--module", "m1", "--next", &"n".repeat(401)]),
+            "the limit is 400",
+        ),
+        (
+            args(&[
+                "handoff",
+                "--module",
+                "m1",
+                "--next",
+                "n",
+                "--stuck",
+                &"s".repeat(601),
+            ]),
+            "the limit is 600",
+        ),
+        (
+            args(&["handoff", "--module", "m9", "--next", "n"]),
+            "not in the module map",
+        ),
+        (args(&["handoff", "--module", "m1"]), "--next is required"),
+        (
+            args(&["handoff", "--module", "m1", "--next", "n", "--notes", "x"]),
+            "unknown handoff option",
+        ),
+        (
+            args(&["handoff", "--module", "m1", "--next", "n", "--next", "m"]),
+            "given twice",
+        ),
+    ] {
+        let out = orch::run(&r.store, &bad, false, false);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains(why), "{}", out.stderr);
+    }
+    assert_eq!(
+        orch::read_handoff(&r.store, Some("m1")).unwrap().unwrap(),
+        note
+    );
+
+    fs::write(r.store.join("decisions.md"), "d".repeat(40_000)).unwrap();
+    handoff(&r, "m2", "start b1");
+    let whole = orch::resume_text(&r.store, Some(&r.project), None).unwrap();
+    assert!(whole.chars().count() <= orch::MAX_RESUME, "{}", whole.len());
+    assert!(whole.contains("next: start b1") && whole.contains("cut; run orch report"));
+}
+
+#[test]
+fn a_fresh_dispatcher_prompt_carries_the_digest_and_the_handoff() {
+    let r = run();
+    handoff(&r, "m1", "dispatch fix unit a1-fix");
+    let start = |prompt: &str| {
+        tool(
+            &r,
+            "Agent",
+            json!({"subagent_type":"chronos:dispatcher","description":"m1","prompt":prompt}),
+        )
+    };
+    assert!(
+        call(&r, &start("Carry out module m12 only.")).is_none(),
+        "m12 is not m1"
+    );
+    assert!(call(&r, &start("Carry out module m2.")).is_none());
+
+    let out = call(&r, &start("Carry out module m1. Project dir given.")).unwrap();
+    let hso = &out["hookSpecificOutput"];
+    assert_eq!(hso["permissionDecision"], "allow");
+    let updated = &hso["updatedInput"];
+    assert_eq!(updated["subagent_type"], "chronos:dispatcher");
+    assert_eq!(updated["description"], "m1");
+    let prompt = updated["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("Carry out module m1. Project dir given."));
+    assert!(prompt.contains("HANDOFF for module m1"));
+    assert!(prompt.contains("next: dispatch fix unit a1-fix"));
+    assert!(prompt.contains("DIGEST\nunits: 1 (failed 1)"));
+    assert!(prompt.contains("a1  failed"));
+
+    assert!(
+        orch::read_handoff(&r.store, Some("m1"))
+            .unwrap()
+            .unwrap()
+            .taken
+    );
+    assert!(
+        call(&r, &start("Carry out module m1.")).is_none(),
+        "a handoff is given to one fresh dispatcher"
+    );
+}
+
+#[test]
+fn the_goal_cannot_close_blocked_while_a_handoff_waits() {
+    let r = run();
+    handoff(&r, "m2", "start b1");
+    let refused = goal::set_status(&r.home, "s", "blocked", Some("needs a key")).unwrap_err();
+    assert_eq!(refused.kind, "handoff_pending");
+    assert!(refused.message.contains("names module m2"));
+    orch::take_handoff(&r.store, Some("m2")).unwrap();
+    goal::set_status(&r.home, "s", "blocked", Some("needs a key")).unwrap();
+}
+
+#[test]
+fn compaction_brings_back_the_work_state() {
+    let r = run();
+    handoff(&r, "m1", "dispatch fix unit a1-fix");
+    let session = |source: &str| json!({"hook_event_name":"SessionStart","session_id":"s","source":source,"transcript_path":r.main});
+    assert!(call(&r, &session("startup")).is_none());
+    let out = call(&r, &session("compact")).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let text = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("Chronos goal s is active"));
+    assert!(text.contains("next: dispatch fix unit a1-fix"));
+    assert!(text.contains("units: 2"));
+
+    fs::create_dir_all(r.store.join("agents")).unwrap();
+    fs::write(r.store.join("agents").join("d1"), "m1").unwrap();
+    transcript(&r.own, &[30_000, 160_000]);
+    let read = in_dispatcher(tool(
+        &r,
+        "Read",
+        json!({"file_path": r.store.join("units.tsv")}),
+    ));
+    assert!(call(&r, &read).is_none(), "no compaction, nothing added");
+
+    let boundary = |uuid: &str| {
+        format!(
+            "{}\n",
+            json!({"type":"system","subtype":"compact_boundary","uuid":uuid,"compactMetadata":{"trigger":"auto","preTokens":167189}})
+        )
+    };
+    let mut lines = fs::read_to_string(&r.own).unwrap();
+    lines.push_str(&boundary("c1"));
+    lines.push_str(&assistant(20_000));
+    fs::write(&r.own, &lines).unwrap();
+    let out = call(&r, &read).unwrap();
+    let text = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(out["hookSpecificOutput"]
+        .get("permissionDecision")
+        .is_none());
+    assert!(text.contains("HANDOFF for module m1"));
+    assert!(text.contains("DIGEST\nunits: 1 (failed 1)"));
+    assert!(call(&r, &read).is_none(), "once per compaction");
+
+    lines.push_str(&boundary("c2"));
+    fs::write(&r.own, &lines).unwrap();
+    assert!(call(&r, &read).is_some());
+}
