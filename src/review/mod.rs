@@ -27,6 +27,13 @@ const TOKEN_CAP: u64 = 400_000;
 const TOKEN_CAP_ENV: &str = "AXIOM_REVIEW_TOKEN_CAP";
 
 /// The Codex token cap: `AXIOM_REVIEW_TOKEN_CAP` when it is a positive count, else 400k.
+/// `axiom review --diff-only`, or `AXIOM_REVIEW_DIFF_ONLY=1`: Codex judges from the diff alone.
+/// Each file it opens resends the whole context, so exploring a large change can exhaust the cap.
+pub fn diff_only() -> bool {
+    std::env::var(DIFF_ONLY_ENV).is_ok_and(|v| v.trim() == "1")
+}
+const DIFF_ONLY_ENV: &str = "AXIOM_REVIEW_DIFF_ONLY";
+
 pub fn token_cap() -> u64 {
     std::env::var(TOKEN_CAP_ENV)
         .ok()
@@ -321,9 +328,11 @@ fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &V
         sandbox: "read-only".into(),
         effort: Some("high".into()),
         output_schema: Some(shape.clone()),
-        developer_instructions: Some(
-            "Review the diff you are given; it already holds every changed file with its surrounding code. Read other files in this repository only to confirm or rule out a specific suspected defect, and never change anything. Your budget is limited: give your verdict before you run out, reporting what you could not check.".into(),
-        ),
+        developer_instructions: Some(if diff_only() {
+            "Review only the diff you are given; it holds every changed file with its surrounding code. Do not run commands or open other files. Where a judgement needs code you cannot see, say so in a finding instead of looking.".into()
+        } else {
+            "Review the diff you are given; it already holds every changed file with its surrounding code. Read other files in this repository only to confirm or rule out a specific suspected defect, and never change anything. Your budget is limited: give your verdict before you run out, reporting what you could not check.".into()
+        }),
         timeout_s: config.codex_timeout.as_secs().max(1),
         lean: true,
         keep_plugins: vec![],
@@ -449,12 +458,13 @@ fn usage(message: impl std::fmt::Display) -> i32 {
     eprintln!("axiom: {message}");
     2
 }
-/// `axiom review <range> [--project <dir>] [--json]`.
+/// `axiom review <range> [--project <dir>] [--json] [--diff-only]`.
 pub fn command(args: &[String]) -> i32 {
     let (mut range, mut project, mut json, mut i) = (None, None, false, 0);
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
+            "--diff-only" => std::env::set_var(DIFF_ONLY_ENV, "1"),
             "--project" => {
                 i += 1;
                 match args.get(i) {
