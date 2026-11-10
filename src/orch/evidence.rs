@@ -183,10 +183,10 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     if git(repo, &["rev-parse", "--is-inside-work-tree"]) != "true" {
         return String::new();
     }
-    let scope: Vec<&String> = scope
+    let (dirs, files): (Vec<&String>, Vec<&String>) = scope
         .iter()
         .filter(|path| repo.join(path).exists())
-        .collect();
+        .partition(|path| path.ends_with('/') || !repo.join(path).is_file());
     let index = std::env::temp_dir().join(format!(
         "orch-index-{}-{}",
         std::process::id(),
@@ -203,9 +203,16 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         if !run(&["read-tree", "--empty"]).ok()?.status.success() {
             return None;
         }
-        if !scope.is_empty() {
+        if !dirs.is_empty() {
             let mut args = vec!["add", "-A", "--"];
-            args.extend(scope.iter().map(|path| path.as_str()));
+            args.extend(dirs.iter().map(|path| path.as_str()));
+            if !run(&args).ok()?.status.success() {
+                return None;
+            }
+        }
+        if !files.is_empty() {
+            let mut args = vec!["--literal-pathspecs", "add", "-A", "--force", "--"];
+            args.extend(files.iter().map(|path| path.as_str()));
             if !run(&args).ok()?.status.success() {
                 return None;
             }

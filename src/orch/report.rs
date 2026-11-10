@@ -44,21 +44,29 @@ pub(crate) fn git(repo: &Path, args: &[&str]) -> Res<Vec<u8>> {
 fn tree_id(commit: &str) -> &str {
     commit.strip_prefix("tree:").unwrap_or(commit)
 }
+pub(crate) fn project_prefix(repo: &Path) -> Res<String> {
+    let raw = git(repo, &["rev-parse", "--show-prefix"])?;
+    Ok(String::from_utf8_lossy(&raw)
+        .trim_end_matches(['\r', '\n'])
+        .replace('\\', "/"))
+}
 fn changed_files(repo: &Path, base: &str, tree: &str) -> Res<Vec<(String, u64, u64)>> {
-    let raw = git(
-        repo,
-        &[
-            "-c",
-            "core.quotepath=off",
-            "diff-tree",
-            "-r",
-            "--no-renames",
-            "--numstat",
-            "-z",
-            tree_id(base),
-            tree_id(tree),
-        ],
-    )?;
+    let prefix = project_prefix(repo)?;
+    let relative = format!("--relative={prefix}");
+    let mut args = vec![
+        "-c",
+        "core.quotepath=off",
+        "diff-tree",
+        "-r",
+        "--no-renames",
+        "--numstat",
+        "-z",
+    ];
+    if !prefix.is_empty() {
+        args.push(&relative);
+    }
+    args.extend([tree_id(base), tree_id(tree)]);
+    let raw = git(repo, &args)?;
     let mut files = Vec::new();
     for entry in raw.split(|b| *b == 0).filter(|e| !e.is_empty()) {
         let line = String::from_utf8_lossy(entry);
@@ -71,25 +79,25 @@ fn changed_files(repo: &Path, base: &str, tree: &str) -> Res<Vec<(String, u64, u
     Ok(files)
 }
 fn file_diff(repo: &Path, base: &str, tree: &str, path: &str) -> Res<String> {
-    let raw = git(
-        repo,
-        &[
-            "--literal-pathspecs",
-            "-c",
-            "core.quotepath=off",
-            "diff-tree",
-            "-r",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-color",
-            "-p",
-            PACK_CONTEXT,
-            tree_id(base),
-            tree_id(tree),
-            "--",
-            path,
-        ],
-    )?;
+    let prefix = project_prefix(repo)?;
+    let relative = format!("--relative={prefix}");
+    let mut args = vec![
+        "--literal-pathspecs",
+        "-c",
+        "core.quotepath=off",
+        "diff-tree",
+        "-r",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-color",
+        "-p",
+        PACK_CONTEXT,
+    ];
+    if !prefix.is_empty() {
+        args.push(&relative);
+    }
+    args.extend([tree_id(base), tree_id(tree), "--", path]);
+    let raw = git(repo, &args)?;
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
@@ -134,15 +142,37 @@ fn pack_diffs_noting(
     Ok(omitted)
 }
 /// Where a file deleted between `base` and `tree` keeps its last version, written on first use.
-fn deleted_copy(repo: &Path, dir: &Path, base: &str, tree: &str, path: &str) -> Res<Option<PathBuf>> {
+fn deleted_copy(
+    repo: &Path,
+    dir: &Path,
+    base: &str,
+    tree: &str,
+    path: &str,
+) -> Res<Option<PathBuf>> {
     let present = git(
         repo,
-        &["--literal-pathspecs", "ls-tree", "--name-only", "-z", tree_id(tree), "--", path],
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "--name-only",
+            "-z",
+            tree_id(tree),
+            "--",
+            path,
+        ],
     )?;
     if !present.is_empty() {
         return Ok(None);
     }
-    let text = git(repo, &["cat-file", "blob", &format!("{}:{path}", tree_id(base))])?;
+    let prefix = project_prefix(repo)?;
+    let text = git(
+        repo,
+        &[
+            "cat-file",
+            "blob",
+            &format!("{}:{prefix}{path}", tree_id(base)),
+        ],
+    )?;
     let mut out = dir.to_path_buf();
     out.extend(path.split('/'));
     if let Some(parent) = out.parent() {

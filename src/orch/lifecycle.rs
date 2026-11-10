@@ -49,6 +49,20 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     if !out.status.success() {
         return Ok(BTreeSet::new());
     }
+    let prefix = super::report::project_prefix(repo)?;
+    let project: Vec<_> = prefix.split('/').filter(|p| !p.is_empty()).collect();
+    let relative = |path: &[u8]| {
+        let path = String::from_utf8_lossy(path).replace('\\', "/");
+        let parts: Vec<_> = path.split('/').collect();
+        let common = project
+            .iter()
+            .zip(&parts)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut result = vec![".."; project.len() - common];
+        result.extend_from_slice(&parts[common..]);
+        result.join("/")
+    };
     let mut parts = out.stdout.split(|b| *b == 0);
     let mut result = BTreeSet::new();
     while let Some(p) = parts.next() {
@@ -56,10 +70,10 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
             continue;
         }
         let status = &p[..2];
-        result.insert(String::from_utf8_lossy(&p[3..]).replace('\\', "/"));
+        result.insert(relative(&p[3..]));
         if status.contains(&b'R') || status.contains(&b'C') {
             if let Some(old) = parts.next() {
-                result.insert(String::from_utf8_lossy(old).replace('\\', "/"));
+                result.insert(relative(old));
             }
         }
     }

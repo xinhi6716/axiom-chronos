@@ -62,6 +62,16 @@ impl SharedInput {
     fn end_run(&self) {
         self.ended.store(true, Ordering::SeqCst);
     }
+    fn hand_back(&self) -> run::HandBack {
+        let lines = Arc::clone(&self.lines);
+        Box::new(move |line| {
+            lines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .kept
+                .push_front((line + "\n").into_bytes());
+        })
+    }
 }
 impl Drop for SharedInput {
     fn drop(&mut self) {
@@ -97,7 +107,10 @@ impl BufRead for RunInput {
                     break;
                 }
                 Ok(line) => self.line = Cursor::new(line),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drop(lines);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -154,7 +167,15 @@ fn resume_run(
     lines: &mut SharedInput,
     out: &mut dyn Write,
 ) -> Res<i32> {
-    run::resume(config, session, max_turns, message, lines.for_run(), out)
+    run::resume_keeping(
+        config,
+        session,
+        max_turns,
+        message,
+        lines.for_run(),
+        Some(lines.hand_back()),
+        out,
+    )
 }
 
 /// While the session's goal waits on a batch: wait with no model running, then resume the session.
@@ -247,6 +268,7 @@ pub fn run_with(
         project,
         max_turns,
         lines.for_run(),
+        Some(lines.hand_back()),
         out,
         None,
         &mut |event| {
@@ -358,6 +380,64 @@ mod tests {
             .expect("the reader did not return")
     }
 
+    struct SignalConsumed {
+        reader: Box<dyn BufRead + Send>,
+        signal: Option<mpsc::Sender<()>>,
+    }
+    impl Read for SignalConsumed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.fill_buf()?.read(buf)?;
+            self.consume(n);
+            Ok(n)
+        }
+    }
+    impl BufRead for SignalConsumed {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.reader.fill_buf()
+        }
+        fn consume(&mut self, amount: usize) {
+            let complete = self.reader.fill_buf().unwrap()[..amount].contains(&b'\n');
+            self.reader.consume(amount);
+            if complete {
+                if let Some(signal) = self.signal.take() {
+                    signal.send(()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_held_by_the_finished_forwarder_goes_to_the_next_run_once() {
+        let (feed, fed) = mpsc::channel();
+        let mut lines = SharedInput::new(Box::new(io::BufReader::new(Fed(fed))));
+        let (consumed, wait_consumed) = mpsc::channel();
+        let one = Box::new(SignalConsumed {
+            reader: lines.for_run(),
+            signal: Some(consumed),
+        });
+        let writer = Arc::new(Mutex::new(None));
+        let drive_writer = Arc::clone(&writer);
+        run::forward_input_keeping(writer, one, Some(lines.hand_back()));
+        feed.send(b"late\n".to_vec()).unwrap();
+        wait_consumed.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(drive_writer);
+        lines.end_run();
+
+        let mut next = lines.for_run();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(read(&mut next)).unwrap();
+            tx.send(read(&mut next)).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("the reader did not return"),
+            "late\n"
+        );
+        drop(feed);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "");
+    }
+
     #[test]
     fn a_line_typed_while_the_ended_run_is_receiving_goes_to_the_next_run() {
         for _ in 0..10 {
@@ -379,5 +459,195 @@ mod tests {
         let mut lines = SharedInput::new(Box::new(Cursor::new(Vec::new())));
         let mut reader = lines.for_run();
         assert_eq!(read(&mut reader), "");
+    }
+
+    const SESSION: &str = "12345678-1234-1234-1234-123456789abc";
+
+    fn python() -> String {
+        if let Ok(p) = std::env::var("AXIOM_TEST_PYTHON") {
+            return p;
+        }
+        let names = if cfg!(windows) {
+            ["python", "python3"]
+        } else {
+            ["python3", "python"]
+        };
+        names
+            .into_iter()
+            .find(|p| {
+                crate::base::proc::cmd(p)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            })
+            .expect("Python not found")
+            .into()
+    }
+
+    fn fake_config(temp: &tempfile::TempDir) -> Config {
+        let script = temp.path().join("claude.py");
+        std::fs::write(&script, r#"
+import json, pathlib, sys, threading
+if '--version' in sys.argv:
+    print('fake claude 1.0')
+    sys.exit(0)
+stage, record = map(pathlib.Path, sys.argv[1:3])
+sys.stdin.readline()
+if not stage.exists():
+    stage.touch()
+    if '--resume' not in sys.argv:
+        print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': '12345678-1234-1234-1234-123456789abc'}), flush=True)
+else:
+    def receive():
+        record.write_text(sys.stdin.readline(), encoding='utf-8')
+    reader = threading.Thread(target=receive, daemon=True)
+    reader.start()
+    reader.join(2)
+print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
+"#).unwrap();
+        Config {
+            claude: Ok(vec![
+                python(),
+                "-I".into(),
+                script.to_string_lossy().into_owned(),
+                temp.path().join("stage").to_string_lossy().into_owned(),
+                temp.path().join("record").to_string_lossy().into_owned(),
+            ]),
+            home: temp.path().join("home"),
+            bin: temp.path().join("axiom"),
+            clock: super::super::run::Clock::system(),
+        }
+    }
+
+    // The log is written after the first child has exited and its writer was emptied, but
+    // before drive releases the writer. Keep drive there until the forwarder can take the line.
+    struct FeedOnLog<'a> {
+        feed: mpsc::Sender<Vec<u8>>,
+        fed: bool,
+        read_again: mpsc::Receiver<()>,
+        activate_on_batch: Option<&'a Config>,
+        output: Vec<u8>,
+    }
+    impl Write for FeedOnLog<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(bytes);
+            let text = String::from_utf8_lossy(bytes);
+            if text.contains("log: ") {
+                if !self.fed {
+                    self.fed = true;
+                    self.feed.send(b"late line\n".to_vec()).unwrap();
+                    self.read_again
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis(750));
+                }
+            }
+            if text.contains("batch finished; resuming") {
+                if let Some(config) = self.activate_on_batch.take() {
+                    goal::set_status(&config.home, SESSION, "blocked", Some("test")).unwrap();
+                }
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct SignalFed {
+        fed: Fed,
+        read_again: Option<mpsc::Sender<()>>,
+        read_once: bool,
+    }
+    impl Read for SignalFed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.read_once {
+                if let Some(signal) = self.read_again.take() {
+                    signal.send(()).unwrap();
+                }
+            }
+            let n = self.fed.read(buf)?;
+            self.read_once = true;
+            Ok(n)
+        }
+    }
+    fn input_and_output(config: Option<&Config>) -> (Box<dyn BufRead + Send>, FeedOnLog<'_>) {
+        let (feed, fed) = mpsc::channel();
+        let (signal, read_again) = mpsc::channel();
+        (
+            Box::new(io::BufReader::new(SignalFed {
+                fed: Fed(fed),
+                read_again: Some(signal),
+                read_once: false,
+            })),
+            FeedOnLog {
+                feed,
+                fed: false,
+                read_again,
+                activate_on_batch: config,
+                output: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn resume_run_hands_the_held_line_to_the_next_reader() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = fake_config(&temp);
+        goal::open(&config.home, SESSION, "wish", temp.path().to_str()).unwrap();
+        goal::set_status(&config.home, SESSION, "waiting", Some("waiting")).unwrap();
+        let (input, mut out) = input_and_output(None);
+        let mut lines = SharedInput::new(input);
+        assert_eq!(
+            resume_run(&config, SESSION, None, None, &mut lines, &mut out).unwrap(),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.output)
+        );
+        assert_eq!(read_within(lines.for_run()), "late line\n");
+    }
+
+    #[test]
+    fn run_with_hands_the_held_line_to_the_resumed_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = fake_config(&temp);
+        goal::open(&config.home, SESSION, "wish", temp.path().to_str()).unwrap();
+        let marker = temp.path().join("done");
+        std::fs::write(&marker, "").unwrap();
+        goal::set_status_with_batch(
+            &config.home,
+            SESSION,
+            "waiting",
+            Some("waiting"),
+            Some(Batch {
+                progress_file: temp.path().join("progress").to_string_lossy().into_owned(),
+                marker_file: marker.to_string_lossy().into_owned(),
+                pid: std::process::id(),
+            }),
+        )
+        .unwrap();
+        let (input, mut out) = input_and_output(Some(&config));
+        assert_eq!(
+            run_with(
+                &config,
+                "wish",
+                "wish",
+                temp.path(),
+                None,
+                input,
+                &mut out,
+                &run::Launch::default()
+            )
+            .unwrap(),
+            0
+        );
+        let record = std::fs::read_to_string(temp.path().join("record")).unwrap_or_default();
+        let message: serde_json::Value = serde_json::from_str(&record).unwrap_or_else(|_| {
+            panic!(
+                "resumed run did not receive the line: {}",
+                String::from_utf8_lossy(&out.output)
+            )
+        });
+        assert_eq!(message["message"]["content"][0]["text"], "late line");
     }
 }

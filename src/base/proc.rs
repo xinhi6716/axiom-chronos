@@ -1,5 +1,6 @@
 use super::{Failure, Res};
 use std::{
+    cell::Cell,
     io::Read,
     path::Path,
     process::{Child, Command, Stdio},
@@ -159,7 +160,14 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
     let run = capture(child, timeout)?;
     let mut bytes = run.stdout;
     bytes.extend(run.stderr);
-    let output = String::from_utf8_lossy(&bytes).replace('\0', "");
+    let mut output = String::from_utf8_lossy(&bytes).replace('\0', "");
+    if run.holders_ended {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(HOLDERS_ENDED_NOTE);
+        output.push('\n');
+    }
     Ok(ShellRun {
         exit_code: run.exit_code,
         output,
@@ -168,6 +176,8 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
 }
 /// The most of each stream `capture` keeps: its tail, where results and failures are printed.
 pub const OUTPUT_CAP: usize = 8 << 20;
+pub const HOLDER_GRACE: Duration = Duration::from_secs(10);
+pub const HOLDERS_ENDED_NOTE: &str = "axiom: the command exited, but background processes it started still held its output after 10s and were ended";
 /// How long the streams may take to close once everything holding them has been killed.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub struct Captured {
@@ -175,12 +185,14 @@ pub struct Captured {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub timed_out: bool,
+    pub holders_ended: bool,
 }
 
 /// Reads one stream to its end on its own thread, keeping at most the last `OUTPUT_CAP` bytes.
 struct Drain {
     kept: Arc<Mutex<Vec<u8>>>,
-    done: mpsc::Receiver<()>,
+    done: mpsc::Receiver<Instant>,
+    ended: Cell<Option<Instant>>,
 }
 impl Drain {
     fn start(mut stream: impl Read + Send + 'static) -> Self {
@@ -204,14 +216,22 @@ impl Drain {
                     Err(_) => break,
                 }
             }
-            let _ = tx.send(());
+            let _ = tx.send(Instant::now());
         });
-        Self { kept, done }
+        Self { kept, done, ended: Cell::new(None) }
     }
     /// True once the stream has ended.
     fn ended_by(&self, deadline: Instant) -> bool {
-        let wait = deadline.saturating_duration_since(Instant::now());
-        !matches!(self.done.recv_timeout(wait), Err(mpsc::RecvTimeoutError::Timeout))
+        let ended = self.ended.get().or_else(|| {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match self.done.recv_timeout(wait) {
+                Ok(at) => Some(at),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Some(Instant::now()),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+            }
+        });
+        self.ended.set(ended);
+        ended.is_some_and(|at| at <= deadline)
     }
     fn take(self) -> Vec<u8> {
         let mut kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(|e| e.into_inner()));
@@ -275,17 +295,19 @@ impl Drop for Job {
 }
 
 /// Runs `child`, which `command` built with piped stdout and stderr, to its end or `timeout`.
-/// The deadline covers the streams too: a process the child leaves behind can hold them open, and
-/// at the deadline everything the child started is killed. A run that has not closed its
-/// streams by then is `timed_out`, with exit code -1 and whatever output arrived.
+/// The deadline covers the streams too. After the child exits, holders get at most
+/// `HOLDER_GRACE` to close them before the group is killed.
 pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
+    let deadline = Instant::now() + timeout;
     let group = Group::of(&child);
     let out = Drain::start(child.stdout.take().unwrap());
     let err = Drain::start(child.stderr.take().unwrap());
-    let deadline = Instant::now() + timeout;
     let exited = loop {
         match child.try_wait() {
-            Ok(Some(s)) => break Some(s.code().unwrap_or(-1)),
+            Ok(Some(s)) => {
+                let exited_at = Instant::now();
+                break (exited_at < deadline).then_some((s.code().unwrap_or(-1), exited_at));
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => break None,
             Err(e) => {
@@ -294,18 +316,27 @@ pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
             }
         }
     };
-    let finished = exited.filter(|_| out.ended_by(deadline) && err.ended_by(deadline));
-    if finished.is_none() {
+    let stream_deadline = exited.map(|(_, at)| at + HOLDER_GRACE).unwrap_or(deadline);
+    let finished = exited.is_some()
+        && out.ended_by(stream_deadline.min(deadline))
+        && err.ended_by(stream_deadline.min(deadline));
+    let holders_ended = exited.is_some() && !finished && stream_deadline <= deadline;
+    if !finished {
         group.kill(&mut child);
         let grace = Instant::now() + DRAIN_GRACE;
         // Only a holder out of the group's reach can keep a drain thread past this.
         let _ = out.ended_by(grace) && err.ended_by(grace);
     }
     Ok(Captured {
-        exit_code: finished.unwrap_or(-1),
+        exit_code: if finished || holders_ended {
+            exited.unwrap().0
+        } else {
+            -1
+        },
         stdout: out.take(),
         stderr: err.take(),
-        timed_out: finished.is_none(),
+        timed_out: !finished && !holders_ended,
+        holders_ended,
     })
 }
 
