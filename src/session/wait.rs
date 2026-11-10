@@ -238,8 +238,35 @@ pub fn run_with(
     out: &mut dyn Write,
     launch: &run::Launch,
 ) -> Res<i32> {
+    run_observing(
+        config,
+        skill,
+        text,
+        project,
+        max_turns,
+        input,
+        out,
+        launch,
+        &mut |_| {},
+    )
+}
+
+/// Like `run_with`, reporting the first session ID observed in a system init event.
+#[allow(clippy::too_many_arguments)]
+pub fn run_observing(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    out: &mut dyn Write,
+    launch: &run::Launch,
+    on_session: &mut dyn FnMut(&str),
+) -> Res<i32> {
     let mut lines = SharedInput::new(input);
     let mut session = None;
+    let mut reported = false;
     let code = run_observed(
         config,
         skill,
@@ -252,6 +279,12 @@ pub fn run_with(
         &mut |event| {
             if event["type"] == "system" && event["subtype"] == "init" {
                 session = event["session_id"].as_str().map(str::to_owned);
+                if !reported {
+                    if let Some(id) = session.as_deref() {
+                        on_session(id);
+                        reported = true;
+                    }
+                }
             }
         },
         launch,

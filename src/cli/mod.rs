@@ -1,5 +1,5 @@
 pub(crate) mod doctor;
-use crate::{base, bridge, hook, memory::Memory, orch, session};
+use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
 fn usage(message: impl std::fmt::Display) -> i32 {
@@ -309,6 +309,75 @@ fn usage_command(args: &[String]) -> i32 {
         }
     }
 }
+fn evolve_command(args: &[String]) -> i32 {
+    let (mut since, mut repo, mut dry_run, mut i) = (evolve::DEFAULT_SINCE_DAYS, None, false, 0);
+    while i < args.len() {
+        match args[i].as_str() {
+            "--since" => match value(args, &mut i, "--since") {
+                Ok(v) => match v.parse::<u32>() {
+                    Ok(days) if (1..=evolve::MAX_SINCE_DAYS).contains(&days) => since = days,
+                    _ => {
+                        return usage(format!(
+                            "--since must be an integer between 1 and {}",
+                            evolve::MAX_SINCE_DAYS
+                        ))
+                    }
+                },
+                Err(e) => return usage(e),
+            },
+            "--repo" => match value(args, &mut i, "--repo") {
+                Ok(v) => repo = Some(PathBuf::from(v)),
+                Err(e) => return usage(e),
+            },
+            "--dry-run" => dry_run = true,
+            s => return usage(format!("evolve: unrecognized argument: {s}")),
+        }
+        i += 1;
+    }
+    let inputs = evolve::Inputs::from_env(since);
+    if dry_run {
+        return match evolve::preview(&inputs) {
+            Ok(preview) => {
+                print!("{}", preview.text);
+                0
+            }
+            Err(e) if e.kind == "invalid_argument" => usage(e.message),
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        };
+    }
+    if let Some(path) = &mut repo {
+        if !path.is_absolute() {
+            *path = match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&*path),
+                Err(e) => {
+                    eprintln!("axiom: {e}");
+                    return 1;
+                }
+            };
+        }
+    }
+    match evolve::start(
+        &inputs,
+        repo.as_deref(),
+        &session::Config::from_env(),
+        Box::new(io::BufReader::new(io::stdin())),
+        &mut io::stdout(),
+    ) {
+        Ok(evolve::StartOutcome::NoOp { reason }) => {
+            println!("{reason}");
+            0
+        }
+        Ok(evolve::StartOutcome::Ran { exit_code, .. }) => exit_code,
+        Err(e) if e.kind == "invalid_argument" => usage(e.message),
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -354,6 +423,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "memory" => memory_command(rest),
         "lint" => lint_command(rest),
         "usage" => usage_command(rest),
+        "evolve" => evolve_command(rest),
         "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
