@@ -54,10 +54,10 @@ Chronos 也有視窗版，不用開終端機就能許願、觀看並調整進行
 ## 一個願望怎麼跑
 
 <p align="center"><picture>
-  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
-  <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
-  <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="流程：Astra 先規劃、critic 第二審、architect 切模組、Codex 施工（terra 實作、sol 整合）、Claude 審查程式，最後由完整測試、CI 與記憶收尾。接受結果前仍需檢查修改。" />
+  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-zh-TW-dark-mobile.svg" />
+  <source media="(max-width: 600px)" srcset="assets/chronos-process-zh-TW-mobile.svg" />
+  <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-zh-TW-dark.svg" />
+  <img src="assets/chronos-process-zh-TW.svg" width="1200" alt="流程：Astra 先規劃、critic 第二審、architect 切模組、Codex 施工（terra 實作、sol 整合）、Claude 審查程式，最後由完整測試、CI 與記憶收尾。接受結果前仍需檢查修改。" />
 </picture></p>
 
 每次 wish 都先由 Astra 規劃，`chronos:critic` 審查計畫，核心裁決後才開始建置。

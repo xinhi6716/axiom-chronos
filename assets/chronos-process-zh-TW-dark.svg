@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="594" viewBox="0 0 1200 594" role="img" aria-labelledby="title desc" xml:lang="zh-TW">
+<title id="title">Axiom Chronos: 從願望到驗證完成</title>
+<desc id="desc">Astra 先規劃、critic 審查計畫、architect 切模組、Codex 施工、Claude 審查確切檔案，最後由完整測試、CI 與記憶收尾。</desc>
+<rect width="1200" height="594" fill="#101a22"/>
+<path d="M24 1H1176M24 593H1176" stroke="#586052"/>
+<text x="36" y="39" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="start">AXIOM / CHRONOS</text>
+<text x="36" y="99" font-size="43" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">從願望到驗證完成</text>
+<path d="M36 124H1164" stroke="#586052"/>
+<g data-step="1">
+<rect x="36" y="150" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="74" cy="189" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="74" y="196" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">01</text>
+<text x="108" y="199" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Astra</text>
+<text x="60" y="246" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">定義修改目標</text>
+<text x="60" y="280" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">先完成計畫</text>
+</g>
+<path d="M400 230h16m-5-5 5 5-5 5" fill="none" stroke="#b89a58" stroke-width="1.5"/>
+<g data-step="2">
+<rect x="420" y="150" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="458" cy="189" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="458" y="196" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">02</text>
+<text x="492" y="199" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Critic</text>
+<text x="444" y="246" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">審查計畫</text>
+<text x="444" y="280" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">核心裁決後才施工</text>
+</g>
+<path d="M784 230h16m-5-5 5 5-5 5" fill="none" stroke="#b89a58" stroke-width="1.5"/>
+<g data-step="3">
+<rect x="804" y="150" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="842" cy="189" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="842" y="196" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">03</text>
+<text x="876" y="199" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Architect</text>
+<text x="828" y="246" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">切分工作模組</text>
+<text x="828" y="280" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">介面規格與驗收測試</text>
+</g>
+<g data-step="4">
+<rect x="36" y="334" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="74" cy="373" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="74" y="380" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">04</text>
+<text x="108" y="383" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Codex</text>
+<text x="60" y="430" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">terra 實作各單元</text>
+<text x="60" y="464" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">必要時由 sol 整合</text>
+</g>
+<path d="M400 414h16m-5-5 5 5-5 5" fill="none" stroke="#b89a58" stroke-width="1.5"/>
+<g data-step="5">
+<rect x="420" y="334" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="458" cy="373" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="458" y="380" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">05</text>
+<text x="492" y="383" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Claude 審查</text>
+<text x="444" y="430" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">檢查確切檔案</text>
+<text x="444" y="464" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">跨模型家族複核</text>
+</g>
+<path d="M784 414h16m-5-5 5 5-5 5" fill="none" stroke="#b89a58" stroke-width="1.5"/>
+<g data-step="6">
+<rect x="804" y="334" width="360" height="160" rx="6" fill="#172530" stroke="#586052"/>
+<circle cx="842" cy="373" r="20" fill="#101a22" stroke="#b89a58"/>
+<text x="842" y="380" font-size="19" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">06</text>
+<text x="876" y="383" font-size="31" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">驗證</text>
+<text x="828" y="430" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">完整測試與 CI</text>
+<text x="828" y="464" font-size="24" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">保存工作紀錄</text>
+</g>
+<path d="M36 526H1164" stroke="#586052"/>
+<text x="36" y="563" font-size="23" fill="#d7bd82" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">每次 commit 前請檢查 diff。</text>
+</svg>
