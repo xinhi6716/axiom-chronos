@@ -98,6 +98,7 @@ When what remains is a long batch of the project's own programs, the wish waits 
 | `--creative` | Let Chronos find one small, evidence-backed improvement. |
 | `--max-turns N` | Limit core-session turns. |
 | `--advanced-research` | Opt in to the paid research council before planning. |
+| `--fable-cap USD`, `--astra-cap TOKENS`, `--council-rounds N` | Override council budgets; require `--advanced-research`. |
 
 Put options **before** the wish; everything after them is wish text. `axiom research` turns a question into a reviewed research plan.
 
@@ -105,7 +106,7 @@ More commands: `axiom review <git range>` gives a diff a second opinion from ano
 
 `axiom evolve --dry-run` gives a self-improvement digest from Chronos's own logs for the last seven days. Review it before explicitly running `axiom evolve --repo PATH` against the Chronos source repository. It is an on-demand weekly pass, not a scheduled job: the desktop asks for confirmation; the CLI start command has no confirmation prompt.
 
-**Optional pieces.** agy (the backup reviewer) and [CodeGraph](https://github.com/colbymchenry/codegraph) (less code reading when a `.codegraph/` folder exists) are used only if installed. `--advanced-research` is the one option that costs extra: Astra, Fable and Argon discuss the problem before the plan, with Fable capped at $5 by default. It is off unless you ask.
+**Optional pieces.** agy (the backup reviewer) and [CodeGraph](https://github.com/colbymchenry/codegraph) (less code reading when a `.codegraph/` folder exists) are used only if installed. `--advanced-research` is the one option that costs extra: Astra and Fable discuss the plan in order (Astra first each round); Argon (Gemini 4) reviews exactly once afterward. If Argon objects, Astra and Fable answer in the same order; the core rules with every phase recorded. It is off unless you ask. Defaults are Fable $5, Astra 200k tokens, Argon 400k tokens for one review, and up to 3 rounds in each dialogue phase. Set `AXIOM_FABLE_CAP_USD`, `AXIOM_ASTRA_TOKEN_CAP`, `AXIOM_ARGON_TOKEN_CAP` and `AXIOM_COUNCIL_ROUNDS`, or use Settings → Advanced research budgets. CLI overrides: `axiom wish --advanced-research --fable-cap 20 --astra-cap 600000 --council-rounds 3 "fix the bug"`. These options require `--advanced-research`. Values must be positive; tokens and rounds must be whole numbers. Invalid values refuse startup; a Fable cap above $200 is refused as probably a typo. Agreement stops a phase early; spent budgets, failures or its round cap leave disputes for the core. Argon failure ends after the planning dialogue and is reported as not reviewed.
 
 To save tokens, each module gets its own dispatcher, with a soft warning at 80% of the handoff limit and a fresh dispatcher at 150k tokens. Binding rules are restored verbatim after compaction; rarely used prompt sections load only when needed. Handoff notes are checked for instructions to hide problems. The no-progress guard stops a wish after three unchanged continuations instead of re-prompting it (`AXIOM_IDLE_CONTINUES` changes the count).
 

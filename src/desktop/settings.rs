@@ -156,6 +156,26 @@ const TITLE_STRIP_HEIGHT: f32 = 34.0;
 /// A strip about 120 by 24 pixels: enough to grab and drag.
 const MIN_REACHABLE_STRIP: f32 = 2880.0;
 
+/// Keep invalid drafts visible across restarts; the shared parser blocks advanced wishes.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct BudgetInputs { pub fable: String, pub astra: String, pub argon: String, pub rounds: String }
+impl Default for BudgetInputs {
+    fn default() -> Self { Self { fable:"5".into(), astra:"200000".into(), argon:"400000".into(), rounds:"3".into() } }
+}
+impl BudgetInputs {
+    fn parse(value: Option<&Value>) -> Self {
+        let d=Self::default();
+        let word=|key, fallback|value.and_then(|v|v.get(key)).map(|v|v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string())).unwrap_or(fallback);
+        Self { fable:word("fable",d.fable), astra:word("astra",d.astra), argon:word("argon",d.argon), rounds:word("rounds",d.rounds) }
+    }
+    pub fn values(&self) -> [String;4] { [self.fable.clone(),self.astra.clone(),self.argon.clone(),self.rounds.clone()] }
+    pub fn set(&mut self,index:usize,value:String) { match index {0=>self.fable=value,1=>self.astra=value,2=>self.argon=value,_=>self.rounds=value} }
+    pub fn validate(&self) -> Result<crate::council::Budgets,crate::council::budgets::BudgetError> {
+        use crate::council::budgets::*;
+        crate::council::Budgets::parse(|key|Some(match key {FABLE_CAP=>self.fable.clone(),ASTRA_CAP=>self.astra.clone(),ARGON_CAP=>self.argon.clone(),_=>self.rounds.clone()}))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub language: LanguageChoice,
@@ -176,6 +196,7 @@ pub struct Settings {
     pub views: BTreeMap<String, ViewMemory>,
     pub board: BoardChoice,
     pub board_tokens: BoardTokens,
+    pub council_budgets: BudgetInputs,
 }
 
 impl Default for Settings {
@@ -196,6 +217,7 @@ impl Default for Settings {
             views: BTreeMap::new(),
             board: BoardChoice::default(),
             board_tokens: BoardTokens::default(),
+            council_budgets: BudgetInputs::default(),
         }
     }
 }
@@ -239,6 +261,7 @@ impl Settings {
                 memory.sanitize();
                 Some((key.clone(), memory))
             }).collect()).unwrap_or_default(),
+            council_budgets: BudgetInputs::parse(root.get("council_budgets")),
             board: match word("board") { Some("haiku") => BoardChoice::Haiku, Some("off") => BoardChoice::Off, _ => BoardChoice::Luna },
             board_tokens: BoardTokens {
                 input: root.pointer("/board_tokens/input").and_then(Value::as_u64).unwrap_or(0),
@@ -258,6 +281,7 @@ impl Settings {
             "filter": v.filter, "sort": v.sort, "scroll": v.scroll, "selected": v.selected,
         }))).collect();
         let body = json!({
+            "council_budgets":self.council_budgets,
             "language": key_of(&LANGUAGE_KEYS, self.language),
             "theme": key_of(&THEME_KEYS, self.theme),
             "plain_words": self.plain_words,
@@ -596,6 +620,16 @@ pub fn opening_bounds(settings: &Settings, default: Size<Pixels>, min: Size<Pixe
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn council_inputs_round_trip_including_invalid_drafts() {
+        for fable in ["20", "NaN", "201", ""] {
+            let budgets = serde_json::json!({"fable":fable,"astra":"600000","argon":"400000","rounds":"3"});
+            let settings = super::Settings::parse(&serde_json::json!({"council_budgets":budgets}).to_string());
+            let saved: serde_json::Value = serde_json::from_str(&settings.to_json()).unwrap();
+            assert_eq!(saved["council_budgets"], budgets);
+        }
+    }
+
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
@@ -617,6 +651,7 @@ mod tests {
             views: BTreeMap::from([("run".into(), ViewMemory { filter: Some("open".into()), sort: Some("new".into()), scroll: 42.0, selected: Some("item".into()) })]),
             board: BoardChoice::Haiku,
             board_tokens: BoardTokens { input: 123, output: 45, unreported: 2 },
+            council_budgets: BudgetInputs::default(),
         }
     }
 

@@ -205,8 +205,10 @@ pub fn call_body(body: impl FnOnce() -> Res<Value>) -> Value {
 }
 pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
     let mut bridge = Bridge::new(config);
-    if let Some(setup) = council::Setup::from_env() {
-        bridge = bridge.with_council(setup);
+    match council::Setup::from_env() {
+        Ok(Some(setup)) => bridge = bridge.with_council(setup),
+        Ok(None) => (),
+        Err(e) => { eprintln!("axiom: {}", e.message); return 2; }
     }
     let bridge = Arc::new(bridge);
     let out = Arc::new(Mutex::new(output));

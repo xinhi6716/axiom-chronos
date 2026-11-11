@@ -851,7 +851,7 @@ impl Engine {
         self.open = Some(key.clone());
         // Starting a process takes a moment; the run should appear before it does.
         self.publish();
-        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research };
+        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research, council_budgets:request.council_budgets };
         match host::Wish::start((self.config)(), &request.cwd, &request.wish, &options) {
             Ok(wish) => {
                 if let Some(entry) = self.hosted.get_mut(&key) {
@@ -2481,7 +2481,7 @@ mod tests {
 
         backend.start_wish(WishRequest {
             cwd: PathBuf::from("project"), wish: "wish".into(), creative: false,
-            max_turns: None, advanced_research: false,
+            max_turns: None, advanced_research: false, council_budgets:None,
         }).unwrap();
         backend.refresh().unwrap();
         backend.follow("session").unwrap();
@@ -3406,7 +3406,7 @@ mod tests {
             wish: "x".into(),
             creative: false,
             max_turns: None,
-            advanced_research: false,
+            advanced_research: false, council_budgets:None,
         }));
         let updates = rig.updates();
         let provisional = updates.iter().find_map(|u| match u {
@@ -3431,7 +3431,7 @@ mod tests {
             wish: wish.into(),
             creative: false,
             max_turns: None,
-            advanced_research: false,
+            advanced_research: false, council_budgets:None,
         }));
         let message = rig
             .updates()

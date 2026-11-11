@@ -105,7 +105,7 @@ mod composer_super {
     #[test]
     fn composer_buttons_have_their_own_tooltips() {
         let source = production(include_str!("../composer.rs"));
-        assert_eq!(source.matches("Button::new(").count(), 5);
+        assert_eq!(source.matches("Button::new(").count(), 6);
         assert_eq!(buttons_without_tooltips(source), Vec::<usize>::new());
         assert_eq!(buttons_without_tooltips("Button::new(\"missing\"); Button::new(\"ok\").tooltip(\"tip\")"), vec![1]);
         assert_eq!(buttons_without_tooltips("Button::new(\"ok\").tooltip(\"tip\"); Button::new(\"missing\")"), vec![1]);

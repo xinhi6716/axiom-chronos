@@ -369,6 +369,7 @@ pub struct WishRequest {
     /// The council of Astra, Fable 5.2 and Argon, as `axiom wish --advanced-research`. It costs
     /// real money, so it is on only when the user turned it on for this wish.
     pub advanced_research: bool,
+    pub council_budgets: Option<crate::council::Budgets>,
 }
 
 /// What the app was doing when something went wrong.

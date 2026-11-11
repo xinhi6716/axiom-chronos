@@ -7,8 +7,17 @@ fn contains(text: &str, phrase: &str) -> bool {
 
 fn excludes(text: &str, phrase: &str) -> bool {
     let text = text.to_lowercase();
-    if phrase == "agy" {
-        !text.split(|c: char| !c.is_alphanumeric()).any(|word| word == phrase)
+    if phrase == "--astra" {
+        !text.match_indices(phrase).any(|(at, _)| {
+            text[at + phrase.len()..]
+                .chars()
+                .next()
+                .map_or(true, |c| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        })
+    } else if phrase == "agy" {
+        !text
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == phrase)
     } else {
         !text.contains(phrase)
     }
@@ -38,12 +47,24 @@ fn bridge_documentation_contract() {
         let text = fs::read_to_string(root.join(path)).unwrap();
         for phrase in *phrases {
             assert!(contains(&text, phrase), "{path}: {phrase}");
-            assert!(!contains(&text.replace(phrase, ""), phrase), "{path}: {phrase}");
+            assert!(
+                !contains(&text.replace(phrase, ""), phrase),
+                "{path}: {phrase}"
+            );
         }
         // Gemini returned in 2.0 only as the optional backup reviewer (agy), so its name may appear.
-        for forbidden in ["rewrite", "--astra", "[astra]", "review_code", "second_review"] {
+        for forbidden in [
+            "rewrite",
+            "--astra",
+            "[astra]",
+            "review_code",
+            "second_review",
+        ] {
             assert!(excludes(&text, forbidden), "{path}: {forbidden}");
-            assert!(!excludes(&format!("{text} {forbidden}"), forbidden), "{path}: {forbidden}");
+            assert!(
+                !excludes(&format!("{text} {forbidden}"), forbidden),
+                "{path}: {forbidden}"
+            );
         }
     }
 }
@@ -62,7 +83,19 @@ fn historical_docs_note_gemini_removal() {
     ] {
         let text = fs::read_to_string(root.join(path)).unwrap();
         assert!(has_historical_note(&text, title), "{path}");
-        let without_note = text.lines().filter(|line| *line != "Gemini 已於第五輪收尾移除。").collect::<Vec<_>>().join("\n");
+        let without_note = text
+            .lines()
+            .filter(|line| *line != "Gemini 已於第五輪收尾移除。")
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(!has_historical_note(&without_note, title), "{path}");
+    }
+}
+
+#[test]
+fn astra_budget_flag_is_distinct_from_the_removed_astra_switch() {
+    assert!(excludes("`--astra-cap 600000`", "--astra"));
+    for sample in ["`--astra`", "--astra value", "--astra=value"] {
+        assert!(!excludes(sample, "--astra"));
     }
 }

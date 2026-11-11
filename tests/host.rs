@@ -235,12 +235,14 @@ fn advanced_research_reaches_the_launch_and_stays_with_the_session() {
     let setup = Setup::new("ok");
     let options = Options {
         advanced_research: true,
+        council_budgets:Some(council::Budgets {fable_cap_usd:20.0,astra_token_cap:600000,argon_token_cap:12345,rounds:5}),
         ..Options::default()
     };
     let wish = Wish::start(setup.config(), setup.project(), "研究氧化層厚度", &options).unwrap();
     assert_eq!(wish.wait().unwrap(), 0);
     let record = setup.record();
     assert_eq!(record["env"]["AXIOM_ADVANCED_RESEARCH"], "1", "{record}");
+    for (key,value) in [("AXIOM_FABLE_CAP_USD","20"),("AXIOM_ASTRA_TOKEN_CAP","600000"),("AXIOM_ARGON_TOKEN_CAP","12345"),("AXIOM_COUNCIL_ROUNDS","5")] { assert_eq!(record["env"][key],value); }
     let argv = argv_of(&record);
     let at = argv
         .iter()

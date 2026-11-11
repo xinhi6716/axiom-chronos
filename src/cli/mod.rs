@@ -21,6 +21,7 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
     let (mut no_architect, mut creative, mut resume, mut project_set) =
         (false, false, None, false);
     let mut launch = session::Launch::default();
+    let mut caps = std::collections::BTreeMap::new();
     const RESUME_USAGE: &str = "--resume takes a session id and an optional message";
     if skill == "wish" && args.iter().any(|a| a == "--resume") {
         let mut j = 0;
@@ -67,6 +68,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
             "--advanced-research" => launch.advanced_research = true,
+            flag @ ("--fable-cap" | "--astra-cap" | "--council-rounds") => {
+                let key = match flag { "--fable-cap" => crate::council::budgets::FABLE_CAP, "--astra-cap" => crate::council::budgets::ASTRA_CAP, _ => crate::council::budgets::ROUNDS };
+                match value(args, &mut i, flag) { Ok(v) => { caps.insert(key, v); }, Err(e) => return usage(e) }
+            },
             "--" => {
                 i += 1;
                 break;
@@ -75,6 +80,12 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             _ => break,
         }
         i += 1;
+    }
+    if !caps.is_empty() && !launch.advanced_research { return usage("budget options require --advanced-research"); }
+    if launch.advanced_research {
+        launch.council_budgets = match crate::council::Budgets::parse(|k| caps.get(k).cloned().or_else(|| crate::council::budgets::env_value(k))) {
+            Ok(b) => Some(b), Err(e) => return usage(e),
+        };
     }
     if let Some(id) = resume {
         if project_set || no_architect || creative {
@@ -116,9 +127,6 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         ));
     }
     let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
-    if launch.advanced_research {
-        eprintln!("axiom: {}", crate::council::NOTICE);
-    }
     match session::run_with(
         &session::Config::from_env(),
         skill,

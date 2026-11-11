@@ -49,7 +49,7 @@ impl Answer {
     }
 }
 
-/// Fable's spend across both rounds, priced from reported usage. Persisted per brief, so a
+/// Fable's spend across all dialogue turns, priced from reported usage. Persisted per brief, so a
 /// retry after a crash continues the same budget instead of starting a fresh one.
 pub(super) struct Meter {
     cap_usd: f64,

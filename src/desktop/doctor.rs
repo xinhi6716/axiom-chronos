@@ -11,17 +11,28 @@ use crate::base;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::component::{Icon, IconName, Selectable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const T: Table = &[
+    ("Advanced research budgets", "進階研究預算"),
+    ("Fable dollars", "Fable 金額（美元）"),
+    ("Astra tokens", "Astra token 上限"),
+    ("Argon tokens (one review)", "Argon token 上限（單次審查）"),
+    ("Maximum council rounds", "每階段最多輪數"),
+    ("Fable must be a positive dollar amount, at most $200; a larger cap is probably a typo.", "Fable 須為正數金額，最多 $200；超過此值可能是誤植。"),
+    ("Tokens and rounds must be positive whole numbers.", "Token 與輪數須為正整數。"),
+    ("Saved for the next wish. Advanced research stays off until you turn it on.", "將套用於下一個願望；進階研究仍須自行開啟。"),
+    ("Invalid budget: {} = {}. {}", "預算無效：{} = {}。{}"),
     ("Settings", "設定"),
     ("English", "English"),
     ("繁體中文", "繁體中文"),
@@ -209,10 +220,11 @@ pub struct DoctorView {
     state: Entity<AppState>,
     data_folder: PathBuf,
     recheck: Option<Recheck>,
+    budget_inputs: [Entity<InputState>;4],
 }
 
 impl DoctorView {
-    pub fn new(state: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, state, cx| {
             let done = this.recheck.as_ref().is_some_and(|recheck| recheck.before != snapshot(&state.read(cx).checks));
             if done {
@@ -221,7 +233,21 @@ impl DoctorView {
             cx.notify();
         })
         .detach();
-        Self { state, data_folder: base::axiom_home(), recheck: None }
+        let values=Store::current(cx).council_budgets.values();
+        let budget_inputs=std::array::from_fn(|i|cx.new(|cx| {
+            let mut input=InputState::new(window,cx);
+            input.set_value(values[i].clone(),window,cx); input
+        }));
+        for (index,input) in budget_inputs.iter().enumerate() {
+            cx.subscribe(input,move |_,input,event:&InputEvent,cx| {
+                if matches!(event,InputEvent::Change) {
+                    let value=input.read(cx).value().to_string();
+                    Store::edit(cx,|s|s.council_budgets.set(index,value));
+                    cx.notify();
+                }
+            }).detach();
+        }
+        Self { state, data_folder: base::axiom_home(), recheck: None, budget_inputs }
     }
 
     fn start_recheck(&mut self, cx: &mut Context<Self>) {
@@ -318,6 +344,18 @@ impl DoctorView {
             .child(version_row(&t, d, tr(cx, T, "Claude Code"), versions.claude.clone(), None))
             .child(version_row(&t, d, tr(cx, T, "Codex"), versions.codex.clone(), None))
             .when_some(mismatch, |this, message| this.child(div().pt(theme::space(d, Step::Sm)).child(Alert::warning("version-mismatch", message).small())))
+    }
+
+    fn budgets(&self,cx:&mut Context<Self>) -> impl IntoElement {
+        let t=cx.tokens();let d=theme::density(cx);
+        let error=Store::current(cx).council_budgets.validate().err().map(|e|fill(tr(cx,T,"Invalid budget: {} = {}. {}"),&[e.variable,&format!("{:?}",e.value),tr(cx,T,e.reason)]));
+        card(&t,tr(cx,T,"Advanced research budgets"),None,d)
+            .children(["Fable dollars","Astra tokens","Argon tokens (one review)","Maximum council rounds"].into_iter().enumerate().map(|(i,label)| {
+                preference_row(&t,d,tr(cx,T,label),None,
+                    Input::new(&self.budget_inputs[i]).id(("council-budget",i)).small().w_full())
+            }))
+            .child(div().text_size(theme::font(d,TypeSize::Caption)).text_color(t.muted).child(tr(cx,T,"Saved for the next wish. Advanced research stays off until you turn it on.")))
+            .when_some(error,|this,error|this.child(div().id("council-budget-error").text_size(theme::font(d,TypeSize::Caption)).text_color(t.fail).child(error.clone().test_text(error)).test_support()))
     }
 
     fn preferences(&self, reduce_motion: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -497,6 +535,7 @@ impl Render for DoctorView {
             let children = column.into_iter().map(|card| match card {
                 logic::Card::Environment => self.environment(&checks, &panel, cx).into_any_element(),
                 logic::Card::Versions => self.versions(&checks, cx).into_any_element(),
+                logic::Card::Budgets => self.budgets(cx).into_any_element(),
                 logic::Card::Preferences => self.preferences(reduce_motion, cx).into_any_element(),
             }).collect::<Vec<_>>();
             v_flex().flex_1().min_w_0().gap(theme::space(d, Step::Xl)).children(children)

@@ -3,7 +3,7 @@ mod common;
 use axiom::{
     base,
     bridge::{call, tools, Bridge, Config},
-    council::{self, CrossReply, CrossRequest, Setup, Stance, Status, DIGEST_MAX_CHARS},
+    council::{self, CrossReply, CrossRequest, Setup, Status, DIGEST_MAX_CHARS},
     orch,
     usage::price,
 };
@@ -21,6 +21,52 @@ use std::{
 };
 
 const BRIEF: &str = "GOAL the changes that carry out the wish\nWISH make it faster";
+
+#[test]
+fn phased_protocol_calls_argon_once_after_phase_a() {
+    let case = Case::new();
+    let reply = case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
+    let calls = case.calls();
+    assert_eq!(calls.iter().filter(|c| c["role"] == "argon").count(), 1);
+    assert_eq!(reply["phases"][0]["phase"], "A");
+    assert_eq!(reply["phases"][0]["agreement"], true);
+    assert_eq!(reply["phases"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn invalid_budget_refuses_start_before_any_child() {
+    for name in [
+        "AXIOM_FABLE_CAP_USD",
+        "AXIOM_ASTRA_TOKEN_CAP",
+        "AXIOM_ARGON_TOKEN_CAP",
+        "AXIOM_COUNCIL_ROUNDS",
+    ] {
+        for value in ["text", "0", "-1", "NaN", "inf", "", "18446744073709551616"] {
+            let temp = common::temp();
+            let record = temp.path().join("record.json");
+            let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+                .env("AXIOM_HOME", temp.path())
+                .env("AXIOM_DATA_HOME", temp.path())
+                .env(
+                    "AXIOM_CLAUDE_CMD",
+                    serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+                )
+                .env("FAKE_CLAUDE_RECORD", &record)
+                .env(name, value)
+                .args(["wish", "--advanced-research", "fix"])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2), "{name}={value}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains(name) && error.contains(&format!("{value:?}")),
+                "{error}"
+            );
+            assert!(!record.exists());
+        }
+    }
+}
 
 fn absent() -> axiom::base::Res<Vec<String>> {
     Err(base::Failure::new("not_installed", "not on PATH"))
@@ -156,10 +202,6 @@ fn claims(case: &Case) -> Vec<Value> {
     case.stored()["claims"].as_array().unwrap().clone()
 }
 
-fn stance(claim: &Value, member: &str) -> String {
-    claim["stances"][member].as_str().unwrap().to_owned()
-}
-
 fn flag_value(argv: &[Value], flag: &str) -> String {
     let at = argv.iter().position(|a| a == flag).unwrap();
     argv[at + 1].as_str().unwrap().to_owned()
@@ -180,607 +222,414 @@ fn fable_5_2_is_priced_from_the_published_table() {
 }
 
 #[test]
-fn all_three_members_succeed() {
+fn phased_order_agreement_and_single_review() {
     let case = Case::new();
-    let astra = Astra::ok();
-    let digest = case.run(&case.setup("ok", "ok"), &astra).unwrap();
-    assert_eq!(digest["outcome"], "full", "{digest}");
-    assert_eq!(digest["degraded"], false);
-    assert_eq!(digest["status"], "completed");
+    let astra = |r: &CrossRequest| {
+        assert_eq!(case.calls_of("fable", 1).len(), 1);
+        assert!(case.calls_of("fable", 2).is_empty());
+        assert!(case.calls_of("argon", 1).is_empty());
+        Astra::ok().answer(r)
+    };
+    let reply = council::run(
+        &case.setup("ok", "ok"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(reply["rounds"][0]["speakers"], json!(["astra", "fable"]));
+    assert_eq!(reply["rounds"][1]["speakers"], json!(["astra", "fable"]));
+    assert_eq!(reply["rounds"][2]["speakers"], json!(["argon"]));
+    assert_eq!(
+        case.calls()
+            .iter()
+            .map(|c| c["role"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["fable", "fable", "argon"]
+    );
+    assert_eq!(reply["phases"][0]["agreement"], true);
+    assert_eq!(reply["phases"].as_array().unwrap().len(), 2);
     valid_council(&case);
     let stored = case.stored();
-    assert_eq!(
-        stored["rounds"][0]["positions"].as_array().unwrap().len(),
-        3
-    );
-    assert_eq!(
-        stored["rounds"][1]["positions"].as_array().unwrap().len(),
-        3
-    );
-    let all = claims(&case);
-    assert_eq!(all.len(), 6);
-    for claim in &all {
-        assert_eq!(claim["status"], "consensus", "{claim}");
-    }
-    for member in ["astra", "fable", "argon"] {
-        assert_eq!(case.member_status(member), "ok");
-    }
-    // Two rounds of repeated usage events: priced once per message, never the CLI's dollars.
-    let expected = 2.0 * (1000.0 * 8.0 + 2000.0 * 0.20 + 4000.0 * 10.0 + 500.0 * 40.0) / 1e6;
-    let usd = stored["cost"]["usd"].as_f64().unwrap();
-    assert!((usd - expected).abs() < 1e-9, "{usd} vs {expected}");
-    assert_eq!(stored["cost"]["cap_usd"], 5.0);
-    assert_eq!(stored["members"][0]["model"], "gpt-6-astra");
-    assert_eq!(stored["members"][0]["family"], "openai");
-    assert_eq!(stored["members"][1]["family"], "anthropic");
-    assert_eq!(stored["members"][2]["family"], "google");
-    for position in stored["rounds"][0]["positions"].as_array().unwrap() {
-        let bytes = fs::read(position["path"].as_str().unwrap()).unwrap();
-        let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
-        assert_eq!(position["sha256"], digest.as_str());
+    for round in stored["rounds"].as_array().unwrap() {
+        for p in round["positions"].as_array().unwrap() {
+            let bytes = fs::read(p["path"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                p["sha256"],
+                format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes))
+            );
+            assert!(p["path"].as_str().unwrap().contains(&format!(
+                "{}-r{}-{}",
+                round["phase"].as_str().unwrap(),
+                round["n"],
+                p["member"].as_str().unwrap()
+            )));
+        }
     }
 }
-
 #[test]
-fn members_are_launched_read_only_with_the_given_flags() {
+fn phase_a_stops_on_agreement_or_the_configured_cap() {
+    for (scenario, cap, want, agreement) in [
+        ("no-claims", 3, 1, true),
+        ("disagree", 3, 3, false),
+        ("disagree", 1, 1, false),
+        ("disagree,resolve-a", 5, 2, true),
+    ] {
+        let case = Case::new();
+        let mut setup = case.setup(scenario, "ok");
+        setup.rounds = cap;
+        let result = case.run(&setup, &Astra::ok()).unwrap();
+        assert_eq!(
+            case.calls().iter().filter(|c| c["role"] == "fable").count(),
+            want
+        );
+        assert_eq!(result["phases"][0]["agreement"], agreement);
+        if !agreement {
+            assert!(!result["phases"][0]["open"].as_array().unwrap().is_empty());
+        }
+    }
     let case = Case::new();
-    case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
-    let r1 = &case.calls_of("fable", 1)[0];
-    let argv = r1["argv"].as_array().unwrap();
-    assert_eq!(flag_value(argv, "--model"), "claude-fable-5-2");
-    assert_eq!(flag_value(argv, "--output-format"), "stream-json");
-    assert_eq!(flag_value(argv, "--setting-sources"), "local");
-    assert_eq!(flag_value(argv, "--tools"), "Read,Glob,Grep");
-    assert_eq!(flag_value(argv, "--allowedTools"), "Read,Glob,Grep");
-    assert!(argv.iter().any(|a| a == "--verbose"));
-    assert!(argv.iter().any(|a| a == "-p"));
-    let r2 = &case.calls_of("fable", 2)[0];
-    let argv = r2["argv"].as_array().unwrap();
-    assert_eq!(flag_value(argv, "--tools"), "");
-    assert!(!argv.iter().any(|a| a == "--allowedTools"));
-    let argon = &case.calls_of("argon", 1)[0];
-    let argv = argon["argv"].as_array().unwrap();
-    assert_eq!(flag_value(argv, "--model"), "gemini-4-argon-high");
-    assert_eq!(flag_value(argv, "--output-format"), "json");
-    assert_eq!(flag_value(argv, "--mode"), "plan");
-    assert!(argv.iter().any(|a| a == "--sandbox"));
-    assert!(flag_value(argv, "--json-schema").ends_with("audit.schema.json"));
-    assert!(flag_value(argv, "--print-timeout").ends_with('s'));
-    assert_eq!(argv[argv.len() - 2], "--print");
+    let result = case
+        .run(
+            &case.setup("disagree,approve-with-rebuttal", "ok"),
+            &Astra::ok(),
+        )
+        .unwrap();
+    assert_eq!(
+        result["phases"][0]["agreement"], false,
+        "approval alone must not close rebuttals"
+    );
 }
-
 #[test]
-fn round_one_is_blind_and_round_two_is_anonymous() {
+fn phase_c_requires_objections_and_orders_replies_without_recalling_argon() {
+    let case = Case::new();
+    let astra = |r: &CrossRequest| {
+        let mut reply = Astra::ok().answer(r);
+        if r.prompt.contains("COUNCIL PHASE C") {
+            assert_eq!(
+                case.calls().iter().filter(|c| c["role"] == "argon").count(),
+                1
+            );
+            assert_eq!(
+                case.calls()
+                    .iter()
+                    .filter(|c| c["role"] == "fable" && c["phase"] == "C")
+                    .count(),
+                0
+            );
+            let ids = Regex::new(r"(?m)^(C\d+) \[Position").unwrap();
+            reply.output.as_mut().unwrap()["resolutions"]=json!(ids.captures_iter(&r.prompt).map(|c|json!({"claim":c[1].to_string(),"decision":"rejected","reason":"src/mod.py:12 already covers this","change":""})).collect::<Vec<_>>());
+        }
+        reply
+    };
+    let result = council::run(
+        &case.setup("ok,settle", "disagree"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result["phases"][2]["agreement"], true);
+    assert_eq!(result["rounds"][3]["speakers"], json!(["astra", "fable"]));
+    assert_eq!(
+        case.calls().iter().filter(|c| c["role"] == "argon").count(),
+        1
+    );
+    for claim in claims(&case) {
+        assert_eq!(claim["stances"]["argon"], "disagree");
+        assert!(claim["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["phase"] == "C" && h["decision"] == "rejected"));
+        assert_ne!(claim["status"], "consensus", "review remains for the core");
+    }
+}
+#[test]
+fn unresolved_review_objections_use_the_phase_c_cap() {
+    let case = Case::new();
+    let astra = |r: &CrossRequest| {
+        if r.prompt.contains("COUNCIL PHASE C") {
+            let n = Regex::new(r"COUNCIL ROUND (\d+)")
+                .unwrap()
+                .captures(&r.prompt)
+                .unwrap()[1]
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(
+                case.calls()
+                    .iter()
+                    .filter(|c| c["role"] == "fable" && c["phase"] == "C")
+                    .count(),
+                n - 1
+            );
+            assert_eq!(
+                case.calls().iter().filter(|c| c["role"] == "argon").count(),
+                1
+            );
+        }
+        Astra::ok().answer(r)
+    };
+    let result = council::run(
+        &case.setup("ok", "disagree"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result["phases"][2]["agreement"], false);
+    assert_eq!(
+        case.calls()
+            .iter()
+            .filter(|c| c["role"] == "fable" && c["phase"] == "C")
+            .count(),
+        3
+    );
+    assert_eq!(
+        case.calls().iter().filter(|c| c["role"] == "argon").count(),
+        1
+    );
+}
+#[test]
+fn argon_failure_or_cap_ends_after_phase_a() {
+    for scenario in ["garbage", "wrong-shape", "quota", "crash", "argon-tokens"] {
+        let case = Case::new();
+        let result = case.run(&case.setup("ok", scenario), &Astra::ok()).unwrap();
+        assert_eq!(result["degraded"], true, "{scenario}");
+        assert!(result["note"]
+            .as_str()
+            .unwrap()
+            .contains("Argon did not review"));
+        assert_eq!(result["phases"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            case.calls().iter().filter(|c| c["role"] == "argon").count(),
+            1
+        );
+        assert!(case.stored()["rounds"][2]["positions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+}
+#[test]
+fn fable_failure_mid_phase_preserves_astra_and_the_reason() {
+    for scenario in ["disagree,fail-third", "disagree,r2-garbage"] {
+        let case = Case::new();
+        let result = case.run(&case.setup(scenario, "ok"), &Astra::ok()).unwrap();
+        assert_eq!(case.member_status("fable"), "malformed");
+        assert!(result["phases"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fable"));
+        assert!(case.plan.exists());
+        assert!(!case.stored()["rounds"][0]["positions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            case.calls().iter().filter(|c| c["role"] == "argon").count(),
+            1
+        );
+        valid_council(&case);
+    }
+}
+#[test]
+fn missing_members_and_missing_plan_degrade_without_losing_the_plan() {
+    for (fable, argon, outcome) in [
+        (false, false, "ordinary"),
+        (false, true, "degraded"),
+        (true, false, "degraded"),
+    ] {
+        let case = Case::new();
+        let setup = Setup::new(
+            if fable { case.member("ok") } else { absent() },
+            if argon { case.member("ok") } else { absent() },
+        );
+        let result = case.run(&setup, &Astra::ok()).unwrap();
+        assert_eq!(result["outcome"], outcome);
+        assert!(case.plan.exists());
+        assert!(claims(&case).iter().any(|c| c["author"] == "astra"));
+        valid_council(&case);
+    }
+    let case = Case::new();
+    fs::remove_file(&case.plan).unwrap();
+    assert_eq!(
+        case.run(&case.setup("ok", "ok"), &Astra::ok())
+            .unwrap_err()
+            .kind,
+        "astra_missing"
+    );
+    assert!(case.calls().is_empty());
+}
+#[test]
+fn readonly_flags_and_neutral_latest_replies_are_preserved() {
     let case = Case::new();
     let astra = Astra::ok();
     case.run(&case.setup("ok", "ok"), &astra).unwrap();
-    for role in ["fable", "argon"] {
-        let prompt = case.calls_of(role, 1)[0]["prompt"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(prompt.contains(BRIEF));
-        assert!(!prompt.contains("astra evidence"), "{prompt}");
+    for (role, round) in [("fable", 1), ("fable", 2), ("argon", 1)] {
+        let calls = case.calls_of(role, round);
+        let call = &calls[0];
+        let argv = call["argv"].as_array().unwrap();
+        assert_eq!(
+            flag_value(argv, "--model"),
+            if role == "fable" {
+                "claude-fable-5-2"
+            } else {
+                "gemini-4-argon-high"
+            }
+        );
+        if role == "fable" {
+            assert_eq!(
+                flag_value(argv, "--tools"),
+                if round == 1 { "Read,Glob,Grep" } else { "" }
+            );
+        } else {
+            assert!(argv.iter().any(|a| a == "--sandbox"));
+            assert_eq!(flag_value(argv, "--mode"), "plan");
+        }
+        let prompt = call["prompt"].as_str().unwrap();
+        assert!(prompt.contains("[Position"));
+        for name in ["astra", "fable", "argon", "claude", "gemini"] {
+            assert!(!prompt.to_lowercase().contains(name), "{prompt}");
+        }
     }
-    let fable_r2 = case.calls_of("fable", 2)[0]["prompt"]
+    assert!(case.calls_of("fable", 1)[0]["prompt"]
         .as_str()
         .unwrap()
-        .to_owned();
-    assert!(
-        fable_r2.contains("evidence one"),
-        "fable must see astra's claims"
-    );
-    let lower = fable_r2.to_lowercase();
-    for name in ["astra", "argon", "gemini", "fable", "claude"] {
-        assert!(!lower.contains(name), "{name} leaked: {fable_r2}");
-    }
-    let own = Regex::new(r"fable\d").unwrap();
-    assert!(
-        !own.is_match(&fable_r2),
-        "fable must not be shown its own claims"
-    );
-    let shown = astra.prompt.lock().unwrap().clone();
-    assert!(shown.contains("[member]"), "names are masked: {shown}");
-    assert!(!shown.to_lowercase().contains("claude"));
-}
-
-#[test]
-fn fable_missing_runs_with_two_and_says_so() {
-    let case = Case::new();
-    let setup = Setup::new(absent(), case.member("ok"));
-    let digest = case.run(&setup, &Astra::ok()).unwrap();
-    assert_eq!(digest["outcome"], "degraded", "{digest}");
-    assert_eq!(digest["degraded"], true);
-    assert!(
-        digest["note"].as_str().unwrap().contains("fable: missing"),
-        "{digest}"
-    );
-    assert_eq!(case.member_status("fable"), "missing");
-    assert!(case.calls().iter().all(|c| c["role"] == "argon"));
-    let all = claims(&case);
-    assert_eq!(all.len(), 4);
-    for claim in &all {
-        assert_eq!(stance(claim, "fable"), "absent");
-        assert_eq!(claim["status"], "consensus", "{claim}");
-    }
-    valid_council(&case);
-}
-
-#[test]
-fn argon_missing_runs_with_two_and_says_so() {
-    let case = Case::new();
-    let setup = Setup::new(case.member("ok"), absent());
-    let digest = case.run(&setup, &Astra::ok()).unwrap();
-    assert_eq!(digest["outcome"], "degraded");
-    assert!(
-        digest["note"].as_str().unwrap().contains("argon: missing"),
-        "{digest}"
-    );
-    assert_eq!(case.member_status("argon"), "missing");
-    assert!(case.calls().iter().all(|c| c["role"] == "fable"));
-    assert_eq!(case.calls_of("fable", 2).len(), 1);
-}
-
-#[test]
-fn astra_missing_blocks_before_anyone_is_paid() {
-    let case = Case::new();
-    fs::remove_file(&case.plan).unwrap();
-    let astra = Astra::ok();
-    let error = case.run(&case.setup("ok", "ok"), &astra).unwrap_err();
-    assert_eq!(error.kind, "astra_missing");
-    assert!(case.calls().is_empty());
-    assert_eq!(astra.calls.load(Ordering::SeqCst), 0);
-    assert!(!case.plan.with_file_name("council.json").exists());
-    fs::write(&case.plan, "{\"not\":\"the schema\"}").unwrap();
-    let error = case.run(&case.setup("ok", "ok"), &astra).unwrap_err();
-    assert_eq!(error.kind, "astra_missing");
-    assert!(case.calls().is_empty());
-}
-
-#[test]
-fn fable_and_argon_both_missing_is_an_ordinary_wish() {
-    let case = Case::new();
-    let astra = Astra::ok();
-    let setup = Setup::new(absent(), absent());
-    let digest = case.run(&setup, &astra).unwrap();
-    assert_eq!(digest["outcome"], "ordinary", "{digest}");
-    assert_eq!(digest["stage_note"], "ordinary wish: no council");
-    assert!(digest["note"].as_str().unwrap().contains("ordinary wish"));
-    assert_eq!(
-        astra.calls.load(Ordering::SeqCst),
-        0,
-        "no round 2 for one member"
-    );
-    assert!(claims(&case).is_empty());
-    assert_eq!(case.stored()["degraded"], true);
-    valid_council(&case);
-}
-
-#[test]
-fn a_member_out_of_quota_is_named_and_the_rest_go_on() {
-    let case = Case::new();
-    case.run(&case.setup("quota", "ok"), &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("fable"), "quota");
-    assert_eq!(case.stored()["cost"]["usd"].as_f64().unwrap() < 0.1, true);
-
-    let case = Case::new();
-    let digest = case.run(&case.setup("ok", "quota"), &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("argon"), "quota");
-    assert_eq!(digest["outcome"], "degraded");
-
-    let case = Case::new();
-    let digest = case
-        .run(&case.setup("ok", "ok"), &Astra::with(Status::Quota))
-        .unwrap();
-    assert_eq!(case.member_status("astra"), "quota");
-    assert_eq!(digest["outcome"], "degraded");
-    for claim in claims(&case) {
-        if stance(&claim, "astra") != "author" {
-            assert_eq!(stance(&claim, "astra"), "absent", "{claim}");
-        }
-    }
-
-    let case = Case::new();
-    case.run(&case.setup("ok", "r2-quota"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("argon"), "quota");
-    assert_eq!(
-        case.stored()["rounds"][0]["positions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-}
-
-#[test]
-fn the_cap_stops_round_two_from_starting() {
-    let case = Case::new();
-    // Round 1's stream shows little; its closing total shows $4.65 of the $5 spent.
-    let digest = case
-        .run(&case.setup("r1-near-cap", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("fable"), "budget_cut");
-    assert!(
-        case.calls_of("fable", 2).is_empty(),
-        "round 2 must not be spawned"
-    );
-    let stored = case.stored();
-    assert_eq!(stored["cost"]["cut"], json!(["fable:round2"]));
-    assert!(stored["cost"]["usd"].as_f64().unwrap() > 4.0);
-    assert_eq!(
-        stored["rounds"][0]["positions"].as_array().unwrap().len(),
-        3
-    );
-    assert_eq!(digest["outcome"], "degraded");
-    for claim in claims(&case) {
-        if stance(&claim, "fable") != "author" {
-            assert_eq!(stance(&claim, "fable"), "absent", "{claim}");
-        }
-    }
-    assert!(claims(&case).iter().any(|c| stance(c, "fable") == "author"));
-    valid_council(&case);
-}
-
-#[test]
-fn the_cap_kills_round_two_while_it_runs() {
-    let case = Case::new();
-    let mut setup = case.setup("r2-over-cap", "ok");
-    setup.round2_timeout = Duration::from_secs(25);
-    let started = std::time::Instant::now();
-    case.run(&setup, &Astra::ok()).unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "killed at the cap, not by the timeout"
-    );
-    assert_eq!(case.member_status("fable"), "budget_cut");
-    let round2 = case.calls_of("fable", 2);
-    assert_eq!(round2.len(), 1);
-    assert!(!base::proc::pid_alive(
-        round2[0]["pid"].as_u64().unwrap() as u32
-    ));
-    let stored = case.stored();
-    assert_eq!(stored["cost"]["cut"], json!(["fable:round2"]));
-    assert!(stored["cost"]["usd"].as_f64().unwrap() >= 5.0);
-    assert_eq!(
-        stored["rounds"][0]["positions"].as_array().unwrap().len(),
-        3
-    );
-    assert_eq!(
-        stored["rounds"][1]["positions"].as_array().unwrap().len(),
-        2
-    );
-}
-
-#[test]
-fn the_cap_kills_round_one_and_fable_counts_as_missing() {
-    let case = Case::new();
-    let mut setup = case.setup("r1-over-cap", "ok");
-    setup.round1_timeout = Duration::from_secs(25);
-    let started = std::time::Instant::now();
-    case.run(&setup, &Astra::ok()).unwrap();
-    assert!(started.elapsed() < Duration::from_secs(20));
-    assert_eq!(case.member_status("fable"), "budget_cut");
-    assert!(case.calls_of("fable", 2).is_empty());
-    let round1 = case.calls_of("fable", 1);
-    assert!(!base::proc::pid_alive(
-        round1[0]["pid"].as_u64().unwrap() as u32
-    ));
-    let stored = case.stored();
-    assert_eq!(stored["cost"]["cut"], json!(["fable:round1"]));
-    let positions = stored["rounds"][0]["positions"].as_array().unwrap();
-    assert_eq!(positions.len(), 2);
-    assert!(positions.iter().all(|p| p["member"] != "fable"));
-    assert_eq!(claims(&case).len(), 4);
-}
-
-#[test]
-fn a_model_the_table_cannot_price_fails_closed() {
-    let case = Case::new();
-    let mut setup = case.setup("unpriced", "ok");
-    setup.fable_cap_usd = 0.05; // 1000 unpriced tokens of allowance; a call reports 7500.
-    case.run(&setup, &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("fable"), "budget_cut");
-    let stored = case.stored();
-    assert!(stored["cost"]["unpriced_tokens"].as_u64().unwrap() > 0);
-    assert_eq!(stored["cost"]["usd"].as_f64().unwrap(), 0.0);
-}
-
-#[test]
-fn usage_that_is_never_reported_stops_round_two() {
-    let case = Case::new();
-    case.run(&case.setup("no-usage", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("fable"), "budget_cut");
-    assert!(case.calls_of("fable", 2).is_empty());
-    assert_eq!(case.stored()["cost"]["cut"], json!(["fable:round2"]));
-}
-
-#[test]
-fn spend_carries_over_when_a_run_is_retried() {
-    let case = Case::new();
-    case.run(&case.setup("r1-near-cap", "ok"), &Astra::ok())
-        .unwrap();
-    fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
-    let before = case.calls().len();
-    case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
-    assert!(
-        case.calls()[before..]
-            .iter()
-            .all(|c| c["role"] != "fable" || c["round"] == 1),
-        "fable's round 2 must not be funded a second time"
-    );
-    assert_eq!(
-        case.member_status("fable"),
-        "budget_cut",
-        "the budget is the brief's"
-    );
-}
-
-#[test]
-fn malformed_output_is_named_and_never_counted() {
-    let case = Case::new();
-    case.run(&case.setup("garbage", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("fable"), "malformed");
-    assert_eq!(
-        case.stored()["rounds"][0]["positions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-
-    let case = Case::new();
-    case.run(&case.setup("wrong-shape", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("fable"), "malformed");
-
-    let case = Case::new();
-    case.run(&case.setup("ok", "garbage"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("argon"), "malformed");
-
-    let case = Case::new();
-    case.run(&case.setup("ok", "wrong-shape"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("argon"), "malformed");
-
-    let case = Case::new();
-    let digest = case
-        .run(&case.setup("r2-garbage", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.member_status("fable"), "malformed");
-    assert_eq!(digest["outcome"], "degraded");
-    assert_eq!(
-        case.stored()["rounds"][0]["positions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-    for claim in claims(&case) {
-        if stance(&claim, "fable") != "author" {
-            assert_eq!(stance(&claim, "fable"), "absent");
-        }
-    }
-}
-
-#[test]
-fn argon_envelopes_and_crashes_and_timeouts() {
-    for scenario in ["shape-top", "shape-object"] {
-        let case = Case::new();
-        let digest = case.run(&case.setup("ok", scenario), &Astra::ok()).unwrap();
-        assert_eq!(digest["outcome"], "full", "{scenario}: {digest}");
-    }
-    let case = Case::new();
-    case.run(&case.setup("ok", "crash"), &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("argon"), "failed");
-
-    let case = Case::new();
-    let mut setup = case.setup("hang", "ok");
-    setup.round1_timeout = Duration::from_millis(400);
-    case.run(&setup, &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("fable"), "timeout");
-
-    let case = Case::new();
-    let mut setup = case.setup("ok", "argon-tokens");
-    setup.argon_token_cap = 1000;
-    case.run(&setup, &Astra::ok()).unwrap();
-    assert_eq!(case.member_status("argon"), "budget_cut");
-    assert!(case.calls_of("argon", 2).is_empty());
-    assert_eq!(case.stored()["cost"]["cut"], json!(["argon:round2"]));
-}
-
-#[test]
-fn evidence_decides_what_is_disputed() {
-    // Both other members dissent with evidence: the author stands alone.
-    let case = Case::new();
-    let astra = Astra::ok();
-    let digest = case
-        .run(&case.setup("disagree", "disagree"), &astra)
-        .unwrap();
-    let all = claims(&case);
-    let authored_by = |c: &Value, m: &str| stance(c, m) == "author";
-    for claim in all.iter().filter(|c| authored_by(c, "astra")) {
-        assert_eq!(claim["status"], "disputed", "{claim}");
-        assert_eq!(claim["dissent"].as_array().unwrap().len(), 2);
-    }
-    for claim in all.iter().filter(|c| authored_by(c, "fable")) {
-        assert_eq!(stance(claim, "astra"), "agree");
-        assert_eq!(stance(claim, "argon"), "disagree");
-        assert_eq!(claim["status"], "majority", "{claim}");
-    }
-    assert_eq!(digest["counts"]["disputed"], 2);
-    assert_eq!(digest["counts"]["majority"], 4);
-    assert_eq!(digest["counts"]["consensus"], 0);
-    assert_eq!(digest["stage_note"], "0 of 6 claims agreed, 6 disputed");
-
-    // A bare "no" is not dissent, but neither is it support.
-    let case = Case::new();
-    case.run(&case.setup("disagree-bare", "disagree-bare"), &Astra::ok())
-        .unwrap();
-    for claim in claims(&case) {
-        if stance(&claim, "astra") == "author" {
-            assert_eq!(stance(&claim, "fable"), "unsupported");
-            assert_eq!(claim["status"], "disputed", "{claim}");
-            assert!(claim["dissent"].as_array().unwrap().is_empty());
-        }
-    }
-}
-
-#[test]
-fn a_member_cannot_vote_on_its_own_claim_or_on_nothing() {
-    let case = Case::new();
-    case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
-    for claim in claims(&case) {
-        let authors = ["astra", "fable", "argon"]
-            .iter()
-            .filter(|m| claim["stances"][**m] == serde_json::to_value(Stance::Author).unwrap())
-            .count();
-        assert_eq!(authors, 1, "{claim}");
-    }
-}
-
-#[test]
-fn the_digest_is_bounded_and_holds_no_raw_position() {
-    let case = Case::new();
-    let digest = case
-        .run(&case.setup("huge,disagree", "huge,disagree"), &Astra::ok())
-        .unwrap();
-    assert!(
-        digest.to_string().chars().count() <= DIGEST_MAX_CHARS + 512,
-        "{}",
-        digest.to_string().len()
-    );
-    assert!(!digest.to_string().contains(&"x".repeat(250)));
-    assert!(digest["counts"]["dropped_at_intake"].as_u64().unwrap() >= 8);
-    assert!(digest["omitted_open"].as_u64().unwrap() > 0, "{digest}");
-    let file = fs::read_to_string(digest["digest_path"].as_str().unwrap()).unwrap();
-    assert!(file.chars().count() <= DIGEST_MAX_CHARS);
-    assert!(claims(&case).len() <= 22);
-    let r2 = &case.calls_of("fable", 2)[0];
-    assert!(r2["prompt"].as_str().unwrap().encode_utf16().count() < 30_000);
-    let raw =
-        fs::read_to_string(case.plan.with_file_name("council").join("r1-fable.json")).unwrap();
-    assert!(
-        raw.contains(&"x".repeat(4000)),
-        "the position itself is kept"
-    );
-}
-
-#[test]
-fn a_finished_council_is_never_paid_for_twice() {
-    let case = Case::new();
-    let astra = Astra::ok();
-    let setup = case.setup("ok", "ok");
-    let first = case.run(&setup, &astra).unwrap();
-    assert_eq!(first["reused"], false);
-    let spawned = case.calls().len();
-    let second = case.run(&setup, &astra).unwrap();
-    assert_eq!(second["reused"], true);
-    assert_eq!(case.calls().len(), spawned);
-    assert_eq!(astra.calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn rulings_are_written_only_for_open_claims() {
-    let case = Case::new();
-    case.run(&case.setup("disagree", "ok"), &Astra::ok())
-        .unwrap();
-    let all = claims(&case);
-    let open = all.iter().find(|c| c["status"] != "consensus").unwrap();
-    let settled = all.iter().find(|c| c["status"] == "consensus").unwrap();
-    let (open_id, settled_id) = (
-        open["id"].as_str().unwrap().to_owned(),
-        settled["id"].as_str().unwrap().to_owned(),
-    );
-    let ruling = |id: &str, decision: &str, reason: &str| {
-        (id.to_string(), decision.to_string(), reason.to_string())
-    };
-    let reply = council::rule(
-        &case.plan,
-        &[ruling(&open_id, "upheld", "the check is real")],
-    )
-    .unwrap();
-    assert!(!reply["unruled"]
-        .as_array()
+        .contains("evidence one"));
+    assert!(case.calls_of("argon", 1)[0]["prompt"]
+        .as_str()
         .unwrap()
-        .iter()
-        .any(|v| v == open_id.as_str()));
-    let stored = claims(&case);
-    let written = stored.iter().find(|c| c["id"] == open_id.as_str()).unwrap();
-    assert_eq!(written["ruling"]["decision"], "upheld");
-    valid_council(&case);
-    assert!(council::rule(&case.plan, &[ruling(&settled_id, "upheld", "x")]).is_err());
-    assert!(council::rule(&case.plan, &[ruling("C99", "upheld", "x")]).is_err());
-    assert!(council::rule(&case.plan, &[ruling(&open_id, "maybe", "x")]).is_err());
-    assert!(council::rule(&case.plan, &[ruling(&open_id, "upheld", " ")]).is_err());
+        .contains("SECRET-RAW"));
+    let stored = case.stored();
+    let usd = stored["cost"]["usd"].as_f64().unwrap();
+    let expected = 2.0 * (1000.0 * 8.0 + 2000.0 * 0.20 + 4000.0 * 10.0 + 500.0 * 40.0) / 1e6;
+    assert!((usd - expected).abs() < 1e-9, "{usd}");
 }
-
 #[test]
-fn runs_that_report_only_a_result_add_up_and_trip_the_cap() {
-    let case = Case::new();
-    // Each round costs $3 and reports it only in its closing result: $6 against the $5 cap.
-    case.run(&case.setup("result-only", "ok"), &Astra::ok())
-        .unwrap();
-    assert_eq!(case.calls_of("fable", 2).len(), 1, "round 2 ran under the cap");
-    let usd = case.stored()["cost"]["usd"].as_f64().unwrap();
-    assert!((usd - 6.0).abs() < 0.01, "two $3 runs must add up: {usd}");
-    // A retry now finds the budget spent.
-    fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
-    let before = case.calls().len();
-    case.run(&case.setup("result-only", "ok"), &Astra::ok())
-        .unwrap();
-    assert!(case.calls()[before..].iter().all(|c| c["role"] != "fable"));
-}
-
-#[test]
-fn a_retry_with_the_budget_spent_starts_no_fable_process() {
-    let case = Case::new();
-    case.run(&case.setup("r1-over-cap", "ok"), &Astra::ok())
-        .unwrap();
-    fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
-    let before = case.calls().len();
-    case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
-    assert!(
-        case.calls()[before..].iter().all(|c| c["role"] != "fable"),
-        "no paid request may start once the budget is spent"
-    );
-    assert_eq!(case.member_status("fable"), "budget_cut");
-}
-
-#[test]
-fn every_open_claim_can_be_ruled_through_successive_replies() {
-    let case = Case::new();
-    let digest = case
-        .run(&case.setup("huge,disagree", "huge,disagree"), &Astra::ok())
-        .unwrap();
-    let open_total = claims(&case)
-        .iter()
-        .filter(|c| c["status"] != "consensus")
-        .count();
-    assert!(open_total > 16, "{open_total}");
-    assert_eq!(digest["more_open"], true, "{digest}");
-    let mut batch: Vec<Value> = digest["open"].as_array().unwrap().clone();
-    let mut ruled = 0;
-    while !batch.is_empty() {
-        let rulings: Vec<_> = batch
-            .iter()
-            .map(|e| (e["id"].as_str().unwrap().to_owned(), "upheld".to_owned(), "checked".to_owned()))
-            .collect();
-        ruled += rulings.len();
-        let reply = council::rule(&case.plan, &rulings).unwrap();
-        assert!(reply.to_string().chars().count() <= DIGEST_MAX_CHARS, "reply is bounded");
-        batch = reply["next"].as_array().expect("rule carries the next batch").clone();
-        assert!(batch.len() <= 16);
-        assert_eq!(reply["more_open"], !batch.is_empty() && reply["unruled_total"].as_u64().unwrap() > batch.len() as u64);
+fn streaming_and_unreported_usage_stop_later_turns_and_retries() {
+    for (scenario, cap) in [
+        ("r1-over-cap", 5.0),
+        ("unpriced", 0.05),
+        ("no-usage", 5.0),
+        ("r1-near-cap", 5.0),
+        ("result-only", 5.0),
+        ("r2-over-cap", 5.0),
+    ] {
+        let case = Case::new();
+        let mut setup = case.setup(scenario, "ok");
+        setup.fable_cap_usd = cap;
+        let started = std::time::Instant::now();
+        let result = case.run(&setup, &Astra::ok()).unwrap();
+        if ["r1-over-cap", "r2-over-cap"].contains(&scenario) {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "stopped by the cap, not the timeout"
+            );
+        }
+        let fable_calls = case
+            .calls()
+            .into_iter()
+            .filter(|c| c["role"] == "fable")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fable_calls.len(),
+            if ["result-only", "r2-over-cap"].contains(&scenario) {
+                2
+            } else {
+                1
+            }
+        );
+        for call in fable_calls {
+            assert!(!base::proc::pid_alive(call["pid"].as_u64().unwrap() as u32));
+        }
+        assert_eq!(
+            case.member_status("fable"),
+            "budget_cut",
+            "{scenario}: {result}"
+        );
+        assert!(!case.stored()["cost"]["cut"].as_array().unwrap().is_empty());
+        if ["r1-over-cap", "unpriced", "result-only"].contains(&scenario) {
+            fs::remove_file(case.plan.with_file_name("council.json")).unwrap();
+            let before = case.calls().len();
+            case.run(&setup, &Astra::ok()).unwrap();
+            assert!(case.calls()[before..].iter().all(|c| c["role"] != "fable"));
+        }
     }
-    assert_eq!(ruled, open_total);
-    assert!(claims(&case)
-        .iter()
-        .filter(|c| c["status"] != "consensus")
-        .all(|c| c["ruling"].is_object()));
+}
+#[test]
+fn astra_budget_is_shared_between_phases_and_failures_do_not_erase_the_plan() {
+    for status in [Status::Ok, Status::Quota] {
+        let case = Case::new();
+        let mut setup = case.setup("ok", "disagree");
+        setup.astra_token_cap = 100;
+        let result = case.run(&setup, &Astra::with(status)).unwrap();
+        assert_eq!(result["degraded"], true);
+        assert!(case.plan.exists());
+        assert!(claims(&case).iter().any(|c| c["author"] == "astra"));
+    }
+}
+#[test]
+fn digest_is_bounded_and_rulings_paginate_without_losing_provenance() {
+    let case = Case::new();
+    let result = case
+        .run(
+            &case.setup("huge,disagree", "huge,disagree,add-claims"),
+            &Astra::ok(),
+        )
+        .unwrap();
+    assert!(
+        result.to_string().chars().count() <= DIGEST_MAX_CHARS + 512,
+        "{}",
+        result.to_string().chars().count()
+    );
+    assert!(result["counts"]["dropped_at_intake"].as_u64().unwrap() >= 8);
+    assert!(!result.to_string().contains(&"x".repeat(250)));
+    assert!(
+        fs::read_to_string(case.plan.with_file_name("council").join("A-r1-fable.json"))
+            .unwrap()
+            .contains(&"x".repeat(4000))
+    );
+    let mut batch = result["open"].as_array().unwrap().clone();
+    let mut total = 0;
+    while !batch.is_empty() {
+        total += batch.len();
+        let rulings = batch
+            .iter()
+            .map(|c| {
+                (
+                    c["id"].as_str().unwrap().into(),
+                    "upheld".into(),
+                    "checked".into(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let reply = council::rule(&case.plan, &rulings).unwrap();
+        batch = reply["next"].as_array().unwrap().clone();
+    }
+    assert_eq!(
+        total,
+        claims(&case)
+            .iter()
+            .filter(|c| c["status"] != "consensus")
+            .count()
+    );
+    valid_council(&case);
+    assert!(council::rule(
+        &case.plan,
+        &[("C99".into(), "upheld".into(), "reason".into())]
+    )
+    .is_err());
+}
+#[test]
+fn completed_council_is_reused_without_another_review_or_spend() {
+    let case = Case::new();
+    let setup = case.setup("ok", "ok");
+    let astra = Astra::ok();
+    case.run(&setup, &astra).unwrap();
+    let count = case.calls().len();
+    assert_eq!(case.run(&setup, &astra).unwrap()["reused"], true);
+    assert_eq!(case.calls().len(), count);
 }
 
 // ---- bridge and launch ----
@@ -858,7 +707,11 @@ fn the_tool_runs_with_the_real_astra_path_and_caps_its_tokens() {
     let digest = &reply["structuredContent"];
     assert_eq!(digest["outcome"], "full", "{reply}");
     assert!(
-        digest.get("rounds").is_none(),
+        digest["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("positions").is_none()),
         "the core gets a digest only"
     );
     let stored: Value =
@@ -880,7 +733,7 @@ fn the_tool_runs_with_the_real_astra_path_and_caps_its_tokens() {
     let stored: Value =
         serde_json::from_slice(&fs::read(store.join("astra/council.json")).unwrap()).unwrap();
     assert_eq!(stored["members"][0]["status"], "budget_cut", "{stored}");
-    assert_eq!(stored["cost"]["cut"], json!(["astra:round2"]));
+    assert_eq!(stored["cost"]["cut"], json!(["astra:A:round2"]));
 
     let temp = common::temp();
     let (store, repo) = bridge_fixture(&temp);
@@ -1100,4 +953,330 @@ fn the_bridge_process_serves_the_tool_only_with_the_switch() {
     let off = run(false);
     assert_eq!(off["result"]["tools"], tools());
     assert!(names(&run(true)).contains(&"council".to_string()));
+}
+
+#[test]
+fn cli_caps_require_opt_in_and_override_only_the_child_environment() {
+    for (flag, value) in [
+        ("--fable-cap", "20"),
+        ("--astra-cap", "600000"),
+        ("--council-rounds", "5"),
+    ] {
+        let temp = common::temp();
+        let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+            .args(["wish", flag, value, "fix"])
+            .env("AXIOM_HOME", temp.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("require --advanced-research"));
+    }
+    let temp = common::temp();
+    let record = temp.path().join("record.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args([
+            "wish",
+            "--fable-cap",
+            "20",
+            "--advanced-research",
+            "--astra-cap",
+            "600000",
+            "--council-rounds",
+            "5",
+            "fix",
+        ])
+        .env("AXIOM_HOME", temp.path())
+        .env("AXIOM_DATA_HOME", temp.path())
+        .env(
+            "AXIOM_CLAUDE_CMD",
+            serde_json::to_string(&common::fake("fake_claude")).unwrap(),
+        )
+        .env("FAKE_CLAUDE_RECORD", &record)
+        .env("AXIOM_FABLE_CAP_USD", "overridden-invalid")
+        .env("AXIOM_ARGON_TOKEN_CAP", "40000")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
+    for (key, value) in [
+        ("AXIOM_FABLE_CAP_USD", "20"),
+        ("AXIOM_ASTRA_TOKEN_CAP", "600000"),
+        ("AXIOM_ARGON_TOKEN_CAP", "40000"),
+        ("AXIOM_COUNCIL_ROUNDS", "5"),
+    ] {
+        assert_eq!(v["env"][key], value);
+    }
+    assert!(String::from_utf8_lossy(&output.stderr).contains("$20.00, Astra at 600k tokens, Argon at 40k tokens for one review, up to 5 rounds per phase"));
+}
+
+#[test]
+fn bridge_refuses_invalid_environment_without_serving_or_calling_members() {
+    for (name, value) in [
+        ("AXIOM_FABLE_CAP_USD", "201"),
+        ("AXIOM_ASTRA_TOKEN_CAP", "-1"),
+        ("AXIOM_ARGON_TOKEN_CAP", "NaN"),
+        ("AXIOM_COUNCIL_ROUNDS", "0"),
+    ] {
+        let temp = common::temp();
+        let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+            .arg("bridge")
+            .env("AXIOM_DATA_HOME", temp.path())
+            .env(council::ENV, "1")
+            .env(name, value)
+            .env("AXIOM_CLAUDE_CMD", "[\"no-real-claude\"]")
+            .env("AXIOM_AGY_CMD", "[\"no-real-agy\"]")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(name) && error.contains(&format!("{value:?}")),
+            "{error}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn legacy_finished_councils_are_not_paid_for_again() {
+    let case = Case::new();
+    let setup = case.setup("ok", "ok");
+    case.run(&setup, &Astra::ok()).unwrap();
+    let mut saved = case.stored();
+    saved.as_object_mut().unwrap().remove("phases");
+    for r in saved["rounds"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("phase");
+        r.as_object_mut().unwrap().remove("turns");
+    }
+    for c in saved["claims"].as_array_mut().unwrap() {
+        for k in ["phase", "round", "author", "history"] {
+            c.as_object_mut().unwrap().remove(k);
+        }
+    }
+    fs::write(
+        case.plan.with_file_name("council.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let before = case.calls().len();
+    assert_eq!(case.run(&setup, &Astra::ok()).unwrap()["reused"], true);
+    assert_eq!(case.calls().len(), before);
+}
+#[test]
+fn many_rounds_keep_a_bounded_digest_and_each_stances_phase() {
+    let case = Case::new();
+    case.run(&case.setup("ok", "disagree"), &Astra::ok())
+        .unwrap();
+    let mut stored: council::Council = serde_json::from_value(case.stored()).unwrap();
+    let mut round = stored.rounds[1].clone();
+    stored.rounds.clear();
+    for n in 1..=1000 {
+        round.n = n;
+        stored.rounds.push(round.clone());
+    }
+    let result = council::digest(&stored, &case.plan.with_file_name("council.json"), false);
+    assert!(result.to_string().chars().count() <= DIGEST_MAX_CHARS);
+    assert_eq!(result["rounds"][0]["through"], 1000);
+    assert!(result["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["stance_phases"]["argon"]["phase"] == "B"));
+}
+
+#[test]
+fn rejected_new_review_claims_stay_open_for_the_core() {
+    let case = Case::new();
+    let astra = |r: &CrossRequest| {
+        let mut reply = Astra::ok().answer(r);
+        if r.prompt.contains("COUNCIL PHASE C") {
+            let ids = Regex::new(r"(?m)^(C\d+) \[Position").unwrap();
+            reply.output.as_mut().unwrap()["resolutions"]=json!(ids.captures_iter(&r.prompt).map(|c|json!({"claim":c[1].to_string(),"decision":"rejected","reason":"the premise is contradicted by src/mod.py:12","change":""})).collect::<Vec<_>>());
+        }
+        reply
+    };
+    let result = council::run(
+        &case.setup("ok,settle", "add-claims"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result["phases"][2]["agreement"], true);
+    for claim in claims(&case).iter().filter(|c| c["author"] == "argon") {
+        assert_ne!(claim["status"], "consensus");
+        assert_eq!(claim["stances"]["astra"], "disagree");
+        assert_eq!(claim["stances"]["fable"], "disagree");
+        assert_eq!(claim["stances"]["argon"], "author");
+    }
+}
+
+#[test]
+fn missing_approval_or_claim_reviews_do_not_silently_count_as_agreement() {
+    for (fable, argon, member) in [
+        ("missing-approval", "ok", "fable"),
+        ("ok", "partial-review", "argon"),
+    ] {
+        let case = Case::new();
+        let result = case.run(&case.setup(fable, argon), &Astra::ok()).unwrap();
+        assert_eq!(case.member_status(member), "malformed", "{result}");
+        assert_eq!(result["degraded"], true);
+        if member == "argon" {
+            assert!(result["note"]
+                .as_str()
+                .unwrap()
+                .contains("Argon did not review"));
+        }
+    }
+}
+
+#[test]
+fn astra_can_revise_a_claim_before_fable_and_the_single_review() {
+    let case = Case::new();
+    let original = fs::read(&case.plan).unwrap();
+    let astra = |r: &CrossRequest| {
+        let mut reply = Astra::ok().answer(r);
+        reply.output.as_mut().unwrap()["resolutions"] = json!([{"claim":"C01","decision":"accepted","reason":"the rebuttal identified unbounded growth","change":"use a bounded cache with eviction"}]);
+        reply
+    };
+    let result = council::run(
+        &case.setup("ok", "ok"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result["phases"][0]["agreement"], true);
+    assert!(case.calls_of("fable", 2)[0]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("use a bounded cache with eviction"));
+    assert!(case.calls_of("argon", 1)[0]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("use a bounded cache with eviction"));
+    assert_eq!(fs::read(&case.plan).unwrap(), original);
+}
+
+#[test]
+fn accepted_review_objections_require_a_matching_change_from_both_members() {
+    let case = Case::new();
+    let astra = |r: &CrossRequest| {
+        let mut reply = Astra::ok().answer(r);
+        if r.prompt.contains("COUNCIL PHASE C") {
+            let ids = Regex::new(r"(?m)^(C\d+) \[Position").unwrap();
+            reply.output.as_mut().unwrap()["resolutions"]=json!(ids.captures_iter(&r.prompt).map(|c|json!({"claim":c[1].to_string(),"decision":"accepted","reason":"apply the review change","change":"bound the cache at 100 entries"})).collect::<Vec<_>>());
+        }
+        reply
+    };
+    let result = council::run(
+        &case.setup("ok,settle,accept", "disagree,add-claims"),
+        &case.request(),
+        &astra,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result["phases"][2]["agreement"], true);
+    assert_eq!(
+        case.calls().iter().filter(|c| c["role"] == "argon").count(),
+        1
+    );
+    assert!(result["agreed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["phase"] == "B"
+            && c["changes"]
+                .as_array()
+                .is_some_and(|changes| changes.len() == 2)));
+    assert!(claims(&case)
+        .iter()
+        .filter(|c| c["author"] == "argon")
+        .all(|c| c["stances"]["argon"] == "author"));
+}
+
+#[test]
+fn argon_envelopes_and_fable_timeouts_keep_their_original_guards() {
+    for scenario in ["shape-top", "shape-object"] {
+        let case = Case::new();
+        assert_eq!(
+            case.run(&case.setup("ok", scenario), &Astra::ok()).unwrap()["outcome"],
+            "full"
+        );
+    }
+    let case = Case::new();
+    let mut setup = case.setup("hang", "ok");
+    setup.round1_timeout = Duration::from_millis(400);
+    case.run(&setup, &Astra::ok()).unwrap();
+    assert_eq!(case.member_status("fable"), "timeout");
+    assert!(!base::proc::pid_alive(
+        case.calls_of("fable", 1)[0]["pid"].as_u64().unwrap() as u32
+    ));
+}
+#[test]
+fn authorship_and_checkable_evidence_still_determine_claim_status() {
+    let case = Case::new();
+    case.run(&case.setup("disagree", "disagree"), &Astra::ok())
+        .unwrap();
+    for c in claims(&case) {
+        assert_eq!(
+            c["stances"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|v| **v == "author")
+                .count(),
+            1
+        );
+        if c["author"] == "astra" {
+            assert_eq!(c["status"], "disputed");
+            assert_eq!(c["dissent"].as_array().unwrap().len(), 2);
+        } else {
+            assert_eq!(c["status"], "majority");
+        }
+    }
+    let case = Case::new();
+    case.run(&case.setup("disagree-bare", "disagree-bare"), &Astra::ok())
+        .unwrap();
+    for c in claims(&case).iter().filter(|c| c["author"] == "astra") {
+        assert_eq!(c["stances"]["fable"], "unsupported");
+        assert_eq!(c["status"], "disputed");
+        assert!(c["dissent"].as_array().unwrap().is_empty());
+    }
+}
+#[test]
+fn ruling_guards_still_refuse_consensus_bad_decisions_and_empty_reasons() {
+    let case = Case::new();
+    case.run(&case.setup("disagree", "ok"), &Astra::ok())
+        .unwrap();
+    let all = claims(&case);
+    let open = all.iter().find(|c| c["status"] != "consensus").unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let agreed = all.iter().find(|c| c["status"] == "consensus").unwrap()["id"]
+        .as_str()
+        .unwrap();
+    for (id, decision, reason) in [
+        (agreed, "upheld", "checked"),
+        (open, "maybe", "checked"),
+        (open, "upheld", " "),
+    ] {
+        assert!(council::rule(&case.plan, &[(id.into(), decision.into(), reason.into())]).is_err());
+    }
+    council::rule(
+        &case.plan,
+        &[(open.into(), "upheld".into(), "checked".into())],
+    )
+    .unwrap();
+    assert_eq!(
+        claims(&case).iter().find(|c| c["id"] == open).unwrap()["ruling"]["decision"],
+        "upheld"
+    );
 }

@@ -376,6 +376,7 @@ pub struct Spawned {
 pub struct Launch {
     /// Advanced research: the council of Astra, Fable 5.2 and Argon. Costs real money.
     pub advanced_research: bool,
+    pub council_budgets: Option<council::Budgets>,
 }
 
 pub fn spawn(
@@ -407,10 +408,13 @@ pub fn spawn_with(
     launch: &Launch,
 ) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
-    let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     let advanced_research = launch.advanced_research
         || resume.is_some_and(|id| council::switch_remembered(&config.home, id));
+    let budgets = if advanced_research { Some(match launch.council_budgets {
+        Some(b) => b.validate()?, None => council::Budgets::from_env()?,
+    }) } else { None };
+    let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
+    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if advanced_research {
         if let Some(tools) = argv
             .iter()
@@ -473,6 +477,7 @@ pub fn spawn_with(
         .stdout(Stdio::piped());
     if advanced_research {
         child.env(council::ENV, "1");
+        if let Some(budgets) = budgets { child.envs(budgets.env()); eprintln!("axiom: {}", budgets.notice()); }
     }
     let mut child = child
         .spawn()

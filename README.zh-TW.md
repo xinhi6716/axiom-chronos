@@ -108,7 +108,7 @@ architect 把工作切成模組，每個模組有介面規格與驗收測試。�
 
 `axiom evolve --dry-run` 從 Chronos 自己最近七天的紀錄產生自我改進摘要。檢視後，再明確執行 `axiom evolve --repo PATH`，對 Chronos 原始碼儲存庫進行改進。這是手動啟動的每週檢查，不是排程工作：桌面會詢問確認；CLI 啟動指令沒有確認提示。
 
-**選用項目。** agy（備用審查員）與 [CodeGraph](https://github.com/colbymchenry/codegraph)（有 `.codegraph/` 資料夾時減少讀碼量）有安裝才會用。`--advanced-research` 是唯一額外花錢的選項：規劃前由 Astra、Fable 與 Argon 一起討論，Fable 預設上限 $5。不主動開啟就不會用。
+**選用項目。** agy（備用審查員）與 [CodeGraph](https://github.com/colbymchenry/codegraph)（有 `.codegraph/` 資料夾時減少讀碼量）有安裝才會用。`--advanced-research` 是唯一額外花錢的選項：Astra 與 Fable 先討論計畫，每輪固定 Astra 先、Fable 後；Argon（Gemini 4）接著只審查一次。有異議才由 Astra、Fable 依相同順序答辯，最後核心依各階段紀錄裁決。不主動開啟就不會用。預設 Fable $5、Astra 200k tokens、Argon 單次審查 400k tokens，兩個對話階段各最多 3 輪。可設定 `AXIOM_FABLE_CAP_USD`、`AXIOM_ASTRA_TOKEN_CAP`、`AXIOM_ARGON_TOKEN_CAP`、`AXIOM_COUNCIL_ROUNDS`，或到「設定 → 進階研究預算」調整。CLI 可用 `axiom wish --advanced-research --fable-cap 20 --astra-cap 600000 --council-rounds 3 "修正問題"` 覆寫；這三個選項都必須搭配 `--advanced-research`。數值須為正數，token 與輪數須為整數；無效值拒絕啟動，Fable 超過 $200 視為可能誤植而拒絕。達成共識會提早結束；預算用盡、失敗或輪數用完時，把未解爭議交給核心。Argon 失敗會在計畫對話後結束，並註明未經 Argon 審查。
 
 為了省 token，每個模組各有一個調度員，達交棒門檻的 80% 時先提醒，150k token 時換新調度員。壓縮後會逐字還原約束規則；少用的提示章節需要時才載入。交棒備註會檢查是否含有隱瞞問題的指示。無進展防護會在連續三次接續都沒有進展時停止願望，避免反覆提示（`AXIOM_IDLE_CONTINUES` 可改次數）。
 
