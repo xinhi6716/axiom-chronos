@@ -1,9 +1,10 @@
-//! Quota strip presentation and its minute-scale repaint schedule.
+//! Static quota strip presentation.
 use super::{i18n::{self, Lang, Table}, model::AppState, ornament, theme::{self, Step, Tokened, Tokens, TypeSize}};
 use crate::usage::quota::{self, Freshness, Level, ProviderQuota, Quotas, Window, WindowKind};
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::h_flex;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,8 +16,6 @@ const T: Table = &[
     ("{}% left ({}% used)", "剩 {}%（已用 {}%）"),
     ("{} · observed {}", "{} · 觀測 {}"), ("{} · resets {}", "{} · {} 重置"),
 ];
-const HOURGLASS_SIDE: f32 = 10.0;
-const MINUTE: Duration = Duration::from_secs(60);
 
 fn tr(lang: Lang, key: &'static str) -> &'static str { i18n::translate(lang, T, key) }
 fn fill(lang: Lang, key: &'static str, args: &[&str]) -> String { i18n::fill(tr(lang, key), args) }
@@ -98,66 +97,68 @@ fn tooltip(w: Option<&Window>, now: i64, utc_offset_min: i32, lang: Lang) -> Str
     }
 }
 
-pub fn repaint_after(q: &Quotas) -> Option<Duration> {
-    [&q.claude, &q.codex].into_iter().any(|p| p.five_hour.is_some() || p.weekly.is_some()).then_some(MINUTE)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum SyncAction { Start, Stop, Keep }
-
-fn sync_action(on: bool, running: bool) -> SyncAction {
-    match (on, running) {
-        (false, _) => SyncAction::Stop,
-        (true, false) => SyncAction::Start,
-        (true, true) => SyncAction::Keep,
-    }
-}
-
-pub struct Ticker { task: Option<Task<()>> }
+// The shell still calls these hooks; quota changes repaint through state updates.
+pub fn repaint_after(_: &Quotas) -> Option<Duration> { None }
+pub struct Ticker;
 impl Ticker {
-    pub fn new() -> Self { Self { task: None } }
-    pub fn sync<V: 'static>(&mut self, on: bool, cx: &mut Context<V>) {
-        match sync_action(on, self.task.is_some()) {
-            SyncAction::Stop => self.task = None,
-            SyncAction::Start => self.task = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(MINUTE).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() { break; }
-            })),
-            SyncAction::Keep => {},
+    pub fn new() -> Self { Self }
+    pub fn sync<V: 'static>(&mut self, _: bool, _: &mut Context<V>) {}
+}
+
+pub fn strip(state: &AppState, cx: &App) -> AnyElement { strip_layout(state, cx, false) }
+pub fn compact_strip(state: &AppState, cx: &App) -> AnyElement { strip_layout(state, cx, true) }
+
+fn strip_value(w: Option<&Window>, now: i64, lang: Lang, compact: bool) -> String {
+    let Some(w) = w else { return "—".into() };
+    let value = format!("{}%", percent(w.left()));
+    match (quota::level(w.left()), w.resets_at) {
+        (Level::Exhausted, Some(reset)) if reset > now => {
+            let remaining = reset.saturating_sub(now).saturating_add(59);
+            let time = age(remaining, lang);
+            if compact {
+                let short = time.replace(" min", "m").replace(" h", "h").replace(" d", "d").replace(' ', "");
+                format!("{value} ↻{short}")
+            }
+            else { match lang {
+                Lang::ZhTw => format!("{value} · {time}後重置"),
+                Lang::En => format!("{value} · resets in {time}"),
+            }}
         }
+        _ => value,
     }
 }
 
-pub fn strip(state: &AppState, cx: &App) -> AnyElement {
+fn strip_layout(state: &AppState, cx: &App, compact: bool) -> AnyElement {
     let t = cx.tokens();
     let d = theme::density(cx);
     let lang = *cx.global::<Lang>();
+    let spacing = theme::space(if compact { theme::Density::Dense } else { d }, Step::Xs);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs().min(i64::MAX as u64) as i64).unwrap_or(0);
     let offset = crate::session::local_offset_secs(now) / 60;
     let meter = |kind, w: Option<&Window>, id: &'static str| {
         let (share, color) = meter_paint(&t, w, now);
         let tip = tooltip(w, now, offset, lang);
         let name = window_name(kind, lang);
-        let value = meter_text(w, lang);
+        let value = strip_value(w, now, lang, compact);
         // The hourglass uses the window's ink for its sand as well as its outline.
         let meter_tokens = Tokens { gold: color, ..t };
-        h_flex().id(id).flex_none().gap(theme::space(d, Step::Xs) / 2.).text_color(color)
+        h_flex().id(id).flex_none().gap(spacing / 2.).text_color(color)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(ornament::hourglass(&meter_tokens, share, color, HOURGLASS_SIDE))
-            .child(v_flex().flex_none().line_height(theme::font(d, TypeSize::Caption))
-                .child(name.test_text(name))
-                .child(value.clone().test_text(value)))
+            .child(ornament::hourglass(&meter_tokens, share, color, f32::from(theme::font(d, TypeSize::Caption))))
+            .when(!compact, |this| this.child(name.test_text(name)))
+            .child(value.clone().test_text(value))
             .test_support()
     };
     let provider = |name: &'static str, q: &ProviderQuota, id: &'static str, five_id, weekly_id| {
-        h_flex().id(id).flex_none().gap(theme::space(d, Step::Xs) / 2.)
-            .child(div().text_color(t.muted).child(name))
+        h_flex().id(id).flex_none().gap(spacing / 2.)
+            .child(div().text_color(t.gold.opacity(0.75)).child(name.test_text(name)))
             .child(meter(WindowKind::FiveHour, q.five_hour.as_ref(), five_id))
+            .child(div().text_color(t.muted).child("·"))
             .child(meter(WindowKind::Weekly, q.weekly.as_ref(), weekly_id))
             .test_support()
     };
     h_flex().id("quota-strip").w_full().h(theme::row_height(d)).min_h(theme::TARGET_MIN)
-        .px(theme::space(d, Step::Xs)).gap(theme::space(d, Step::Xs))
+        .px(spacing).gap(theme::space(if compact { theme::Density::Dense } else { d }, if compact { Step::Md } else { Step::Xl }))
         .border_t_1().border_color(t.border).bg(t.surface).text_size(theme::font(d, TypeSize::Caption))
         .child(provider("Claude", &state.quota.claude, "quota-claude", "quota-claude-five-hour", "quota-claude-weekly"))
         .child(provider("Codex", &state.quota.codex, "quota-codex", "quota-codex-five-hour", "quota-codex-weekly"))
@@ -283,28 +284,19 @@ mod tests {
     }
 
     #[test]
-    fn ticker_actions_and_minute_wake_rule() {
-        for (on, running, expected) in [
-            (false, false, SyncAction::Stop), (false, true, SyncAction::Stop),
-            (true, false, SyncAction::Start), (true, true, SyncAction::Keep),
-        ] { assert_eq!(sync_action(on, running), expected); }
-        assert_eq!(MINUTE, Duration::from_secs(60));
+    fn strip_values_include_static_reset_countdown() {
+        let exhausted = window(WindowKind::FiveHour, 1.0, Some(NOW + 1200), NOW);
+        assert_eq!(strip_value(Some(&exhausted), NOW, Lang::ZhTw, false), "0% · 20 分後重置");
+        assert_eq!(strip_value(Some(&exhausted), NOW, Lang::En, false), "0% · resets in 20 min");
+        assert_eq!(strip_value(Some(&exhausted), NOW, Lang::En, true), "0% ↻20m");
+        assert_eq!(strip_value(None, NOW, Lang::En, false), "—");
         assert_eq!(repaint_after(&Quotas::default()), None);
-        for is_claude in [true, false] {
-            for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
-                let mut q = Quotas::default();
-                let target = if is_claude { &mut q.claude } else { &mut q.codex };
-                let w = Some(window(kind, 0.38, None, NOW));
-                match kind { WindowKind::FiveHour => target.five_hour = w, WindowKind::Weekly => target.weekly = w }
-                assert_eq!(repaint_after(&q), Some(MINUTE));
-            }
-        }
     }
 
     #[test]
     fn presentation_does_not_request_frames_or_use_literal_font_sizes() {
         let source = include_str!("quota.rs").split("#[cfg(test)]").next().unwrap();
-        for forbidden in ["request_animation_frame", "on_next_frame", "text_size(px("] {
+        for forbidden in ["request_animation_frame", "on_next_frame", ".timer(", "text_size(px("] {
             assert!(!source.contains(forbidden), "found {forbidden}");
         }
     }

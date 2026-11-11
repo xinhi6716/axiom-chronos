@@ -100,7 +100,6 @@ fn open_card(state: &Entity<AppState>, session: &SharedString, cx: &mut App) {
 
 pub struct MiniView {
     state: Entity<AppState>,
-    ticker: quota::Ticker,
     focus: FocusHandle,
     pin_focus: FocusHandle,
     back_focus: FocusHandle,
@@ -116,7 +115,7 @@ impl MiniView {
         });
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { state, ticker: quota::Ticker::new(), focus, pin_focus: cx.focus_handle().tab_stop(true), back_focus: cx.focus_handle().tab_stop(true), card_focus: HashMap::new() }
+        Self { state, focus, pin_focus: cx.focus_handle().tab_stop(true), back_focus: cx.focus_handle().tab_stop(true), card_focus: HashMap::new() }
     }
 }
 
@@ -125,8 +124,6 @@ impl Render for MiniView {
         let t = cx.tokens();
         let d = theme::density(cx);
         let lang = *cx.global::<Lang>();
-        let state = self.state.read(cx);
-        self.ticker.sync(quota::repaint_after(&state.quota).is_some(), cx);
         let state = self.state.read(cx);
         let list = rows(state);
         let indices = model::board_runs(state);
@@ -161,7 +158,7 @@ impl Render for MiniView {
                     .child(div().text_color(ink).text_size(theme::font(d, TypeSize::Caption)).child(tr(cx, &[], run.status_label()).test_text(tr(cx, &[], run.status_label())))))
                 .child(div().w_full().text_color(t.muted).text_size(theme::font(d, TypeSize::Caption)).child(line.clone().test_text(line))));
         }
-        let strip = quota::strip(state, cx);
+        let strip = quota::compact_strip(state, cx);
         let back_tip = back_tip_text(palette::keys_of(palette::Global::ToggleMini), lang);
         let pin_ring = self.pin_focus.is_focused(window);
         let back_ring = self.back_focus.is_focused(window);
