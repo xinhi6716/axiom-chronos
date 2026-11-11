@@ -1,0 +1,18 @@
+Axiom Chronos @VERSION@ - Linux x64
+
+Extract the tar.gz, open a terminal in that folder, then run:
+  sh ./install.sh
+
+Default folder: ~/.local/bin (add it to PATH if needed).
+Options: --prefix /your/bin/folder --no-plugin
+When claude is on PATH, the installer adds/refreshes the
+xinhi6716/axiom-chronos marketplace and installs/updates
+chronos@axiom-chronos at user scope. --no-plugin skips that step.
+Restart Claude Code after a plugin update.
+The final axiom doctor output reports setup problems without failing installation.
+A plugin setup failure returns an error, even though the program is installed.
+
+Start: axiom wish <your wish>
+Claude Code and Codex CLI must already be installed and signed in.
+The desktop app is Windows only. To uninstall, remove the installed axiom
+file; ~/.axiom and the Claude plugin are not removed.
