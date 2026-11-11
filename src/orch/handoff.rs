@@ -35,6 +35,9 @@ pub struct Handoff {
     /// Set once a fresh dispatcher was started with this note.
     #[serde(default)]
     pub taken: bool,
+    /// The launch hook offered this exact note to a fresh dispatcher, even if launch failed.
+    #[serde(default)]
+    pub offered: bool,
     /// Consecutive handoffs of this module with no unit progress in the store since the one before.
     #[serde(default)]
     pub stalled: u32,
@@ -206,7 +209,7 @@ fn io(e: std::io::Error) -> Failure {
 fn invalid(message: impl Into<String>) -> Failure {
     Failure::new("invalid_argument", message)
 }
-fn path(store: &Path, module: Option<&str>) -> PathBuf {
+pub fn handoff_path(store: &Path, module: Option<&str>) -> PathBuf {
     let dir = store.join("handoffs");
     match module {
         Some(m) => dir.join("module").join(format!("{m}.json")),
@@ -286,6 +289,12 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
             "--next is required: the step the fresh dispatcher takes first",
         ));
     }
+    static COMPLETE: OnceLock<regex::Regex> = OnceLock::new();
+    if COMPLETE.get_or_init(|| regex::Regex::new(
+        r"(?i)^\s*(?:none\b|wish\s+(?:is\s+)?complete\b|nothing\s+(?:left|remaining)\b|no\s+(?:remaining\s+work|(?:work|steps?|tasks?)\s+(?:left|remaining))\b)"
+    ).unwrap()).is_match(&next) {
+        return Err(invalid("--next says no work remains; finish normally instead of recording a handoff"));
+    }
     check_module(store, module.as_deref())?;
     let mut note = Handoff {
         module,
@@ -296,6 +305,7 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
         stuck: field("--stuck"),
         decisions: field("--decisions"),
         taken: false,
+        offered: false,
         stalled: 0,
         snapshot: None,
     };
@@ -304,7 +314,7 @@ pub fn record_handoff(store: &Path, args: &[String]) -> Res<Handoff> {
             "{flag} is refused: {reason}. Write facts only; the store holds units, evidence and reviews."
         )));
     }
-    let file = path(store, note.module.as_deref());
+    let file = handoff_path(store, note.module.as_deref());
     with_lock(store, false, || {
         if let Some(m) = note.module.clone() {
             note.snapshot = snapshot_of(store, &m);
@@ -326,7 +336,7 @@ pub fn read_handoff(store: &Path, module: Option<&str>) -> Res<Option<Handoff>> 
     if let Some(m) = module {
         base::require_slug("module", m)?;
     }
-    match std::fs::read(path(store, module)) {
+    match std::fs::read(handoff_path(store, module)) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
             invalid(format!(
                 "handoff of {} is unreadable: {e}",
@@ -369,29 +379,67 @@ fn keep_pending(all: Vec<Handoff>) -> Vec<Handoff> {
 
 /// Marks a handoff as taken by a fresh dispatcher.
 pub fn take_handoff(store: &Path, module: Option<&str>) -> Res<()> {
-    take(store, module, None)
+    update_delivery(store, module, None, true)
 }
 
 /// Marks `h` taken once a dispatcher was seen running with it; a newer note of the module stays pending.
 pub fn take_delivered(store: &Path, h: &Handoff) -> Res<()> {
-    take(store, h.module.as_deref(), Some(&h.ts))
+    update_delivery(store, h.module.as_deref(), Some(h), true)
 }
 
-fn take(store: &Path, module: Option<&str>, ts: Option<&str>) -> Res<()> {
+pub fn offer_handoff(store: &Path, h: &Handoff) -> Res<()> {
+    update_delivery(store, h.module.as_deref(), Some(h), false)
+}
+
+fn update_delivery(
+    store: &Path,
+    module: Option<&str>,
+    expected: Option<&Handoff>,
+    taken: bool,
+) -> Res<()> {
     with_lock(store, false, || {
         let Some(mut note) = read_handoff(store, module)? else {
             return Ok(());
         };
-        if note.taken || ts.is_some_and(|ts| ts != note.ts) {
+        let matches = expected.is_none_or(|h| {
+            let mut expected = h.clone();
+            expected.taken = note.taken;
+            expected.offered = note.offered;
+            expected == note
+        });
+        if !matches || note.taken || (!taken && note.offered) {
             return Ok(());
         }
-        note.taken = true;
+        if taken {
+            note.taken = true;
+        } else {
+            note.offered = true;
+        }
         base::atomic_write(
-            &path(store, module),
+            &handoff_path(store, module),
             &serde_json::to_vec_pretty(&note).unwrap(),
         )
         .map_err(io)
     })
+}
+
+/// A concrete instruction shared by the goal refusal, Stop hook and headless driver.
+pub fn handoff_blocker(store: &Path, h: &Handoff) -> String {
+    let whom = h
+        .module
+        .as_deref()
+        .map_or("a fresh chronos:dispatcher".to_string(), |m| {
+            format!("a fresh chronos:dispatcher that names module {m}")
+        });
+    format!(
+        "Pending handoff {}. Start {whom}; the hook injects the note and marks it taken when that dispatcher's first tool call confirms it in its transcript. {}",
+        handoff_path(store, h.module.as_deref()).display(),
+        if h.offered || stalled_out(store, h).is_some() {
+            "It has already been offered or stalled; status blocked is allowed with this pending handoff in the note."
+        } else {
+            "Offer it to that dispatcher before requesting status blocked."
+        }
+    )
 }
 
 /// The first line of a handoff's text without its pending mark; it names the note by module and time.

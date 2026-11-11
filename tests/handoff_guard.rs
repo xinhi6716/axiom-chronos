@@ -27,6 +27,7 @@ fn note() -> Handoff {
         stuck: "stuck secret".into(),
         decisions: "decision secret".into(),
         taken: false,
+        offered: false,
         stalled: 2,
         snapshot: Some("a1=failed".into()),
     }

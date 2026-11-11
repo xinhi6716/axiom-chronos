@@ -468,12 +468,9 @@ fn a_handoff_stays_pending_until_a_dispatcher_runs_with_it() {
     assert!(orch::digest(&r.store, &r.project, Some("m1"))
         .unwrap()
         .contains("handoff pending (m1)"));
-    assert_eq!(
-        goal::set_status(&r.home, "s", "blocked", Some("needs a key"))
-            .unwrap_err()
-            .kind,
-        "handoff_pending"
-    );
+    goal::set_status(&r.home, "s", "blocked", Some("needs a key"))
+        .expect("a failed offer allows blocked without consuming the note");
+    goal::reopen(&r.home, "s").unwrap();
     // A dispatcher started without the note consumes nothing.
     dispatcher_runs(&r, "Carry out module m1.");
     assert_eq!(pending_modules(&r), ["m1"]);
@@ -495,6 +492,109 @@ fn the_goal_cannot_close_blocked_while_a_handoff_waits() {
     assert!(refused.message.contains("names module m2"));
     orch::take_handoff(&r.store, Some("m2")).unwrap();
     goal::set_status(&r.home, "s", "blocked", Some("needs a key")).unwrap();
+}
+
+#[test]
+fn whole_wish_handoff_reaches_a_module_dispatcher_and_is_taken() {
+    for prompt in [
+        "Module: m1. Consume the whole-wish handoff.",
+        "Wish mentions m1 and m2. Consume the whole-wish handoff.",
+    ] {
+        let r = run();
+        orch::record_handoff(&r.store, &args(&["handoff", "--next", "check acceptance"])).unwrap();
+        let out = call(&r, &start_with(&r, "Consume handoff", prompt))
+            .expect("whole-wish note must be offered even when modules are named");
+        let prompt = given_prompt(&out);
+        assert!(prompt.contains("HANDOFF for the whole wish"), "{prompt}");
+        assert!(!orch::read_handoff(&r.store, None).unwrap().unwrap().taken);
+        dispatcher_runs(&r, &prompt);
+        assert!(orch::pending_handoffs(&r.store).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn blocked_is_legal_after_an_offer_but_records_every_pending_handoff() {
+    let r = run();
+    handoff(&r, "m1", "fix a1");
+    handoff(&r, "m2", "start b1");
+    call(&r, &start_with(&r, "Dispatch m1", "Module m1")).unwrap();
+    assert_eq!(
+        goal::set_status(&r.home, "s", "blocked", Some("launch failed"))
+            .unwrap_err()
+            .kind,
+        "handoff_pending",
+        "m2 has never been offered"
+    );
+    call(&r, &start_with(&r, "Dispatch m2", "Module m2")).unwrap();
+    goal::set_status(&r.home, "s", "blocked", Some("launch failed"))
+        .expect("offered but untaken handoffs must allow blocked");
+    let note = goal::load(&r.home, "s").unwrap().unwrap().note.unwrap();
+    assert!(
+        note.contains("launch failed") && note.contains("m1.json") && note.contains("m2.json"),
+        "{note}"
+    );
+    assert_eq!(pending_modules(&r), ["m1", "m2"]);
+}
+
+#[test]
+fn replacement_handoffs_need_their_own_offer() {
+    let r = run();
+    handoff(&r, "m1", "fix a1");
+    call(&r, &start_with(&r, "Dispatch m1", "Module m1")).unwrap();
+    handoff(&r, "m1", "fix a1 again");
+    let why = goal::set_status(&r.home, "s", "blocked", Some("launch failed")).unwrap_err();
+    assert_eq!(why.kind, "handoff_pending");
+    assert!(why.message.contains("m1.json"), "{}", why.message);
+}
+
+#[test]
+fn completed_work_is_not_a_handoff() {
+    for next in [
+        "none",
+        "None: wish complete, fulltest passed",
+        "wish complete",
+        "Nothing left to do",
+        "No remaining work",
+    ] {
+        let r = run();
+        let err =
+            orch::record_handoff(&r.store, &args(&["handoff", "--next", next])).expect_err(next);
+        assert!(err.message.contains("finish normally"), "{}", err.message);
+        assert!(orch::pending_handoffs(&r.store).unwrap().is_empty());
+    }
+    let r = run();
+    orch::record_handoff(
+        &r.store,
+        &args(&[
+            "handoff",
+            "--next",
+            "verify the wish complete message after fixing a1",
+        ]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn stop_names_the_pending_note_and_the_way_to_take_it() {
+    let r = run();
+    orch::record_handoff(&r.store, &args(&["handoff", "--next", "check acceptance"])).unwrap();
+    let out = call(&r, &json!({"hook_event_name":"Stop", "session_id":"s"})).unwrap();
+    let text = out["reason"].as_str().unwrap();
+    assert!(
+        text.contains("wish.json")
+            && text.contains("fresh chronos:dispatcher")
+            && text.contains("taken"),
+        "{text}"
+    );
+    assert!(!text.contains("or close it"), "{text}");
+}
+
+#[test]
+fn stop_names_the_actual_completion_gate_without_a_handoff() {
+    let r = run();
+    let out = call(&r, &json!({"hook_event_name":"Stop", "session_id":"s"})).unwrap();
+    let text = out["reason"].as_str().unwrap();
+    assert!(text.contains("a1=failed") && text.contains("b1=pending"), "{text}");
 }
 
 #[test]

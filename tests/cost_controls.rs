@@ -71,8 +71,11 @@ fn turn_may_end_while_a_chronos_agent_runs_in_the_background() {
         json!([agent_task("general-purpose", "running")]),
         json!([{"id":"b","type":"shell","status":"running","description":"d","command":"sleep 9"}]),
     ] {
+        // Each case is the first Stop of an explicitly resumed session.
+        goal::reopen(d.path(), "s").unwrap();
         assert!(blocks(d.path(), &stop_with(tasks)));
     }
+    goal::reopen(d.path(), "s").unwrap();
     assert!(blocks(d.path(), &json!({"hook_event_name":"Stop","session_id":"s"})));
 }
 

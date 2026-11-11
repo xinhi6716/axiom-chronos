@@ -202,6 +202,33 @@ pub fn stop_reason(session: &str, goal: &Goal) -> String {
     text
 }
 
+pub fn stop_reason_in(home: &Path, session: &str, goal: &Goal) -> String {
+    let Some(store) = store_of(home, goal.project.as_deref()) else {
+        return stop_reason(session, goal);
+    };
+    match crate::orch::pending_handoffs(&store) {
+        Ok(pending) if !pending.is_empty() => {
+            let mut text = format!("Chronos goal {session} is still active.");
+            for h in pending {
+                text.push(' ');
+                text.push_str(&crate::orch::handoff_blocker(&store, &h));
+            }
+            if goal.interjection.is_some() {
+                text.push_str(" Classify the pending interjection with the bridge goal tool as amend, answer or stop.");
+            }
+            text
+        }
+        Err(e) => format!("Chronos goal {session} is still active. Cannot read handoffs in {}: {e}. Report this blocker with the bridge goal tool.", store.display()),
+        _ => {
+            let mut text = stop_reason(session, goal);
+            if let Err(e) = crate::orch::done_gate(&store, goal.mode.as_deref() == Some("change")) {
+                text.push_str(&format!(" Completion blocker: {e}."));
+            }
+            text
+        }
+    }
+}
+
 /// True while a Chronos agent runs in the background: the harness calls the session back when it finishes.
 fn agent_running(event: &Value) -> bool {
     event
@@ -448,7 +475,7 @@ fn start_dispatcher(
         Target::Wish => pending.iter().filter(|h| h.module.is_none()).collect(),
         Target::Module(m) => pending
             .iter()
-            .filter(|h| h.module.as_deref() == Some(m.as_str()))
+            .filter(|h| h.module.is_none() || h.module.as_deref() == Some(m.as_str()))
             .collect(),
         Target::Unclear(named) => {
             if pending
@@ -460,7 +487,7 @@ fn start_dispatcher(
                     named.join(", ")
                 )));
             }
-            Vec::new()
+            pending.iter().filter(|h| h.module.is_none()).collect()
         }
     };
     if let Some(reason) = chosen
@@ -473,10 +500,23 @@ fn start_dispatcher(
         return None;
     }
     let mut text = prompt.to_string();
-    for h in chosen {
-        let repo = h.repo.as_deref().or(g.cwd.as_deref()).map(Path::new);
+    // Module digests must not pull in another module's pending notes through a wish resume.
+    // Append each chosen note explicitly, then one digest for the dispatcher's target.
+    for h in &chosen {
         text.push_str(HANDED_OFF);
-        text.push_str(&crate::orch::resume_text(&store, repo, h.module.as_deref()).ok()?);
+        text.push_str(&crate::orch::handoff_text(h));
+    }
+    if let Some(h) = chosen.first() {
+        let repo = h.repo.as_deref().or(g.cwd.as_deref()).map(Path::new);
+        let digest = repo
+            .and_then(|repo| crate::orch::digest(&store, repo, module).ok())
+            .unwrap_or_else(|| "unavailable: pass --repo <project directory>\n".into());
+        text.push_str("DIGEST\n");
+        text.extend(
+            digest
+                .chars()
+                .take(crate::orch::MAX_RESUME.saturating_sub(text[prompt.len()..].chars().count())),
+        );
     }
     let wish_file = home.join("goals").join(format!("{session}.json"));
     text.push('\n');
@@ -491,6 +531,11 @@ fn start_dispatcher(
     ));
     let mut updated = input.clone();
     updated["prompt"] = json!(text);
+    for h in chosen {
+        if let Err(e) = crate::orch::offer_handoff(&store, h) {
+            return Some(Err(format!("Could not record the handoff offer: {e}")));
+        }
+    }
     Some(Ok(updated))
 }
 /// Marks taken each pending handoff this dispatcher was started with: its transcript opens with
@@ -635,9 +680,21 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             )
         }
         "Stop" => {
-            let g = goal::load(home?, session).ok()??;
-            (g.status == "active" && (g.interjection.is_some() || !agent_running(event)))
-                .then(|| json!({"decision":"block", "reason":stop_reason(session, &g)}))
+            let home = home?;
+            let g = goal::load(home, session).ok()??;
+            if g.status != "active" || (g.interjection.is_none() && agent_running(event)) {
+                return None;
+            }
+            match goal::progress::block_stop(home, session) {
+                Ok(true) => {
+                    Some(json!({"decision":"block", "reason":stop_reason_in(home, session, &g)}))
+                }
+                Ok(false) => None,
+                Err(e) => {
+                    eprintln!("Chronos Stop progress guard: {e}");
+                    None
+                }
+            }
         }
         "PreToolUse" => {
             let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");

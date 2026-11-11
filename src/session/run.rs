@@ -242,7 +242,7 @@ fn continue_prompt(config: &Config, session: &str) -> Res<String> {
     let goal = goal::reopen(&config.home, session)?;
     Ok(format!(
         "{CONTINUE_TAG} {}",
-        hook::stop_reason(session, &goal)
+        hook::stop_reason_in(&config.home, session, &goal)
     ))
 }
 
@@ -653,6 +653,8 @@ fn drive_once(
     let mut goal_error = None;
     let mut cause = None;
     let mut reset = None;
+    let mut last_refusal = None::<String>;
+    let idle_limit = goal::progress::idle_limit();
     let result: Res<i32> = loop {
         if stop.load(Ordering::SeqCst) {
             base::proc::kill_tree(&mut child);
@@ -676,6 +678,27 @@ fn drive_once(
                 }
                 renderer.event(&event, out);
                 observe(&event);
+                if event["parent_tool_use_id"].is_null() {
+                    if let Some(blocks) = event["message"]["content"].as_array() {
+                        for block in blocks {
+                            if block["type"] == "tool_result" && block["is_error"] == true {
+                                let text =
+                                    block["content"].as_str().map(str::to_owned).or_else(|| {
+                                        block["content"].as_array().map(|blocks| {
+                                            blocks
+                                                .iter()
+                                                .filter_map(|b| b["text"].as_str())
+                                                .collect::<Vec<_>>()
+                                                .join("\n")
+                                        })
+                                    });
+                                if let Some(text) = text.filter(|s| !s.trim().is_empty()) {
+                                    last_refusal = Some(text.chars().take(300).collect());
+                                }
+                            }
+                        }
+                    }
+                }
                 if event["type"] != "result" {
                     continue;
                 }
@@ -691,17 +714,45 @@ fn drive_once(
                 } else if let Some(id) = session.as_deref() {
                     match goal::load(&config.home, id) {
                         Ok(Some(g)) if g.status == "active" => {
-                            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(stdin) = guard.as_mut() {
-                                if let Err(e) = send(
-                                    stdin,
-                                    &format!("{CONTINUE_TAG} {}", hook::stop_reason(id, &g)),
-                                ) {
+                            let reason = hook::stop_reason_in(&config.home, id, &g);
+                            let idle = match goal::progress::idle_continues(&config.home, id) {
+                                Ok(idle) => idle,
+                                Err(e) => {
                                     base::proc::kill_tree(&mut child);
-                                    break Err(failure(e));
+                                    cause = Some(format!("could not track goal progress: {e}"));
+                                    break Err(e);
                                 }
+                            };
+                            if idle >= idle_limit {
+                                let quote: String = last_refusal
+                                    .as_deref()
+                                    .unwrap_or(&reason)
+                                    .chars()
+                                    .take(300)
+                                    .collect();
+                                let note = format!("core made no progress for {idle} continues; last refusal or stop reason: \"{quote}\"");
+                                match goal::interrupt(&config.home, id, &note) {
+                                    Ok(Some(blocked)) => {
+                                        let _ = writeln!(
+                                            out,
+                                            "goal blocked: {}",
+                                            blocked.note.as_deref().unwrap_or("")
+                                        );
+                                    }
+                                    Ok(None) => (),
+                                    Err(e) => goal_error = Some(e),
+                                }
+                            } else {
+                                let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(stdin) = guard.as_mut() {
+                                    if let Err(e) = send(stdin, &format!("{CONTINUE_TAG} {reason}"))
+                                    {
+                                        base::proc::kill_tree(&mut child);
+                                        break Err(failure(e));
+                                    }
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         Ok(Some(g)) if g.status == "blocked" || g.status == "waiting" => {
                             let _ = writeln!(

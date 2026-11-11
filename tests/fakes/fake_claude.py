@@ -113,6 +113,25 @@ if scenario == 'continue':
     while incoming.get() is not None:
         pass
     sys.exit(0)
+if scenario in ('idle', 'idle-progress', 'idle-refusal'):
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    for turn in range(13):
+        if scenario == 'idle-progress' and turn == 2:
+            store = Path(os.environ['AXIOM_DATA_HOME']) / 'orchestrate' / 'demo'
+            (store / 'units.tsv').write_text('id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm1\tverified\t\t\t\t\n', encoding='utf-8')
+        if scenario == 'idle-refusal':
+            emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'is_error': True, 'content': '拒絕' + '願' * 400}]}})
+        emit({'type': 'result', 'is_error': False, 'result': "I can't close the goal"})
+        if incoming.get(timeout=5) is None:
+            sys.exit(0)
+    # Finite ceiling so a regression cannot hang or start a real model.
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    goal['status'] = 'done'
+    path.write_text(json.dumps(goal), encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': 'fake safety ceiling'})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
 emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})
 emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})

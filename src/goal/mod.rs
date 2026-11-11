@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 mod batch;
+pub(crate) mod progress;
 pub use batch::{sleep_unless_stopped, wait_for_batch, Batch, BatchEnd, Waited, BATCH_POLL};
 
 fn is_false(v: &bool) -> bool {
@@ -119,6 +120,7 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         other: Map::new(),
     };
     save(home, session, &goal)?;
+    progress::clear(home, session)?;
     Ok(goal)
 }
 fn leave_waiting(goal: &mut Goal, end: Option<BatchEnd>) {
@@ -163,6 +165,7 @@ pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
     goal.reason = None;
     goal.interjection = None;
     save(home, session, &goal)?;
+    progress::clear(home, session)?;
     Ok(goal)
 }
 pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> {
@@ -324,23 +327,25 @@ pub fn set_status_with_batch(
             )?;
         }
     }
+    let mut note = note.unwrap_or("").to_string();
     if status == "blocked" {
         if let Some(project) = &goal.project {
             let store = crate::orch::store_for(home, project)?;
-            let pending: Vec<_> = crate::orch::pending_handoffs(&store)?
-                .into_iter()
-                .filter(|h| crate::orch::stalled_out(&store, h).is_none())
-                .collect();
-            if let Some(h) = pending.first() {
-                let whom = h
-                    .module
-                    .as_deref()
-                    .map_or("a fresh chronos:dispatcher".to_string(), |m| {
-                        format!("a fresh chronos:dispatcher that names module {m}")
-                    });
+            let pending = crate::orch::pending_handoffs(&store)?;
+            if let Some(h) = pending
+                .iter()
+                .find(|h| !h.offered && crate::orch::stalled_out(&store, h).is_none())
+            {
                 return Err(Failure::new(
                     "handoff_pending",
-                    format!("a dispatcher handed off its work instead of finishing; start {whom} before closing the goal"),
+                    crate::orch::handoff_blocker(&store, h),
+                ));
+            }
+            for h in pending {
+                note.push_str(&format!(
+                    "\nPending handoff: {} (next: {})",
+                    crate::orch::handoff_path(&store, h.module.as_deref()).display(),
+                    h.next
                 ));
             }
         }
@@ -349,7 +354,7 @@ pub fn set_status_with_batch(
         goal.waited = None;
     }
     goal.status = status.into();
-    goal.note = Some(note.unwrap_or("").into());
+    goal.note = Some(note);
     goal.batch = batch;
     goal.interjection = None;
     save(home, session, &goal)?;
