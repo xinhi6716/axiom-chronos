@@ -220,13 +220,18 @@ impl AppServer {
                     "timeout"
                 };
                 report["status"] = json!(status);
+                // A cancellation is the caller's own stop: report it exactly as the server's
+                // interrupted completion does, whichever is seen first, and do not probe the
+                // Codex version for it. A timeout may stem from an untested version, so note it.
                 let message = if cancelled() {
-                    "turn was cancelled".into()
+                    "turn interrupted".to_string()
                 } else {
-                    format!("turn exceeded {}s and was interrupted", req.timeout_s)
+                    self.note_untested_version(&format!(
+                        "turn exceeded {}s and was interrupted",
+                        req.timeout_s
+                    ))
                 };
-                report["error"] =
-                    json!({"kind":status,"message":self.note_untested_version(&message)});
+                report["error"] = json!({"kind":status,"message":message});
                 ending = Some(Instant::now());
             }
             // Keep the slot until completion; an unresponsive interrupted server must die first.
