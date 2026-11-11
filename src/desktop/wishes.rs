@@ -345,14 +345,20 @@ fn select_ix(list: &Entity<ListState<RunList>>, ix: IndexPath, window: &mut Wind
 }
 
 const PAGE_ROWS: usize = 10;
-fn row_height(d: theme::Density) -> Pixels { theme::row_height(d) + theme::space(d, Step::Xxl) }
+fn text_line_height(d: theme::Density, size: TypeSize) -> Pixels {
+    theme::font(d, size) + theme::space(d, Step::Xs) * 2.0
+}
+fn row_height(d: theme::Density) -> Pixels {
+    text_line_height(d, TypeSize::Body) * 2.0 + text_line_height(d, TypeSize::Caption)
+        + theme::space(d, Step::Xs) * 5.0
+}
 fn column_width(d: theme::Density, n: f32) -> Pixels { theme::space(d, Step::Xxl) * n }
 
 fn cell(width: Pixels) -> Div {
     div().flex_none().w(width).min_w_0()
 }
 
-fn glyph_state(status: RunStatus, verified_end: bool) -> UnitState {
+pub(in crate::desktop) fn glyph_state(status: RunStatus, verified_end: bool) -> UnitState {
     match status {
         RunStatus::Active => UnitState::Running,
         RunStatus::Done if verified_end => UnitState::Verified,
@@ -449,7 +455,7 @@ impl ListDelegate for RunList {
         let hover_session = session.clone();
         let bounds_session = session.clone();
         let bounds = self.bounds.clone();
-        let meta = logic::row_meta(run, &started);
+        let meta = logic::row_meta(run);
         let h = row_height(d);
 
         Some(
@@ -508,13 +514,13 @@ impl ListDelegate for RunList {
                                 )
                                 .child(
                                     v_flex().flex_1().min_w_0().gap(theme::space(d, Step::Xs))
-                                        .child(h_flex().min_w_0().gap(theme::space(d, Step::Xs))
-                                            .child(div().id(("wish-text", index)).min_w_0().truncate().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(wish.clone())
+                                        .child(h_flex().min_w_0().items_start().gap(theme::space(d, Step::Xs))
+                                            .child(div().id(("wish-text", index)).flex_1().min_w_0().line_clamp(2).text_size(theme::font(d, TypeSize::Body)).line_height(text_line_height(d, TypeSize::Body)).text_color(t.text).child(wish.clone().test_text(wish.clone()))
                                                 .tooltip(move |window, cx| Tooltip::new(full_wish.clone()).build(window, cx)))
                                             .when_some(warning, |this, warning| this.child(div().id(("wish-warning", index)).flex_none().text_color(t.review)
                                                 .child(Icon::new(IconName::TriangleAlert).size(theme::font(d, TypeSize::Body)))
                                                 .tooltip(move |window, cx| Tooltip::new(warning.clone()).build(window, cx)))))
-                                        .child(div().w_full().truncate().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(meta)),
+                                        .child(div().w_full().truncate().text_size(theme::font(d, TypeSize::Caption)).line_height(text_line_height(d, TypeSize::Caption)).text_color(t.muted).child(meta.clone().test_text(meta))),
                                 )
                                 .child(
                                     cell(column_width(d, 2.25))

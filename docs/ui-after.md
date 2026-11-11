@@ -41,13 +41,13 @@
 W1 PASS blocked-1100x700.png - needs-you card and checklist both whole, no scrolling
 W2 PASS run-dark-1100x700.png - run text at least 12px, held by tests/desktop_style.rs
 W3 PASS run-dark-1100x700.png - column widths persist, walk test column_widths_survive_a_restart
-W4 FAIL wishes-dark-1100x700.png - running wish title still ends in an ellipsis at 1100x700
+W4 PASS wishes-dark-1100x700.png - running wish title wraps to two lines with no ellipsis, folder-only subtitle
 W5 PASS wishes-dark-1100x700.png - row corners at most 4px, held by tests/desktop_style.rs
 W6 PASS memory-dark-1920x1080.png - second subtitle shown whole
 W7 PASS memory-dark-1100x700.png - right-click and shift-f10 menu with correction and deletion, deletion confirms (walk tests)
 W8 PASS memory-dark-1100x700.png - corners at most 4px, held by tests/desktop_style.rs
 W9 PASS usage-dark-1920x1080.png - model and role tables side by side, headers and first rows visible
-W10 FAIL usage-dark-1100x700.png - model-cost table not visible at 1100x700, below the warning panel
+W10 PASS usage-dark-1100x700.png - warnings fold to one line and the model-cost header and first row are visible at 1100x700 without scrolling
 W11 PASS settings-dark-1920x1080.png - preferences column fills its half at 1920x1080 and stays legible at 1100x700
 W12 PASS dense.png - density choice in Settings, persists, row heights change (walk tests)
 W13 DROPPED run-dark-1100x700.png - continuous animation violates idle restraint

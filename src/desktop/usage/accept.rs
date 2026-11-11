@@ -7,6 +7,14 @@
 use super::{logic::*, Scope};
 use crate::desktop::{i18n::Lang, model::PanelState, settings::{BoardTokens, ViewMemory}, theme};
 
+#[test] fn compact_order_and_warning_text() {
+    assert!(one_column_order(1));
+    assert!(!one_column_order(2));
+    for (lang, n, expected) in [(Lang::En, 1, "1 warning"), (Lang::En, 3, "3 warnings"), (Lang::ZhTw, 1, "1 個警告"), (Lang::ZhTw, 3, "3 個警告")] {
+        assert_eq!(warning_summary_text(n, |key| crate::desktop::i18n::translate(lang, super::TEXT, key)), expected);
+    }
+}
+
 #[test] fn columns_and_cap() {
     assert_eq!([cost_columns(1100.), cost_columns(1399.), cost_columns(1400.)], [1, 1, 2]);
     assert!(page_cap() > theme::WIDE_BREAKPOINT && page_cap() < gpui_kit::px(1920.));

@@ -1,6 +1,17 @@
 //! Sample data for `chronos --demo`, so every screen can be seen without a live wish.
 use super::model::*;
+use super::i18n::Lang;
 use gpui_kit::*;
+
+/// Translate only the fixed sentences written by the demo, never arbitrary summaries.
+pub fn board_sentence(text: &str, lang: Lang) -> Option<&'static str> {
+    let pair = match text {
+        "工作進度已更新。" | "Work progress has been updated." => ("Work progress has been updated.", "工作進度已更新。"),
+        "Continue with the next step." | "繼續下一步。" => ("Continue with the next step.", "繼續下一步。"),
+        _ => return None,
+    };
+    Some(if lang == Lang::En { pair.0 } else { pair.1 })
+}
 
 fn inline(text: &str) -> Option<TextSource> {
     Some(TextSource::Inline(SharedString::from(text.to_owned())))

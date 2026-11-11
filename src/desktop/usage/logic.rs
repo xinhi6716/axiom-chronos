@@ -4,6 +4,10 @@ use crate::desktop::settings::{BoardTokens, ViewMemory};
 use gpui_kit::px;
 
 pub(super) fn cost_columns(width: f32) -> usize { theme::columns_for(px(width)) }
+pub(super) fn one_column_order(columns: usize) -> bool { columns == 1 }
+pub(super) fn warning_summary_text(n: usize, tr: impl Fn(&'static str) -> &'static str) -> String {
+    if n == 1 { tr("1 warning").to_owned() } else { tr("{n} warnings").replace("{n}", &n.to_string()) }
+}
 pub(super) fn page_cap() -> gpui_kit::Pixels { theme::READ_WIDTH * 2.5 }
 
 #[derive(Debug, PartialEq, Eq)]

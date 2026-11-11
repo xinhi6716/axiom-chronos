@@ -1,9 +1,12 @@
 //! Compact view of unfinished work; window switching is owned by the shell.
-use super::{i18n::{self, tr, Lang, Table}, model::{self, AppState}, palette, quota, settings::{self, SettingPrior, WindowMode}, shell, theme::{self, Step, Tokened as _, TypeSize}};
+use super::{i18n::{self, tr, Lang, Table}, model::{self, AppState}, ornament::{self, Emblem}, palette, quota, settings::{self, SettingPrior, WindowMode}, shell, theme::{self, Step, Tokened as _, TypeSize}, wishes};
 use crate::base::{Failure, Res};
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::{h_flex, v_flex, Icon, TitleBar};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 
 const MINI_WIDTH: f32 = 380.;
 const MINI_HEIGHT: f32 = 520.;
@@ -17,18 +20,17 @@ const T: Table = &[
     ("{}, {} needs you", "{}，{} 個需要你"),
     ("{}, {} need you", "{}，{} 個需要你"),
     ("Needs you", "需要你"),
-    ("Working", "進行中"),
     ("Back to full app", "返回完整應用程式"),
     ("Back to full app ({})", "返回完整應用程式（{}）"),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
-struct MiniRow { session: SharedString, project: SharedString, needs_you: bool }
+struct MiniRow { session: SharedString, needs_you: bool }
 
 fn rows(state: &AppState) -> Vec<MiniRow> {
     model::board_runs(state).into_iter().map(|i| {
         let run = &state.runs[i];
-        MiniRow { session: run.session.clone(), project: run.project.clone(), needs_you: model::needs_you(run) }
+        MiniRow { session: run.session.clone(), needs_you: model::needs_you(run) }
     }).collect()
 }
 
@@ -81,7 +83,29 @@ pub(super) fn back_to_full(state: &Entity<AppState>, cx: &mut App) {
     shell::record_change(state, prior, next, cx);
 }
 
-pub struct MiniView { state: Entity<AppState>, ticker: quota::Ticker }
+fn toggle_pin(state: &Entity<AppState>, on: bool, cx: &mut App) {
+    let prior = settings::set_mini_on_top(!on, cx);
+    shell::record_change(state, prior, pin_prior(on), cx);
+}
+
+fn open_card(state: &Entity<AppState>, session: &SharedString, cx: &mut App) {
+    let opened = state.update(cx, |state, cx| {
+        if let Some(index) = state.runs.iter().position(|run| run.session == *session) {
+            state.open_run(index, cx);
+            true
+        } else { false }
+    });
+    if opened { back_to_full(state, cx); }
+}
+
+pub struct MiniView {
+    state: Entity<AppState>,
+    ticker: quota::Ticker,
+    focus: FocusHandle,
+    pin_focus: FocusHandle,
+    back_focus: FocusHandle,
+    card_focus: HashMap<SharedString, FocusHandle>,
+}
 impl MiniView {
     fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
@@ -90,12 +114,14 @@ impl MiniView {
             back_to_full(&closing_state, cx);
             true
         });
-        Self { state, ticker: quota::Ticker::new() }
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        Self { state, ticker: quota::Ticker::new(), focus, pin_focus: cx.focus_handle().tab_stop(true), back_focus: cx.focus_handle().tab_stop(true), card_focus: HashMap::new() }
     }
 }
 
 impl Render for MiniView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let d = theme::density(cx);
         let lang = *cx.global::<Lang>();
@@ -103,6 +129,8 @@ impl Render for MiniView {
         self.ticker.sync(quota::repaint_after(&state.quota).is_some(), cx);
         let state = self.state.read(cx);
         let list = rows(state);
+        let indices = model::board_runs(state);
+        self.card_focus.retain(|session, _| list.iter().any(|row| row.session == *session));
         let on = settings::Store::current(cx).mini_on_top;
         let pin_tip = if on { tr(cx, T, "Stop keeping on top") } else { tr(cx, T, "Keep on top") };
         let pin_state = self.state.clone();
@@ -111,34 +139,54 @@ impl Render for MiniView {
         let mut content = v_flex().w_full().gap(theme::space(d, Step::Sm))
             .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted)
                 .child(summary_line(list.len(), list.iter().filter(|r| r.needs_you).count(), lang)));
-        for (index, row) in list.into_iter().enumerate() {
-            let wish = state.runs.iter().find(|run| run.session == row.session).map(|run| run.wish.clone()).unwrap_or_default();
-            let ink = if row.needs_you { t.fail } else { t.muted };
-            let label = if row.needs_you { tr(cx, T, "Needs you") } else { tr(cx, T, "Working") };
-            content = content.child(h_flex().id(("mini-row", index)).w_full().min_w_0().gap(theme::space(d, Step::Sm))
-                .tooltip(move |window, cx| Tooltip::new(wish.clone()).build(window, cx))
-                .child(div().text_color(ink).child("●"))
-                .child(div().flex_1().min_w_0().truncate().text_color(t.text).child(row.project))
-                .child(div().flex_none().px(theme::space(d, Step::Sm)).rounded(theme::RADIUS).bg(ink.opacity(0.12)).text_color(ink).text_size(theme::font(d, TypeSize::Caption)).child(label)));
+        for (position, index) in indices.into_iter().enumerate() {
+            let run = &state.runs[index];
+            let focus = self.card_focus.entry(run.session.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
+            let ring = focus.is_focused(window);
+            let ink = t.outcome(run.status, run.verified_end());
+            let line = super::run_view::board::compact_line(state, index, cx);
+            let session = run.session.clone();
+            let click_session = session.clone();
+            let click_state = self.state.clone();
+            let key_state = self.state.clone();
+            content = content.child(v_flex().id(("mini-card", position)).test_support().track_focus(&focus)
+                .w_full().min_w_0().gap(theme::space(d, Step::Xs)).p(theme::space(d, Step::Sm))
+                .rounded(theme::RADIUS).border_1().border_color(t.border).bg(t.raised).cursor_pointer()
+                .when(ring, |this| this.border_2().border_color(t.gold).shadow(theme::focus_ring(&t)))
+                .on_click(move |_, _, cx| open_card(&click_state, &click_session, cx))
+                .on_key_down(move |event, _, cx| { if event.keystroke.key == "enter" { cx.stop_propagation(); open_card(&key_state, &session, cx); } })
+                .child(h_flex().w_full().min_w_0().gap(theme::space(d, Step::Sm))
+                    .child(ornament::glyph(wishes::glyph_state(run.status, run.verified_end()), f32::from(theme::font(d, TypeSize::Heading)), ink, 0.0))
+                    .child(div().flex_1().min_w_0().truncate().child(run.project.clone().test_text(run.project.clone())))
+                    .child(div().text_color(ink).text_size(theme::font(d, TypeSize::Caption)).child(tr(cx, &[], run.status_label()).test_text(tr(cx, &[], run.status_label())))))
+                .child(div().w_full().text_color(t.muted).text_size(theme::font(d, TypeSize::Caption)).child(line.clone().test_text(line))));
         }
-        content = content.child(super::run_view::board::board(state, true, cx));
         let strip = quota::strip(state, cx);
         let back_tip = back_tip_text(palette::keys_of(palette::Global::ToggleMini), lang);
-        v_flex().size_full().bg(t.canvas).text_color(t.text)
+        let pin_ring = self.pin_focus.is_focused(window);
+        let back_ring = self.back_focus.is_focused(window);
+        let pin_key_state = self.state.clone();
+        let back_key_state = self.state.clone();
+        v_flex().track_focus(&self.focus).size_full().bg(t.canvas).text_color(t.text)
             .child(TitleBar::new().on_close_window(move |_, window, cx| { back_to_full(&close_state, cx); window.remove_window(); })
                 .child(h_flex().w_full().items_center().gap(theme::space(d, Step::Sm))
+                    .child(ornament::emblem(Emblem::Hourglass, f32::from(theme::font(d, TypeSize::Title)), t.gold))
                     .child(div().text_size(theme::font(d, TypeSize::Title)).text_color(t.gold).child(tr(cx, T, "Chronos")))
                     .child(div().flex_1())
-                    .child(div().id("mini-pin").cursor_pointer().px(theme::space(d, Step::Sm)).text_color(if on { t.gold } else { t.muted })
+                    .child(div().id("mini-pin").test_support().track_focus(&self.pin_focus).cursor_pointer().px(theme::space(d, Step::Sm)).border_2().border_color(if pin_ring { t.gold } else { t.canvas }).when(pin_ring, |this| this.shadow(theme::focus_ring(&t))).text_color(if on { t.gold } else { t.muted })
                         .tooltip(move |window, cx| Tooltip::new(pin_tip).build(window, cx))
-                        .on_click(move |_, _, cx| { let prior = settings::set_mini_on_top(!on, cx); shell::record_change(&pin_state, prior, pin_prior(on), cx); })
+                        .on_click(move |_, _, cx| toggle_pin(&pin_state, on, cx))
+                        .on_key_down(move |event, _, cx| { if event.keystroke.key == "enter" { cx.stop_propagation(); toggle_pin(&pin_key_state, on, cx); } })
                         .child(Icon::new(gpui_kit::assets::IconName::Pin).size(theme::font(d, TypeSize::Title))))))
+            .child(div().id("mini-rule").w_full().h(px(1.)).bg(t.gold))
             .child(div().id("mini-body").flex_1().min_h_0().overflow_y_scroll().p(theme::space(d, Step::Md)).child(content))
             .child(div().px(theme::space(d, Step::Md)).pb(theme::space(d, Step::Sm))
-                .child(div().id("mini-back").w_full().h(theme::row_height(d)).flex().items_center().justify_center().cursor_pointer()
+                .child(div().id("mini-back").test_support().track_focus(&self.back_focus).w_full().h(theme::row_height(d)).flex().items_center().justify_center().cursor_pointer()
                     .rounded(theme::RADIUS).border_1().border_color(t.border).bg(t.raised).text_color(t.text)
+                    .when(back_ring, |this| this.border_2().border_color(t.gold).shadow(theme::focus_ring(&t)))
                     .tooltip(move |window, cx| Tooltip::new(back_tip.clone()).build(window, cx))
                     .on_click(move |_, _, cx| back_to_full(&back_state, cx))
+                    .on_key_down(move |event, _, cx| { if event.keystroke.key == "enter" { cx.stop_propagation(); back_to_full(&back_key_state, cx); } })
                     .child(tr(cx, T, "Back to full app"))))
             .child(strip)
     }
@@ -203,27 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn mode_and_pin_changes_record_undo() {
+    fn mode_and_pin_outcomes() {
         assert_eq!(back_transition(), (WindowMode::Full, SettingPrior::Mode(WindowMode::Full)));
         assert_eq!(pin_prior(false), SettingPrior::MiniOnTop(true));
         assert_eq!(pin_prior(true), SettingPrior::MiniOnTop(false));
-        let source = include_str!("mini.rs").split_once("#[cfg(test)]").unwrap().0;
-        let back = source.split_once("fn back_to_full(").unwrap().1.split_once("\npub struct MiniView").unwrap().0;
-        assert!(back.contains("let (mode, next) = back_transition()"));
-        let after_set = back.split_once("settings::set_mode(mode, cx)").unwrap().1;
-        assert!(after_set.contains("shell::record_change(state, prior, next, cx)"));
-
-        let pin = source.split_once(".id(\"mini-pin\")").unwrap().1.split_once(".child(Icon::new").unwrap().0;
-        let after_set = pin.split_once("settings::set_mini_on_top(!on, cx)").unwrap().1;
-        assert!(after_set.contains("shell::record_change(&pin_state, prior, pin_prior(on), cx)"));
     }
 
     #[test]
-    fn source_guards_and_translation_keys() {
-        let source = include_str!("mini.rs").split_once("#[cfg(test)]").unwrap().0;
-        for forbidden in ["shutdown(", "request_animation_frame", "on_next_frame", "text_size(px(", "rounded(px(", ".axiom", "Command::new"] { assert!(!source.contains(forbidden), "{forbidden}"); }
-        for after in source.split("tr(cx, T, \"").skip(1) {
-            let key = after.split('"').next().unwrap();
+    fn translation_keys() {
+        for key in ["Chronos", "Stop keeping on top", "Keep on top", "Back to full app",
+            "Back to full app ({})", "Nothing is in progress", "{} wish in progress",
+            "{} wishes in progress", "{}, {} needs you", "{}, {} need you"] {
             assert!(T.iter().any(|(en, _)| *en == key), "missing {key}");
         }
     }

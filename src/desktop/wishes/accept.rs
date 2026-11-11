@@ -67,13 +67,15 @@ fn restore_cancels_only_for_actual_filter_or_search_changes() {
 }
 
 #[test]
-fn row_meta_uses_folder_or_project_followed_by_started_label() {
+fn row_meta_uses_only_folder_or_dash() {
     let mut run = sample_run();
     run.project = "project".into();
     run.cwd = Some("work/project".into());
-    assert_eq!(row_meta(&run, "started"), format!("{} · started", run.cwd.as_ref().unwrap().display()));
+    let with_folder = row_meta(&run);
+    let folder = run.cwd.as_ref().unwrap().display().to_string();
     run.cwd = None;
-    assert_eq!(row_meta(&run, "started"), "project · started");
+    let without_folder = row_meta(&run);
+    assert_eq!((with_folder, without_folder), (folder, "—".to_string()));
 }
 #[test]
 fn memory_encoding_is_bounded_and_unambiguous() {

@@ -1,22 +1,21 @@
 //! Quota strip presentation and its minute-scale repaint schedule.
 use super::{i18n::{self, Lang, Table}, model::AppState, ornament, theme::{self, Step, Tokened, Tokens, TypeSize}};
-use crate::usage::quota::{self, Freshness, Level, Provider, ProviderQuota, Quotas, Window, WindowKind};
+use crate::usage::quota::{self, Freshness, Level, ProviderQuota, Quotas, Window, WindowKind};
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::h_flex;
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const T: Table = &[
     ("5 hours", "5 小時"), ("weekly", "每週"),
-    ("{}% left", "剩 {}%"), ("{}% left · resets {}", "剩 {}% · {} 重置"),
-    ("used up", "已用完"), ("used up · resets in {}", "已用完 · {}後重置"),
-    ("under 1 min", "不到 1 分"), ("{} h {} min", "{} 小時 {} 分"),
+    ("{}% left", "剩 {}%"),
     ("{} min", "{} 分"), ("{} h", "{} 小時"), ("{} d", "{} 天"),
     ("last known · {} · {} ago", "最後已知 · {} · {}前"),
     ("{}% left ({}% used)", "剩 {}%（已用 {}%）"),
-    ("{} · observed {}", "{}· 觀測 {}"), ("{} · resets {}", "{} · {} 重置"),
+    ("{} · observed {}", "{} · 觀測 {}"), ("{} · resets {}", "{} · {} 重置"),
 ];
-const HOURGLASS_SIDE: f32 = 18.0;
+const HOURGLASS_SIDE: f32 = 10.0;
 const MINUTE: Duration = Duration::from_secs(60);
 
 fn tr(lang: Lang, key: &'static str) -> &'static str { i18n::translate(lang, T, key) }
@@ -24,12 +23,6 @@ fn fill(lang: Lang, key: &'static str, args: &[&str]) -> String { i18n::fill(tr(
 
 fn window_name(kind: WindowKind, lang: Lang) -> &'static str {
     tr(lang, match kind { WindowKind::FiveHour => "5 hours", WindowKind::Weekly => "weekly" })
-}
-
-#[allow(dead_code)]
-pub fn head(p: Provider, kind: WindowKind, lang: Lang) -> String {
-    let provider = match p { Provider::Claude => "Claude", Provider::Codex => "Codex" };
-    format!("{provider} {}{}", window_name(kind, lang), if lang == Lang::ZhTw { "：" } else { ": " })
 }
 
 // log_stamp already implements local Gregorian calendar arithmetic without a time dependency.
@@ -63,39 +56,17 @@ fn age(age_s: i64, lang: Lang) -> String {
     fill(lang, key, &[&n.to_string()])
 }
 
-fn countdown(seconds: i64, lang: Lang) -> String {
-    let minutes = seconds / 60;
-    if minutes == 0 { tr(lang, "under 1 min").to_string() }
-    else if minutes >= 60 { fill(lang, "{} h {} min", &[&(minutes / 60).to_string(), &(minutes % 60).to_string()]) }
-    else { fill(lang, "{} min", &[&minutes.to_string()]) }
-}
-
-#[allow(dead_code)]
-pub fn line(w: Option<&Window>, now: i64, utc_offset_min: i32, lang: Lang) -> String {
-    let Some(w) = w else { return "—".into() };
-    let left = percent(w.left()).to_string();
-    let share = || fill(lang, "{}% left", &[&left]);
-    if let Freshness::Stale { age_s } = quota::freshness(w, now) {
-        return fill(lang, "last known · {} · {} ago", &[&share(), &age(age_s, lang)]);
-    }
-    if quota::level(w.left()) == Level::Exhausted {
-        return match w.resets_at.filter(|&reset| reset > now) {
-            Some(reset) => fill(lang, "used up · resets in {}", &[&countdown(reset.saturating_sub(now), lang)]),
-            None => tr(lang, "used up").to_string(),
-        };
-    }
-    match w.resets_at {
-        Some(reset) => fill(lang, "{}% left · resets {}", &[&left, &clock(reset, now, utc_offset_min)]),
-        None => share(),
+fn meter_text(w: Option<&Window>, lang: Lang) -> String {
+    match w {
+        Some(w) => fill(lang, "{}% left", &[&percent(w.left()).to_string()]),
+        None => "—".into(),
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum Tone { Gold, Amber, Cinnabar, Muted }
+enum Tone { Gold, Amber, Cinnabar, Muted }
 
-#[allow(dead_code)]
-pub fn tone(w: Option<&Window>, now: i64) -> Tone {
+fn tone(w: Option<&Window>, now: i64) -> Tone {
     match w {
         None => Tone::Muted,
         Some(w) if matches!(quota::freshness(w, now), Freshness::Stale { .. }) => Tone::Muted,
@@ -107,47 +78,29 @@ fn ink(t: &Tokens, tone: Tone) -> Hsla {
     match tone { Tone::Gold => t.gold.opacity(0.75), Tone::Amber => t.review, Tone::Cinnabar => t.fail, Tone::Muted => t.muted }
 }
 
-#[allow(dead_code)]
-pub fn primary(p: &ProviderQuota) -> Option<&Window> {
-    match (&p.five_hour, &p.weekly) {
-        (Some(a), Some(b)) => Some(if a.left() <= b.left() { a } else { b }),
-        (Some(a), None) => Some(a), (None, Some(b)) => Some(b), (None, None) => None,
+fn meter_paint(t: &Tokens, w: Option<&Window>, now: i64) -> (Option<f32>, Hsla) {
+    (w.map(Window::left), ink(t, tone(w, now)))
+}
+
+fn tooltip(w: Option<&Window>, now: i64, utc_offset_min: i32, lang: Lang) -> String {
+    let Some(w) = w else { return "—".into() };
+    let share = format!("{:.1}", w.left() * 100.0);
+    let used = format!("{:.1}", w.used.clamp(0.0, 1.0) * 100.0);
+    let figures = fill(lang, "{}% left ({}% used)", &[&share, &used]);
+    let observed = fill(lang, "{} · observed {}", &[&figures, &clock(w.observed_at, now, utc_offset_min)]);
+    let detail = match w.resets_at {
+        Some(reset) => fill(lang, "{} · resets {}", &[&observed, &clock(reset, now, utc_offset_min)]),
+        None => observed,
+    };
+    match quota::freshness(w, now) {
+        Freshness::Stale { age_s } => format!("{} · {detail}", fill(lang, "last known · {} · {} ago", &[&meter_text(Some(w), lang), &age(age_s, lang)])),
+        Freshness::Fresh => detail,
     }
 }
 
-#[allow(dead_code)]
-pub fn tooltip(_p: Provider, q: &ProviderQuota, now: i64, utc_offset_min: i32, lang: Lang) -> String {
-    [(WindowKind::FiveHour, q.five_hour.as_ref()), (WindowKind::Weekly, q.weekly.as_ref())]
-        .into_iter().map(|(kind, w)| {
-            let detail = if let Some(w) = w {
-                let share = format!("{:.1}", w.left() * 100.0);
-                let used = format!("{:.1}", w.used.clamp(0.0, 1.0) * 100.0);
-                let figures = fill(lang, "{}% left ({}% used)", &[&share, &used]);
-                let observed = fill(lang, "{} · observed {}", &[&figures, &clock(w.observed_at, now, utc_offset_min)]);
-                match w.resets_at { Some(reset) => fill(lang, "{} · resets {}", &[&observed, &clock(reset, now, utc_offset_min)]), None => observed }
-            } else { "—".to_string() };
-            format!("{}{}{}", window_name(kind, lang), if lang == Lang::ZhTw { "：" } else { ": " }, detail)
-        }).collect::<Vec<_>>().join("\n")
-}
-
-pub struct ProviderView { pub label: String, pub tone: Tone, pub share: Option<f32>, pub tooltip: String }
-
-pub fn provider_view(p: Provider, q: &ProviderQuota, now: i64, utc_offset_min: i32, lang: Lang) -> ProviderView {
-    let w = primary(q);
-    ProviderView {
-        label: format!("{}{}", head(p, w.map_or(WindowKind::FiveHour, |w| w.kind), lang), line(w, now, utc_offset_min, lang)),
-        tone: tone(w, now),
-        share: w.map(Window::left),
-        tooltip: tooltip(p, q, now, utc_offset_min, lang),
-    }
-}
-
-#[allow(dead_code)]
-pub fn next_wake(q: &Quotas) -> Option<Duration> {
+pub fn repaint_after(q: &Quotas) -> Option<Duration> {
     [&q.claude, &q.codex].into_iter().any(|p| p.five_hour.is_some() || p.weekly.is_some()).then_some(MINUTE)
 }
-
-pub fn repaint_after(q: &Quotas) -> Option<Duration> { next_wake(q) }
 
 #[derive(Debug, PartialEq, Eq)]
 enum SyncAction { Start, Stop, Keep }
@@ -160,9 +113,7 @@ fn sync_action(on: bool, running: bool) -> SyncAction {
     }
 }
 
-#[allow(dead_code)]
 pub struct Ticker { task: Option<Task<()>> }
-#[allow(dead_code)]
 impl Ticker {
     pub fn new() -> Self { Self { task: None } }
     pub fn sync<V: 'static>(&mut self, on: bool, cx: &mut Context<V>) {
@@ -177,28 +128,40 @@ impl Ticker {
     }
 }
 
-#[allow(dead_code)]
 pub fn strip(state: &AppState, cx: &App) -> AnyElement {
     let t = cx.tokens();
     let d = theme::density(cx);
     let lang = *cx.global::<Lang>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs().min(i64::MAX as u64) as i64).unwrap_or(0);
     let offset = crate::session::local_offset_secs(now) / 60;
-    let provider = |p, q: &ProviderQuota, id: &'static str| {
-        let view = provider_view(p, q, now, offset, lang);
-        let color = ink(&t, view.tone);
-        let tip = view.tooltip;
-        h_flex().id(id).min_w_0().gap(theme::space(d, Step::Xs)).text_color(color)
+    let meter = |kind, w: Option<&Window>, id: &'static str| {
+        let (share, color) = meter_paint(&t, w, now);
+        let tip = tooltip(w, now, offset, lang);
+        let name = window_name(kind, lang);
+        let value = meter_text(w, lang);
+        // The hourglass uses the window's ink for its sand as well as its outline.
+        let meter_tokens = Tokens { gold: color, ..t };
+        h_flex().id(id).flex_none().gap(theme::space(d, Step::Xs) / 2.).text_color(color)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(ornament::hourglass(&t, view.share, color, HOURGLASS_SIDE))
-            .child(div().min_w_0().truncate().child(view.label))
+            .child(ornament::hourglass(&meter_tokens, share, color, HOURGLASS_SIDE))
+            .child(v_flex().flex_none().line_height(theme::font(d, TypeSize::Caption))
+                .child(name.test_text(name))
+                .child(value.clone().test_text(value)))
+            .test_support()
     };
-    h_flex().w_full().h(theme::row_height(d)).min_h(theme::TARGET_MIN)
-        .px(theme::space(d, Step::Md)).gap(theme::space(d, Step::Lg))
+    let provider = |name: &'static str, q: &ProviderQuota, id: &'static str, five_id, weekly_id| {
+        h_flex().id(id).flex_none().gap(theme::space(d, Step::Xs) / 2.)
+            .child(div().text_color(t.muted).child(name))
+            .child(meter(WindowKind::FiveHour, q.five_hour.as_ref(), five_id))
+            .child(meter(WindowKind::Weekly, q.weekly.as_ref(), weekly_id))
+            .test_support()
+    };
+    h_flex().id("quota-strip").w_full().h(theme::row_height(d)).min_h(theme::TARGET_MIN)
+        .px(theme::space(d, Step::Xs)).gap(theme::space(d, Step::Xs))
         .border_t_1().border_color(t.border).bg(t.surface).text_size(theme::font(d, TypeSize::Caption))
-        .child(provider(Provider::Claude, &state.quota.claude, "quota-claude"))
-        .child(provider(Provider::Codex, &state.quota.codex, "quota-codex"))
-        .into_any_element()
+        .child(provider("Claude", &state.quota.claude, "quota-claude", "quota-claude-five-hour", "quota-claude-weekly"))
+        .child(provider("Codex", &state.quota.codex, "quota-codex", "quota-codex-five-hour", "quota-codex-weekly"))
+        .test_support().into_any_element()
 }
 
 #[cfg(test)]
@@ -206,32 +169,109 @@ mod tests {
     use super::*;
     use std::prelude::v1::test;
 
-    const NOW: i64 = 1_704_067_200; // 2024-01-01 00:00 UTC
-    fn window(used: f32, reset: Option<i64>, observed: i64) -> Window {
-        Window { kind: WindowKind::FiveHour, used, resets_at: reset, observed_at: observed, status: None }
-    }
-    fn check(w: Option<&Window>, zh: &str, en: &str) {
-        assert_eq!(line(w, NOW, 480, Lang::ZhTw), zh);
-        assert_eq!(line(w, NOW, 480, Lang::En), en);
+    const NOW: i64 = 1_704_067_200;
+    fn window(kind: WindowKind, used: f32, reset: Option<i64>, observed: i64) -> Window {
+        Window { kind, used, resets_at: reset, observed_at: observed, status: None }
     }
 
     #[test]
-    fn exhausted_with_passed_reset_is_explicit() {
-        let exhausted_reset_just_passed = Window {
-            kind: WindowKind::FiveHour, used: 1.0, resets_at: Some(NOW - 1), observed_at: NOW, status: None,
-        };
-        check(Some(&exhausted_reset_just_passed), "最後已知 · 剩 0% · 0 分前", "last known · 0% left · 0 min ago");
-        let stale_observation = Window {
-            kind: WindowKind::FiveHour, used: 1.0, resets_at: Some(NOW - 1), observed_at: NOW - 2400, status: None,
-        };
-        check(Some(&stale_observation), "最後已知 · 剩 0% · 40 分前", "last known · 0% left · 40 min ago");
+    fn meter_paint_fresh_share_and_ink() {
+        for t in theme::both() {
+            for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+                let fresh = window(kind, 0.38, None, NOW);
+                let (share, color) = meter_paint(&t, Some(&fresh), NOW);
+                assert_eq!(share, Some(fresh.left()));
+                assert_eq!(color, t.gold.opacity(0.75));
+            }
+        }
+    }
 
-        let above_boundary = window(0.79, None, NOW);
-        let below_boundary = window(0.81, None, NOW);
-        let at_boundary = window(1.0 - 0.2f32, None, NOW);
-        assert_eq!(tone(Some(&above_boundary), NOW), Tone::Gold);
-        assert_eq!(tone(Some(&below_boundary), NOW), Tone::Amber);
-        assert_eq!(tone(Some(&at_boundary), NOW), Tone::Amber);
+    #[test]
+    fn meter_paint_missing_has_no_share() {
+        for t in theme::both() {
+            assert_eq!(meter_paint(&t, None, NOW).0, None);
+            assert_eq!(meter_paint(&t, None, NOW).1, t.muted);
+        }
+    }
+
+    #[test]
+    fn meter_paint_stale_uses_muted_ink() {
+        for t in theme::both() {
+            for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+                let fresh = window(kind, 0.38, None, NOW);
+                let stale = window(kind, 0.38, None, NOW - 2400);
+                let color = meter_paint(&t, Some(&stale), NOW).1;
+                assert_eq!(color, t.muted);
+                assert_ne!(color, meter_paint(&t, Some(&fresh), NOW).1);
+            }
+        }
+    }
+
+    #[test]
+    fn meter_paint_exhausted_uses_fail_ink() {
+        for t in theme::both() {
+            for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+                let fresh = window(kind, 0.38, None, NOW);
+                let exhausted = window(kind, 1.0, None, NOW);
+                let color = meter_paint(&t, Some(&exhausted), NOW).1;
+                assert_eq!(tone(Some(&exhausted), NOW), Tone::Cinnabar);
+                assert_eq!(color, t.fail);
+                assert_ne!(color, meter_paint(&t, Some(&fresh), NOW).1);
+            }
+        }
+    }
+
+    #[test]
+    fn meter_paint_low_uses_review_ink() {
+        for t in theme::both() {
+            for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+                let low = window(kind, 0.9, None, NOW);
+                assert_eq!(meter_paint(&t, Some(&low), NOW).1, t.review);
+            }
+        }
+    }
+
+    #[test]
+    fn meter_values_and_tones_for_both_windows() {
+        for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
+            let fresh = window(kind, 0.38, Some(NOW + 1200), NOW);
+            let empty = window(kind, 1.0, Some(NOW + 1200), NOW);
+            let full = window(kind, 0.0, None, NOW);
+            let low = window(kind, 0.9, None, NOW);
+            let stale = window(kind, 0.38, Some(NOW - 1), NOW - 2400);
+            for (w, zh, en, expected_tone) in [
+                (None, "—", "—", Tone::Muted),
+                (Some(&fresh), "剩 62%", "62% left", Tone::Gold),
+                (Some(&empty), "剩 0%", "0% left", Tone::Cinnabar),
+                (Some(&full), "剩 100%", "100% left", Tone::Gold),
+                (Some(&low), "剩 10%", "10% left", Tone::Amber),
+                (Some(&stale), "剩 62%", "62% left", Tone::Muted),
+            ] {
+                assert_eq!((meter_text(w, Lang::ZhTw), meter_text(w, Lang::En), tone(w, NOW)), (zh.into(), en.into(), expected_tone));
+            }
+        }
+        let mut q = ProviderQuota::default();
+        for lang in [Lang::ZhTw, Lang::En] {
+            assert_eq!([meter_text(q.five_hour.as_ref(), lang), meter_text(q.weekly.as_ref(), lang)], ["—", "—"]);
+            q.five_hour = Some(window(WindowKind::FiveHour, 0.0, None, NOW));
+            assert_eq!(meter_text(q.weekly.as_ref(), lang), "—");
+            q.five_hour = None;
+            q.weekly = Some(window(WindowKind::Weekly, 1.0, None, NOW));
+            assert_eq!(meter_text(q.five_hour.as_ref(), lang), "—");
+            q.weekly = None;
+        }
+        assert_eq!(percent(0.001), 1);
+        assert_eq!(percent(0.999), 99);
+    }
+
+    #[test]
+    fn stale_tooltip_includes_age_and_times() {
+        let w = window(WindowKind::FiveHour, 0.38, Some(NOW - 1), NOW - 2400);
+        assert_eq!(tooltip(Some(&w), NOW, 0, Lang::En), "last known · 62% left · 40 min ago · 62.0% left (38.0% used) · observed 12/31 23:20 · resets 12/31 23:59");
+        assert_eq!(tooltip(Some(&w), NOW, 0, Lang::ZhTw), "最後已知 · 剩 62% · 40 分前 · 剩 62.0%（已用 38.0%） · 觀測 12/31 23:20 · 12/31 23:59 重置");
+        let fresh = window(WindowKind::Weekly, 0.38, Some(NOW + 1200), NOW);
+        assert_eq!(tooltip(Some(&fresh), NOW, 480, Lang::En), "62.0% left (38.0% used) · observed 08:00 · resets 08:20");
+        assert_eq!(tooltip(None, NOW, 0, Lang::En), "—");
     }
 
     #[test]
@@ -243,151 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn lines_cover_fresh_unknown_exhausted_and_time_zones() {
-        check(None, "—", "—");
-        let mut w = window(0.38, Some(NOW + 1200), NOW);
-        check(Some(&w), "剩 62% · 08:20 重置", "62% left · resets 08:20");
-        assert_eq!(line(Some(&w), NOW, -300, Lang::ZhTw), "剩 62% · 19:20 重置");
-        assert_eq!(line(Some(&w), NOW, -300, Lang::En), "62% left · resets 19:20");
-        w.resets_at = None;
-        check(Some(&w), "剩 62%", "62% left");
-        w.used = 0.9;
-        check(Some(&w), "剩 10%", "10% left");
-        w.used = 1.0;
-        check(Some(&w), "已用完", "used up");
-        w.resets_at = Some(NOW + 4800);
-        check(Some(&w), "已用完 · 1 小時 20 分後重置", "used up · resets in 1 h 20 min");
-        w.resets_at = Some(NOW + 30);
-        check(Some(&w), "已用完 · 不到 1 分後重置", "used up · resets in under 1 min");
-        w.resets_at = Some(NOW + 300);
-        check(Some(&w), "已用完 · 5 分後重置", "used up · resets in 5 min");
-        w.used = 0.38;
-        w.resets_at = Some(NOW + 86400);
-        check(Some(&w), "剩 62% · 1/2 08:00 重置", "62% left · resets 1/2 08:00");
-        assert_eq!(head(Provider::Claude, WindowKind::FiveHour, Lang::ZhTw), "Claude 5 小時：");
-        assert_eq!(head(Provider::Codex, WindowKind::Weekly, Lang::ZhTw), "Codex 每週：");
-        assert_eq!(head(Provider::Claude, WindowKind::FiveHour, Lang::En), "Claude 5 hours: ");
-        assert_eq!(head(Provider::Codex, WindowKind::Weekly, Lang::En), "Codex weekly: ");
-    }
-
-    #[test]
-    fn percent_clamping_and_stale_snapshots_never_restore_share() {
-        let mut w = window(0.001, None, NOW);
-        check(Some(&w), "剩 99%", "99% left");
-        w.used = 0.996;
-        check(Some(&w), "剩 1%", "1% left");
-        w.used = 0.0;
-        check(Some(&w), "剩 100%", "100% left");
-        w.used = 0.38; w.observed_at = NOW - 2400; w.resets_at = Some(NOW - 1);
-        check(Some(&w), "最後已知 · 剩 62% · 40 分前", "last known · 62% left · 40 min ago");
-        assert!(!line(Some(&w), NOW, 480, Lang::ZhTw).contains("重置"));
-        assert!(!line(Some(&w), NOW, 480, Lang::En).contains("resets"));
-        w.observed_at = NOW - 7200;
-        check(Some(&w), "最後已知 · 剩 62% · 2 小時前", "last known · 62% left · 2 h ago");
-        w.observed_at = NOW - 172800;
-        check(Some(&w), "最後已知 · 剩 62% · 2 天前", "last known · 62% left · 2 d ago");
-        w.used = 1.0; w.observed_at = NOW;
-        check(Some(&w), "最後已知 · 剩 0% · 0 分前", "last known · 0% left · 0 min ago");
-    }
-
-    #[test]
-    fn tones_and_primary_selection() {
-        let mut w = window(0.38, None, NOW);
-        assert_eq!(tone(None, NOW), Tone::Muted);
-        assert_eq!(tone(Some(&w), NOW), Tone::Gold);
-        w.used = 0.9; assert_eq!(tone(Some(&w), NOW), Tone::Amber);
-        w.used = 1.0; assert_eq!(tone(Some(&w), NOW), Tone::Cinnabar);
-        w.observed_at = NOW - 901; assert_eq!(tone(Some(&w), NOW), Tone::Muted);
-        let mut q = ProviderQuota::default();
-        assert!(primary(&q).is_none());
-        q.five_hour = Some(window(0.2, None, NOW));
-        q.weekly = Some(Window { kind: WindowKind::Weekly, ..window(0.8, None, NOW) });
-        assert_eq!(primary(&q).unwrap().kind, WindowKind::Weekly);
-        q.weekly.as_mut().unwrap().used = 0.2;
-        assert_eq!(primary(&q).unwrap().kind, WindowKind::FiveHour);
-        q.five_hour = None;
-        assert_eq!(primary(&q).unwrap().kind, WindowKind::Weekly);
-    }
-
-    #[test]
-    fn repaint_and_tooltip_cover_both_windows() {
-        let mut quotas = Quotas::default();
-        assert_eq!(repaint_after(&quotas), None);
-        quotas.codex.weekly = Some(Window { kind: WindowKind::Weekly, ..window(0.38, Some(NOW + 1200), NOW) });
-        assert_eq!(repaint_after(&quotas), Some(Duration::from_secs(60)));
-        assert_eq!(tooltip(Provider::Codex, &quotas.codex, NOW, 480, Lang::ZhTw), "5 小時：—\n每週：剩 62.0%（已用 38.0%）· 觀測 08:00 · 08:20 重置");
-        assert_eq!(tooltip(Provider::Codex, &quotas.codex, NOW, -300, Lang::En), "5 hours: —\nweekly: 62.0% left (38.0% used) · observed 19:00 · resets 19:20");
-        quotas.codex.five_hour = Some(window(0.1, None, NOW - 86400));
-        assert_eq!(tooltip(Provider::Codex, &quotas.codex, NOW, 480, Lang::En), "5 hours: 90.0% left (10.0% used) · observed 12/31 08:00\nweekly: 62.0% left (38.0% used) · observed 08:00 · resets 08:20");
-    }
-
-    #[test]
     fn ticker_actions_and_minute_wake_rule() {
         for (on, running, expected) in [
             (false, false, SyncAction::Stop), (false, true, SyncAction::Stop),
             (true, false, SyncAction::Start), (true, true, SyncAction::Keep),
         ] { assert_eq!(sync_action(on, running), expected); }
-
         assert_eq!(MINUTE, Duration::from_secs(60));
-        let mut q = Quotas::default();
-        assert_eq!(next_wake(&q), None);
-        assert_eq!(repaint_after(&q), None);
-        for provider in [Provider::Claude, Provider::Codex] {
+        assert_eq!(repaint_after(&Quotas::default()), None);
+        for is_claude in [true, false] {
             for kind in [WindowKind::FiveHour, WindowKind::Weekly] {
-                let mut single = Quotas::default();
-                let target = match provider { Provider::Claude => &mut single.claude, Provider::Codex => &mut single.codex };
-                let w = Some(Window { kind, ..window(0.38, None, NOW) });
+                let mut q = Quotas::default();
+                let target = if is_claude { &mut q.claude } else { &mut q.codex };
+                let w = Some(window(kind, 0.38, None, NOW));
                 match kind { WindowKind::FiveHour => target.five_hour = w, WindowKind::Weekly => target.weekly = w }
-                assert_eq!(next_wake(&single), Some(MINUTE));
-                assert_eq!(repaint_after(&single), Some(MINUTE));
-                assert!(repaint_after(&single).unwrap() >= MINUTE);
+                assert_eq!(repaint_after(&q), Some(MINUTE));
             }
         }
-        q.claude.five_hour = Some(window(0.38, None, NOW - 2400));
-        assert_eq!(next_wake(&q), Some(MINUTE));
-        assert_eq!(repaint_after(&q), Some(MINUTE));
-        assert!(repaint_after(&q).unwrap() >= MINUTE);
-        q.codex.weekly = Some(Window { kind: WindowKind::Weekly, ..window(0.1, None, NOW) });
-        assert_eq!(next_wake(&q), Some(MINUTE));
-        assert_eq!(repaint_after(&q), Some(MINUTE));
-    }
-
-    #[test]
-    fn provider_view_composes_strip_content() {
-        let mut q = ProviderQuota::default();
-        let view = provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw);
-        assert_eq!(view.label, "Claude 5 小時：—");
-        assert_eq!(view.tone, Tone::Muted);
-        assert_eq!(view.share, None);
-
-        q.five_hour = Some(window(0.38, Some(NOW + 1200), NOW));
-        let view = provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw);
-        assert_eq!(view.label, "Claude 5 小時：剩 62% · 08:20 重置");
-        assert_eq!(view.tone, Tone::Gold);
-        assert_eq!(view.share, Some(0.62));
-        let en = provider_view(Provider::Claude, &q, NOW, 480, Lang::En);
-        assert_eq!(en.label, "Claude 5 hours: 62% left · resets 08:20");
-
-        q.five_hour.as_mut().unwrap().used = 0.9;
-        assert_eq!(provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw).tone, Tone::Amber);
-        q.five_hour.as_mut().unwrap().used = 1.0;
-        let view = provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw);
-        assert_eq!(view.tone, Tone::Cinnabar);
-        assert_eq!(view.label, "Claude 5 小時：已用完 · 20 分後重置");
-
-        q.five_hour = Some(window(0.38, None, NOW - 2400));
-        let view = provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw);
-        assert_eq!(view.label, "Claude 5 小時：最後已知 · 剩 62% · 40 分前");
-        assert_eq!(view.tone, Tone::Muted);
-        assert_eq!(view.share, Some(0.62));
-        q.weekly = Some(Window { kind: WindowKind::Weekly, ..window(0.8, None, NOW - 60) });
-        let view = provider_view(Provider::Claude, &q, NOW, 480, Lang::ZhTw);
-        assert_eq!(view.tooltip, "5 小時：剩 62.0%（已用 38.0%）· 觀測 07:20\n每週：剩 20.0%（已用 80.0%）· 觀測 07:59");
-        assert!(view.label.starts_with("Claude 每週："));
-        q.five_hour = None;
-        let view = provider_view(Provider::Codex, &q, NOW, 480, Lang::ZhTw);
-        assert!(view.label.starts_with("Codex 每週："));
-        assert!((view.share.unwrap() - 0.2).abs() < 0.000_001);
     }
 
     #[test]

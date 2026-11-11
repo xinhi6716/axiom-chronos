@@ -397,8 +397,8 @@ fn density_global_falls_back_sets_and_returns(cx: &mut TestAppContext) {
         assert_eq!(theme::row_height(theme::density(cx)), px(36.));
         assert_eq!(theme::space(theme::density(cx), Step::Xxl), px(32.));
     });
-    // The actual ListItem uses row_height + Xxl spacing: 68 -> 52 -> 68.
-    assert_eq!(wish_row_height(cx, window), px(68.));
+    // The painted ListItem changes with the density: 82 -> 58 -> 82.
+    assert_eq!(wish_row_height(cx, window), px(82.));
     cx.update(|cx| theme::set_density(Density::Dense, cx));
     frame(cx, window);
     cx.update(|cx| {
@@ -406,11 +406,11 @@ fn density_global_falls_back_sets_and_returns(cx: &mut TestAppContext) {
         assert_eq!(theme::row_height(theme::density(cx)), px(28.));
         assert_eq!(theme::space(theme::density(cx), Step::Xxl), px(24.));
     });
-    assert_eq!(wish_row_height(cx, window), px(52.), "an existing Shell redraws at Dense size");
+    assert_eq!(wish_row_height(cx, window), px(58.), "an existing Shell redraws at Dense size");
     cx.update(|cx| theme::set_density(Density::Comfortable, cx));
     frame(cx, window);
     assert_eq!(cx.update(|cx| theme::density(cx)), Density::Comfortable);
-    assert_eq!(wish_row_height(cx, window), px(68.));
+    assert_eq!(wish_row_height(cx, window), px(82.));
 }
 
 #[gpui_kit::test]

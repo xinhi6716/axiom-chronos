@@ -1,7 +1,17 @@
 use super::*;
 use super::super::demo::sample_run;
-use super::logic::{handled_keys, missing_from_shortcuts};
+use super::logic::{handled_keys, missing_from_shortcuts, should_auto_refit};
 use std::prelude::v1::test;
+
+#[test]
+fn auto_refit_only_when_untouched_and_viewport_changed() {
+    let old = (800., 600.);
+    assert!(should_auto_refit(Some(old), (700., 600.)));
+    assert!(should_auto_refit(Some(old), (800., 500.)));
+    assert!(!should_auto_refit(Some(old), old));
+    assert!(!should_auto_refit(None, old));
+    assert!(!should_auto_refit(None, (700., 500.)));
+}
 
 #[test]
 fn scenes_require_their_run_counts() {
