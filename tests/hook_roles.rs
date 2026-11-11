@@ -211,7 +211,16 @@ fn reviewer_verdict_resolves_links_and_parent_components() {
     if !dir_link(&link, &outside.join("child")) {
         return;
     }
+    // Unix follows the link before `..`, so this lands outside reports and is refused.
+    // Windows removes `..` from the text before opening, so it lands on reports/u.verdict.json,
+    // the reviewer's own verdict file, and is allowed.
+    #[cfg(unix)]
     assert!(denied(
+        h,
+        &reviewer(write(&link.join("../u.verdict.json")), "a")
+    ));
+    #[cfg(windows)]
+    assert!(!denied(
         h,
         &reviewer(write(&link.join("../u.verdict.json")), "a")
     ));
