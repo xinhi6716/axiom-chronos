@@ -1,8 +1,10 @@
 //! The Run screen: the wish, the stage rail, three resizable columns and the control bar,
 //! plus what surrounds them: setup problems, no runs yet, and the summary when a run ends.
+pub(super) mod board;
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
-use super::theme::{self, Tokened as _, Tokens};
+use super::theme::{self, Density, Step, TypeSize, Tokened as _, Tokens};
+use super::motion::{self, Pace};
 use super::{
     control::{self, Control},
     detail::Detail,
@@ -17,18 +19,67 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::resizable::{h_resizable, resizable_panel, ResizableState};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel, ResizablePanelEvent, ResizableState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_kit::component::ElementExt as _;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+const BOARD_CARD_SHARE: f32 = 0.30;
+const DETAIL_OVERVIEW_MIN: f32 = 315.0;
+
+fn board_card_max_height(details_height: f32) -> f32 {
+    if details_height.is_finite() && details_height >= 0.0 { details_height * BOARD_CARD_SHARE } else { 0.0 }
+}
+
+fn board_card_budget(details_height: f32) -> f32 {
+    if details_height.is_finite() && details_height >= 0.0 {
+        (details_height - DETAIL_OVERVIEW_MIN).max(0.0).min(board_card_max_height(details_height))
+    } else { 0.0 }
+}
+
+#[derive(Debug, PartialEq)]
+enum BoardMode { Card, Strip }
+
+#[derive(Debug, PartialEq)]
+struct BoardLayout {
+    mode: BoardMode,
+    visible: usize,
+    max_height: f32,
+    min_height: f32,
+}
+
+fn board_layout(details_height: f32, run_count: usize, padding: f32) -> Option<BoardLayout> {
+    if run_count == 0 { return None; }
+    let max_height = board_card_budget(details_height);
+    let visible = board::compact_visible_count(run_count, max_height, padding);
+    let min_height = 2.0 * padding + board::COMPACT_CARD_ESTIMATE
+        + if visible < run_count { padding + board::MORE_ROW_HEIGHT } else { 0.0 };
+    if max_height >= min_height {
+        return Some(BoardLayout { mode: BoardMode::Card, visible, max_height, min_height });
+    }
+    if details_height < DETAIL_OVERVIEW_MIN + board::STRIP_ROW_HEIGHT || !details_height.is_finite() { return None; }
+    let rows = ((max_height / board::STRIP_ROW_HEIGHT).floor() as usize).max(1);
+    let visible = if run_count > rows { rows.saturating_sub(1).max(1) } else { run_count };
+    let used_rows = visible + usize::from(visible < run_count && rows > 1);
+    let height = used_rows as f32 * board::STRIP_ROW_HEIGHT;
+    Some(BoardLayout { mode: BoardMode::Strip, visible, max_height: height, min_height: height })
+}
+
 const TEXT: Table = &[
+    ("Exit focus", "離開專注模式"),
+    ("Back to the whole window (Ctrl+Shift+F)", "返回完整視窗（Ctrl+Shift+F）"),
     ("Run", "執行"),
+    ("Reading your wishes…", "正在讀取你的願望…"),
+    ("Try again", "重試"),
+    ("Build implements and checks the planned units.", "施工並檢查規劃好的單元。"),
+    ("Full test checks the completed work together.", "完整測試會一起檢查已完成的工作。"),
+    ("Report records the outcome of the wish.", "報告會記錄這個願望的結果。"),
     ("Started in terminal: view only", "在終端機啟動：僅供檢視"),
     ("Elapsed", "經過時間"),
     ("Cost", "費用"),
@@ -122,6 +173,49 @@ const TEXT: Table = &[
 ];
 
 const STAGE_NAMES: [&str; 7] = ["Astra", "Critic", "Architect", "Build", "Full test", "Memory", "Report"];
+#[derive(Clone, Copy, Debug)]
+struct ChromeHeights { brief: Pixels, header: Pixels, rail: Pixels }
+
+fn caption_line(d: Density) -> Pixels {
+    px((f32::from(theme::font(d, TypeSize::Caption)) * 1.6).ceil())
+}
+
+fn chrome_heights(d: Density) -> ChromeHeights {
+    ChromeHeights {
+        brief: theme::row_height(d),
+        header: theme::row_height(d) * 2.,
+        rail: caption_line(d) * 2. + theme::space(d, Step::Sm) * 2.,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PanelView { Skeleton, Empty, Content, Error { message: SharedString, keep_content: bool } }
+
+fn panel_view(p: &PanelState) -> PanelView {
+    match p {
+        PanelState::Loading => PanelView::Skeleton,
+        PanelState::Empty => PanelView::Empty,
+        PanelState::Ready => PanelView::Content,
+        PanelState::Failed(message) => PanelView::Error { message: message.clone(), keep_content: false },
+        PanelState::Stale(message) => PanelView::Error { message: message.clone(), keep_content: true },
+    }
+}
+
+fn stage_tip(name: &str, lang: Lang) -> SharedString {
+    let id = match name {
+        "Astra" => Some("astra"), "Critic" => Some("critic"),
+        "Architect" => Some("architect"), "Memory" => Some("memory-keeper"), _ => None,
+    };
+    if let Some(id) = id { return super::i18n::role_tooltip(lang, id); }
+    let key = match name {
+        "Build" => "Build implements and checks the planned units.",
+        "Full test" => "Full test checks the completed work together.",
+        "Report" => "Report records the outcome of the wish.",
+        _ => return name.to_owned().into(),
+    };
+    translate(lang, TEXT, key).into()
+}
+
 const FULL_TEST: &str = "Full test";
 
 const UNKNOWN: &str = "—";
@@ -136,6 +230,28 @@ const CHECKLIST_RANGE: std::ops::Range<Pixels> = px(240.)..px(480.);
 const GRAPH_MIN: Pixels = px(320.);
 const DETAILS_WIDTH: Pixels = px(380.);
 const DETAILS_RANGE: std::ops::Range<Pixels> = px(300.)..px(560.);
+
+fn restored_widths(saved: Option<settings::ColumnWidths>, available: f32) -> settings::ColumnWidths {
+    saved.unwrap_or(settings::ColumnWidths { checklist: f32::from(CHECKLIST_WIDTH), details: f32::from(DETAILS_WIDTH) })
+        .clamped(available, f32::from(CHECKLIST_RANGE.start)..f32::from(CHECKLIST_RANGE.end),
+            f32::from(DETAILS_RANGE.start)..f32::from(DETAILS_RANGE.end), f32::from(GRAPH_MIN))
+}
+
+fn step_widths(mut w: settings::ColumnWidths, key: &str, available: f32) -> Option<settings::ColumnWidths> {
+    match key {
+        "alt-left" => w.checklist -= 16.,
+        "alt-right" => w.checklist += 16.,
+        "alt-shift-left" => w.details += 16.,
+        "alt-shift-right" => w.details -= 16.,
+        "alt-0" => return Some(restored_widths(None, available)),
+        _ => return None,
+    }
+    Some(restored_widths(Some(w), available))
+}
+
+fn focus_target(mode: settings::WindowMode) -> Option<settings::FocusPanel> {
+    match mode { settings::WindowMode::Focus(panel) => Some(panel), _ => None }
+}
 
 /// A stage as it should read given what its run is doing now. A stage still marked running
 /// in a paused run is not running, and one still waiting in a finished run never will.
@@ -352,7 +468,7 @@ fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> A
     let text = text.into();
     move |window, cx| {
         let text = text.clone();
-        Tooltip::element(move |_, _| div().max_w(px(440.)).whitespace_normal().child(text.clone())).build(window, cx)
+        Tooltip::element(move |_, _| div().max_w(theme::READ_WIDTH).whitespace_normal().child(text.clone())).build(window, cx)
     }
 }
 
@@ -379,13 +495,13 @@ fn unit_icon(state: UnitState) -> IconName {
     }
 }
 
-fn stage_icon(state: StageState, animate: bool, t: &Tokens) -> AnyElement {
+fn stage_icon(state: StageState, animate: bool, t: &Tokens, d: Density) -> AnyElement {
     let color = state.color(t);
-    let icon = |name: IconName| Icon::new(name).size(px(16.)).text_color(color).into_any_element();
+    let icon = |name: IconName| Icon::new(name).size(theme::font(d, TypeSize::Title)).text_color(color).into_any_element();
     match state {
         StageState::Done => icon(IconName::CircleCheck),
         StageState::Running if animate => {
-            super::motion::Spin::new(IconName::LoaderCircle).color(color).size(px(16.)).into_any_element()
+            super::motion::Spin::new(IconName::LoaderCircle).color(color).size(theme::font(d, TypeSize::Title)).into_any_element()
         }
         StageState::Running => icon(IconName::LoaderCircle),
         StageState::Failed => icon(IconName::CircleX),
@@ -393,7 +509,7 @@ fn stage_icon(state: StageState, animate: bool, t: &Tokens) -> AnyElement {
         StageState::OnBatch | StageState::OnLimit => icon(IconName::Pause),
         StageState::Unfinished | StageState::Skipped => icon(IconName::Dash),
         StageState::Waiting => div()
-            .size(px(14.))
+            .size(theme::font(d, TypeSize::Caption))
             .m(px(1.))
             .rounded_full()
             .border_2()
@@ -408,9 +524,10 @@ fn stage_cell(index: usize, stage: &Stage, status: RunStatus, last: bool, animat
     let name = stage_name(&stage.name, cx);
     let word = tr(cx, TEXT, state.word());
     let note = stage.note.as_ref().filter(|n| !n.is_empty());
+    let duty = stage_tip(&stage.name, *cx.global::<Lang>());
     let tip = match note {
-        Some(note) => format!("{name}: {word}\n{note}"),
-        None => format!("{name}: {word}"),
+        Some(note) => format!("{duty}\n{name}: {word}\n{note}"),
+        None => format!("{duty}\n{name}: {word}"),
     };
     let caption: SharedString = note.cloned().unwrap_or_else(|| word.into());
     let name_color = if state.is_current() {
@@ -425,16 +542,16 @@ fn stage_cell(index: usize, stage: &Stage, status: RunStatus, last: bool, animat
         .map(|this| if last { this.max_w(px(128.)) } else { this.flex_1() })
         .min_w_0()
         .items_center()
-        .gap_2()
+        .gap(theme::space(theme::density(cx), Step::Sm))
         .tooltip(tooltip(tip))
-        .child(div().flex_none().child(stage_icon(state, animate, &t)))
+        .child(div().flex_none().child(stage_icon(state, animate, &t, theme::density(cx))))
         .child(
             v_flex()
                 .min_w_0()
                 .child(
                     div()
                         .truncate()
-                        .text_xs()
+                        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                         .font_weight(if state.is_current() { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                         .text_color(name_color)
                         .child(name),
@@ -442,7 +559,7 @@ fn stage_cell(index: usize, stage: &Stage, status: RunStatus, last: bool, animat
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(11.))
+                        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                         .text_color(if state == StageState::Failed { t.fail } else { t.muted })
                         .child(caption),
                 ),
@@ -453,7 +570,7 @@ fn stage_cell(index: usize, stage: &Stage, status: RunStatus, last: bool, animat
                     .flex_1()
                     .min_w(px(10.))
                     .h(px(1.))
-                    .mx_2()
+                    .mx(theme::space(theme::density(cx), Step::Sm))
                     .bg(if state == StageState::Done { t.ok.opacity(0.55) } else { t.border }),
             )
         })
@@ -465,12 +582,12 @@ fn stage_rail(run: &Run, animate: bool, cx: &App) -> impl IntoElement {
         .flex_none()
         .w_full()
         .items_center()
-        .px_5()
-        .py_2p5()
+        .px(theme::space(theme::density(cx), Step::Xl))
+        .py(theme::space(theme::density(cx), Step::Sm))
         .border_b_1()
         .border_color(t.border);
     if run.stages.is_empty() {
-        return rail.text_xs().text_color(t.muted).child(tr(cx, TEXT, "Stages have not been reported yet"));
+        return rail.text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TEXT, "Stages have not been reported yet"));
     }
     let last = run.stages.len() - 1;
     rail.children(
@@ -487,8 +604,8 @@ fn stat(id: &'static str, label: &'static str, value: SharedString, tip: Option<
         .id(id)
         .flex_none()
         .items_end()
-        .child(div().text_size(px(11.)).text_color(t.muted).child(tr(cx, TEXT, label)))
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(t.text).child(value))
+        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TEXT, label)))
+        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).font_weight(FontWeight::MEDIUM).text_color(t.text).child(value))
         .when_some(tip, |this, tip| this.tooltip(tooltip(tip)))
 }
 
@@ -506,13 +623,13 @@ fn status_pill(run: &Run, cx: &App) -> impl IntoElement {
         RunStatus::Done if clean => (run.status.label(), t.ok, IconName::CircleCheck),
         RunStatus::Done => ("Ended, needs attention", t.review, IconName::TriangleAlert),
     };
-    tinted_tag(color).rounded_full().flex_none().child(
+    div().id("run-status").tooltip(tooltip(tr(cx, TEXT, word))).child(tinted_tag(color).rounded_full().flex_none().child(
         h_flex()
-            .gap_1()
+            .gap(theme::space(theme::density(cx), Step::Xs))
             .items_center()
-            .child(Icon::new(icon).size(px(12.)))
+            .child(Icon::new(icon).size(theme::font(theme::density(cx), TypeSize::Caption)))
             .child(tr(cx, TEXT, word)),
-    )
+    ))
 }
 
 /// How the top line should look: calm when Chronos is simply working, urgent when it needs a person.
@@ -807,33 +924,60 @@ pub struct RunView {
     detail: Entity<Detail>,
     control: Entity<Control>,
     columns: Entity<ResizableState>,
+    columns_focus: FocusHandle,
+    columns_shown: bool,
+    restored: bool,
     /// The run the transient state below belongs to.
     viewing: Option<SharedString>,
     wish_open: bool,
     report_open: bool,
     hidden_summaries: HashSet<SharedString>,
+    glows: motion::Glows<SharedString>,
+    hovered: Option<SharedString>,
+    details_height: std::rc::Rc<std::cell::Cell<f32>>,
 }
 
 impl RunView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, _, cx| {
+            if this.state.read(cx).view != Screen::Run { this.columns_shown = false; }
             this.settle_first_day(cx);
             cx.notify();
         })
         .detach();
         let scene = state.read(cx).scene.clone().unwrap_or_default();
         state.update(cx, |s, _| apply_scene(s, &scene));
+        match scene.as_ref() {
+            "run-focus-graph" => { settings::set_mode(settings::WindowMode::Focus(settings::FocusPanel::Graph), cx); }
+            "run-focus-checklist" => { settings::set_mode(settings::WindowMode::Focus(settings::FocusPanel::Checklist), cx); }
+            _ => {}
+        }
+        cx.observe_global::<settings::Store>(|_, cx| cx.notify()).detach();
+        let columns = cx.new(|_| ResizableState::default());
+        cx.subscribe_in(&columns, window, |_, columns, _: &ResizablePanelEvent, _, cx| {
+            let sizes = columns.read(cx).sizes();
+            if sizes.len() == 3 {
+                let widths = settings::ColumnWidths { checklist: f32::from(sizes[0]), details: f32::from(sizes[2]) };
+                settings::remember_columns(widths, cx);
+            }
+        }).detach();
         let viewing = state.read(cx).run().map(|r| r.session.clone());
         let this = Self {
             todo: cx.new(|cx| Todo::new(state.clone(), window, cx)),
             mesh: cx.new(|cx| Mesh::new(state.clone(), window, cx)),
             detail: cx.new(|cx| Detail::new(state.clone(), window, cx)),
             control: cx.new(|cx| Control::new(state.clone(), window, cx)),
-            columns: cx.new(|_| ResizableState::default()),
+            columns,
+            columns_focus: cx.focus_handle().tab_stop(true),
+            columns_shown: false,
+            restored: false,
             hidden_summaries: viewing.iter().filter(|_| scene.ends_with("-graph")).cloned().collect(),
             viewing,
             wish_open: scene.ends_with("-open"),
             report_open: false,
+            glows: motion::Glows::new(Pace::Glow),
+            hovered: None,
+            details_height: std::rc::Rc::new(std::cell::Cell::new(0.0)),
             state,
         };
         this.settle_first_day(cx);
@@ -866,31 +1010,31 @@ impl RunView {
                 .w_full()
                 .flex_wrap()
                 .items_center()
-                .gap_x_5()
-                .gap_y_1()
-                .px_4()
-                .py_2()
-                .rounded(px(10.))
+                .gap_x(theme::space(theme::density(cx), Step::Xl))
+                .gap_y(theme::space(theme::density(cx), Step::Xs))
+                .px(theme::space(theme::density(cx), Step::Lg))
+                .py(theme::space(theme::density(cx), Step::Sm))
+                .rounded(theme::RADIUS)
                 .bg(t.surface)
                 .border_1()
                 .border_color(t.gold.opacity(0.3))
                 .child(
                     h_flex()
-                        .gap_2()
+                        .gap(theme::space(theme::density(cx), Step::Sm))
                         .items_baseline()
                         .child(ornament::section_label(&t, tr(cx, TEXT, "Your first day with Chronos")))
-                        .child(div().text_xs().text_color(t.muted).child(count)),
+                        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(count)),
                 )
                 .children(day.items().into_iter().enumerate().map(|(i, (label, done, meaning))| {
                     let tip = if done { meaning } else { "Not yet." };
                     h_flex()
                         .id(("first-day-item", i))
-                        .gap_1p5()
+                        .gap(theme::space(theme::density(cx), Step::Sm))
                         .items_center()
-                        .text_xs()
+                        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                         .text_color(if done { t.muted } else { t.text })
                         .child(if done {
-                            Icon::new(IconName::CircleCheck).size(px(14.)).text_color(t.ok).into_any_element()
+                            Icon::new(IconName::CircleCheck).size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.ok).into_any_element()
                         } else {
                             div().size(px(12.)).m(px(1.)).rounded_full().border_1().border_color(t.muted).into_any_element()
                         })
@@ -905,9 +1049,12 @@ impl RunView {
     fn brief(&self, run: &Run, cx: &App) -> impl IntoElement {
         let t = cx.tokens();
         let mut brief = brief_of(run);
+        let mut full_brief = brief.clone();
         let original = if run.status == RunStatus::Blocked && !brief.args.is_empty() {
             run.needs.iter().find(|n| n.kind != NeedKind::Interjection).and_then(|need| {
-                let (arg, original) = blocked_brief_title(plain_text::plain(cx, &need.title));
+                let plain = plain_text::plain(cx, &need.title);
+                full_brief.args[0] = plain.shown.to_string();
+                let (arg, original) = blocked_brief_title(plain);
                 brief.args[0] = arg;
                 original
             })
@@ -922,43 +1069,73 @@ impl RunView {
             Tone::Unsettled => (IconName::TriangleAlert, t.review),
         };
         let text = brief.text(*cx.global::<Lang>());
+        let full_text = full_brief.text(*cx.global::<Lang>());
+        let tip = original.map_or_else(|| full_text.clone(), |original| format!("{full_text}\n{original}"));
         h_flex()
             .id("run-brief")
             .flex_none()
             .w_full()
             .items_center()
-            .gap_2()
-            .px_5()
-            .py_2()
+            .gap(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Xl))
+            .py(theme::space(theme::density(cx), Step::Sm))
             .bg(color.opacity(0.08))
             .border_b_1()
             .border_color(t.border)
-            .child(Icon::new(icon).size(px(16.)).text_color(color))
+            .child(Icon::new(icon).size(theme::font(theme::density(cx), TypeSize::Title)).text_color(color))
             .child(
-                div().id("run-brief-text").min_w_0().text_sm().font_weight(FontWeight::MEDIUM).text_color(t.text)
-                    .when_some(original, |this, original| this.tooltip(tooltip(original)))
-                    .child(text),
+                div().id("run-brief-text").min_w_0().max_w(theme::READ_WIDTH).truncate().text_size(theme::font(theme::density(cx), TypeSize::Body)).font_weight(FontWeight::MEDIUM).text_color(t.text)
+                    .tooltip(tooltip(tip)).child(text),
             )
     }
 
     /// The details panel, with its "say something about this" action when a message can reach the run.
-    fn details_column(&self, run: &Run, selection: &Selection, cx: &Context<Self>) -> impl IntoElement {
+    fn details_column(&self, run: &Run, selection: &Selection, driver: &mut motion::Driver, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let can_say = control::offer(run.status, run.hosted, run.cwd.is_some(), run.report.is_some()).entry
             == control::Entry::Interjection;
         let subject = control::subject_of(run, selection).filter(|_| can_say);
         let state = self.state.clone();
+        let app = self.state.read(cx);
+        let runs = board_runs(app);
+        let d = theme::density(cx);
+        let padding = f32::from(theme::space(d, Step::Sm));
+        let layout = board_layout(self.details_height.get(), runs.len(), padding)
+            .filter(|_| *selection == Selection::None);
+        let measured_height = self.details_height.clone();
+        let board = layout.map(|layout| {
+            let levels: std::collections::HashMap<SharedString, f32> = board_runs(app).into_iter()
+                .map(|i| { let key = app.runs[i].session.clone(); let value = self.glows.value(&key, driver); (key, value) }).collect();
+            let lift = |key: &SharedString| levels.get(key).copied().unwrap_or(0.0);
+            let weak = cx.weak_entity();
+            let hover = std::rc::Rc::new(move |key: SharedString, inside: bool, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| {
+                    let reduce = this.state.read(cx).reduce_motion;
+                    this.hovered = if inside { Some(key.clone()) } else if this.hovered.as_ref() == Some(&key) { None } else { this.hovered.clone() };
+                    this.glows.set(&key, if inside { 1.0 } else { 0.0 }, motion::now(cx), reduce);
+                    cx.notify();
+                });
+            });
+            let strip = layout.mode == BoardMode::Strip;
+            let board = board::board_with_hover(app, true, strip, strip && layout.max_height <= board::STRIP_ROW_HEIGHT, Some(layout.visible), &lift, hover, cx);
+            (layout, board)
+        });
         column(
             v_flex()
                 .size_full()
+                .on_prepaint(move |bounds, window, _| {
+                    let height = f32::from(bounds.size.height);
+                    if measured_height.replace(height) != height { window.request_animation_frame(); }
+                })
+                .when_some(board, |this, (layout, board)| this.child(div().id("overview-board").flex_none().w_full().max_h(px(layout.max_height)).min_h(px(layout.min_height)).when(layout.mode == BoardMode::Card, |this| this.p(theme::space(d, Step::Sm))).child(board)))
                 .child(div().flex_1().min_h_0().w_full().child(self.detail.clone()))
                 .when_some(subject, |this, subject| {
                     this.child(
                         h_flex()
                             .flex_none()
                             .w_full()
-                            .px_4()
-                            .py_2()
+                            .px(theme::space(theme::density(cx), Step::Lg))
+                            .py(theme::space(theme::density(cx), Step::Sm))
                             .border_t_1()
                             .border_color(t.border)
                             .child(
@@ -997,7 +1174,7 @@ impl RunView {
 
     fn wish(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
-        let row = h_flex().w_full().min_w_0().items_start().gap_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD);
+        let row = h_flex().w_full().max_w(theme::READ_WIDTH).min_w_0().items_start().gap(theme::space(theme::density(cx), Step::Xs)).text_size(theme::font(theme::density(cx), TypeSize::Title)).font_weight(FontWeight::SEMIBOLD);
         if run.wish.trim().is_empty() {
             return row.text_color(t.muted).child(tr(cx, TEXT, "No wish text was recorded"));
         }
@@ -1008,14 +1185,14 @@ impl RunView {
                 .id("wish-full")
                 .flex_1()
                 .min_w_0()
-                .max_h(px(132.))
-                .gap_1()
+                .max_h(theme::row_height(theme::density(cx)) - theme::space(theme::density(cx), Step::Sm))
+                .gap(theme::space(theme::density(cx), Step::Xs))
                 .overflow_y_scrollbar()
                 .child(
                     div()
                         .w_full()
                         .whitespace_normal()
-                        .text_sm()
+                        .text_size(theme::font(theme::density(cx), TypeSize::Body))
                         .line_height(relative(1.6))
                         .font_weight(FontWeight::NORMAL)
                         .child(SharedString::from(shown.to_owned())),
@@ -1023,7 +1200,7 @@ impl RunView {
                 .when(cut, |this| {
                     this.child(
                         div()
-                            .text_xs()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(t.muted)
                             .child(tr(cx, TEXT, "The wish is longer than this. Only its beginning is shown.")),
@@ -1083,9 +1260,9 @@ impl RunView {
                 .id("folder-unknown")
                 .min_w_0()
                 .max_w(px(320.))
-                .gap_1()
-                .px_1()
-                .child(Icon::new(IconName::Folder).size(px(12.)))
+                .gap(theme::space(theme::density(cx), Step::Xs))
+                .px(theme::space(theme::density(cx), Step::Xs))
+                .child(Icon::new(IconName::Folder).size(theme::font(theme::density(cx), TypeSize::Caption)))
                 .child(div().min_w_0().truncate().child(name))
                 .tooltip(tooltip(tr(cx, TEXT, "The folder of this wish is not known")))
                 .into_any_element(),
@@ -1100,10 +1277,10 @@ impl RunView {
         h_flex()
             .flex_none()
             .w_full()
-            .items_start()
-            .gap_5()
-            .px_5()
-            .py_3()
+            .items_center()
+            .gap(theme::space(theme::density(cx), Step::Lg))
+            .px(theme::space(theme::density(cx), Step::Lg))
+            .py(theme::space(theme::density(cx), Step::Xs))
             .bg(t.surface)
             .border_b_1()
             .border_color(t.border)
@@ -1111,16 +1288,15 @@ impl RunView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
-                    .child(ornament::page_title(&t, tr(cx, TEXT, "Run")))
+                    .gap(theme::space(theme::density(cx), Step::Xs))
                     .child(self.wish(run, cx))
                     .child(
                         h_flex()
                             .w_full()
                             .min_w_0()
                             .items_center()
-                            .gap_2()
-                            .text_xs()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.muted)
                             .child(self.folder(run, cx))
                             .when(!run.started.is_empty(), |this| {
@@ -1132,11 +1308,11 @@ impl RunView {
                             })
                             .when(!run.hosted, |this| {
                                 this.child(
-                                    Tag::custom(t.raised, t.muted, t.border).flex_none().h(px(20.)).py_0().child(
+                                    Tag::custom(t.raised, t.muted, t.border).flex_none().py_0().child(
                                         h_flex()
-                                            .gap_1()
+                                            .gap(theme::space(theme::density(cx), Step::Xs))
                                             .items_center()
-                                            .child(Icon::new(IconName::Eye).size(px(11.)))
+                                            .child(Icon::new(IconName::Eye).size(theme::font(theme::density(cx), TypeSize::Caption)))
                                             .child(tr(cx, TEXT, "Started in terminal: view only")),
                                     ),
                                 )
@@ -1152,10 +1328,10 @@ impl RunView {
                                     h_flex()
                                         .id("run-warnings")
                                         .flex_none()
-                                        .gap_1()
+                                        .gap(theme::space(theme::density(cx), Step::Xs))
                                         .items_center()
                                         .text_color(t.review)
-                                        .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                                        .child(Icon::new(IconName::TriangleAlert).size(theme::font(theme::density(cx), TypeSize::Caption)))
                                         .child(label)
                                         .tooltip(tooltip(tip)),
                                 )
@@ -1166,8 +1342,8 @@ impl RunView {
                 h_flex()
                     .flex_none()
                     .items_center()
-                    .gap_5()
-                    .child(stat("stat-elapsed", "Elapsed", elapsed, None, cx))
+                    .gap(theme::space(theme::density(cx), Step::Xl))
+                    .child(stat("stat-elapsed", "Elapsed", elapsed.clone(), Some(elapsed), cx))
                     .child(stat(
                         "stat-cost",
                         "Cost",
@@ -1185,10 +1361,10 @@ impl RunView {
         let settings = self.state.clone();
         v_flex()
             .w_full()
-            .gap_2()
-            .px_4()
-            .py_3()
-            .rounded(px(10.))
+            .gap(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Lg))
+            .py(theme::space(theme::density(cx), Step::Md))
+            .rounded(theme::RADIUS)
             .bg(t.surface)
             .border_1()
             .border_color(t.fail.opacity(0.4))
@@ -1197,22 +1373,22 @@ impl RunView {
                     .w_full()
                     .items_center()
                     .justify_between()
-                    .gap_3()
+                    .gap(theme::space(theme::density(cx), Step::Md))
                     .child(
                         h_flex()
                             .min_w_0()
                             .items_center()
-                            .gap_2()
-                            .text_sm()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
+                            .text_size(theme::font(theme::density(cx), TypeSize::Body))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.text)
-                            .child(Icon::new(IconName::TriangleAlert).size(px(16.)).text_color(t.fail))
+                            .child(Icon::new(IconName::TriangleAlert).size(theme::font(theme::density(cx), TypeSize::Title)).text_color(t.fail))
                             .child(div().min_w_0().truncate().child(tr(cx, TEXT, "Chronos cannot start a wish yet"))),
                     )
                     .child(
                         h_flex()
                             .flex_none()
-                            .gap_1()
+                            .gap(theme::space(theme::density(cx), Step::Xs))
                             .child(
                                 Button::new("setup-settings")
                                     .ghost()
@@ -1238,17 +1414,17 @@ impl RunView {
                 h_flex()
                     .w_full()
                     .items_start()
-                    .gap_3()
-                    .text_xs()
+                    .gap(theme::space(theme::density(cx), Step::Md))
+                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                     .child(
                         h_flex()
                             .w(px(104.))
                             .flex_none()
-                            .gap_1p5()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
                             .items_center()
                             .text_color(t.text)
                             .font_weight(FontWeight::MEDIUM)
-                            .child(Icon::new(IconName::CircleX).size(px(12.)).text_color(t.fail))
+                            .child(Icon::new(IconName::CircleX).size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.fail))
                             .child(div().min_w_0().truncate().child(check.name.clone())),
                     )
                     .child(
@@ -1256,7 +1432,7 @@ impl RunView {
                             .id(("setup-check", i))
                             .flex_1()
                             .min_w_0()
-                            .gap_0p5()
+                            .gap(theme::space(theme::density(cx), Step::Xs))
                             .tooltip(tooltip(check.detail.clone()))
                             .child(div().w_full().text_color(t.text).line_clamp(2).child(detail))
                             .when_some(fix, |this, fix| {
@@ -1264,6 +1440,16 @@ impl RunView {
                             }),
                     )
             }))
+    }
+
+    fn retry_note(&self, message: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let state = self.state.clone();
+        h_flex().w_full().items_center().gap(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Lg))
+            .child(ornament::stale_note(&t, message))
+            .child(Button::new("retry-runs").ghost().small().label(tr(cx, TEXT, "Try again"))
+                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.retry(FeedKind::Runs, cx))))
     }
 
     fn no_run(&self, no_runs: bool, failures: &[&Check], cx: &Context<Self>) -> impl IntoElement {
@@ -1284,8 +1470,8 @@ impl RunView {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_6()
-            .p_8()
+            .gap(theme::space(theme::density(cx), Step::Xl))
+            .p(theme::space(theme::density(cx), Step::Xxl))
             .overflow_y_scrollbar()
             // The portrait sits in the flow above everything, and its lower half fades out, so no
             // text is ever drawn over it.
@@ -1299,12 +1485,12 @@ impl RunView {
             .child(
                 Empty::new()
                     .flex_none()
-                    .gap_5()
+                    .gap(theme::space(theme::density(cx), Step::Xl))
                     .header(
                         EmptyHeader::new()
                             .max_w(px(560.))
                             .title(EmptyTitle::new().child(ornament::page_title(&t, tr(cx, TEXT, title))))
-                            .description(EmptyDescription::new().text_sm().child(tr(cx, TEXT, description))),
+                            .description(EmptyDescription::new().text_size(theme::font(theme::density(cx), TypeSize::Body)).child(tr(cx, TEXT, description))),
                     )
                     .content(
                         EmptyContent::new()
@@ -1313,15 +1499,15 @@ impl RunView {
                                     Button::new("make-a-wish")
                                         .large()
                                         .h(px(44.))
-                                        .px_6()
+                                        .px(theme::space(theme::density(cx), Step::Xl))
                                         .disabled(blocked)
                                         .child(
                                             h_flex()
-                                                .gap_2()
+                                                .gap(theme::space(theme::density(cx), Step::Sm))
                                                 .items_center()
-                                                .text_size(px(15.))
+                                                .text_size(theme::font(theme::density(cx), TypeSize::Title))
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .child(Icon::new(IconName::Star).size(px(16.)))
+                                                .child(Icon::new(IconName::Star).size(theme::font(theme::density(cx), TypeSize::Title)))
                                                 .child(tr(cx, TEXT, "Make a wish")),
                                         )
                                         .on_click(move |_, _, cx| compose.update(cx, |s, cx| s.set_composing(true, cx))),
@@ -1330,7 +1516,7 @@ impl RunView {
                             )
                             .when(blocked, |this| {
                                 this.child(
-                                    div().text_xs().text_color(t.muted).child(tr(cx, TEXT, "Fix the items above to make a wish")),
+                                    div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TEXT, "Fix the items above to make a wish")),
                                 )
                             })
                             .when(!no_runs, |this| {
@@ -1351,15 +1537,15 @@ impl RunView {
         v_flex()
             .flex_1()
             .min_w_0()
-            .gap_1()
-            .px_3()
-            .py_2p5()
-            .rounded(px(8.))
+            .gap(theme::space(theme::density(cx), Step::Xs))
+            .px(theme::space(theme::density(cx), Step::Md))
+            .py(theme::space(theme::density(cx), Step::Md))
+            .rounded(theme::RADIUS)
             .bg(t.raised)
-            .child(div().truncate().text_size(px(11.)).text_color(t.muted).child(tr(cx, TEXT, label)))
+            .child(div().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TEXT, label)))
     }
 
-    fn attention_list(&self, run: &Run, summary: &Summary, cx: &Context<Self>) -> Vec<AnyElement> {
+    fn attention_list(&self, run: &Run, summary: &Summary, driver: &mut motion::Driver, cx: &Context<Self>) -> Vec<AnyElement> {
         let t = cx.tokens();
         let mut rows: Vec<AnyElement> = summary
             .unverified
@@ -1369,7 +1555,18 @@ impl RunView {
                 let (title, tooltip) = attention_title(plain_text::plain(cx, &unit.title));
                 let color = t.unit(unit.state);
                 let state = self.state.clone();
-                Button::new(("attention-unit", index))
+                let hover_key: SharedString = format!("hover:{}", unit.id).into();
+                let selection_key: SharedString = format!("sel:{}", unit.id).into();
+                let lift = self.glows.value(&hover_key, driver);
+                let selected = self.glows.value(&selection_key, driver);
+                ornament::raised_card(&t, lift, selected)
+                    .id(("attention-card", index))
+                    .on_hover(cx.listener(move |this, inside: &bool, _, cx| {
+                        let reduce = this.state.read(cx).reduce_motion;
+                        this.glows.set(&hover_key, if *inside { 1.0 } else { 0.0 }, motion::now(cx), reduce);
+                        cx.notify();
+                    }))
+                    .child(Button::new(("attention-unit", index))
                     .ghost()
                     .small()
                     .w_full()
@@ -1378,14 +1575,15 @@ impl RunView {
                         h_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap_2()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
                             .items_center()
-                            .text_xs()
-                            .child(Icon::new(unit_icon(unit.state)).size(px(13.)).text_color(color))
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
+                            .child(Icon::new(unit_icon(unit.state)).size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(color))
                             .child(div().flex_1().min_w_0().truncate().text_color(t.text).child(title))
                             .child(div().flex_none().text_color(color).child(tr(cx, TEXT, unit.state.label()))),
                     )
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select(Selection::Unit(index), cx)))
+                    .focus_visible(move |style| style.shadow(theme::focus_ring(&t)))
+                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select(Selection::Unit(index), cx))))
                     .into_any_element()
             })
             .collect();
@@ -1394,13 +1592,13 @@ impl RunView {
                 .id(id)
                 .w_full()
                 .min_w_0()
-                .gap_2()
-                .px_2()
-                .py_1()
+                .gap(theme::space(theme::density(cx), Step::Sm))
+                .px(theme::space(theme::density(cx), Step::Sm))
+                .py(theme::space(theme::density(cx), Step::Xs))
                 .items_start()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .tooltip(tooltip(text.clone()))
-                .child(div().flex_none().mt_0p5().child(Icon::new(icon).size(px(13.)).text_color(color)))
+                .child(div().flex_none().mt(theme::space(theme::density(cx), Step::Xs)).child(Icon::new(icon).size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(color)))
                 .child(div().flex_1().min_w_0().line_clamp(2).text_color(t.text).child(text))
                 .into_any_element()
         };
@@ -1427,7 +1625,7 @@ impl RunView {
         rows
     }
 
-    fn summary(&self, run: &Run, summary: &Summary, cx: &Context<Self>) -> impl IntoElement {
+    fn summary(&self, run: &Run, summary: &Summary, driver: &mut motion::Driver, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let (headline, count) = summary.headline();
         let headline: SharedString = match count {
@@ -1451,7 +1649,7 @@ impl RunView {
             FullTest::NotRun => ("Did not run", t.review, Some(IconName::Dash)),
             FullTest::Unknown => (UNKNOWN, t.muted, None),
         };
-        let attention = self.attention_list(run, summary, cx);
+        let attention = self.attention_list(run, summary, driver, cx);
         let attention_count = attention.len();
         let report = self.report_link(run, cx);
         let inline_report = match (&run.report, self.report_open) {
@@ -1465,7 +1663,7 @@ impl RunView {
             .flex()
             .items_center()
             .justify_center()
-            .p_4()
+            .p(theme::space(theme::density(cx), Step::Lg))
             .bg(t.canvas.opacity(0.72))
             .child(
                 ornament::frame(&t, accent.opacity(0.6), t.surface)
@@ -1479,16 +1677,16 @@ impl RunView {
                             .flex_none()
                             .w_full()
                             .items_center()
-                            .gap_2p5()
-                            .px_4()
-                            .pt_4()
-                            .pb_3()
-                            .child(Icon::new(icon).size(px(20.)).text_color(accent))
+                            .gap(theme::space(theme::density(cx), Step::Md))
+                            .px(theme::space(theme::density(cx), Step::Lg))
+                            .pt(theme::space(theme::density(cx), Step::Lg))
+                            .pb(theme::space(theme::density(cx), Step::Md))
+                            .child(Icon::new(icon).size(theme::font(theme::density(cx), TypeSize::Heading)).text_color(accent))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_base()
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Title))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(t.text)
                                     .child(headline),
@@ -1500,21 +1698,21 @@ impl RunView {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .gap_3()
-                            .px_4()
-                            .pb_3()
+                            .gap(theme::space(theme::density(cx), Step::Md))
+                            .px(theme::space(theme::density(cx), Step::Lg))
+                            .pb(theme::space(theme::density(cx), Step::Md))
                             .overflow_y_scrollbar()
                             .child(
                                 h_flex()
                                     .flex_none()
                                     .w_full()
                                     .items_stretch()
-                                    .gap_2()
+                                    .gap(theme::space(theme::density(cx), Step::Sm))
                                     .child(
                                         Self::summary_tile("Units verified", cx)
                                             .child(
                                                 div()
-                                                    .text_lg()
+                                                    .text_size(theme::font(theme::density(cx), TypeSize::Heading))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(t.text)
                                                     .child(units_value),
@@ -1525,30 +1723,30 @@ impl RunView {
                                         Self::summary_tile(FULL_TEST, cx)
                                             .child(
                                                 h_flex()
-                                                    .gap_1p5()
+                                                    .gap(theme::space(theme::density(cx), Step::Sm))
                                                     .items_center()
-                                                    .text_lg()
+                                                    .text_size(theme::font(theme::density(cx), TypeSize::Heading))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(test_color)
                                                     .when_some(test_icon, |this, icon| {
-                                                        this.child(Icon::new(icon).size(px(16.)))
+                                                        this.child(Icon::new(icon).size(theme::font(theme::density(cx), TypeSize::Title)))
                                                     })
                                                     .child(tr(cx, TEXT, test_word)),
                                             )
                                             .when_some(summary.full_test_note.clone(), |this, note| {
-                                                this.child(div().truncate().text_size(px(11.)).text_color(t.muted).child(note))
+                                                this.child(div().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(note))
                                             }),
                                     )
                                     .child(
                                         Self::summary_tile("Cost", cx)
                                             .child(
                                                 div()
-                                                    .text_lg()
+                                                    .text_size(theme::font(theme::density(cx), TypeSize::Heading))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(t.text)
                                                     .child(cost_text(run.usage.total_usd)),
                                             )
-                                            .child(div().truncate().text_size(px(11.)).text_color(t.muted).child(tr(
+                                            .child(div().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(
                                                 cx,
                                                 TEXT,
                                                 if run.usage.total_usd.is_some() { "API-price equivalent" } else { "Not reported" },
@@ -1559,7 +1757,7 @@ impl RunView {
                                 v_flex()
                                     .flex_none()
                                     .w_full()
-                                    .gap_1()
+                                    .gap(theme::space(theme::density(cx), Step::Xs))
                                     .when(attention_count > 0, |this| {
                                         this.child(
                                             ornament::section_label(&t, tr(cx, TEXT, "What needs attention")),
@@ -1568,13 +1766,13 @@ impl RunView {
                                     .when(summary.verdict == Verdict::Clean && attention_count == 0, |this| {
                                         this.child(
                                             h_flex()
-                                                .gap_2()
-                                                .px_2()
-                                                .py_1()
+                                                .gap(theme::space(theme::density(cx), Step::Sm))
+                                                .px(theme::space(theme::density(cx), Step::Sm))
+                                                .py(theme::space(theme::density(cx), Step::Xs))
                                                 .items_center()
-                                                .text_xs()
+                                                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                                 .text_color(t.text)
-                                                .child(Icon::new(IconName::Check).size(px(13.)).text_color(t.ok))
+                                                .child(Icon::new(IconName::Check).size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.ok))
                                                 .child(tr(cx, TEXT, "Nothing needs attention")),
                                         )
                                     })
@@ -1585,13 +1783,13 @@ impl RunView {
                                     v_flex()
                                         .flex_none()
                                         .w_full()
-                                        .gap_1()
-                                        .p_3()
-                                        .rounded(px(8.))
+                                        .gap(theme::space(theme::density(cx), Step::Xs))
+                                        .p(theme::space(theme::density(cx), Step::Md))
+                                        .rounded(theme::RADIUS)
                                         .bg(t.raised)
-                                        .text_xs()
+                                        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                         .text_color(t.text)
-                                        .child(div().w_full().whitespace_normal().child(SharedString::from(text.to_owned())))
+                                        .child(div().w_full().max_w(theme::READ_WIDTH).whitespace_normal().child(SharedString::from(text.to_owned())))
                                         .when(cut, |this| {
                                             this.child(div().text_color(t.muted).child(tr(
                                                 cx,
@@ -1608,9 +1806,9 @@ impl RunView {
                             .w_full()
                             .items_center()
                             .justify_between()
-                            .gap_2()
-                            .px_4()
-                            .py_3()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
+                            .px(theme::space(theme::density(cx), Step::Lg))
+                            .py(theme::space(theme::density(cx), Step::Md))
                             .border_t_1()
                             .border_color(t.border)
                             .child(report)
@@ -1635,7 +1833,7 @@ impl RunView {
         let t = cx.tokens();
         match run.report.clone() {
             None => div()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
                 .child(tr(cx, TEXT, "No report was written"))
                 .into_any_element(),
@@ -1662,7 +1860,7 @@ impl RunView {
         }
     }
 
-    fn graph_column(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
+    fn graph_column(&self, run: &Run, driver: &mut motion::Driver, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let summary = (run.status == RunStatus::Done).then(|| Summary::of(run));
         let hidden = self.hidden_summaries.contains(&run.session);
@@ -1670,7 +1868,7 @@ impl RunView {
         column(self.mesh.clone())
             .relative()
             .map(|this| match &summary {
-                Some(summary) if !hidden => this.child(self.summary(run, summary, cx)).into_any_element(),
+                Some(summary) if !hidden => this.child(self.summary(run, summary, driver, cx)).into_any_element(),
                 Some(_) => this
                     .child(
                         h_flex().absolute().top_3().left_0().right_0().justify_center().child(
@@ -1693,51 +1891,130 @@ impl RunView {
 }
 
 impl Render for RunView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let entity = self.state.clone();
         let state = entity.read(cx);
         let failures = required_failures(&state.checks);
+        let panel = panel_view(&panel_state(&state.feeds.runs, state.runs.is_empty()));
+        let mut driver = motion::Driver::new(state.reduce_motion, cx);
         let Some(run) = state.run() else {
-            return self.no_run(state.runs.is_empty(), &failures, cx).into_any_element();
+            let result = match panel {
+                PanelView::Error { message, keep_content: true } => v_flex().size_full().child(self.retry_note(message, cx)).child(self.no_run(state.runs.is_empty(), &failures, cx)).into_any_element(),
+                PanelView::Skeleton => ornament::empty_state(&t, tr(cx, TEXT, "Reading your wishes…").into(), "".into()).size_full().into_any_element(),
+                PanelView::Error { message, .. } => self.retry_note(message, cx).into_any_element(),
+                _ => self.no_run(state.runs.is_empty(), &failures, cx).into_any_element(),
+            };
+            driver.finish(window);
+            return result;
         };
+        if let PanelView::Error { message, keep_content: false } = &panel {
+            let result = self.retry_note(message.clone(), cx).into_any_element();
+            driver.finish(window);
+            return result;
+        }
         if self.viewing.as_ref() != Some(&run.session) {
             self.viewing = Some(run.session.clone());
             self.wish_open = false;
             self.report_open = false;
         }
         let animate = run.status == RunStatus::Active && !state.reduce_motion;
-        v_flex()
+        let d = theme::density(cx);
+        let heights = chrome_heights(d);
+        for (index, unit) in run.units.iter().enumerate() {
+            let key: SharedString = format!("sel:{}", unit.id).into();
+            self.glows.set(&key, if state.selection == Selection::Unit(index) { 1.0 } else { 0.0 }, motion::now(cx), state.reduce_motion);
+        }
+        if let Some(target) = focus_target(settings::Store::current(cx).mode) {
+            let focused = match target {
+                settings::FocusPanel::Graph => self.graph_column(run, &mut driver, cx).into_any_element(),
+                settings::FocusPanel::Checklist => column(self.todo.clone()).bg(t.surface).into_any_element(),
+            };
+            let result = v_flex().size_full()
+                .when(needs_you(run), |this| this.child(div().flex_none().h(heights.brief).overflow_hidden().child(self.brief(run, cx))))
+                .child(h_flex().w_full().flex_none().justify_end()
+                    .px(theme::space(d, Step::Lg)).py(theme::space(d, Step::Sm))
+                    .child(theme::gold_leaf(Button::new("exit-focus"), &t)
+                        .icon(IconName::ArrowLeft)
+                        .label(tr(cx, TEXT, "Exit focus"))
+                        .tooltip(tr(cx, TEXT, "Back to the whole window (Ctrl+Shift+F)"))
+                        .on_click(|_, _, cx| { settings::set_mode(settings::WindowMode::Full, cx); })))
+                .child(div().flex_1().min_h_0().w_full().child(focused))
+                .into_any_element();
+            driver.finish(window);
+            return result;
+        }
+        let available = f32::from(window.viewport_size().width);
+        if !self.restored && (!available.is_finite() || available <= 0.) {
+            driver.finish(window);
+            return div().size_full().into_any_element();
+        }
+        let widths = restored_widths(settings::columns(cx), available);
+        self.restored = true;
+        let graph = self.graph_column(run, &mut driver, cx).into_any_element();
+        let details = self.details_column(run, &state.selection, &mut driver, cx).into_any_element();
+        let result = v_flex()
             .size_full()
-            .child(self.brief(run, cx))
+            .child(div().flex_none().h(heights.brief).overflow_hidden().child(self.brief(run, cx)))
+            .when_some(match panel { PanelView::Error { message, keep_content: true } => Some(message), _ => None }, |this, message| this.child(self.retry_note(message, cx)))
             .when_some(self.first_day_card(cx), |this, card| {
-                this.child(div().flex_none().w_full().px_5().pt_3().child(card))
+                this.child(div().flex_none().w_full().px(theme::space(theme::density(cx), Step::Xl)).pt(theme::space(theme::density(cx), Step::Md)).child(card))
             })
             .when(!failures.is_empty(), |this| {
-                this.child(div().flex_none().w_full().px_5().py_3().child(self.setup_card(&failures, cx)))
+                this.child(div().flex_none().w_full().px(theme::space(theme::density(cx), Step::Xl)).py(theme::space(theme::density(cx), Step::Md)).child(self.setup_card(&failures, cx)))
             })
-            .child(self.header(run, cx))
-            .child(stage_rail(run, animate, cx))
+            .child(div().flex_none().h(heights.header).overflow_hidden().child(self.header(run, cx)))
+            .child(div().flex_none().h(heights.rail).overflow_hidden().child(stage_rail(run, animate, cx)))
             .child(
-                div().flex_1().min_h_0().w_full().child(
+                div().flex_1().min_h_0().w_full()
+                    .key_context("RunColumns")
+                    .track_focus(&self.columns_focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        let m = event.keystroke.modifiers;
+                        if !m.alt || m.control || m.platform { return; }
+                        let key = format!("alt-{}{}", if m.shift { "shift-" } else { "" }, event.keystroke.key);
+                        match key.as_str() {
+                            "alt-left" | "alt-right" | "alt-shift-left" | "alt-shift-right" | "alt-0" => {
+                                let state = this.columns.read(cx);
+                                let sizes = state.sizes();
+                                if sizes.len() != 3 { return; }
+                                let current = settings::ColumnWidths { checklist: f32::from(sizes[0]), details: f32::from(sizes[2]) };
+                                let available = f32::from(state.container_size());
+                                let Some(next) = step_widths(current, &key, available) else { return };
+                                this.columns.update(cx, |state, cx| {
+                                    // Free space before growing either side when resetting both.
+                                    if next.checklist < current.checklist { state.resize_panel(0, px(next.checklist), window, cx); }
+                                    if next.details < current.details { state.resize_panel(2, px(next.details), window, cx); }
+                                    if next.checklist > current.checklist { state.resize_panel(0, px(next.checklist), window, cx); }
+                                    if next.details > current.details { state.resize_panel(2, px(next.details), window, cx); }
+                                });
+                                let sizes = this.columns.read(cx).sizes();
+                                let actual = settings::ColumnWidths { checklist: f32::from(sizes[0]), details: f32::from(sizes[2]) };
+                                settings::remember_columns(actual, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .child(
                     h_resizable("run-columns")
                         .with_state(&self.columns)
                         .child(
                             resizable_panel()
-                                .size(CHECKLIST_WIDTH)
+                                .size(px(widths.checklist)).fixed()
                                 .size_range(CHECKLIST_RANGE)
                                 .child(column(self.todo.clone()).bg(t.surface)),
                         )
                         .child(
                             resizable_panel()
                                 .size_range(GRAPH_MIN..Pixels::MAX)
-                                .child(self.graph_column(run, cx)),
+                                .child(graph),
                         )
                         .child(
                             resizable_panel()
-                                .size(DETAILS_WIDTH)
+                                .size(px(widths.details)).fixed()
                                 .size_range(DETAILS_RANGE)
-                                .child(self.details_column(run, &state.selection, cx)),
+                                .child(details),
                         ),
                 ),
             )
@@ -1751,9 +2028,28 @@ impl Render for RunView {
                     .bg(t.surface)
                     .child(self.control.clone()),
             )
-            .into_any_element()
+            .into_any_element();
+        if state.view == Screen::Run && !self.columns_shown {
+            self.columns_shown = true;
+            // Wait for the focus tree, once per entry; inputs and overlays keep the keyboard.
+            cx.defer_in(window, |this, window, cx| {
+                if this.state.read(cx).view != Screen::Run
+                    || this.state.read(cx).composing
+                    || focus_target(settings::Store::current(cx).mode).is_some()
+                    || window.has_active_dialog(cx) || window.has_active_sheet(cx) { return; }
+                let idle_focus = window.context_stack().iter().all(|context| {
+                    context.primary().is_none_or(|entry| matches!(entry.key.as_ref(), "Root" | "ChronosShell" | "RunColumns"))
+                });
+                if idle_focus { this.columns_focus.focus(window, cx); }
+            });
+        }
+        driver.finish(window);
+        result
     }
 }
+
+#[cfg(test)]
+mod accept;
 
 #[cfg(test)]
 mod tests {
@@ -1772,6 +2068,7 @@ mod tests {
     #[test]
     fn production_code_has_no_uncapped_spinner() {
         let source = include_str!("run_view.rs").split_once("#[cfg(test)]").unwrap().0;
+        assert!(source.contains("fn details_column"));
         assert!(!source.contains("Spinner::new"));
         assert!(!source.contains("component::spinner"));
     }

@@ -1,6 +1,7 @@
 //! The window frame: title bar, navigation rail and the active screen. It also owns what applies
 //! across screens: the window-wide shortcuts (Ctrl+N, Ctrl+K and ?), the command palette's jumps,
 //! Needs you notifications and the question asked before closing.
+mod logic;
 use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Lang, Table};
 use super::launch::{self, Launch, Square};
@@ -8,9 +9,9 @@ use super::model::*;
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament::Emblem;
 use super::palette::{self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target};
-use super::settings::{LanguageChoice, ThemeChoice};
-use super::{ornament, settings};
-use super::theme::{self, Tokened as _, Tokens};
+use super::settings::{FocusPanel, LanguageChoice, SettingPrior, ThemeChoice, WindowMode};
+use super::{mini, ornament, quota, settings};
+use super::theme::{self, Step, Tokened as _, Tokens, TypeSize};
 use super::{composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView, usage::UsageView, wishes::WishesView};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
@@ -81,7 +82,18 @@ const T: Table = &[
     ("It can be resumed later.", "之後可以接續。"),
     ("Keep running", "繼續執行"),
     ("Not connected to the engine, so nothing was sent.", "沒有連上引擎，所以沒有送出任何指令。"),
+    ("The mini window could not open", "無法開啟迷你視窗"),
 ];
+
+pub(super) fn start_mini_only(ephemeral: bool, mode: WindowMode) -> bool {
+    logic::startup_windows(ephemeral, mode) == logic::Startup::MiniOnly
+}
+
+pub(super) fn record_change(state: &Entity<AppState>, prior: SettingPrior, now: SettingPrior, cx: &mut App) {
+    if logic::should_record(&prior, &now) {
+        state.update(cx, |state, _| state.record_undo(Undoable::Setting(prior)));
+    }
+}
 
 /// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
 const STOP_DEADLINE: Duration = Duration::from_secs(10);
@@ -90,6 +102,19 @@ const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
 const TOAST_MESSAGE_CHARS: usize = 120;
 /// How far a new screen drifts up into place as it crossfades in.
 const SCREEN_DRIFT: f32 = 10.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Chrome {
+    rail: bool,
+    title_extras: bool,
+    strip: bool,
+    force_run: bool,
+}
+
+pub(super) fn chrome(mode: WindowMode) -> Chrome {
+    let focus = matches!(mode, WindowMode::Focus(_));
+    Chrome { rail: !focus, title_extras: !focus, strip: true, force_run: focus }
+}
 
 /// The rail's screens, in order.
 const SCREENS: [Screen; 5] = [Screen::Run, Screen::Wishes, Screen::Memory, Screen::Usage, Screen::Doctor];
@@ -139,11 +164,7 @@ pub fn run_alerts(seen: &mut HashMap<SharedString, RunStatus>, runs: &[Run]) -> 
 
 /// What the Wishes badge counts.
 pub fn needs_user(run: &Run) -> bool {
-    match run.status {
-        RunStatus::Blocked | RunStatus::Waiting | RunStatus::Interrupted => true,
-        RunStatus::Active | RunStatus::LimitWait => !run.needs.is_empty(),
-        RunStatus::Done => false,
-    }
+    super::model::needs_you(run)
 }
 
 /// The first required check that failed. Optional tools report a warning and never block.
@@ -164,7 +185,7 @@ fn clipped(text: &str, max_chars: usize) -> String {
 }
 
 /// A count that stays legible in both themes, which the kit's white-on-color badge does not.
-fn count_badge(count: usize, t: &Tokens) -> impl IntoElement {
+fn count_badge(count: usize, t: &Tokens, d: theme::Density) -> impl IntoElement {
     h_flex()
         .absolute()
         .top(px(-6.))
@@ -177,7 +198,7 @@ fn count_badge(count: usize, t: &Tokens) -> impl IntoElement {
         .bg(t.fail)
         .border_1()
         .border_color(t.surface)
-        .text_size(px(10.))
+        .text_size(theme::font(d, TypeSize::Caption))
         .font_semibold()
         .text_color(t.canvas)
         .child(if count > 9 { "9+".to_string() } else { count.to_string() })
@@ -238,10 +259,15 @@ pub struct Shell {
     shown: Screen,
     leaving: Option<Screen>,
     switch: Tween,
-    /// How lit and how hovered each rail item is, so selection and hover glows fade.
-    lit: [Tween; 5],
-    hover: [Tween; 5],
+    /// Selection and hover share one glow per rail slot.
+    glows: motion::Glows<usize>,
+    rail_focus: [FocusHandle; 5],
+    ticker: quota::Ticker,
     hovered: Option<Screen>,
+    applied_mode: WindowMode,
+    applied_on_top: bool,
+    mini: Option<AnyWindowHandle>,
+    last_panel: FocusPanel,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -278,6 +304,7 @@ impl Shell {
         run_alerts(&mut seen, &state.read(cx).runs);
         let subscriptions = vec![
             cx.observe_in(&state, window, |this, _, window, cx| this.state_changed(window, cx)),
+            cx.observe_global_in::<settings::Store>(window, |this, window, cx| this.apply_wanted(window, cx)),
             cx.observe_window_bounds(window, |_, window, cx| {
                 settings::remember_window(window.window_bounds(), cx);
             }),
@@ -290,6 +317,10 @@ impl Shell {
         Self::on_global::<NewWish>(window, cx, Self::new_wish);
         Self::on_global::<OpenPalette>(window, cx, Self::toggle_palette);
         Self::on_global::<ShowShortcuts>(window, cx, Self::toggle_shortcuts);
+        Self::on_global::<palette::Undo>(window, cx, Self::undo);
+        Self::on_global::<palette::ToggleFocus>(window, cx, Self::toggle_focus);
+        Self::on_global::<palette::ToggleMini>(window, cx, Self::toggle_mini);
+        Self::on_global::<palette::ToggleDensity>(window, cx, Self::toggle_density);
         let palette = cx.new(|cx| Palette::new(state.clone(), window, cx));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -305,7 +336,17 @@ impl Shell {
         });
         let scene = state.read(cx).scene.clone();
         let shown = state.read(cx).view;
-        let glow = |on: bool| Tween::rest(if on { 1.0 } else { 0.0 }, Pace::Glow, Curve::EaseOut);
+        let mut glows = motion::Glows::new(Pace::Glow);
+        glows.set(&slot(shown), 1.0, motion::now(cx), true);
+        let prefs = settings::Store::current(cx);
+        let initial_mode = prefs.mode;
+        let initial_on_top = prefs.mini_on_top;
+        if initial_mode != WindowMode::Full {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                let _ = this.update_in(cx, |this, window, cx| this.apply_wanted(window, cx));
+            }).detach();
+        }
         if let Some(scene) = scene {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(400)).await;
@@ -336,10 +377,85 @@ impl Shell {
             shown,
             leaving: None,
             switch: Tween::rest(1.0, Pace::Screen, Curve::EaseOut),
-            lit: SCREENS.map(|screen| glow(screen == shown)),
-            hover: SCREENS.map(|_| glow(false)),
+            glows,
+            rail_focus: std::array::from_fn(|_| cx.focus_handle()),
+            ticker: quota::Ticker::new(),
             hovered: None,
+            applied_mode: WindowMode::Full,
+            applied_on_top: initial_on_top,
+            mini: None,
+            last_panel: match initial_mode { WindowMode::Focus(panel) => panel, _ => FocusPanel::Graph },
             _subscriptions: subscriptions,
+        }
+    }
+
+    fn apply_wanted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefs = settings::Store::current(cx).clone();
+        let plan = logic::plan(self.applied_mode, prefs.mode, self.applied_on_top, prefs.mini_on_top, self.mini.is_some());
+        if theme::density(cx) != prefs.density { theme::set_density(prefs.density, cx); }
+        if let WindowMode::Focus(panel) = prefs.mode { self.last_panel = panel; }
+        if plan.close_mini || plan.reopen_mini {
+            if let Some(handle) = self.mini.take() {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+        }
+        if plan.open_mini || plan.reopen_mini {
+            match mini::open_mini(self.state.clone(), prefs.mini_on_top, cx) {
+                Ok(handle) => self.mini = Some(handle),
+                Err(error) => {
+                    self.applied_mode = WindowMode::Full;
+                    settings::set_mode(WindowMode::Full, cx);
+                    // gpui's Windows activate() restores minimized windows with SW_RESTORE.
+                    window.activate_window();
+                    self.state.update(cx, |state, cx| {
+                        state.report(super::model::Action::ReadData, None, format!("mini window: {error}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+        }
+        if plan.minimize_main { window.minimize_window(); }
+        if plan.restore_main {
+            // gpui's Windows activate() restores minimized windows with SW_RESTORE.
+            window.activate_window();
+        }
+        if plan.force_run { self.state.update(cx, |state, cx| state.set_view(Screen::Run, cx)); }
+        self.applied_mode = prefs.mode;
+        self.applied_on_top = prefs.mini_on_top;
+        cx.notify();
+    }
+
+    fn set_mode(&mut self, mode: WindowMode, cx: &mut Context<Self>) {
+        let prior = settings::set_mode(mode, cx);
+        if let SettingPrior::Mode(WindowMode::Focus(panel)) = prior { self.last_panel = panel; }
+        if let WindowMode::Focus(panel) = mode { self.last_panel = panel; }
+        record_change(&self.state, prior, SettingPrior::Mode(mode), cx);
+    }
+
+    fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) { return; }
+        let mode = logic::after_key_focus(settings::Store::current(cx).mode, self.last_panel);
+        self.set_mode(mode, cx);
+    }
+    fn toggle_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) { return; }
+        let mode = logic::after_key_mini(settings::Store::current(cx).mode);
+        self.set_mode(mode, cx);
+    }
+    fn toggle_density(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) { return; }
+        let density = match theme::density(cx) { theme::Density::Comfortable => theme::Density::Dense, theme::Density::Dense => theme::Density::Comfortable };
+        let prior = settings::set_density(density, cx);
+        record_change(&self.state, prior, SettingPrior::Density(density), cx);
+    }
+    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) || self.palette.read(cx).overlay() != Overlay::Closed { return; }
+        let undo = self.state.update(cx, |state, _| state.take_undo());
+        match logic::undo_step(undo) {
+            logic::UndoStep::Memory { id, prior } => self.state.update(cx, |state, cx| state.undo_memory(id, prior, cx)),
+            logic::UndoStep::Setting(prior) => settings::restore(prior, &self.state, window, cx),
+            logic::UndoStep::Nothing => (),
         }
     }
 
@@ -409,7 +525,7 @@ impl Shell {
                 Notification::new()
                     .id1::<ErrorToast>(error.id as usize)
                     .with_type(NotificationType::Error)
-                    .title(tr(cx, T, error.action.headline()))
+                    .title(tr(cx, T, if error.message.starts_with("mini window: ") { "The mini window could not open" } else { error.action.headline() }))
                     .message(clipped(&format!("{advice} {}", error.message), TOAST_MESSAGE_CHARS))
                     .action(move |_, _, cx| {
                         let raw = raw.clone();
@@ -442,12 +558,13 @@ impl Shell {
         };
         let (state, session, open) = (self.state.clone(), alert.session.clone(), tr(cx, T, "Open"));
         let id = session.clone();
+        let d = theme::density(cx);
         Some(
             Notification::new()
                 .id1::<NeedsYouToast>(id)
                 .with_type(kind)
                 .title(fill(title, &[run.project.as_ref()]))
-                .content(move |_, _, _| div().w_full().text_sm().truncate().child(message.clone()).into_any_element())
+                .content(move |_, _, _| div().w_full().text_size(theme::font(d, TypeSize::Body)).truncate().child(message.clone()).into_any_element())
                 .action(move |_, _, cx| {
                     let (state, session) = (state.clone(), session.clone());
                     Button::new("open-run").label(open).on_click(cx.listener(move |note, _, window, cx| {
@@ -572,6 +689,16 @@ impl Shell {
                 self.state.update(cx, |state, cx| command_or_report(state, super::model::Action::Resume, offline, cx));
             }
             Command::Shortcuts => self.palette.update(cx, |palette, cx| palette.show_shortcuts(window, cx)),
+            Command::Focus(_) | Command::FullWindow | Command::Mini => {
+                if let Some(mode) = logic::mode_after(&command, settings::Store::current(cx).mode, self.last_panel) { self.set_mode(mode, cx); }
+            }
+            Command::ToggleDensity => self.toggle_density(window, cx),
+            Command::ToggleOnTop => {
+                let on = !settings::Store::current(cx).mini_on_top;
+                let prior = settings::set_mini_on_top(on, cx);
+                record_change(&self.state, prior, SettingPrior::MiniOnTop(on), cx);
+            }
+            Command::Undo => self.undo(window, cx),
         }
     }
 
@@ -813,10 +940,14 @@ impl Shell {
         view: Screen,
         count: usize,
         (lit, hover): (f32, f32),
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let active = self.state.read(cx).view == view;
+        let focus = &self.rail_focus[slot(view)];
+        let ring = focus.is_focused(window) && window.last_input_was_keyboard();
         let state = self.state.clone();
         // Glow and underline follow selection (lit); hover only tints the face.
         let face = mix(t.raised.opacity(0.0), t.raised, lit.max(hover));
@@ -824,8 +955,9 @@ impl Shell {
         div()
             .id(("nav-glow", slot(view)))
             .relative()
-            .rounded(px(8.))
-            .when(lit > 0.01, |this| this.shadow(ornament::gold_glow(&t, lit)))
+            .rounded(theme::RADIUS)
+            .when(lit > 0.01 && !ring, |this| this.shadow(ornament::gold_glow(&t, lit)))
+            .when(ring, |this| this.shadow(theme::focus_ring(&t)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.hovered = Some(view);
@@ -836,11 +968,12 @@ impl Shell {
             }))
             .child(
                 Button::new(id)
+                    .track_focus(&focus.clone().tab_stop(true))
                     .custom(colors)
                     .selected(active)
                     .w(px(64.))
                     .h(px(52.))
-                    .rounded(px(8.))
+                    .rounded(theme::RADIUS)
                     .accessibility_label(tr(cx, &[], label))
                     .tooltip(hint)
                     .tooltip_placement(Placement::Right)
@@ -848,14 +981,14 @@ impl Shell {
                     .child(
                         v_flex()
                             .items_center()
-                            .gap_1()
-                            .text_size(px(11.))
+                            .gap(theme::space(d, Step::Xs))
+                            .text_size(theme::font(d, TypeSize::Label))
                             .text_color(t.rail_ink(lit))
                             .child(
                                 div()
                                     .relative()
                                     .child(ornament::emblem(kind, 20., t.rail_ink(lit)))
-                                    .when(count > 0, |this| this.child(count_badge(count, &t))),
+                                    .when(count > 0, |this| this.child(count_badge(count, &t, d))),
                             )
                             .child(tr(cx, &[], label)),
                     ),
@@ -865,12 +998,13 @@ impl Shell {
 
     fn new_wish_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let blocked = blocking_check(&self.state.read(cx).checks).map(|check| (check.name.clone(), check.detail.clone()));
         let label = tr(cx, &[], "New wish");
         let button = theme::gold_leaf(Button::new("new-wish"), &t)
             .w(px(64.))
             .h(px(52.))
-            .rounded(px(8.))
+            .rounded(theme::RADIUS)
             .disabled(blocked.is_some())
             .accessibility_label(label)
             .tooltip_placement(Placement::Right)
@@ -878,8 +1012,8 @@ impl Shell {
             .child(
                 v_flex()
                     .items_center()
-                    .gap_1()
-                    .text_size(px(11.))
+                    .gap(theme::space(d, Step::Xs))
+                    .text_size(theme::font(d, TypeSize::Label))
                     .font_medium()
                     .child(Icon::new(IconName::Plus).size(px(18.)))
                     .child(label),
@@ -891,7 +1025,7 @@ impl Shell {
         let state = self.state.clone();
         v_flex()
             .items_center()
-            .gap_1()
+            .gap(theme::space(d, Step::Xs))
             .child(button.tooltip(reason.clone()))
             .child(
                 Button::new("setup-reason")
@@ -906,8 +1040,8 @@ impl Shell {
                             .w_full()
                             .whitespace_normal()
                             .text_center()
-                            .text_size(px(10.))
-                            .line_height(px(13.))
+                            .text_size(theme::font(d, TypeSize::Caption))
+                            .line_height(theme::font(d, TypeSize::Body))
                             .text_color(t.review)
                             .child(fill(tr(cx, T, "{} not ready"), &[&name])),
                     ),
@@ -917,17 +1051,18 @@ impl Shell {
     /// The palette's door in the title bar, for people who have not learned Ctrl+K yet.
     fn search_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let label = tr(cx, T, "Search");
         h_flex()
             .id("title-search")
             .flex_none()
             .h(px(26.))
-            .px_2()
-            .gap_2()
-            .rounded(px(4.))
+            .px(theme::space(d, Step::Sm))
+            .gap(theme::space(d, Step::Sm))
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(t.border)
-            .text_xs()
+            .text_size(theme::font(d, TypeSize::Caption))
             .text_color(t.muted)
             .cursor_pointer()
             .hover(|this| this.bg(t.raised))
@@ -942,21 +1077,22 @@ impl Shell {
 
     fn title_status(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let state = self.state.read(cx);
         let run = state.run()?;
         let color = t.outcome(run.status, run.verified_end());
         let (project, label) = (run.project.clone(), tr(cx, &[], run.status_label()));
         Some(
             h_flex()
-                .gap_2()
+                .gap(theme::space(d, Step::Sm))
                 .min_w_0()
                 .child(div().w(px(1.)).h(px(12.)).bg(t.border))
-                .child(div().text_sm().text_color(t.muted).truncate().child(project))
+                .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).truncate().child(project))
                 .child(
                     h_flex()
-                        .gap_1()
+                        .gap(theme::space(d, Step::Xs))
                         .flex_shrink_0()
-                        .text_xs()
+                        .text_size(theme::font(d, TypeSize::Caption))
                         .text_color(color)
                         .child(div().size(px(6.)).rounded_full().bg(color))
                         .child(label),
@@ -972,9 +1108,14 @@ fn shows_underline(lit: f32) -> bool {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
+        let d = theme::density(cx);
+        let chrome = chrome(settings::Store::current(cx).mode);
+        let ticking = quota::repaint_after(&self.state.read(cx).quota).is_some();
+        self.ticker.sync(ticking, cx);
         let state = self.state.read(cx);
+        let strip = quota::strip(state, cx);
         let reduce = state.reduce_motion;
-        let view = state.view;
+        let view = if chrome.force_run { Screen::Run } else { state.view };
         let composing = state.composing;
         let waiting = state.runs.iter().filter(|run| needs_user(run)).count();
         let mut motion = Driver::new(reduce, cx);
@@ -982,7 +1123,11 @@ impl Render for Shell {
         motion.track(&self.launch);
         let launching = self.launch.seconds(now).filter(|_| !reduce);
 
-        if view != self.shown {
+        if chrome.force_run {
+            self.shown = Screen::Run;
+            self.leaving = None;
+            self.switch.jump(1.0);
+        } else if view != self.shown {
             // Behind the launch the screen simply changes; after it, a switch crossfades.
             if launching.is_none() {
                 self.leaving = Some(self.shown);
@@ -995,11 +1140,13 @@ impl Render for Shell {
         if switch >= 1.0 {
             self.leaving = None;
         }
+        if !chrome.rail { self.hovered = None; }
         let mut glows = [(0.0, 0.0); 5];
         for (i, screen) in SCREENS.into_iter().enumerate() {
-            self.lit[i].set(if screen == view { 1.0 } else { 0.0 }, now, reduce);
-            self.hover[i].set(if self.hovered == Some(screen) { 1.0 } else { 0.0 }, now, reduce);
-            glows[i] = (motion.value(&self.lit[i]), motion.value(&self.hover[i]));
+            let target = if screen == view { 1.0 } else if self.hovered == Some(screen) && chrome.rail { 0.5 } else { 0.0 };
+            self.glows.set(&i, target, now, reduce);
+            let value = self.glows.value(&i, &mut motion);
+            glows[i] = ((value * 2.0 - 1.0).max(0.0), (value * 2.0).min(1.0));
         }
         let content = self.screen(view);
         // The screen being left stays underneath while the new one fades in over it.
@@ -1013,17 +1160,17 @@ impl Render for Shell {
         let search = self.search_button(cx);
         let new_wish = self.new_wish_button(cx);
         let g = |screen: Screen| glows[slot(screen)];
-        let run_item = self.nav_item("nav-run", Emblem::Hourglass, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), cx);
-        let wishes_item = self.nav_item("nav-wishes", Emblem::Scroll, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), cx);
-        let memory_item = self.nav_item("nav-memory", Emblem::StarBook, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), cx);
-        let usage_item = self.nav_item("nav-usage", Emblem::Astrolabe, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), cx);
-        let settings_item = self.nav_item("nav-doctor", Emblem::Armillary, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), cx);
+        let run_item = self.nav_item("nav-run", Emblem::Hourglass, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), window, cx);
+        let wishes_item = self.nav_item("nav-wishes", Emblem::Scroll, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), window, cx);
+        let memory_item = self.nav_item("nav-memory", Emblem::StarBook, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), window, cx);
+        let usage_item = self.nav_item("nav-usage", Emblem::Astrolabe, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), window, cx);
+        let settings_item = self.nav_item("nav-doctor", Emblem::Armillary, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), window, cx);
         let rail_cell = self.rail_portrait.clone();
         // Hidden while the launch's keeper is on its way to this spot.
         let rail_portrait = div()
             .relative()
-            .mt_1()
-            .mb_2()
+            .mt(theme::space(d, Step::Xs))
+            .mb(theme::space(d, Step::Sm))
             .child(ornament::portrait(44.).opacity(if launching.is_some() { 0.0 } else { 1.0 }))
             .child(
                 canvas(
@@ -1049,7 +1196,7 @@ impl Render for Shell {
                 }))
         });
         motion.finish(window);
-        v_flex()
+        div()
             .size_full()
             .relative()
             .key_context("ChronosShell")
@@ -1062,74 +1209,81 @@ impl Render for Shell {
             .bg(tokens.canvas)
             .text_color(tokens.text)
             .child(
-                TitleBar::new()
-                    .on_close_window(cx.listener(|this, _, window, cx| {
-                        if this.should_close(window, cx) {
-                            window.remove_window();
-                        }
-                    }))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .pr_2()
-                            .gap_2()
-                            .child(div().flex_shrink_0().text_sm().font_medium().text_color(tokens.gold).child("Axiom Chronos"))
-                            .children(status)
-                            .child(div().flex_1())
-                            .child(search),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_start()
-                    .child(
-                        v_flex()
-                            .id("rail")
-                            .h_full()
-                            .w(px(80.))
-                            .flex_shrink_0()
-                            .p_2()
-                            .gap_1()
-                            .items_center()
-                            .bg(tokens.surface)
-                            .border_r_1()
-                            .border_color(tokens.border)
-                            .child(rail_portrait)
-                            .child(new_wish)
-                            .child(div().w(px(60.)).my_1().child(ornament::divider(&tokens, 0.0)))
-                            .child(run_item)
-                            .child(wishes_item)
-                            .child(memory_item)
-                            .child(usage_item)
-                            .child(div().flex_1())
-                            .child(settings_item),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .relative()
-                            .child(ornament::backdrop(&tokens, cx.theme().is_dark()))
-                            .children(leaving.map(|screen| div().absolute().top_0().left_0().size_full().child(screen)))
-                            .child(
-                                div()
-                                    .relative()
-                                    .size_full()
-                                    .top(px(SCREEN_DRIFT * (1.0 - switch)))
-                                    .when(switch < 1.0, |this| this.opacity(switch))
-                                    .child(content),
-                            ),
-                    ),
+                v_flex().size_full()
+                .child(
+                    TitleBar::new()
+                        .on_close_window(cx.listener(|this, _, window, cx| {
+                            if this.should_close(window, cx) {
+                                window.remove_window();
+                            }
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .pr(theme::space(d, Step::Sm))
+                                .gap(theme::space(d, Step::Sm))
+                                .child(div().flex_shrink_0().text_size(theme::font(d, TypeSize::Body)).font_medium().text_color(tokens.gold).child("Axiom Chronos"))
+                                .when(chrome.title_extras, |this| this.children(status))
+                                .child(div().flex_1())
+                                .when(chrome.title_extras, |this| this.child(search)),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .items_start()
+                        .when(chrome.rail, |this| this.child(
+                            v_flex()
+                                .id("rail")
+                                .h_full()
+                                .w(px(80.))
+                                .flex_shrink_0()
+                                .p(theme::space(d, Step::Sm))
+                                .gap(theme::space(d, Step::Xs))
+                                .items_center()
+                                .bg(tokens.surface)
+                                .border_r_1()
+                                .border_color(tokens.border)
+                                .child(rail_portrait)
+                                .child(new_wish)
+                                .child(div().w(px(60.)).my(theme::space(d, Step::Xs)).child(ornament::divider(&tokens, 0.0)))
+                                .child(run_item)
+                                .child(wishes_item)
+                                .child(memory_item)
+                                .child(usage_item)
+                                .child(div().flex_1())
+                                .child(settings_item),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .relative()
+                                .child(ornament::backdrop(&tokens, cx.theme().is_dark()))
+                                .children(leaving.map(|screen| div().absolute().top_0().left_0().size_full().child(screen)))
+                                .child(
+                                    div()
+                                        .relative()
+                                        .size_full()
+                                        .top(px(SCREEN_DRIFT * (1.0 - switch)))
+                                        .when(switch < 1.0, |this| this.opacity(switch))
+                                        .child(content),
+                                ),
+                        ),
+                )
+                .when(chrome.strip, |this| this.child(strip))
             )
             .when(composing, |this| this.child(self.composer.clone()))
             .child(self.palette.clone())
             .children(overlay)
     }
 }
+
+#[cfg(test)]
+mod accept;
 
 #[cfg(test)]
 mod tests {

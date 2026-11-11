@@ -2,7 +2,7 @@
 //! divider, the state glyphs, the fixed star field and the portrait itself.
 //! The geometry functions are pure, so the drawing can be tested without a window.
 use super::model::UnitState;
-use super::theme::Tokens;
+use super::theme::{font, lift_shadow, selection_glow, space, Density, Step, Tokens, TypeSize, RADIUS};
 use gpui_kit::base::TestTextExt as _;
 use gpui_kit::*;
 use std::borrow::Cow;
@@ -509,14 +509,16 @@ fn label_text(text: &str) -> String {
 pub fn page_title(t: &Tokens, text: impl Into<SharedString>) -> Div {
     let text = text.into();
     let style = title_style(&text);
-    let mut title = div().font_family(style.family).text_color(t.text).text_size(px(style.size))
+    let size = px(style.size);
+    let mut title = div().font_family(style.family).text_color(t.text).text_size(size)
         .font_weight(if style.bold { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(text.clone().test_text(text));
     title.text_style().font_fallbacks = Some(FontFallbacks::from_fonts(vec![style.fallback.to_string()]));
     title
 }
 
 pub fn section_label(t: &Tokens, text: &str) -> Div {
-    div().flex().flex_col().text_color(t.gold).text_size(px(LABEL_SIZE)).child(label_text(text)).child(divider(t, 0.0))
+    let size = px(LABEL_SIZE);
+    div().flex().flex_col().text_color(t.gold).text_size(size).child(label_text(text)).child(divider(t, 0.0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -605,6 +607,124 @@ pub fn gold_fill(t: &Tokens) -> Background {
 
 pub fn gold_glow(t: &Tokens, strength: f32) -> Vec<BoxShadow> {
     vec![BoxShadow { color: t.gold.opacity(0.24 * strength.clamp(0.0, 1.0)), offset: Point::default(), blur_radius: px(12.0), spread_radius: px(0.0), inset: false }]
+}
+
+/// The fraction of a bulb occupied by sand.
+pub fn sand_height(share_left: f32) -> f32 {
+    if share_left.is_nan() { 0.0 } else { share_left.clamp(0.0, 1.0) }
+}
+
+/// Hourglass coordinates are local to a square, with sand bounds before clipping to the bulbs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HourglassGeometry {
+    pub upper: Vec<(f32, f32)>,
+    pub lower: Vec<(f32, f32)>,
+    pub neck: (f32, f32),
+    pub upper_sand: Box2,
+    pub lower_sand: Box2,
+}
+
+impl HourglassGeometry {
+    /// Sand rises from the bottom of each bulb; the returned rectangles are clipped to its outline when painted.
+    pub fn sand_rects(&self, share_left: f32) -> (Box2, Box2) {
+        let share = sand_height(share_left);
+        let portion = |rect: Box2, amount: f32| {
+            let h = rect.h * amount;
+            Box2 { y: rect.y + rect.h - h, h, ..rect }
+        };
+        (portion(self.upper_sand, share), portion(self.lower_sand, 1.0 - share))
+    }
+}
+
+pub fn hourglass_geometry(side: f32) -> HourglassGeometry {
+    let s = if side.is_finite() { side.max(0.0) } else { 0.0 };
+    let points = |p: &[(f32, f32)]| p.iter().map(|&(x, y)| (x * s, y * s)).collect();
+    HourglassGeometry {
+        upper: points(&[(0.28, 0.14), (0.72, 0.14), (0.69, 0.28), (0.5, 0.5), (0.31, 0.28)]),
+        lower: points(&[(0.5, 0.5), (0.69, 0.72), (0.72, 0.86), (0.28, 0.86), (0.31, 0.72)]),
+        neck: (0.5 * s, 0.5 * s),
+        upper_sand: Box2 { x: 0.28 * s, y: 0.14 * s, w: 0.44 * s, h: 0.36 * s },
+        lower_sand: Box2 { x: 0.28 * s, y: 0.5 * s, w: 0.44 * s, h: 0.36 * s },
+    }
+}
+
+// Clip the bulb polygon to the horizontal sand surface before filling it.
+fn paint_sand(window: &mut Window, origin: (f32, f32), bulb: &[(f32, f32)], rect: Box2, gold: Hsla) {
+    if rect.h <= 0.0 { return; }
+    let mut clipped = Vec::new();
+    let mut previous = *bulb.last().unwrap();
+    for &current in bulb {
+        let (inside, was_inside) = (current.1 >= rect.y, previous.1 >= rect.y);
+        if inside != was_inside {
+            let fraction = (rect.y - previous.1) / (current.1 - previous.1);
+            clipped.push((previous.0 + fraction * (current.0 - previous.0), rect.y));
+        }
+        if inside { clipped.push(current); }
+        previous = current;
+    }
+    if clipped.len() < 3 { return; }
+    let points: Vec<_> = clipped.iter().map(|&(x, y)| point(px(origin.0 + x), px(origin.1 + y))).collect();
+    let mut path = PathBuilder::fill();
+    path.add_polygon(&points, true);
+    if let Ok(path) = path.build() { window.paint_path(path, gold); }
+}
+
+/// A static hourglass. An unknown share is shown as an empty glass with a muted dashed line.
+pub fn hourglass(t: &Tokens, share_left: Option<f32>, ink: Hsla, side: f32) -> impl IntoElement {
+    let g = hourglass_geometry(side);
+    let (gold, muted) = (t.gold, t.muted);
+    let side = if side.is_finite() { side.max(0.0) } else { 0.0 };
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let b = Box2::of(bounds);
+        let origin = (b.x, b.y);
+        if let Some(share) = share_left {
+            let (upper, lower) = g.sand_rects(share);
+            paint_sand(window, origin, &g.upper, upper, gold);
+            paint_sand(window, origin, &g.lower, lower, gold);
+        } else {
+            for (a, z) in [(0.38, 0.43), (0.47, 0.53), (0.57, 0.62)] {
+                stroke(window, &[point(px(b.x + a * side), px(b.y + 0.75 * side)), point(px(b.x + z * side), px(b.y + 0.75 * side))], false, 1.0, muted.opacity(0.4));
+            }
+        }
+        for bulb in [&g.upper, &g.lower] {
+            let points: Vec<_> = bulb.iter().map(|&(x, y)| point(px(b.x + x), px(b.y + y))).collect();
+            stroke(window, &points, true, 1.4, ink);
+        }
+        for y in [0.14, 0.86] {
+            stroke(window, &[point(px(b.x + 0.22 * side), px(b.y + y * side)), point(px(b.x + 0.78 * side), px(b.y + y * side))], false, 1.4, ink);
+        }
+        dot(window, b.x + g.neck.0, b.y + g.neck.1, 0.7, ink);
+    }).flex_none().size(px(side))
+}
+
+pub fn raised_card_shadows(t: &Tokens, lift: f32, selected: f32) -> Vec<BoxShadow> {
+    let mut shadows = lift_shadow(t, lift);
+    shadows.extend(selection_glow(t, selected));
+    shadows
+}
+
+pub fn raised_card(t: &Tokens, lift: f32, selected: f32) -> Div {
+    div().bg(t.raised).border_1().border_color(t.border).rounded(RADIUS).shadow(raised_card_shadows(t, lift, selected))
+}
+
+pub fn empty_state(t: &Tokens, title: SharedString, line: SharedString) -> Div {
+    let d = Density::Comfortable;
+    frame(t, t.border, t.surface).flex().flex_col().items_center().justify_center()
+        .text_center().p(space(d, Step::Xl)).gap(space(d, Step::Sm))
+        .child(div().text_size(font(d, TypeSize::Title)).text_color(t.text).child(title))
+        .child(div().text_size(font(d, TypeSize::Body)).text_color(t.muted).child(line))
+}
+
+pub fn stale_note(t: &Tokens, text: SharedString) -> Div {
+    let d = Density::Comfortable;
+    let color = t.review;
+    let side = space(d, Step::Xs);
+    div().flex().items_center().gap(space(d, Step::Sm)).text_size(font(d, TypeSize::Caption)).text_color(color)
+        .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let b = Box2::of(bounds);
+            dot(window, b.x + b.w / 2.0, b.y + b.h / 2.0, b.w.min(b.h) / 2.0, color);
+        }).size(side).flex_none())
+        .child(div().truncate().child(text))
 }
 
 #[cfg(test)]

@@ -253,6 +253,32 @@ impl Settling for Tween {
     }
 }
 
+/// Independent glow tweens keyed by the items they illuminate.
+pub struct Glows<K: Eq + Hash + Clone> {
+    tweens: HashMap<K, Tween>,
+    pace: Pace,
+}
+
+impl<K: Eq + Hash + Clone> Glows<K> {
+    pub fn new(pace: Pace) -> Self {
+        Self { tweens: HashMap::new(), pace }
+    }
+
+    pub fn set(&mut self, key: &K, target: f32, now: Instant, reduce: bool) {
+        self.tweens.entry(key.clone())
+            .or_insert_with(|| Tween::rest(0.0, self.pace, Curve::EaseOut))
+            .set(target, now, reduce);
+    }
+
+    pub fn value(&self, key: &K, driver: &mut Driver) -> f32 {
+        self.tweens.get(key).map_or(0.0, |tween| driver.value(tween))
+    }
+
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.tweens.retain(|key, _| keep(key));
+    }
+}
+
 /// Something that appears and leaves, such as an overlay: it opens with the soft spring over
 /// [`Pace::Open`] and closes quickly over [`Pace::Close`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -506,6 +532,50 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn glows_do_not_restart_and_reverse_continuously() {
+        let start = Instant::now();
+        let pace = Pace::Glow;
+        let mut glows = Glows::new(pace);
+        let key = "item";
+        glows.set(&key, 1.0, start, false);
+        let middle = start + pace.duration() / 2;
+        let mut driver = Driver::at(middle, false);
+        let before = glows.value(&key, &mut driver);
+        assert!(before > 0.0 && before < 1.0);
+        assert!(driver.wants_frame()); // Negative control: a moving glow asks for frames.
+        glows.set(&key, 1.0, middle, false);
+        let later = start + pace.duration() * 3 / 4;
+        let actual = glows.value(&key, &mut Driver::at(later, false));
+        let mut uninterrupted = Glows::new(pace);
+        uninterrupted.set(&key, 1.0, start, false);
+        assert_eq!(actual, uninterrupted.value(&key, &mut Driver::at(later, false)));
+        glows.set(&key, 0.0, middle, false);
+        assert_eq!(glows.value(&key, &mut Driver::at(middle, false)), before);
+        let mut end = Driver::at(middle + pace.duration(), false);
+        assert_eq!(glows.value(&key, &mut end), 0.0);
+        assert!(!end.wants_frame());
+    }
+
+    #[test]
+    fn glows_reduce_unknown_and_retain() {
+        let now = Instant::now();
+        let mut glows = Glows::new(Pace::Glow);
+        let mut unknown = Driver::at(now, false);
+        assert_eq!(glows.value(&"missing", &mut unknown), 0.0);
+        assert!(!unknown.wants_frame());
+        glows.set(&"kept", 1.0, now, true);
+        glows.set(&"removed", 1.0, now, true);
+        let mut reduced = Driver::at(now, true);
+        assert_eq!(glows.value(&"kept", &mut reduced), 1.0);
+        assert!(!reduced.wants_frame());
+        // Reduced changes remain at rest even if motion is later re-enabled.
+        assert_eq!(glows.value(&"kept", &mut Driver::at(now, false)), 1.0);
+        glows.retain(|key| *key == "kept");
+        assert_eq!(glows.value(&"removed", &mut Driver::at(now, false)), 0.0);
+        assert_eq!(glows.value(&"kept", &mut Driver::at(now, false)), 1.0);
+    }
 
     #[test]
     fn pending_views_share_a_window_chain() {

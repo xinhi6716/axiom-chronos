@@ -70,6 +70,13 @@ pub struct Record {
     pub files: Vec<String>,
     pub wish: String,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryPriorRow {
+    pub body: String,
+    pub summary: String,
+    pub corrected: Option<f64>,
+    pub confirmed: f64,
+}
 pub struct Memory {
     home: PathBuf,
     root: PathBuf,
@@ -328,6 +335,30 @@ impl Memory {
         tx.commit().map_err(err)?;
         Ok(json!({"status":"completed", "id":id, "error":null}))
     }
+    pub fn prior(&self, id: i64) -> Res<MemoryPriorRow> {
+        let db = self.connect()?;
+        let mut stmt = db.prepare("SELECT * FROM entries WHERE id = ?").map_err(err)?;
+        let mut rows = stmt.query([id]).map_err(err)?;
+        let row = rows.next().map_err(err)?
+            .ok_or_else(|| Failure::new("not_found", format!("no memory entry {id}")))?;
+        Ok(MemoryPriorRow {
+            body: row.get("body").map_err(err)?,
+            summary: row.get("summary").map_err(err)?,
+            corrected: row.get("corrected").map_err(err)?,
+            confirmed: confirmed(row)?,
+        })
+    }
+    pub fn restore(&self, id: i64, prior: &MemoryPriorRow) -> Res<()> {
+        let mut db = self.connect()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
+        if tx.execute(
+            "UPDATE entries SET body = ?, summary = ?, corrected = ?, confirmed = ? WHERE id = ?",
+            params![prior.body, prior.summary, prior.corrected, prior.confirmed, id],
+        ).map_err(err)? == 0 {
+            return Err(Failure::new("not_found", format!("no memory entry {id}")));
+        }
+        tx.commit().map_err(err)
+    }
     /// Replaces the entry's text: `text` becomes the body and its first line the
     /// summary, so neither search nor briefs can surface the old text. The title is kept.
     pub fn correct(&self, id: i64, text: &str) -> Res<Value> {
@@ -493,6 +524,48 @@ fn confirmed(row: &Row<'_>) -> Res<f64> {
         .get::<_, Option<f64>>("confirmed")
         .map_err(err)?
         .unwrap_or(row.get::<_, f64>("created").map_err(err)?))
+}
+
+#[cfg(test)]
+mod prior_tests {
+    use super::*;
+
+    #[test]
+    fn prior_and_restore_preserve_all_fields_and_report_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("a.py"), "original").unwrap();
+        let store = home.join("orchestrate/p");
+        std::fs::create_dir_all(&store).unwrap();
+        let brief = store.join("a.md");
+        std::fs::write(&brief, "GOAL test\nSCOPE a.py\nVERIFY test\n").unwrap();
+        std::fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu\tx\tverified\t\t\t\t{}\n", brief.display())).unwrap();
+        let memory = Memory::open(&home).unwrap();
+        let id = memory.record(&Record {
+            project: "p".into(), project_dir: project.to_string_lossy().into(), unit: "u".into(),
+            title: "title".into(), summary: "old summary".into(), body: "old body".into(),
+            symbols: vec![], files: vec!["a.py".into()], wish: "wish".into(),
+        }).unwrap()["id"].as_i64().unwrap();
+        let original = memory.prior(id).unwrap();
+        assert_eq!(original.corrected, None);
+        memory.correct(id, "first correction").unwrap();
+        let corrected = memory.prior(id).unwrap();
+        assert!(corrected.corrected.is_some());
+        memory.correct(id, "second correction").unwrap();
+        memory.restore(id, &corrected).unwrap();
+        assert_eq!(memory.prior(id).unwrap(), corrected);
+        memory.restore(id, &original).unwrap();
+        let listed = memory.list(None, 10).unwrap();
+        let entry = &listed["entries"][0];
+        assert_eq!(entry["body"], "old body");
+        assert_eq!(entry["summary"], "old summary");
+        assert!(entry["corrected"].is_null());
+        assert_eq!(entry["confirmed"].as_f64(), Some(original.confirmed));
+        assert_eq!(memory.prior(-1).unwrap_err().kind, "not_found");
+        assert_eq!(memory.restore(-1, &original).unwrap_err().kind, "not_found");
+    }
 }
 fn file_set(files: &[Value]) -> Res<BTreeSet<(&str, &str)>> {
     files

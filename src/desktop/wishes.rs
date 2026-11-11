@@ -1,9 +1,14 @@
 //! Every run, newest first: filter, search, open. Filtering and sorting are pure and sit apart from drawing.
 use super::i18n::{tr, Lang, Table};
 use super::model::*;
-use super::{ornament, theme};
+use super::{motion, ornament, palette, settings, theme};
+use super::theme::{Step, TypeSize};
+use super::motion::{Driver, Pace};
+mod logic;
+#[cfg(test)] mod accept;
 use super::theme::Tokened as _;
 use gpui_kit::base::actions::{SelectFirst, SelectLast, SelectPageDown, SelectPageUp};
+use gpui_kit::base::actions::{Cancel, Confirm};
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{
@@ -11,7 +16,7 @@ use gpui_kit::component::empty::{
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown};
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -21,12 +26,17 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cmp::Reverse;
-use std::path::PathBuf;
+use std::rc::Rc;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use gpui_kit::base::ElementExt as _;
 
 gpui_kit::actions!(chronos_lists, [FocusSearch]);
 
 const T: Table = &[
     ("Wishes", "願望"),
+    ("Loading wishes", "正在載入願望"),
+    ("Try again", "再試一次"),
     ("All", "全部"),
     ("Status", "狀態"),
     ("Project", "專案"),
@@ -215,9 +225,7 @@ fn index_path(groups: &[RunGroup], index: usize) -> Option<IndexPath> {
 }
 
 fn selected_index(groups: &[RunGroup], runs: &[Run], session: Option<&SharedString>) -> Option<usize> {
-    let indices = groups.iter().flat_map(|group| group.runs.iter().copied());
-    session.and_then(|session| indices.clone().find(|&i| runs[i].session == *session))
-        .or_else(|| indices.into_iter().next())
+    logic::selected_index(groups, runs, session)
 }
 
 /// The start time as the interface language writes it; anything unreadable stays as written.
@@ -337,11 +345,8 @@ fn select_ix(list: &Entity<ListState<RunList>>, ix: IndexPath, window: &mut Wind
 }
 
 const PAGE_ROWS: usize = 10;
-const ROW_HEIGHT: Pixels = px(60.);
-const PROJECT_WIDTH: Pixels = px(132.);
-const COST_WIDTH: Pixels = px(72.);
-const STARTED_WIDTH: Pixels = px(104.);
-const MENU_WIDTH: Pixels = px(24.);
+fn row_height(d: theme::Density) -> Pixels { theme::row_height(d) + theme::space(d, Step::Xxl) }
+fn column_width(d: theme::Density, n: f32) -> Pixels { theme::space(d, Step::Xxl) * n }
 
 fn cell(width: Pixels) -> Div {
     div().flex_none().w(width).min_w_0()
@@ -357,53 +362,17 @@ fn glyph_state(status: RunStatus, verified_end: bool) -> UnitState {
     }
 }
 
-#[derive(Clone)]
-struct RowActions {
-    state: Entity<AppState>,
-    index: usize,
-    status: RunStatus,
-    session: SharedString,
-    cwd: Option<PathBuf>,
-}
-
-impl RowActions {
-    fn add_to(&self, menu: PopupMenu, cx: &mut Context<PopupMenu>) -> PopupMenu {
-        let open_folder = self.cwd.clone().filter(|cwd| cwd.is_dir());
-        menu.min_w(px(200.))
-            .item({
-                let actions = self.clone();
-                PopupMenuItem::new(tr(cx, T, "Resume"))
-                    .icon(IconName::Play)
-                    .disabled(!can_resume(self.status))
-                    .on_click(move |_, _, cx| {
-                        actions.state.update(cx, |state, cx| {
-                            state.open_run(actions.index, cx);
-                            state.resume_current(None, cx);
-                        });
-                    })
-            })
-            .item(
-                PopupMenuItem::new(tr(cx, T, "Open folder"))
-                    .icon(IconName::FolderOpen)
-                    .disabled(open_folder.is_none())
-                    .on_click(move |_, _, cx| {
-                        if let Some(cwd) = &open_folder {
-                            cx.open_with_system(cwd);
-                        }
-                    }),
-            )
-            .item({
-                let session = self.session.clone();
-                PopupMenuItem::new(tr(cx, T, "Copy session id"))
-                    .icon(IconName::Copy)
-                    .disabled(session.is_empty())
-                    .on_click(move |_, window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(session.to_string()));
-                        let done = tr(cx, T, "Session id copied");
-                        window.push_notification(Notification::success(done), cx);
-                    })
-            })
-    }
+fn menu_runner(state: Entity<AppState>) -> Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> {
+    Rc::new(move |action, target, window, cx| {
+        let effect = { let state = state.read(cx); if !state.menu_allowed(&target, action) { return; } logic::resolve(&state.runs, &target, action) };
+        match effect {
+            Some(logic::RowEffect::Open(index)) => state.update(cx, |state, cx| state.open_run(index, cx)),
+            Some(logic::RowEffect::Resume(index)) => state.update(cx, |state, cx| { state.open_run(index, cx); state.resume_current(None, cx); }),
+            Some(logic::RowEffect::Folder(path)) if path.is_dir() => cx.open_with_system(&path),
+            Some(logic::RowEffect::Copy(session)) => { cx.write_to_clipboard(ClipboardItem::new_string(session)); window.push_notification(Notification::success(tr(cx, T, "Session id copied")), cx); },
+            _ => {}
+        }
+    })
 }
 
 struct RunList {
@@ -412,6 +381,11 @@ struct RunList {
     selected: Option<IndexPath>,
     selected_session: Option<SharedString>,
     focus: Option<FocusHandle>,
+    hover_glows: motion::Glows<SharedString>,
+    select_glows: motion::Glows<SharedString>,
+    hovered: HashSet<SharedString>,
+    bounds: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
+    saving: bool,
 }
 
 impl ListDelegate for RunList {
@@ -428,7 +402,7 @@ impl ListDelegate for RunList {
     fn render_section_header(&mut self, section: usize, _: &mut Window, cx: &mut Context<ListState<Self>>) -> Option<impl IntoElement> {
         let group = self.groups.get(section)?;
         let label = format!("{} {}", tr(cx, T, group.status.label()), group.runs.len());
-        Some(h_flex().h(px(40.)).items_center().child(ornament::section_label(&cx.tokens(), &label)))
+        Some(h_flex().h(theme::row_height(theme::density(cx))).items_center().child(ornament::section_label(&cx.tokens(), &label)))
     }
 
     fn render_item(
@@ -456,143 +430,120 @@ impl ListDelegate for RunList {
         let started = started_label(&run.started, lang);
         let cost = run.usage.total_usd;
         let warning = (!run.warnings.is_empty()).then(|| run.warnings.join("\n"));
-        let actions = RowActions {
-            state: self.state.clone(),
-            index,
-            status,
-            session: run.session.clone(),
-            cwd: run.cwd.clone(),
-        };
+        let session = run.session.clone();
+        let target = MenuTarget::Run(session.clone());
+        let state = self.state.clone();
+        let runner = menu_runner(state.clone());
+        let context_target = target.clone();
+        let context_state = state.clone();
+        let context_runner = runner.clone();
+        let d = theme::density(cx);
+        let reduce = cx.reduce_motion();
+        let hovered = self.hovered.contains(&session);
+        let mut frames = Driver::new(reduce, cx);
+        self.hover_glows.set(&session, if hovered { 1.0 } else { 0.0 }, frames.now(), reduce);
+        self.select_glows.set(&session, if selected { 1.0 } else { 0.0 }, frames.now(), reduce);
+        let (lift, glow, ring) = logic::levels(selected, hovered, focused, self.hover_glows.value(&session, &mut frames), self.select_glows.value(&session, &mut frames), reduce);
+        frames.finish(window);
         let name = format!("{} {project} {wish}", tr(cx, T, status.label()));
-        let context_actions = actions.clone();
+        let hover_session = session.clone();
+        let bounds_session = session.clone();
+        let bounds = self.bounds.clone();
+        let meta = logic::row_meta(run, &started);
+        let h = row_height(d);
 
         Some(
             ListItem::new(ix)
                 .accessibility_label(name)
                 // The enclosing List handles selection; suppress ListItem's row-wide fills.
                 .disabled(true)
-                .h(ROW_HEIGHT)
-                .py_0()
-                .px_0()
+                .h(h)
+                .py(theme::space(d, Step::Xs))
+                .px(theme::space(d, Step::Xs))
                 .cursor_pointer()
                 .child(
-                    h_flex()
-                        .id(("wish-row", index))
-                        .relative()
-                        .w_full()
-                        .h(ROW_HEIGHT - px(6.))
-                        .mb(px(6.))
-                        .rounded(px(8.))
-                        .bg(t.surface)
-                        .text_color(t.text)
-                        .border_1()
-                        .border_color(if selected { t.gold } else { t.border })
-                        .hover(|style| style.shadow(ornament::gold_glow(&t, 0.7)))
-                        .px_3()
-                        .gap_3()
-                        .context_menu(move |menu, _, cx| context_actions.add_to(menu, cx))
-                        .when(focused, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_2()
-                                    .bottom_2()
-                                    .w(px(3.))
-                                    .rounded_full()
-                                    .bg(t.gold),
-                            )
-                        })
-                        .child(ornament::glyph(glyph_state(status, verified_end), 20.0, t.outcome(status, verified_end), 0.0))
-                        .when_some(ornament::progress_ring(&t, verified, total, 24.0), |this, ring| {
-                            let count: SharedString = progress_label(verified, total).into();
-                            this.child(
-                                h_flex().flex_none().gap_1p5()
-                                    .child(div().id(("wish-progress-ring", index)).child(ring).test_support())
-                                    .child(
-                                        div().id(("wish-progress-count", index))
-                                            .text_size(px(12.0)).text_color(t.muted)
-                                            .font_features(FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])))
-                                            .role(Role::Label).aria_label(count.clone())
-                                            .child(count.clone().test_text(count))
-                                            .test_support(),
-                                    ),
-                            )
-                        })
+                    // Keep popup state outside the card's changing array-index scope.
+                    div().id(session).size_full()
+                        .context_menu(move |menu, _, cx| palette::menu::context_menu(menu, context_target.clone(), context_state.clone(), context_runner.clone(), cx))
                         .child(
-                            cell(PROJECT_WIDTH)
-                                .id(("wish-project", index))
-                                .px_2()
-                                .py_0p5()
-                                .rounded(px(6.))
-                                .bg(t.raised)
-                                .text_sm()
-                                .text_color(t.muted)
-                                .truncate()
-                                .child(project)
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(place.clone()).build(window, cx)
-                                }),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1p5()
+                            ornament::raised_card(&t, lift, glow)
+                                .id(("wish-row", index))
+                                .flex().items_center()
+                                .relative().top(-theme::space(d, Step::Xs) * (lift * 0.5)).w_full().h(h - theme::space(d, Step::Xs) * 2.0)
+                                .text_color(t.text)
+                                .shadow({ let mut shadows = ornament::raised_card_shadows(&t, lift, glow); if ring { shadows.extend(theme::focus_ring(&t)); } shadows })
+                                .px(theme::space(d, Step::Md)).gap(theme::space(d, Step::Sm))
+                                .on_prepaint(move |rect, _, _| { bounds.borrow_mut().insert(bounds_session.clone(), rect); })
+                                .on_hover(cx.listener(move |list, inside: &bool, _, cx| { if *inside { list.delegate_mut().hovered.insert(hover_session.clone()); } else { list.delegate_mut().hovered.remove(&hover_session); } cx.notify(); }))
+                                .child(ornament::glyph(glyph_state(status, verified_end), f32::from(theme::font(d, TypeSize::Heading)), t.outcome(status, verified_end), 0.0))
+                                .child(cell(column_width(d, 3.0)).when_some(ornament::progress_ring(&t, verified, total, f32::from(theme::space(d, Step::Xl))), |this, ring| {
+                                    let count: SharedString = progress_label(verified, total).into();
+                                    this.child(
+                                        h_flex().flex_none().gap(theme::space(d, Step::Xs))
+                                            .child(div().id(("wish-progress-ring", index)).child(ring).test_support())
+                                            .child(
+                                                div().id(("wish-progress-count", index))
+                                                    .text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted)
+                                                    .font_features(FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])))
+                                                    .role(Role::Label).aria_label(count.clone())
+                                                    .child(count.clone().test_text(count))
+                                                    .test_support(),
+                                            ),
+                                    )
+                                }))
                                 .child(
-                                    div()
-                                        .id(("wish-text", index))
-                                        .min_w_0()
+                                    cell(column_width(d, 4.0))
+                                        .id(("wish-project", index))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded(theme::RADIUS_SMALL)
+                                        .bg(t.surface)
+                                        .text_size(theme::font(d, TypeSize::Body))
+                                        .text_color(t.muted)
                                         .truncate()
-                                        .text_sm()
-                                        .text_color(t.text)
-                                        .child(wish.clone())
+                                        .child(project)
                                         .tooltip(move |window, cx| {
-                                            Tooltip::new(full_wish.clone()).build(window, cx)
+                                            Tooltip::new(place.clone()).build(window, cx)
                                         }),
                                 )
-                                .when_some(warning, |this, warning| {
-                                    this.child(
-                                        div()
-                                            .id(("wish-warning", index))
-                                            .flex_none()
-                                            .text_color(t.review)
-                                            .child(
-                                                Icon::new(IconName::TriangleAlert).size(px(14.)),
-                                            )
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(warning.clone()).build(window, cx)
+                                .child(
+                                    v_flex().flex_1().min_w_0().gap(theme::space(d, Step::Xs))
+                                        .child(h_flex().min_w_0().gap(theme::space(d, Step::Xs))
+                                            .child(div().id(("wish-text", index)).min_w_0().truncate().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(wish.clone())
+                                                .tooltip(move |window, cx| Tooltip::new(full_wish.clone()).build(window, cx)))
+                                            .when_some(warning, |this, warning| this.child(div().id(("wish-warning", index)).flex_none().text_color(t.review)
+                                                .child(Icon::new(IconName::TriangleAlert).size(theme::font(d, TypeSize::Body)))
+                                                .tooltip(move |window, cx| Tooltip::new(warning.clone()).build(window, cx)))))
+                                        .child(div().w_full().truncate().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(meta)),
+                                )
+                                .child(
+                                    cell(column_width(d, 2.25))
+                                        .text_right()
+                                        .text_size(theme::font(d, TypeSize::Body))
+                                        .text_color(t.muted)
+                                        .child(cost_label(cost)),
+                                )
+                                .child(
+                                    cell(column_width(d, 3.25))
+                                        .text_right()
+                                        .text_size(theme::font(d, TypeSize::Caption))
+                                        .text_color(t.muted)
+                                        .truncate()
+                                        .child(started.clone()),
+                                )
+                                .child(
+                                    cell(theme::TARGET_MIN).child(
+                                        Button::new(("wish-menu", index))
+                                            .ghost()
+                                            .small()
+                                            .icon(IconName::Ellipsis)
+                                            .tab_stop(selected)
+                                            .accessibility_label(tr(cx, T, "More actions"))
+                                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                                                palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx)
                                             }),
-                                    )
-                                }),
-                        )
-                        .child(
-                            cell(COST_WIDTH)
-                                .text_right()
-                                .text_sm()
-                                .text_color(t.muted)
-                                .child(cost_label(cost)),
-                        )
-                        .child(
-                            cell(STARTED_WIDTH)
-                                .text_right()
-                                .text_xs()
-                                .text_color(t.muted)
-                                .truncate()
-                                .child(started),
-                        )
-                        .child(
-                            cell(MENU_WIDTH).child(
-                                Button::new(("wish-menu", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Ellipsis)
-                                    .tab_stop(selected)
-                                    .accessibility_label(tr(cx, T, "More actions"))
-                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                                        actions.add_to(menu, cx)
-                                    }),
-                            ),
+                                    ),
+                                ),
                         ),
                 ),
         )
@@ -604,11 +555,18 @@ impl ListDelegate for RunList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) {
+        let previous = self.selected_session.clone();
         self.selected = ix;
         self.selected_session = ix
             .and_then(|ix| self.groups.get(ix.section)?.runs.get(ix.row))
             .and_then(|&index| self.state.read(cx).runs.get(index))
             .map(|run| run.session.clone());
+        if self.saving && previous != self.selected_session {
+            let selected = self.selected_session.as_ref().map(ToString::to_string);
+            if settings::view_memory(cx, "wishes").selected != selected {
+                settings::remember_view("wishes", |v| v.selected = selected, cx);
+            }
+        }
     }
 
     fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<ListState<Self>>) {
@@ -628,6 +586,15 @@ pub struct WishesView {
     terms: Vec<String>,
     counts: [usize; 4],
     on_screen: bool,
+    restore: logic::Restore,
+    saved_selected: Option<String>,
+    saved_scroll: f32,
+    last_scroll: Rc<Cell<f32>>,
+    scroll_ready: Rc<Cell<bool>>,
+    bounds: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    painted_scroll: Rc<Cell<f32>>,
+    restore_pending: Rc<Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -639,12 +606,17 @@ impl WishesView {
         bind_list_keys("WishList", cx);
         cx.bind_keys([KeyBinding::new("ctrl-f", FocusSearch, Some("WishesScreen"))]);
 
+        let memory = settings::view_memory(cx, "wishes");
+        if memory.sort.is_some() { settings::remember_view("wishes", |v| v.sort = None, cx); }
+        let (filter, query) = logic::decode(memory.filter.as_deref());
+        let bounds = Rc::new(RefCell::new(HashMap::new()));
         let placeholder = tr(cx, T, "Search wishes and projects");
         let search = cx.new(|cx| {
             InputState::new(window, cx)
-                .clean_on_escape()
                 .placeholder(placeholder)
+                .clean_on_escape()
         });
+        search.update(cx, |input, cx| input.set_value(query.clone(), window, cx));
         let list = cx.new(|cx| {
             ListState::new(
                 RunList {
@@ -653,6 +625,11 @@ impl WishesView {
                     selected: None,
                     selected_session: None,
                     focus: None,
+                    hover_glows: motion::Glows::new(Pace::Glow),
+                    select_glows: motion::Glows::new(Pace::Glow),
+                    hovered: HashSet::new(),
+                    bounds: bounds.clone(),
+                    saving: false,
                 },
                 window,
                 cx,
@@ -671,14 +648,23 @@ impl WishesView {
             search,
             placeholder,
             list,
-            filter: Filter::All,
-            query: SharedString::default(),
-            terms: Vec::new(),
+            filter,
+            terms: search_terms(&query),
+            query: query.into(),
             counts: [0; 4],
             on_screen,
+            restore: logic::Restore::default(),
+            saved_selected: memory.selected,
+            saved_scroll: logic::scroll(memory.scroll),
+            last_scroll: Rc::new(Cell::new(logic::scroll(memory.scroll))),
+            scroll_ready: Rc::new(Cell::new(false)),
+            bounds,
+            viewport: Rc::new(Cell::new(Bounds::default())),
+            painted_scroll: Rc::new(Cell::new(0.0)),
+            restore_pending: Rc::new(Cell::new(false)),
             _subscriptions,
         };
-        this.apply(true, window, cx);
+        this.apply(false, window, cx);
         if on_screen {
             this.focus_list(window, cx);
         }
@@ -713,9 +699,13 @@ impl WishesView {
             // The input reports Change only for committed text, so a word still being composed in an IME never filters.
             InputEvent::Change => {
                 let value = input.read(cx).value();
-                if value != self.query {
-                    self.terms = search_terms(&value);
-                    self.query = value;
+                let capped: String = value.chars().take(120).collect();
+                if value.as_ref() != capped { self.search.update(cx, |search, cx| search.set_value(capped.clone(), window, cx)); }
+                if logic::cancels_restore(self.filter, self.filter, &self.query, &capped) {
+                    self.terms = search_terms(&capped);
+                    self.query = capped.into();
+                    self.restore.cancel(); self.restore_pending.set(false); self.scroll_ready.set(true);
+                    self.remember_filter(cx);
                     self.apply(true, window, cx);
                 }
             }
@@ -725,32 +715,89 @@ impl WishesView {
     }
 
     fn apply(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let runs = &self.state.read(cx).runs;
+        let state = self.state.read(cx);
+        let runs = &state.runs;
+        let panel = panel_state(&state.feeds.runs, runs.is_empty());
         self.counts = filter_counts(runs, &self.terms);
         let visible = visible_runs(runs, self.filter, &self.terms, this_month());
         let groups = group_runs(runs, &visible);
-        let session = if reset { None } else { self.list.read(cx).delegate().selected_session.as_ref() };
-        let selected = selected_index(&groups, runs, session).and_then(|index| index_path(&groups, index));
+        let restoring = self.restore.take(&panel);
+        let old = self.list.read(cx).delegate().selected_session.clone();
+        let desired = if restoring { self.saved_selected.as_ref().map(|s| SharedString::from(s.clone())) } else if reset { None } else { old };
+        let selected = selected_index(&groups, runs, if reset { None } else { desired.as_ref() })
+            .and_then(|index| index_path(&groups, index));
+        let valid: HashSet<_> = runs.iter().map(|r| r.session.clone()).collect();
+        let next_session = selected.and_then(|ix| groups.get(ix.section)?.runs.get(ix.row)).and_then(|&i| runs.get(i)).map(|run| run.session.clone());
+        let restored = restoring && desired.is_some() && desired == next_session;
+        let previous = self.list.read(cx).delegate().selected_session.clone();
         self.list.update(cx, |list, cx| {
-            list.delegate_mut().groups = groups;
+            let delegate = list.delegate_mut();
+            delegate.saving = false;
+            delegate.groups = groups;
+            delegate.hover_glows.retain(|key| valid.contains(key));
+            delegate.select_glows.retain(|key| valid.contains(key));
+            delegate.hovered.retain(|key| valid.contains(key));
             list.set_selected_index(selected, window, cx);
-            if reset && selected.is_some() {
-                list.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx);
-            }
+            list.delegate_mut().saving = self.restore.done();
+            if reset && selected.is_some() { list.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx); }
             cx.notify();
         });
+        if !reset && !restoring && self.restore.done() && previous != next_session {
+            let selected = next_session.as_ref().map(ToString::to_string);
+            if settings::view_memory(cx, "wishes").selected != selected { settings::remember_view("wishes", |v| v.selected = selected, cx); }
+        }
+        if restoring {
+            if !restored {
+                if self.saved_selected.take().is_some() { settings::remember_view("wishes", |v| v.selected = None, cx); }
+                self.scroll_ready.set(true);
+            } else {
+                let handle = self.list.read(cx).scroll_handle().base_handle().clone();
+                let offset = self.saved_scroll;
+                let ready = self.scroll_ready.clone();
+                let pending = self.restore_pending.clone();
+                pending.set(true);
+                cx.on_next_frame(window, move |_, window, cx| {
+                    cx.on_next_frame(window, move |this, _, cx| {
+                        if !pending.replace(false) { return; }
+                        if this.list.read(cx).delegate().selected_session != next_session { ready.set(true); return; }
+                        let mut point = handle.offset(); point.y = -px(offset); handle.set_offset(point);
+                        ready.set(true); cx.notify();
+                    });
+                });
+            }
+        }
+        if reset {
+            let selected = self.list.read(cx).delegate().selected_session.as_ref().map(ToString::to_string);
+            if settings::view_memory(cx, "wishes").selected != selected { settings::remember_view("wishes", |v| v.selected = selected, cx); }
+        }
         cx.notify();
     }
 
+    fn remember_filter(&self, cx: &mut Context<Self>) {
+        let encoded = logic::encode(self.filter, &self.query);
+        let memory = settings::view_memory(cx, "wishes");
+        if memory.filter.as_deref() != Some(&encoded) || memory.sort.is_some() {
+            settings::remember_view("wishes", |v| { v.filter = Some(encoded); v.sort = None; }, cx);
+        }
+    }
+
     fn set_filter(&mut self, filter: Filter, window: &mut Window, cx: &mut Context<Self>) {
+        if !logic::cancels_restore(self.filter, filter, &self.query, &self.query) { return; }
         self.filter = filter;
+        self.restore.cancel(); self.restore_pending.set(false); self.scroll_ready.set(true);
+        self.remember_filter(cx);
         self.apply(true, window, cx);
     }
 
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !logic::cancels_restore(self.filter, self.filter, &self.query, "") {
+            self.focus_search(&FocusSearch, window, cx);
+            return;
+        }
         self.search.update(cx, |search, cx| search.set_value("", window, cx));
         self.query = SharedString::default();
         self.terms.clear();
+        self.restore.cancel(); self.restore_pending.set(false); self.scroll_ready.set(true); self.remember_filter(cx);
         self.apply(true, window, cx);
         self.focus_search(&FocusSearch, window, cx);
     }
@@ -769,10 +816,11 @@ impl WishesView {
 
     fn filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         h_flex()
-            .gap_1()
-            .p_0p5()
-            .rounded(px(8.))
+            .gap(theme::space(d, Step::Xs))
+            .p(theme::space(d, Step::Xs))
+            .rounded(theme::RADIUS)
             .bg(t.surface)
             .border_1()
             .border_color(t.border)
@@ -788,7 +836,7 @@ impl WishesView {
                         .label(tr(cx, T, filter.label()))
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(theme::font(d, TypeSize::Caption))
                                 .text_color(if active { t.gold } else { t.muted })
                                 .child(count.to_string()),
                         )
@@ -850,6 +898,42 @@ impl WishesView {
         }
     }
 
+    fn cursor_menu_position(&self, session: &SharedString, cx: &App) -> Option<Point<Pixels>> {
+        let scroll = -f32::from(self.list.read(cx).scroll_handle().base_handle().offset().y);
+        if (scroll - self.painted_scroll.get()).abs() > 0.5 { return None; }
+        let bounds = self.bounds.borrow().get(session).copied()?.intersect(&self.viewport.get());
+        (bounds.size.width > px(0.) && bounds.size.height > px(0.)).then(|| point(bounds.origin.x + bounds.size.width / 2., bounds.origin.y + bounds.size.height / 2.))
+    }
+
+    fn dispatch_cursor_menu(&mut self, session: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list.read(cx).focus_handle(cx).is_focused(window) || self.list.read(cx).delegate().selected_session.as_ref() != Some(&session) { return; }
+        let Some(position) = self.cursor_menu_position(&session, cx) else { return };
+        window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Right, position, click_count: 1, ..Default::default() }), cx);
+        window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Right, position, click_count: 1, ..Default::default() }), cx);
+    }
+
+    fn open_cursor_menu(&mut self, _: &palette::ContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list.read(cx).focus_handle(cx).is_focused(window) { return; }
+        let Some(session) = self.list.read(cx).delegate().selected_session.clone() else { return };
+        cx.stop_propagation();
+        if self.cursor_menu_position(&session, cx).is_some() {
+            cx.defer_in(window, move |this, window, cx| this.dispatch_cursor_menu(session, window, cx));
+        } else {
+            self.list.update(cx, |list, cx| list.scroll_to_selected_item(window, cx));
+            cx.on_next_frame(window, move |_, window, cx| {
+                cx.on_next_frame(window, move |this, window, cx| this.dispatch_cursor_menu(session, window, cx));
+            });
+        }
+    }
+
+    fn retry_note(&self, message: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        h_flex().w_full().items_center().gap(theme::space(theme::density(cx), Step::Sm))
+            .child(ornament::stale_note(&cx.tokens(), message))
+            .child(Button::new("wishes-retry").ghost().small().label(tr(cx, T, "Try again"))
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.retry(FeedKind::Runs, cx))))
+    }
+
     fn move_selection(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let delegate = self.list.read(cx).delegate();
         let current = delegate.selected.and_then(|ix| delegate.groups.get(ix.section)?.runs.get(ix.row).copied());
@@ -907,65 +991,62 @@ impl Render for WishesView {
             self.search
                 .update(cx, |search, cx| search.set_placeholder(placeholder, window, cx));
         }
-        let no_runs = self.state.read(cx).runs.is_empty();
+        let state = self.state.read(cx);
+        let no_runs = state.runs.is_empty();
+        let panel = panel_state(&state.feeds.runs, no_runs);
+        let view = logic::screen_state(&panel);
         let no_rows = self.row_count(cx) == 0;
-
-        v_flex()
-            .key_context("WishesScreen")
-            .on_action(cx.listener(Self::focus_search))
-            .size_full()
-            .min_h_0()
-            .pt_5()
-            .px_6()
-            .gap_4()
-            .child(ornament::page_title(&t, tr(cx, T, "Wishes")).id("wishes-page-title").flex_none())
-            .when(no_runs, |this| this.child(self.nothing_yet(cx)))
-            .when(!no_runs, |this| {
-                this.child(
-                    h_flex()
-                        .flex_none()
-                        .justify_between()
-                        .gap_4()
-                        .child(self.filter_bar(cx))
-                        .child(
-                            div()
-                                .w(px(280.))
-                                .flex_shrink(1.)
-                                .capture_action(cx.listener(
-                                    |this, _: &MoveDown, window, cx| {
-                                        this.focus_list(window, cx);
-                                        cx.stop_propagation();
-                                    },
-                                ))
-                                .child(
-                                    Input::new(&self.search).small().cleanable(true).prefix(
-                                        Icon::new(IconName::Search)
-                                            .size(px(14.))
-                                            .text_color(t.muted),
-                                    ),
-                                ),
-                        ),
-                )
-                .when(no_rows, |this| this.child(self.nothing_matches(cx)))
-                .when(!no_rows, |this| {
-                    this.child(
-                        v_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .child(
-                                div()
-                                    .key_context("WishList")
-                                    .on_action(cx.listener(Self::first_row))
-                                    .on_action(cx.listener(Self::last_row))
-                                    .on_action(cx.listener(Self::page_up))
-                                    .on_action(cx.listener(Self::page_down))
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(List::new(&self.list).size_full()),
-                            ),
-                    )
-                })
+        let d = theme::density(cx);
+        let handle = self.list.read(cx).scroll_handle().base_handle().clone();
+        let last = self.last_scroll.clone();
+        let ready = self.scroll_ready.clone();
+        let viewport = self.viewport.clone();
+        let painted_scroll = self.painted_scroll.clone();
+        let row_bounds = self.bounds.clone();
+        let body = v_flex().w_full().max_w(theme::READ_WIDTH * 2.0).flex_1().min_h_0().gap(theme::space(d, Step::Md))
+            .when(view == logic::ScreenState::Loading, |this| this.child(ornament::empty_state(&t, tr(cx, T, "Loading wishes").into(), "".into()).size_full()))
+            .when(matches!(view, logic::ScreenState::Failed | logic::ScreenState::Stale), |this| {
+                let message = match &panel { PanelState::Failed(message) | PanelState::Stale(message) => message.clone(), _ => unreachable!() };
+                this.child(self.retry_note(message, cx))
             })
+            .when(matches!(view, logic::ScreenState::Empty | logic::ScreenState::Ready | logic::ScreenState::Stale), |this| {
+                this.when(no_runs, |this| this.child(self.nothing_yet(cx)))
+                    .when(!no_runs, |this| this.child(h_flex().flex_none().justify_between().gap(theme::space(d, Step::Md))
+                        .child(self.filter_bar(cx))
+                        .child(div().w(column_width(d, 9.0)).flex_shrink(1.)
+                            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| { this.focus_list(window, cx); cx.stop_propagation(); }))
+                            .child(Input::new(&self.search).small().cleanable(true).prefix(Icon::new(IconName::Search).size(theme::font(d, TypeSize::Body)).text_color(t.muted)))))
+                        .when(no_rows, |this| this.child(self.nothing_matches(cx)))
+                        .when(!no_rows, |this| this.child(div().key_context("WishList")
+                            .on_action(cx.listener(Self::first_row)).on_action(cx.listener(Self::last_row))
+                            .on_action(cx.listener(Self::page_up)).on_action(cx.listener(Self::page_down))
+                            .on_action(cx.listener(Self::open_cursor_menu))
+                            // List-only guards must not swallow a descendant popup's keys.
+                            .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
+                                if this.list.read(cx).focus_handle(cx).is_focused(window) { cx.stop_propagation(); }
+                            }))
+                            .capture_action(cx.listener(|this, action: &Confirm, window, cx| {
+                                if action.secondary && this.list.read(cx).focus_handle(cx).is_focused(window) { cx.stop_propagation(); }
+                            }))
+                            .flex_1().min_h_0()
+                            // Clear before the List's row callbacks record this frame's bounds.
+                            .on_prepaint(move |bounds, _, cx| {
+                                viewport.set(bounds);
+                                row_bounds.borrow_mut().clear();
+                                painted_scroll.set(-f32::from(handle.offset().y));
+                                if ready.get() {
+                                    let value = logic::scroll(-f32::from(handle.offset().y));
+                                    if (value - last.get()).abs() > 1.0 {
+                                        last.set(value); settings::remember_view("wishes", |v| v.scroll = value, cx);
+                                    }
+                                }
+                            }).child(List::new(&self.list).size_full()))))
+            });
+        v_flex().key_context("WishesScreen").on_action(cx.listener(Self::focus_search))
+            .size_full().min_h_0().pt(theme::space(d, Step::Lg)).px(theme::space(d, Step::Xl)).gap(theme::space(d, Step::Lg))
+            .child(ornament::page_title(&t, tr(cx, T, "Wishes")).id("wishes-page-title").flex_none())
+            .child(body)
+
     }
 }
 
@@ -1159,3 +1240,5 @@ mod tests {
         assert_eq!(keys.len(), total);
     }
 }
+
+

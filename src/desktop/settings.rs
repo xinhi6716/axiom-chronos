@@ -3,6 +3,13 @@
 use super::i18n::{self, Lang};
 use super::model::{AppState, Screen};
 use super::theme;
+use super::theme::Density;
+use std::collections::BTreeMap;
+
+mod mod_types;
+pub use mod_types::*;
+#[cfg(test)]
+mod accept;
 use crate::base;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::*;
@@ -162,6 +169,13 @@ pub struct Settings {
     pub recent_projects: Vec<PathBuf>,
     /// The first-day checklist was completed once; it never comes back.
     pub first_day_done: bool,
+    pub density: Density,
+    pub mode: WindowMode,
+    pub mini_on_top: bool,
+    pub columns: Option<ColumnWidths>,
+    pub views: BTreeMap<String, ViewMemory>,
+    pub board: BoardChoice,
+    pub board_tokens: BoardTokens,
 }
 
 impl Default for Settings {
@@ -175,6 +189,13 @@ impl Default for Settings {
             last_screen: Screen::Run,
             recent_projects: vec![],
             first_day_done: false,
+            density: Density::default(),
+            mode: WindowMode::default(),
+            mini_on_top: false,
+            columns: None,
+            views: BTreeMap::new(),
+            board: BoardChoice::default(),
+            board_tokens: BoardTokens::default(),
         }
     }
 }
@@ -205,6 +226,25 @@ impl Settings {
                 })
                 .unwrap_or_default(),
             first_day_done: root.get("first_day_done").and_then(Value::as_bool).unwrap_or(false),
+            density: match word("density") { Some("dense") => Density::Dense, _ => Density::Comfortable },
+            mode: match word("mode") { Some("focus-graph") => WindowMode::Focus(FocusPanel::Graph), Some("focus-checklist") => WindowMode::Focus(FocusPanel::Checklist), Some("mini") => WindowMode::Mini, _ => WindowMode::Full },
+            mini_on_top: root.get("mini_on_top").and_then(Value::as_bool).unwrap_or(false),
+            columns: root.get("columns").and_then(Value::as_object).map(|v| ColumnWidths {
+                checklist: nonnegative(v.get("checklist")), details: nonnegative(v.get("details")),
+            }),
+            views: root.get("views").and_then(Value::as_object).map(|views| views.iter().filter_map(|(key, v)| {
+                if !valid_view_key(key) || !v.is_object() { return None; }
+                let string = |name| v.get(name).and_then(Value::as_str).map(str::to_owned);
+                let mut memory = ViewMemory { filter: string("filter"), sort: string("sort"), scroll: nonnegative(v.get("scroll")), selected: string("selected") };
+                memory.sanitize();
+                Some((key.clone(), memory))
+            }).collect()).unwrap_or_default(),
+            board: match word("board") { Some("haiku") => BoardChoice::Haiku, Some("off") => BoardChoice::Off, _ => BoardChoice::Luna },
+            board_tokens: BoardTokens {
+                input: root.pointer("/board_tokens/input").and_then(Value::as_u64).unwrap_or(0),
+                output: root.pointer("/board_tokens/output").and_then(Value::as_u64).unwrap_or(0),
+                unreported: root.pointer("/board_tokens/unreported").and_then(Value::as_u64).unwrap_or(0),
+            },
         }
     }
 
@@ -213,6 +253,10 @@ impl Settings {
             json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized })
         });
         let recent: Vec<_> = self.recent_projects.iter().map(|p| p.to_string_lossy()).collect();
+        let columns = self.columns.map(|w| json!({"checklist": w.checklist, "details": w.details}));
+        let views: serde_json::Map<String, Value> = self.views.iter().map(|(key, v)| (key.clone(), json!({
+            "filter": v.filter, "sort": v.sort, "scroll": v.scroll, "selected": v.selected,
+        }))).collect();
         let body = json!({
             "language": key_of(&LANGUAGE_KEYS, self.language),
             "theme": key_of(&THEME_KEYS, self.theme),
@@ -222,8 +266,62 @@ impl Settings {
             "last_screen": key_of(&SCREEN_KEYS, self.last_screen),
             "recent_projects": recent,
             "first_day_done": self.first_day_done,
+            "density": match self.density { Density::Comfortable => "comfortable", Density::Dense => "dense" },
+            "mode": match self.mode { WindowMode::Full => "full", WindowMode::Focus(FocusPanel::Graph) => "focus-graph", WindowMode::Focus(FocusPanel::Checklist) => "focus-checklist", WindowMode::Mini => "mini" },
+            "mini_on_top": self.mini_on_top,
+            "columns": columns,
+            "views": views,
+            "board": match self.board { BoardChoice::Luna => "luna", BoardChoice::Haiku => "haiku", BoardChoice::Off => "off" },
+            "board_tokens": { "input": self.board_tokens.input, "output": self.board_tokens.output, "unreported": self.board_tokens.unreported },
         });
         serde_json::to_string_pretty(&body).unwrap_or_default()
+    }
+}
+
+fn nonnegative(value: Option<&Value>) -> f32 {
+    value.and_then(Value::as_f64).map(|n| n as f32).filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0)
+}
+fn valid_view_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 24 && key.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
+}
+
+impl Settings {
+    pub fn set_theme(&mut self, value: ThemeChoice) -> SettingPrior { SettingPrior::Theme(std::mem::replace(&mut self.theme, value)) }
+    pub fn set_language(&mut self, value: LanguageChoice) -> SettingPrior { SettingPrior::Language(std::mem::replace(&mut self.language, value)) }
+    pub fn set_reduce_motion(&mut self, value: Option<bool>) -> SettingPrior { SettingPrior::ReduceMotion(std::mem::replace(&mut self.reduce_motion, value)) }
+    pub fn set_plain_words(&mut self, value: bool) -> SettingPrior { SettingPrior::PlainWords(std::mem::replace(&mut self.plain_words, value)) }
+    pub fn set_density(&mut self, value: Density) -> SettingPrior { SettingPrior::Density(std::mem::replace(&mut self.density, value)) }
+    pub fn set_mode(&mut self, value: WindowMode) -> SettingPrior { SettingPrior::Mode(std::mem::replace(&mut self.mode, value)) }
+    pub fn set_mini_on_top(&mut self, value: bool) -> SettingPrior { SettingPrior::MiniOnTop(std::mem::replace(&mut self.mini_on_top, value)) }
+    pub fn set_board(&mut self, value: BoardChoice) -> SettingPrior { SettingPrior::Board(std::mem::replace(&mut self.board, value)) }
+    pub fn restore(&mut self, prior: SettingPrior) -> SettingPrior {
+        match prior {
+            SettingPrior::Theme(v) => self.set_theme(v), SettingPrior::Language(v) => self.set_language(v),
+            SettingPrior::ReduceMotion(v) => self.set_reduce_motion(v), SettingPrior::PlainWords(v) => self.set_plain_words(v),
+            SettingPrior::Density(v) => self.set_density(v), SettingPrior::Mode(v) => self.set_mode(v),
+            SettingPrior::MiniOnTop(v) => self.set_mini_on_top(v), SettingPrior::Board(v) => self.set_board(v),
+        }
+    }
+    pub fn with_columns(&mut self, w: ColumnWidths) {
+        let valid = |n: f32| if n.is_finite() && n >= 0.0 { n } else { 0.0 };
+        self.columns = Some(ColumnWidths { checklist: valid(w.checklist), details: valid(w.details) });
+    }
+    pub fn view_memory(&self, key: &str) -> ViewMemory {
+        self.views.get(key).cloned().unwrap_or_default()
+    }
+    pub fn with_view(&mut self, key: &str, change: impl FnOnce(&mut ViewMemory)) {
+        if !valid_view_key(key) { return; }
+        let view = self.views.entry(key.to_owned()).or_default();
+        change(view);
+        view.sanitize();
+    }
+    pub fn add_board_tokens(&mut self, input: Option<u64>, output: Option<u64>) {
+        if input.is_none() && output.is_none() {
+            self.board_tokens.unreported = self.board_tokens.unreported.saturating_add(1);
+        } else {
+            self.board_tokens.input = self.board_tokens.input.saturating_add(input.unwrap_or(0));
+            self.board_tokens.output = self.board_tokens.output.saturating_add(output.unwrap_or(0));
+        }
     }
 }
 
@@ -262,9 +360,19 @@ pub struct Store {
     written: Arc<Mutex<u64>>,
     pending: Option<Task<()>>,
     error: Option<SharedString>,
+    system_motion: Option<bool>,
 }
 
 impl Global for Store {}
+
+fn capture_system_motion(existing: Option<bool>, current: bool) -> Option<bool> {
+    existing.or(Some(current))
+}
+
+fn resolve_none_motion(captured: Option<bool>, _current: bool) -> bool {
+    // The current value may be an override; it is not a safe system fallback.
+    captured.unwrap_or(false)
+}
 
 impl Store {
     pub fn open(ephemeral: bool) -> Self {
@@ -280,6 +388,7 @@ impl Store {
             written: Arc::new(Mutex::new(0)),
             pending: None,
             error: None,
+            system_motion: None,
         }
     }
 
@@ -291,12 +400,16 @@ impl Store {
         cx.global::<Self>().error.clone()
     }
 
+    fn edit_memory(&mut self, change: impl FnOnce(&mut Settings)) -> bool {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        self.settings != before && self.path.is_some()
+    }
+
     /// Applies a change and, when it changed anything, saves shortly after on a background thread.
     pub fn edit(cx: &mut App, change: impl FnOnce(&mut Settings)) {
         let store = cx.global_mut::<Self>();
-        let before = store.settings.clone();
-        change(&mut store.settings);
-        if store.settings == before || store.path.is_none() {
+        if !store.edit_memory(change) {
             return;
         }
         store.version += 1;
@@ -332,6 +445,9 @@ impl Store {
 
     /// Flushes a change that is still waiting for its delay when the app exits.
     pub fn save_on_quit(cx: &mut App) {
+        let current = cx.reduce_motion();
+        let store = cx.global_mut::<Self>();
+        store.system_motion = capture_system_motion(store.system_motion, current);
         cx.on_app_quit(|cx| {
             let write = Self::write(cx);
             async move {
@@ -344,15 +460,19 @@ impl Store {
     }
 }
 
-pub fn set_language(choice: LanguageChoice, window: &mut Window, cx: &mut App) {
-    Store::edit(cx, |s| s.language = choice);
+pub fn set_language(choice: LanguageChoice, window: &mut Window, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Language(Store::current(cx).language);
+    Store::edit(cx, |s| prior = s.set_language(choice));
     i18n::set(choice.resolve(), cx);
     window.refresh();
+    prior
 }
 
-pub fn set_theme(choice: ThemeChoice, window: &mut Window, cx: &mut App) {
-    Store::edit(cx, |s| s.theme = choice);
+pub fn set_theme(choice: ThemeChoice, window: &mut Window, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Theme(Store::current(cx).theme);
+    Store::edit(cx, |s| prior = s.set_theme(choice));
     apply_theme(window, cx);
+    prior
 }
 
 fn apply_theme(window: &mut Window, cx: &mut App) {
@@ -367,14 +487,72 @@ pub fn system_appearance_changed(window: &mut Window, cx: &mut App) {
     }
 }
 
-pub fn set_reduce_motion(on: bool, state: &Entity<AppState>, cx: &mut App) {
-    Store::edit(cx, |s| s.reduce_motion = Some(on));
-    cx.set_reduce_motion(on);
-    state.update(cx, |state, cx| {
-        state.reduce_motion = on;
-        cx.notify();
-    });
+pub fn set_reduce_motion(on: bool, state: &Entity<AppState>, cx: &mut App) -> SettingPrior {
+    set_motion(Some(on), state, cx)
 }
+
+fn set_motion(value: Option<bool>, state: &Entity<AppState>, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::ReduceMotion(Store::current(cx).reduce_motion);
+    if cx.global::<Store>().system_motion.is_none() && Store::current(cx).reduce_motion.is_none() && value.is_some() {
+        let system_motion = cx.reduce_motion();
+        let store = cx.global_mut::<Store>();
+        store.system_motion = capture_system_motion(store.system_motion, system_motion);
+    }
+    Store::edit(cx, |s| prior = s.set_reduce_motion(value));
+    let on = value.unwrap_or_else(|| resolve_none_motion(cx.global::<Store>().system_motion, cx.reduce_motion()));
+    cx.set_reduce_motion(on);
+    state.update(cx, |state, cx| { state.reduce_motion = on; cx.notify(); });
+    prior
+}
+
+pub fn set_plain_words(on: bool, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::PlainWords(Store::current(cx).plain_words);
+    Store::edit(cx, |s| prior = s.set_plain_words(on));
+    super::plain_text::set_enabled(on, cx);
+    prior
+}
+pub fn set_density(d: Density, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Density(Store::current(cx).density);
+    Store::edit(cx, |s| prior = s.set_density(d));
+    theme::set_density(d, cx);
+    prior
+}
+pub fn set_mode(mode: WindowMode, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Mode(Store::current(cx).mode);
+    Store::edit(cx, |s| prior = s.set_mode(mode)); prior
+}
+pub fn set_mini_on_top(on: bool, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::MiniOnTop(Store::current(cx).mini_on_top);
+    Store::edit(cx, |s| prior = s.set_mini_on_top(on)); prior
+}
+pub fn set_board(board: BoardChoice, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Board(Store::current(cx).board);
+    Store::edit(cx, |s| prior = s.set_board(board)); prior
+}
+pub fn restore(prior: SettingPrior, state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    match prior {
+        SettingPrior::Theme(v) => { set_theme(v, window, cx); }
+        SettingPrior::Language(v) => { set_language(v, window, cx); }
+        SettingPrior::ReduceMotion(v) => { set_motion(v, state, cx); }
+        SettingPrior::PlainWords(v) => { set_plain_words(v, cx); }
+        SettingPrior::Density(v) => { set_density(v, cx); }
+        SettingPrior::Mode(v) => { set_mode(v, cx); }
+        SettingPrior::MiniOnTop(v) => { set_mini_on_top(v, cx); }
+        SettingPrior::Board(v) => { set_board(v, cx); }
+    }
+}
+pub fn remember_columns(w: ColumnWidths, cx: &mut App) {
+    Store::edit(cx, |s| s.with_columns(w));
+}
+pub fn columns(cx: &App) -> Option<ColumnWidths> { Store::current(cx).columns }
+pub fn view_memory(cx: &App, key: &str) -> ViewMemory { Store::current(cx).view_memory(key) }
+pub fn remember_view(key: &'static str, change: impl FnOnce(&mut ViewMemory), cx: &mut App) {
+    Store::edit(cx, |s| s.with_view(key, change));
+}
+pub fn add_board_tokens(input: Option<u64>, output: Option<u64>, cx: &mut App) {
+    Store::edit(cx, |s| s.add_board_tokens(input, output));
+}
+pub fn board_tokens(cx: &App) -> BoardTokens { Store::current(cx).board_tokens }
 
 pub fn remember_window(bounds: WindowBounds, cx: &mut App) {
     Store::edit(cx, |s| s.window = Some(WindowPlacement::of(bounds)));
@@ -432,6 +610,13 @@ mod tests {
             last_screen: Screen::Doctor,
             recent_projects: vec![PathBuf::from("E:\\codex\\one"), PathBuf::from("/home/me/two")],
             first_day_done: true,
+            density: Density::Dense,
+            mode: WindowMode::Focus(FocusPanel::Graph),
+            mini_on_top: true,
+            columns: Some(ColumnWidths { checklist: 250.0, details: 300.0 }),
+            views: BTreeMap::from([("run".into(), ViewMemory { filter: Some("open".into()), sort: Some("new".into()), scroll: 42.0, selected: Some("item".into()) })]),
+            board: BoardChoice::Haiku,
+            board_tokens: BoardTokens { input: 123, output: 45, unreported: 2 },
         }
     }
 

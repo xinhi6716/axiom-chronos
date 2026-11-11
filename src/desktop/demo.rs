@@ -280,7 +280,25 @@ pub fn evolve_runs() -> Vec<PastEvolve> {
 }
 
 pub fn state() -> AppState {
-    AppState {
+    state_at(unix_now())
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().min(i64::MAX as u64) as i64).unwrap_or(0)
+}
+
+pub fn state_at(now: i64) -> AppState {
+    use crate::usage::quota::{ProviderQuota, Quotas, Window, WindowKind};
+    let window = |kind, left: f32| Some(Window { kind, used: 1.0 - left, observed_at: now, resets_at: Some(now + match kind { WindowKind::FiveHour => 10_800, WindowKind::Weekly => 3 * 86_400 }), status: None });
+    let mut state = AppState {
+        feeds: Feeds::default(),
+        undo: UndoStack::default(),
+        quota: Quotas {
+            claude: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.62), weekly: window(WindowKind::Weekly, 0.41) },
+            codex: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.15), weekly: None },
+        },
+        board: Default::default(),
         evolve: EvolveState::default(),
         view: Screen::Run,
         runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()],
@@ -306,7 +324,69 @@ pub fn state() -> AppState {
         next_error: 0,
         renames: Default::default(),
         address: None,
+    };
+    for kind in [FeedKind::Runs, FeedKind::Memory, FeedKind::Checks, FeedKind::Usage, FeedKind::Quota] {
+        state.feeds.get_mut(kind).loaded = true;
     }
+    for index in board_runs(&state) {
+        let run = &state.runs[index];
+        state.board.insert(run.session.clone(), BoardEntry {
+            text: Some(BoardText {
+                recent: "工作進度已更新。".into(),
+                next: (run.status != RunStatus::Blocked).then(|| "Continue with the next step.".into()),
+                written_unix: 1_793_700_000,
+            }),
+            status: BoardStatus::Idle,
+        });
+    }
+    state
+}
+
+pub fn apply_data_scene(state: &mut AppState, scene: &str) -> bool {
+    apply_data_scene_at(state, scene, unix_now())
+}
+
+pub fn apply_data_scene_at(state: &mut AppState, scene: &str, now: i64) -> bool {
+    use std::time::SystemTime;
+    match scene {
+        "at-rest" => for run in &mut state.runs {
+            run.status = RunStatus::Done;
+            run.needs.clear();
+            for unit in &mut run.units { unit.state = UnitState::Verified; unit.raw_state = "verified".into(); }
+        },
+        "loading" | "feed-error" | "stale" => {
+            for kind in [FeedKind::Runs, FeedKind::Memory, FeedKind::Checks, FeedKind::Usage, FeedKind::Quota] {
+                let feed = state.feeds.get_mut(kind);
+                feed.loaded = scene == "stale";
+                feed.error = (scene != "loading").then(|| ("Could not load data".into(), SystemTime::now()));
+            }
+            if scene == "stale" {
+                for provider in [&mut state.quota.claude, &mut state.quota.codex] {
+                    for window in [&mut provider.five_hour, &mut provider.weekly].into_iter().flatten() {
+                        window.observed_at = now - 604_800;
+                    }
+                }
+            }
+            if scene != "stale" { state.runs.clear(); state.memory.clear(); state.checks.clear(); }
+        }
+        "quota-low" | "quota-out" => {
+            use crate::usage::quota::{Window, WindowKind};
+            let (claude, codex) = if scene == "quota-low" { (0.12, 0.08) } else { (0.0, 0.0) };
+            let reset = now + if scene == "quota-out" { 7_200 } else { 10_800 };
+            let window = || Window { kind: WindowKind::FiveHour, used: 0.0, observed_at: now, resets_at: Some(reset), status: None };
+            for (provider, left) in [(&mut state.quota.claude, claude), (&mut state.quota.codex, codex)] {
+                let window = provider.five_hour.get_or_insert_with(window);
+                window.used = 1.0 - left;
+                window.observed_at = now;
+                window.resets_at = Some(reset);
+            }
+        }
+        "quota-unknown" => state.quota = Default::default(),
+        "board-writing" => for entry in state.board.values_mut() { entry.status = BoardStatus::Writing; },
+        "board-failed" => for entry in state.board.values_mut() { entry.status = BoardStatus::Failed("Summary could not be written".into()); },
+        _ => return false,
+    }
+    true
 }
 
 /// Demo only: one step of work, as a live run takes it. The running unit is verified, the next
@@ -339,7 +419,103 @@ pub fn advance(run: &mut Run) {
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+    use crate::usage::quota::{freshness, level, Freshness, Level, Quotas, Window, WindowKind};
     use std::prelude::v1::test;
+
+    const NOW: i64 = 2_000_000_000;
+
+    fn windows(quotas: &Quotas) -> impl Iterator<Item = &Window> {
+        [&quotas.claude.five_hour, &quotas.claude.weekly, &quotas.codex.five_hour, &quotas.codex.weekly]
+            .into_iter().flatten()
+    }
+
+    #[test]
+    fn wall_clock_wrappers_pass_current_now() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let before = now();
+        let mut state = state();
+        let after = now();
+        assert_eq!(windows(&state.quota).count(), 3);
+        for window in windows(&state.quota) {
+            assert!((before..=after + 5).contains(&window.observed_at));
+            assert_eq!(freshness(window, after + 5), Freshness::Fresh);
+        }
+
+        for provider in [&mut state.quota.claude, &mut state.quota.codex] {
+            provider.five_hour.as_mut().unwrap().observed_at = before - 604_800;
+        }
+        assert!(apply_data_scene(&mut state, "quota-low"));
+        let after = now();
+        assert_eq!(windows(&state.quota).count(), 3);
+        for window in windows(&state.quota) {
+            assert!((before..=after + 5).contains(&window.observed_at));
+            assert_eq!(freshness(window, after + 5), Freshness::Fresh);
+        }
+
+        assert!(apply_data_scene(&mut state, "stale"));
+        let after = now();
+        assert_eq!(windows(&state.quota).count(), 3);
+        for window in windows(&state.quota) {
+            assert!((before - 604_800..=after + 5 - 604_800).contains(&window.observed_at));
+            assert!(matches!(freshness(window, after + 5), Freshness::Stale { .. }));
+        }
+    }
+
+    #[test]
+    fn demo_quotas_are_fresh_at_construction() {
+        let state = state_at(NOW);
+        assert_eq!(windows(&state.quota).count(), 3);
+        for window in windows(&state.quota) {
+            assert_eq!(freshness(window, NOW), Freshness::Fresh);
+            let reset = match window.kind { WindowKind::FiveHour => 10_800, WindowKind::Weekly => 3 * 86_400 };
+            assert_eq!(window.resets_at, Some(NOW + reset));
+        }
+        assert_eq!(state.quota.claude.five_hour.as_ref().unwrap().used, 1.0 - 0.62);
+        assert_eq!(state.quota.claude.weekly.as_ref().unwrap().used, 1.0 - 0.41);
+        assert_eq!(state.quota.codex.five_hour.as_ref().unwrap().used, 1.0 - 0.15);
+    }
+
+    #[test]
+    fn quota_low_scene_is_low_and_fresh() {
+        let mut state = state_at(NOW - 604_800);
+        assert!(apply_data_scene_at(&mut state, "quota-low", NOW));
+        for (provider, left) in [(&state.quota.claude, 0.12), (&state.quota.codex, 0.08)] {
+            let window = provider.five_hour.as_ref().unwrap();
+            assert_eq!(window.used, 1.0 - left);
+            assert_eq!(level(1.0 - window.used), Level::Low);
+            assert_eq!(freshness(window, NOW), Freshness::Fresh);
+        }
+    }
+
+    #[test]
+    fn quota_out_scene_is_exhausted_with_future_reset() {
+        let mut state = state_at(NOW);
+        assert!(apply_data_scene_at(&mut state, "quota-out", NOW));
+        for provider in [&state.quota.claude, &state.quota.codex] {
+            let window = provider.five_hour.as_ref().unwrap();
+            assert_eq!(level(1.0 - window.used), Level::Exhausted);
+            assert_eq!(freshness(window, NOW), Freshness::Fresh);
+            assert_eq!(window.resets_at, Some(NOW + 7_200));
+        }
+    }
+
+    #[test]
+    fn stale_scene_quotas_are_stale() {
+        let mut state = state_at(NOW);
+        state.quota.codex.weekly = state.quota.claude.weekly.clone();
+        assert!(apply_data_scene_at(&mut state, "stale", NOW));
+        assert_eq!(windows(&state.quota).count(), 4);
+        for window in windows(&state.quota) {
+            assert!(matches!(freshness(window, NOW), Freshness::Stale { .. }));
+        }
+    }
+
+    #[test]
+    fn old_window_is_stale_negative_control() {
+        let window = Window { kind: WindowKind::FiveHour, used: 0.0, observed_at: NOW - 604_800, resets_at: Some(NOW + 10_800), status: None };
+        assert!(matches!(freshness(&window, NOW), Freshness::Stale { .. }));
+    }
 
     #[test]
     fn evolve_demo_has_an_absolute_repo_and_varied_history() {

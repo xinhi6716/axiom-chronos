@@ -2,7 +2,7 @@
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::motion;
-use super::theme::{Tokened as _, Tokens};
+use super::theme::{self, Step, Tokened as _, Tokens, TypeSize};
 use crate::base::Res;
 use crate::session::local_offset_secs;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,7 +20,19 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(super) const RUNNING_ENTRY_HEIGHT: Pixels = px(56.);
+
 const T: Table = &[
+    ("Stop", "停止"),
+    ("Resume", "接續"),
+    ("Report", "報告"),
+    ("Open in editor", "用編輯器開啟"),
+    ("Copy", "複製"),
+    ("Open folder", "開啟資料夾"),
+    ("Waiting on usage limit", "等待用量額度恢復"),
+    ("Waiting on batch", "等待批次"),
+    ("Needs you", "需要你"),
+    ("Done", "完成"),
     ("Send", "送出"),
     ("send", "送出"),
     ("new line", "換行"),
@@ -431,6 +443,7 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
             let handle = if question.focus_confirm { &confirm_focus } else { &back_focus };
             handle.focus(window, cx);
         }
+        let d = theme::density(cx);
         let confirmed = confirmed.clone();
         let muted = cx.tokens().muted;
         dialog
@@ -440,7 +453,7 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
             .on_ok(|_, _, _| false)
             .entrance(motion::DIALOG_ENTRANCE)
             .title(question.title)
-            .child(motion::settle_in("ask-detail", div().text_sm().text_color(muted).child(question.detail)))
+            .child(motion::settle_in("ask-detail", div().text_size(theme::font(d, TypeSize::Body)).text_color(muted).child(question.detail)))
             .footer(
                 DialogFooter::new()
                     .child(
@@ -817,6 +830,7 @@ impl Control {
     }
 
     fn fill_report(&mut self, dialog: Dialog, _window: &mut Window, cx: &mut Context<Self>) -> Dialog {
+        let d = theme::density(cx);
         let t = cx.tokens();
         let Some(report) = &self.report else { return dialog };
         let path = report.path.clone();
@@ -825,26 +839,26 @@ impl Control {
             _ => None,
         };
         let body: AnyElement = match &report.text {
-            ReportText::Loading => div().text_sm().text_color(t.muted).child(tr(cx, T, "Reading the report…")).into_any_element(),
+            ReportText::Loading => div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).child(tr(cx, T, "Reading the report…")).into_any_element(),
             ReportText::Failed(error) => div()
-                .text_sm()
+                .text_size(theme::font(d, TypeSize::Body))
                 .text_color(t.fail)
                 .child(tr(cx, T, "Could not read the report: {error}").replace("{error}", error))
                 .into_any_element(),
             ReportText::Ready { text, cut } => v_flex()
-                .gap_2()
-                .text_sm()
+                .gap(theme::space(d, Step::Sm))
+                .text_size(theme::font(d, TypeSize::Body))
                 .child(div().child(text.clone()))
                 .when(*cut, |this| {
-                    this.child(div().text_xs().text_color(t.review).child(tr(cx, T, "Only the beginning is shown: the report is longer.")))
+                    this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.review).child(tr(cx, T, "Only the beginning is shown: the report is longer.")))
                 })
                 .into_any_element(),
         };
         dialog
-            .w(px(720.))
+            .max_w(theme::READ_WIDTH)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
-            .title(tr(cx, T, "Report"))
+            .title(div().text_size(theme::font(d, TypeSize::Title)).child(tr(cx, T, "Report")))
             .child(body)
             .footer(
                 DialogFooter::new()
@@ -981,27 +995,29 @@ impl Control {
     }
 
     fn hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         h_flex()
-            .gap_1p5()
-            .text_xs()
+            .gap(theme::space(d, Step::Sm))
+            .text_size(theme::font(d, TypeSize::Caption))
             .text_color(t.muted)
-            .child(Kbd::new(Keystroke::parse("enter").expect("valid keystroke")))
+            .child(Kbd::new(Keystroke::parse("enter").expect("valid keystroke")).text_size(theme::font(d, TypeSize::Caption)))
             .child(tr(cx, T, "send"))
-            .child(div().w_2())
-            .child(Kbd::new(Keystroke::parse("shift-enter").expect("valid keystroke")))
+            .child(div().w(theme::space(d, Step::Sm)))
+            .child(Kbd::new(Keystroke::parse("shift-enter").expect("valid keystroke")).text_size(theme::font(d, TypeSize::Caption)))
             .child(tr(cx, T, "new line"))
     }
 
     fn notice_line(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let d = theme::density(cx);
         let t = cx.tokens();
         let notice = self.notice?;
         Some(
             h_flex()
-                .gap_1p5()
-                .text_xs()
+                .gap(theme::space(d, Step::Sm))
+                .text_size(theme::font(d, TypeSize::Caption))
                 .text_color(t.fail)
-                .child(Icon::new(IconName::CircleAlert).size(px(13.)))
+                .child(Icon::new(IconName::CircleAlert).size(theme::font(d, TypeSize::Caption)))
                 .child(tr(cx, T, notice.text())),
         )
     }
@@ -1048,34 +1064,36 @@ impl Control {
     }
 
     fn render_limit_wait(&mut self, facts: &Facts, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         h_flex()
             .size_full()
             .justify_between()
-            .gap_4()
+            .gap(theme::space(d, Step::Md))
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .child(Icon::new(IconName::Pause).size(px(20.)).text_color(t.status(facts.status)))
+                    .gap(theme::space(d, Step::Sm))
+                    .child(Icon::new(IconName::Pause).size(theme::font(d, TypeSize::Heading)).text_color(t.status(facts.status)))
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(div().text_sm().child(tr(cx, T, "Waiting on usage limit")))
-                            .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "It continues by itself when the limit resets."))),
+                            .child(div().text_size(theme::font(d, TypeSize::Body)).child(tr(cx, T, "Waiting on usage limit")))
+                            .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "It continues by itself when the limit resets."))),
                     ),
             )
-            .child(h_flex().gap_1().child(self.log_toggle(facts.log_lines, cx)).child(self.stop_button(cx)))
+            .child(h_flex().gap(theme::space(d, Step::Xs)).child(self.log_toggle(facts.log_lines, cx)).child(self.stop_button(cx)))
             .into_any_element()
     }
 
     fn render_running(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let blank = sendable(&self.input.read(cx).value()).is_none();
         let _ = window;
         v_flex()
             .size_full()
-            .gap_1p5()
+            .gap(theme::space(d, Step::Sm))
             .child(
                 h_flex()
                     .justify_between()
@@ -1085,7 +1103,7 @@ impl Control {
                     })
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap(theme::space(d, Step::Xs))
                             .child(self.log_toggle(facts.log_lines, cx))
                             .child(self.stop_button(cx)),
                     ),
@@ -1095,8 +1113,8 @@ impl Control {
                     .flex_1()
                     .min_h_0()
                     .items_end()
-                    .gap_2()
-                    .child(self.entry_box(px(56.)))
+                    .gap(theme::space(d, Step::Sm))
+                    .child(self.entry_box(RUNNING_ENTRY_HEIGHT))
                     .child(
                         Button::new("control-send")
                             .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
@@ -1110,22 +1128,23 @@ impl Control {
     }
 
     fn render_view_only(&mut self, facts: &Facts, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         h_flex()
             .size_full()
             .justify_between()
-            .gap_4()
+            .gap(theme::space(d, Step::Md))
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .child(Icon::new(IconName::SquareTerminal).size(px(20.)).text_color(t.muted))
+                    .gap(theme::space(d, Step::Sm))
+                    .child(Icon::new(IconName::SquareTerminal).size(theme::font(d, TypeSize::Heading)).text_color(t.muted))
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(div().text_sm().child(tr(cx, T, "Started in terminal: view only")))
-                            .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "To interject or stop it, use the terminal it runs in."))),
+                            .child(div().text_size(theme::font(d, TypeSize::Body)).child(tr(cx, T, "Started in terminal: view only")))
+                            .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "To interject or stop it, use the terminal it runs in."))),
                     ),
             )
             .child(self.log_toggle(facts.log_lines, cx))
@@ -1133,6 +1152,7 @@ impl Control {
     }
 
     fn need_header(&mut self, facts: &Facts, icon: IconName, fallback_title: &'static str, fallback_note: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         let color = t.status(facts.status);
         let (title, note) = facts.need.clone().unwrap_or_else(|| (tr(cx, T, fallback_title).into(), tr(cx, T, fallback_note).into()));
@@ -1140,17 +1160,17 @@ impl Control {
         h_flex()
             .flex_1()
             .min_w_0()
-            .gap_2()
-            .child(Icon::new(icon).size(px(18.)).text_color(color))
+            .gap(theme::space(d, Step::Sm))
+            .child(Icon::new(icon).size(theme::font(d, TypeSize::Title)).text_color(color))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(title))
+                    .child(div().text_size(theme::font(d, TypeSize::Body)).truncate().child(title))
                     .child(
                         div()
                             .id("control-note")
-                            .text_xs()
+                            .text_size(theme::font(d, TypeSize::Caption))
                             .text_color(t.muted)
                             .truncate()
                             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
@@ -1160,18 +1180,19 @@ impl Control {
     }
 
     fn render_blocked(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let header = self.need_header(facts, IconName::TriangleAlert, "Needs you", "Chronos needs you before it can continue.", cx);
         v_flex()
             .size_full()
-            .gap_1p5()
+            .gap(theme::space(d, Step::Sm))
             .child(
                 h_flex()
                     .justify_between()
-                    .gap_3()
+                    .gap(theme::space(d, Step::Md))
                     .child(header)
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap(theme::space(d, Step::Xs))
                             .when(facts.offer.open_folder, |this| this.child(self.folder_button(cx)))
                             .child(self.log_toggle(facts.log_lines, cx)),
                     ),
@@ -1182,7 +1203,7 @@ impl Control {
                     .flex_1()
                     .min_h_0()
                     .items_end()
-                    .gap_2()
+                    .gap(theme::space(d, Step::Sm))
                     .child(self.entry_box(px(34.)))
                     .child(self.resume_button("control-resume", "Resume", window, cx)),
             )
@@ -1190,19 +1211,20 @@ impl Control {
     }
 
     fn render_waiting(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let header = self.need_header(facts, IconName::LoaderCircle, "Waiting on batch", "Chronos continues when the batch finishes.", cx);
         v_flex()
             .size_full()
-            .gap_1p5()
+            .gap(theme::space(d, Step::Sm))
             .child(
                 h_flex()
                     .flex_1()
                     .justify_between()
-                    .gap_3()
+                    .gap(theme::space(d, Step::Md))
                     .child(header)
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(theme::space(d, Step::Sm))
                             .child(self.log_toggle(facts.log_lines, cx))
                             .child(self.resume_button("control-resume-now", "Resume now", window, cx)),
                     ),
@@ -1212,6 +1234,7 @@ impl Control {
     }
 
     fn render_done(&mut self, facts: &Facts, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         let unverified = facts.total.saturating_sub(facts.verified);
         let summary = tr(cx, T, "Verified {done} of {total}")
@@ -1221,21 +1244,21 @@ impl Control {
         h_flex()
             .size_full()
             .justify_between()
-            .gap_4()
+            .gap(theme::space(d, Step::Md))
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .child(Icon::new(IconName::CircleCheck).size(px(20.)).text_color(t.ok))
+                    .gap(theme::space(d, Step::Sm))
+                    .child(Icon::new(IconName::CircleCheck).size(theme::font(d, TypeSize::Heading)).text_color(t.ok))
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(div().text_sm().child(tr(cx, T, "Done")))
+                            .child(div().text_size(theme::font(d, TypeSize::Body)).child(tr(cx, T, "Done")))
                             .child(
                                 h_flex()
-                                    .gap_2()
-                                    .text_xs()
+                                    .gap(theme::space(d, Step::Sm))
+                                    .text_size(theme::font(d, TypeSize::Caption))
                                     .text_color(t.muted)
                                     .child(summary)
                                     .when(unverified > 0, |this| {
@@ -1247,7 +1270,7 @@ impl Control {
             )
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap(theme::space(d, Step::Xs))
                     .when(facts.offer.open_folder, |this| this.child(self.folder_button(cx)))
                     .when(facts.offer.report != ReportOffer::Hidden, |this| {
                         let ready = facts.offer.report == ReportOffer::Ready;
@@ -1263,7 +1286,7 @@ impl Control {
                         )
                     })
                     .child(self.log_toggle(facts.log_lines, cx))
-                    .child(div().w_1())
+                    .child(div().w(theme::space(d, Step::Xs)))
                     .child(
                         Button::new("control-another")
                             .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
@@ -1279,6 +1302,7 @@ impl Control {
     }
 
     fn render_log_row(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let Some(line) = self.log.rows.get(ix).cloned() else { return div().into_any_element() };
         let t = cx.tokens();
         let mono = cx.theme().mono_font_family.clone();
@@ -1292,13 +1316,23 @@ impl Control {
             .id(("log-row", ix))
             .w_full()
             .items_start()
-            .gap_2()
-            .px_3()
-            .py(px(3.))
-            .text_xs()
+            .gap(theme::space(d, Step::Sm))
+            .px(theme::space(d, Step::Md))
+            .py(theme::space(d, Step::Xs))
+            .text_size(theme::font(d, TypeSize::Caption))
             .hover(|this| this.bg(t.raised))
             .child(div().w(px(56.)).flex_none().text_color(t.muted).font_family(mono).child(line.time.clone()))
-            .child(div().pt(px(1.)).child(Icon::new(level_icon(line.level)).size(px(13.)).text_color(t.log(line.level))))
+            .child(
+                div().id(("log-level-icon", ix)).pt(theme::space(d, Step::Xs))
+                    .tooltip({
+                        let label = tr(cx, T, match line.level {
+                            LogLevel::Info => "Info", LogLevel::Ok => "OK",
+                            LogLevel::Warn => "Warnings", LogLevel::Error => "Errors",
+                        });
+                        move |window, cx| Tooltip::new(label).build(window, cx)
+                    })
+                    .child(Icon::new(level_icon(line.level)).size(theme::font(d, TypeSize::Caption)).text_color(t.log(line.level))),
+            )
             .child(
                 div()
                     .id(("log-source", ix))
@@ -1320,6 +1354,7 @@ impl Control {
     }
 
     fn render_log(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let d = theme::density(cx);
         let t = cx.tokens();
         if self.log.list.is_following_tail() {
             self.log.unread = 0;
@@ -1353,27 +1388,27 @@ impl Control {
             .bg(t.surface)
             .border_1()
             .border_color(if focused { t.gold } else { t.border })
-            .rounded_t(px(8.))
+            .rounded_t(theme::RADIUS)
             .shadow_lg()
             .occlude()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.log_key(event, cx)))
             .child(
                 h_flex()
                     .justify_between()
-                    .gap_3()
-                    .px_3()
-                    .py_1p5()
+                    .gap(theme::space(d, Step::Md))
+                    .px(theme::space(d, Step::Md))
+                    .py(theme::space(d, Step::Sm))
                     .border_b_1()
                     .border_color(t.border)
                     .child(
                         h_flex()
-                            .gap_3()
-                            .child(div().text_sm().child(tr(cx, T, "Event log")))
-                            .child(h_flex().gap_0p5().children(levels)),
+                            .gap(theme::space(d, Step::Md))
+                            .child(div().text_size(theme::font(d, TypeSize::Title)).child(tr(cx, T, "Event log")))
+                            .child(h_flex().gap(theme::space(d, Step::Xs)).children(levels)),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(theme::space(d, Step::Sm))
                             .when(paused, |this| {
                                 this.child(
                                     Button::new("log-latest")
@@ -1406,7 +1441,7 @@ impl Control {
                 h_flex()
                     .flex_1()
                     .justify_center()
-                    .text_sm()
+                    .text_size(theme::font(d, TypeSize::Body))
                     .text_color(t.muted)
                     .child(tr(cx, T, empty_text))
                     .into_any_element()
@@ -1416,7 +1451,7 @@ impl Control {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .py_1()
+                    .py(theme::space(d, Step::Xs))
                     .child(list)
                     .vertical_scrollbar(&self.log.list)
                     .into_any_element()
@@ -1488,12 +1523,13 @@ impl Backend for SceneBackend {
 
 impl Render for Control {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let d = theme::density(cx);
         let t: Tokens = cx.tokens();
         let facts = self.facts(cx);
         let body = match &facts {
             None => h_flex()
                 .size_full()
-                .text_sm()
+                .text_size(theme::font(d, TypeSize::Body))
                 .text_color(t.muted)
                 .child(tr(cx, T, "No wish selected. Press Ctrl+N to make one."))
                 .into_any_element(),
@@ -1510,8 +1546,8 @@ impl Render for Control {
         div()
             .size_full()
             .relative()
-            .px_4()
-            .py_2p5()
+            .px(theme::space(d, Step::Md))
+            .py(theme::space(d, Step::Sm))
             .bg(t.surface)
             .border_t_1()
             .border_color(t.border)
@@ -1525,6 +1561,49 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    fn production_source() -> &'static str {
+        include_str!("control.rs").split("#[cfg(test)]").next().unwrap()
+    }
+
+    fn scale_violations(source: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        for forbidden in ["text_size(px(", ".text_xs()", ".text_sm()", "rounded_md", "rounded_lg", "rounded_xl"] {
+            if source.contains(forbidden) {
+                violations.push(forbidden.to_owned());
+            }
+        }
+        for prefix in [".rounded(px(", ".rounded_t(px("] {
+            for rest in source.split(prefix).skip(1) {
+                let number: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                match number.parse::<f32>() {
+                    Ok(radius) if radius <= 4.0 => {},
+                    _ => violations.push(format!("{prefix}{number}")),
+                }
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn control_uses_theme_type_and_radius_scales() {
+        assert_eq!(scale_violations(".rounded_t(px(8.))").len(), 1);
+        assert!(scale_violations(".rounded(px(4.))").is_empty());
+        let violations = scale_violations(production_source());
+        assert!(violations.is_empty(), "scale violations: {violations:?}");
+    }
+
+    #[test]
+    fn literal_translation_keys_are_present_and_unique() {
+        let mut keys = std::collections::HashSet::new();
+        for &(key, _) in T {
+            assert!(keys.insert(key), "duplicate translation key: {key}");
+        }
+        for rest in production_source().split("tr(cx, T, \"").skip(1) {
+            let key = rest.split('"').next().expect("closing quote");
+            assert!(keys.contains(key), "missing translation key: {key}");
+        }
+    }
 
     #[test]
     fn running_here_offers_send_and_stop() {

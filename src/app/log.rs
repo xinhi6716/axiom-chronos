@@ -1,3 +1,4 @@
+use crate::usage::quota::{self, Provider, ProviderQuota, Quotas};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -56,6 +57,8 @@ pub struct Scan {
     pub agents: Vec<AgentView>,
     pub open: Vec<OpenCall>,
     pub finished: BTreeMap<String, u64>,
+    #[serde(skip)]
+    pub rate_limit: Option<ProviderQuota>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Tokens {
@@ -128,6 +131,9 @@ struct ScanState {
     calls: Vec<(String, Call)>,
     tasks: HashMap<String, Task>,
     finished: BTreeMap<String, u64>,
+    last_timestamp: Option<String>,
+    log_start_unix: Option<i64>,
+    quotas: Quotas,
 }
 
 fn s(v: &Value) -> Option<String> {
@@ -295,6 +301,15 @@ impl ScanState {
     fn event(&mut self, v: &Value) {
         self.events += 1;
         match v["type"].as_str().unwrap_or("") {
+            "rate_limit_event" => {
+                if let Some(observed_at) =
+                    quota::claude_log_time(self.last_timestamp.as_deref(), self.log_start_unix)
+                {
+                    if let Some(update) = quota::parse_claude_event(v, observed_at) {
+                        self.quotas.merge(Provider::Claude, update);
+                    }
+                }
+            }
             "system" if v["subtype"] == "task_started" => {
                 if let Some(id) = s(&v["task_id"]) {
                     self.tasks.insert(
@@ -311,6 +326,9 @@ impl ScanState {
             "user" => self.user(v),
             "result" => self.summary = Some(summary(v)),
             _ => {}
+        }
+        if let Some(timestamp) = v["timestamp"].as_str() {
+            self.last_timestamp = Some(timestamp.to_owned());
         }
     }
     fn assistant(&mut self, v: &Value) {
@@ -483,6 +501,9 @@ impl ScanState {
                 })
                 .collect(),
             finished: self.finished.clone(),
+            rate_limit: (self.quotas.claude.five_hour.is_some()
+                || self.quotas.claude.weekly.is_some())
+            .then(|| self.quotas.claude.clone()),
         }
     }
 }
@@ -518,6 +539,8 @@ pub(crate) fn refresh(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let label = format!("logs/{name}");
+        let (skill, started) = name_parts(&name);
+        let started_unix = started.as_deref().and_then(stamp_unix);
         let (size, modified) = (meta.len(), meta.modified().ok());
         let state = states.entry(path.clone()).or_default();
         let changed = state.seen != Some((size, modified));
@@ -532,6 +555,7 @@ pub(crate) fn refresh(
                 warnings.push(format!("{label}: log shrank; rescanning"));
                 *scan = ScanState::default();
             }
+            scan.log_start_unix = started_unix;
             if scan.offset < size || !scan.complete {
                 scan.advance(&path, size, budget, &label, warnings);
             }
@@ -547,11 +571,10 @@ pub(crate) fn refresh(
             }
         }
         state.seen = Some((size, modified));
-        let (skill, started) = name_parts(&name);
         runs.push(Run {
             log: path,
             skill,
-            started_unix: started.as_deref().and_then(stamp_unix),
+            started_unix,
             started,
             session,
             cwd: state.head.as_ref().and_then(|h| h.cwd.clone()),

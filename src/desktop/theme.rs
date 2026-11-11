@@ -25,6 +25,102 @@ pub struct Tokens {
 
 impl Global for Tokens {}
 
+#[cfg(test)]
+mod accept;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Dense,
+}
+
+impl Global for Density {}
+
+pub fn density(cx: &App) -> Density {
+    cx.try_global::<Density>().copied().unwrap_or_default()
+}
+
+pub fn set_density(d: Density, cx: &mut App) {
+    cx.set_global(d);
+    cx.refresh_windows();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step { Xs, Sm, Md, Lg, Xl, Xxl }
+
+pub fn space(d: Density, s: Step) -> Pixels {
+    let values = match d {
+        Density::Comfortable => [4., 8., 12., 16., 24., 32.],
+        Density::Dense => [2., 4., 8., 12., 16., 24.],
+    };
+    px(values[s as usize])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeSize { Caption, Body, Label, Title, Heading, Display }
+
+pub fn font(d: Density, s: TypeSize) -> Pixels {
+    let values = match d {
+        Density::Comfortable => [12., 13., 12., 15., 20., 28.],
+        Density::Dense => [12., 12., 12., 14., 18., 24.],
+    };
+    px(values[s as usize])
+}
+
+pub fn row_height(d: Density) -> Pixels {
+    px(match d { Density::Comfortable => 36., Density::Dense => 28. })
+}
+
+pub const RADIUS: Pixels = px(4.);
+pub const RADIUS_SMALL: Pixels = px(2.);
+pub const TARGET_MIN: Pixels = px(28.);
+pub const READ_WIDTH: Pixels = px(720.);
+pub const WIDE_BREAKPOINT: Pixels = px(1400.);
+
+pub fn columns_for(width: Pixels) -> usize {
+    if width >= WIDE_BREAKPOINT { 2 } else { 1 }
+}
+
+fn shadow_level(level: f32) -> f32 {
+    if level.is_nan() { 0. } else { level.clamp(0., 1.) }
+}
+
+pub fn lift_shadow(t: &Tokens, level: f32) -> Vec<BoxShadow> {
+    let level = shadow_level(level);
+    if level == 0. { return Vec::new(); }
+    let alpha = if t.surface.l < 0.5 { 0.35 } else { 0.18 };
+    vec![BoxShadow {
+        color: Hsla { h: 0., s: 0., l: 0., a: alpha * level },
+        offset: point(px(0.), px(4. * level)),
+        blur_radius: px(12. * level),
+        spread_radius: px(0.),
+        inset: false,
+    }]
+}
+
+pub fn selection_glow(t: &Tokens, level: f32) -> Vec<BoxShadow> {
+    let level = shadow_level(level);
+    if level == 0. { return Vec::new(); }
+    vec![BoxShadow {
+        color: t.gold.opacity(0.3 * level),
+        offset: Point::default(),
+        blur_radius: px(12. * level),
+        spread_radius: px(2. * level),
+        inset: false,
+    }]
+}
+
+pub fn focus_ring(t: &Tokens) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: t.gold,
+        offset: Point::default(),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: false,
+    }]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
     Normal,

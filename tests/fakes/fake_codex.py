@@ -114,6 +114,16 @@ for line in sys.stdin:
         continue
     if method == 'initialize':
         send({'id': message['id'], 'result': {'userAgent': 'fake'}})
+    elif method == 'account/rateLimits/read':
+        limits = {'limitId': 'codex',
+                  'primary': {'usedPercent': 38, 'windowDurationMins': 300, 'resetsAt': 1900000000},
+                  'secondary': {'usedPercent': 59, 'windowDurationMins': 10080, 'resetsAt': 1900500000}}
+        send({'id': message['id'], 'result': {'rateLimits': limits, 'rateLimitsByLimitId': {'codex': limits}}})
+        if os.getenv('FAKE_CODEX_ACCOUNT_UPDATE'):
+            send({'method': 'thread/started', 'params': {}})
+            if os.getenv('FAKE_CODEX_ACCOUNT_UPDATE') == 'two':
+                send({'method': 'account/other', 'params': {}})
+            send({'method': 'account/rateLimits/updated', 'params': {'rateLimits': {'primary': {'usedPercent': 41, 'windowDurationMins': 300, 'resetsAt': 1900000000}}}})
     elif method == 'model/list':
         if params.get('cursor'):
             send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-terra-lite'}]}})

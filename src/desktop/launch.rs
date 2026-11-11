@@ -10,7 +10,7 @@
 //! once. The app's data loads underneath it, so it costs no waiting.
 use super::motion::{ease_out, lerp, mix, seg, smooth, Pace, Settling};
 use super::ornament::PORTRAIT;
-use super::theme::Tokens;
+use super::theme::{self, Density, TypeSize, Tokens};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::f32::consts::{PI, TAU};
@@ -206,7 +206,7 @@ pub fn overlay(s: f32, w: f32, h: f32, rail: Option<Square>, night: Tokens) -> D
                     .top(px(title_top))
                     .flex()
                     .justify_center()
-                    .text_size(px(13.0))
+                    .text_size(theme::font(Density::Comfortable, TypeSize::Body))
                     .text_color(night.gold.opacity(0.85 * layer.title))
                     .child("C\u{2002}H\u{2002}R\u{2002}O\u{2002}N\u{2002}O\u{2002}S"),
             )

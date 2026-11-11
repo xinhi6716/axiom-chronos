@@ -29,6 +29,7 @@ pub enum Event {
         session: String,
     },
     Text(String),
+    RateLimit(crate::usage::quota::ProviderQuota),
     ToolUse {
         name: String,
         label: Option<String>,
@@ -112,6 +113,15 @@ impl Translator {
                 text: text(&event["result"]).into(),
                 is_error: event["is_error"].as_bool().unwrap_or(false),
             }),
+            "rate_limit_event" if event["rate_limit_info"]["unifiedWindows"].is_object() => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if let Some(quota) = crate::usage::quota::parse_claude_event(event, now) {
+                    emit(Event::RateLimit(quota));
+                }
+            }
             "chronos" if text(&event["subtype"]) == "limit_wait" => emit(Event::Waiting {
                 until: event["until"].as_i64().unwrap_or(0),
             }),
@@ -250,5 +260,66 @@ impl Drop for Wish {
             self.stop();
             let _ = self.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::quota::{Window, WindowKind};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn translator_emits_claude_rate_limit_at_receipt_time() {
+        let event: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/quota/claude-rate-limit-1.jsonl"
+        ))
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        Translator::default().event(&event, &tx);
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let Event::RateLimit(quota) = rx.try_recv().unwrap() else {
+            panic!("expected rate limit")
+        };
+        let observed = quota.five_hour.as_ref().unwrap().observed_at;
+        assert!((before..=after).contains(&observed));
+        assert_eq!(
+            quota.five_hour,
+            Some(Window {
+                kind: WindowKind::FiveHour,
+                used: 0.17,
+                resets_at: Some(1793652000),
+                observed_at: observed,
+                status: Some("allowed".into())
+            })
+        );
+        assert_eq!(
+            quota.weekly,
+            Some(Window {
+                kind: WindowKind::Weekly,
+                used: 0.11,
+                resets_at: Some(1794218400),
+                observed_at: observed,
+                status: Some("allowed".into())
+            })
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn translator_ignores_malformed_claude_rate_limit() {
+        let (tx, rx) = mpsc::channel();
+        Translator::default().event(
+            &serde_json::json!({"type":"rate_limit_event", "rate_limit_info":{}}),
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
     }
 }

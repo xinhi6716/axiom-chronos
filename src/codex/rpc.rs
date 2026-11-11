@@ -23,12 +23,15 @@ struct Connection {
     alive: AtomicBool,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     events: Mutex<HashMap<String, (Sender<Value>, Option<Receiver<Value>>)>>,
+    account_events: Arc<Mutex<Option<Sender<Value>>>>,
 }
 pub struct AppServer {
     command: Vec<String>,
     connection: Mutex<Option<Arc<Connection>>>,
     start: Mutex<()>,
     ids: AtomicU64,
+    generation: AtomicU64,
+    account_events: Arc<Mutex<Option<Sender<Value>>>>,
     turns: Mutex<HashSet<(String, String)>>,
     request_timeout: Option<Duration>,
 }
@@ -43,6 +46,8 @@ impl AppServer {
             connection: Mutex::new(None),
             start: Mutex::new(()),
             ids: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
+            account_events: Arc::new(Mutex::new(None)),
             turns: Mutex::new(HashSet::new()),
             request_timeout: timeout,
         }
@@ -52,6 +57,17 @@ impl AppServer {
             c.alive.load(Ordering::Acquire)
                 && matches!(c.child.lock().unwrap().try_wait(), Ok(None))
         })
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+    pub fn account_events(&self) -> Receiver<Value> {
+        let (tx, rx) = mpsc::channel();
+        *self.account_events.lock().unwrap() = Some(tx);
+        rx
+    }
+    pub fn read_rate_limits(&self) -> Res<Value> {
+        self.request("account/rateLimits/read", Value::Null)
     }
     pub fn close(&self) {
         if let Some(c) = self.connection.lock().unwrap().take() {
@@ -93,6 +109,7 @@ impl AppServer {
             alive: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
+            account_events: self.account_events.clone(),
         });
         *self.connection.lock().unwrap() = Some(c.clone());
         let reader = c.clone();
@@ -124,7 +141,11 @@ impl AppServer {
                             let _ = entry.0.send(msg.clone());
                         }
                     }
-                    let _ = method;
+                    if method.starts_with("account/") {
+                        if let Some(tx) = reader.account_events.lock().unwrap().as_ref() {
+                            let _ = tx.send(msg.clone());
+                        }
+                    }
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
                     if let Some(thread_id) =
                         msg.pointer("/result/thread/id").and_then(Value::as_str)
@@ -156,6 +177,7 @@ impl AppServer {
             }
         });
         if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(self.protocol_failure(&format!("handshake: {}", e.message))); }
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(c)
     }
     fn send(c: &Connection, message: Value) -> Res<()> {

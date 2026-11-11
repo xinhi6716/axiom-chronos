@@ -3,7 +3,12 @@ use super::i18n::{tr, Table};
 use super::model::*;
 use super::plain_text;
 use super::motion::{self, ease_out, Curve, Driver, Pace, Spin, Tween};
-use super::theme::{Tokened as _, Tokens};
+use super::theme::{self, Step, TypeSize, Tokened as _, Tokens};
+use super::{palette, settings};
+use gpui_kit::component::menu::ContextMenuExt as _;
+use mod_logic::{glow_target, menu_anchor, menu_target, view_of, GlowKey, TodoView};
+
+mod mod_logic;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -14,13 +19,16 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 const T: Table = &[
+    ("Loading checklist…", "正在載入清單…"),
+    ("Checklist unavailable", "清單無法載入"),
+    ("Checklist may be out of date", "清單可能不是最新資料"),
     ("All", "全部"),
     ("Active", "進行中"),
     ("Needs review", "待審查"),
@@ -68,14 +76,13 @@ struct Tier {
     icon: f32,
     size: f32,
     text: f32,
-    font: f32,
     line: f32,
     pad: f32,
 }
 
-const GOAL: Tier = Tier { chevron: 4.0, icon: 20.0, size: 16.0, text: 42.0, font: 13.0, line: 18.0, pad: 8.0 };
-const MODULE: Tier = Tier { chevron: 18.0, icon: 35.0, size: 14.0, text: 55.0, font: 12.5, line: 17.0, pad: 6.0 };
-const UNIT: Tier = Tier { chevron: 0.0, icon: 42.0, size: 13.0, text: 61.0, font: 12.0, line: 16.0, pad: 5.0 };
+const GOAL: Tier = Tier { chevron: 4.0, icon: 20.0, size: 16.0, text: 42.0, line: 18.0, pad: 8.0 };
+const MODULE: Tier = Tier { chevron: 18.0, icon: 35.0, size: 14.0, text: 55.0, line: 17.0, pad: 6.0 };
+const UNIT: Tier = Tier { chevron: 0.0, icon: 42.0, size: 13.0, text: 61.0, line: 16.0, pad: 5.0 };
 
 /// How far an item has come. Goals and modules derive it from their units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -725,7 +732,10 @@ pub struct Todo {
     selection: Selection,
     /// The list's width and height at the last prepaint.
     viewport: Rc<Cell<(f32, f32)>>,
+    list_bounds: Rc<Cell<Bounds<Pixels>>>,
+    row_bounds: Rc<RefCell<HashMap<RowKey, Bounds<Pixels>>>>,
     measured: (f32, f32),
+    measured_density: Option<theme::Density>,
     /// The scroll position when the last frame was prepainted, to notice the user scrolling.
     painted_scroll: Rc<Cell<f32>>,
     forced_width: Option<f32>,
@@ -733,6 +743,8 @@ pub struct Todo {
     figures: [Tween; 5],
     /// Rows that arrived while the list was on screen, and when; they ease in.
     arrivals: Vec<(RowKey, Instant)>,
+    glows: motion::Glows<GlowKey>,
+    glow_levels: HashMap<GlowKey, f32>,
 }
 
 /// How far a new row slides in from the left as it fades in.
@@ -753,7 +765,7 @@ impl Todo {
             state,
             focus: cx.focus_handle().tab_stop(true),
             scroll: VirtualListScrollHandle::new(),
-            filter: Filter::All,
+            filter: Filter::from_key(settings::view_memory(cx, "checklist").filter.as_deref()),
             expansion: Expansion::default(),
             rows: Rc::default(),
             sizes: Rc::default(),
@@ -767,11 +779,16 @@ impl Todo {
             session: None,
             selection: Selection::None,
             viewport: Rc::new(Cell::new((0.0, 0.0))),
+            list_bounds: Rc::new(Cell::new(Bounds::default())),
+            row_bounds: Rc::default(),
             measured: (0.0, 0.0),
+            measured_density: None,
             painted_scroll: Rc::new(Cell::new(0.0)),
             forced_width: None,
             figures: [Tween::rest(0.0, Pace::Change, Curve::EaseOut); 5],
             arrivals: vec![],
+            glows: motion::Glows::new(Pace::Glow),
+            glow_levels: HashMap::new(),
         };
         this.apply_scene(cx);
         this
@@ -812,7 +829,6 @@ impl Todo {
         let live = state.run().is_some_and(Run::is_live) && !state.reduce_motion;
         if session != self.session {
             self.session = session;
-            self.filter = Filter::All;
             self.expansion = Expansion::default();
             self.cursor = None;
             self.follow = true;
@@ -828,7 +844,7 @@ impl Todo {
         }
         self.live = live;
 
-        if self.viewport.get() != self.measured {
+        if self.viewport.get() != self.measured || self.measured_density != Some(theme::density(cx)) {
             self.request(Rebuild::Viewport);
         }
         if self.rebuild.is_none() {
@@ -868,7 +884,9 @@ impl Todo {
         }
         self.measured = self.viewport.get();
         let width = if self.measured.0 > 0.0 { self.measured.0 } else { FALLBACK_WIDTH };
-        measure(&mut rows, width, window);
+        let density = theme::density(cx);
+        self.measured_density = Some(density);
+        measure(&mut rows, width, density, window);
         self.tally = Tally::of_run(run);
         let tallies = module_tallies(run);
         self.goals_total = run.goals.len();
@@ -950,6 +968,7 @@ impl Todo {
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         if self.filter != filter {
             self.filter = filter;
+            settings::remember_view("checklist", |v| v.filter = Some(filter.to_key().to_owned()), cx);
             self.follow = true;
             self.set_scroll(0.0);
             self.request(Rebuild::Fresh);
@@ -1093,8 +1112,44 @@ impl Todo {
         cx.stop_propagation();
     }
 
+    fn open_cursor_menu(&mut self, _: &palette::ContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) { return; }
+        let Some(index) = self.cursor_index() else { return };
+        let key = self.rows[index].key;
+        if self.state.read(cx).run().and_then(|run| menu_target(run, key)).is_none() { return; }
+        cx.stop_propagation();
+        if self.cursor_menu_position(key).is_some() {
+            cx.defer_in(window, move |this, window, cx| this.dispatch_cursor_menu(key, window, cx));
+        } else {
+            self.move_cursor(index, cx);
+            // Next-frame callbacks run before drawing; wait for the scrolled frame's hitboxes.
+            cx.on_next_frame(window, move |_, window, cx| {
+                cx.on_next_frame(window, move |this, window, cx| this.dispatch_cursor_menu(key, window, cx));
+            });
+        }
+    }
+
+    fn cursor_menu_position(&self, key: RowKey) -> Option<Point<Pixels>> {
+        if self.scroll_pos() != self.painted_scroll.get() { return None; }
+        let bounds = self.row_bounds.borrow().get(&key).copied()?.intersect(&self.list_bounds.get());
+        (bounds.size.width > px(0.0) && bounds.size.height > px(0.0)).then(|| menu_anchor(bounds))
+    }
+
+    fn dispatch_cursor_menu(&mut self, key: RowKey, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) || self.cursor_index().is_none_or(|i| self.rows[i].key != key)
+            || self.state.read(cx).run().and_then(|run| menu_target(run, key)).is_none() { return; }
+        let Some(position) = self.cursor_menu_position(key) else { return };
+        window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Right, position, click_count: 1, ..Default::default()
+        }), cx);
+        window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Right, position, click_count: 1, ..Default::default()
+        }), cx);
+    }
+
     fn render_row(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let row = self.rows[index].clone();
         let key = row.key;
         let height = row.height();
@@ -1102,9 +1157,9 @@ impl Todo {
             return div()
                 .w_full()
                 .h(px(height))
-                .px(px(14.0))
-                .pt(px(12.0))
-                .text_size(px(11.0))
+                .px(theme::space(d, Step::Lg))
+                .pt(theme::space(d, Step::Md))
+                .text_size(theme::font(d, TypeSize::Caption))
                 .line_height(px(14.0))
                 .text_color(t.muted)
                 .child(tr(cx, T, "Not linked to a goal"))
@@ -1142,8 +1197,8 @@ impl Todo {
                 };
                 Some(
                     h_flex()
-                        .gap(px(6.0))
-                        .text_size(px(11.0))
+                        .gap(theme::space(d, Step::Sm))
+                        .text_size(theme::font(d, TypeSize::Caption))
                         .line_height(px(META_LINE))
                         .text_color(t.muted)
                         .child(div().text_color(meta_color(&t, row.progress)).child(word))
@@ -1156,8 +1211,8 @@ impl Todo {
                 let attempts = (row.attempts > 0).then(|| attempts_text(cx, row.attempts));
                 Some(
                     h_flex()
-                        .gap(px(6.0))
-                        .text_size(px(11.0))
+                        .gap(theme::space(d, Step::Sm))
+                        .text_size(theme::font(d, TypeSize::Caption))
                         .line_height(px(META_LINE))
                         .text_color(t.muted)
                         .child(div().text_color(meta_color(&t, row.progress)).child(word))
@@ -1177,20 +1232,44 @@ impl Todo {
             None
         };
 
+        let target = self.state.read(cx).run().and_then(|run| menu_target(run, key));
+        let glow = target.as_ref().and_then(GlowKey::of).and_then(|k| self.glow_levels.get(&k).copied()).unwrap_or(0.0);
+        let weak = cx.weak_entity();
+        let state = self.state.clone();
+        let runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> = Rc::new(move |action, target, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                let resolved = this.state.read(cx).run().and_then(|run| match &target {
+                    MenuTarget::Unit { session, unit } if &run.session == session => run.units.iter().position(|u| &u.id == unit).map(|i| (Selection::Unit(i), format!("{} — {}", run.units[i].id, run.units[i].title))),
+                    MenuTarget::Module { session, module } if &run.session == session => run.modules.iter().position(|m| &m.id == module).map(|i| (Selection::Module(i), format!("{} — {}", run.modules[i].id, run.modules[i].purpose))),
+                    _ => None,
+                });
+                if let Some((selection, text)) = resolved {
+                    match action {
+                        MenuAction::CopyText => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                        MenuAction::OpenDetail | MenuAction::CommentOn => {
+                            this.cursor = this.rows.iter().find(|r| match (&selection, r.key) {
+                                (Selection::Unit(i), RowKey::Unit { unit, .. }) => *i == unit,
+                                (Selection::Module(i), RowKey::Module { module, .. }) => *i == module,
+                                _ => false,
+                            }).map(|r| r.key);
+                            this.state.update(cx, |state, cx| state.select(selection, cx));
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
         let arrival = self.arrival(key, cx);
-        div()
-            .w_full()
-            .h(px(height))
-            .px(px(4.0))
-            .when(arrival < 1.0, |this| this.relative().left(px(-ROW_DRIFT * (1.0 - arrival))).opacity(arrival))
-            .child(
+        let item =
                 ListItem::new(key.id())
                     .selected(row.selected)
                     .w_full()
                     .h(px(height))
-                    .px(px(0.0))
-                    .py(px(0.0))
-                    .rounded(px(6.0))
+                    .px_0()
+                    .py_0()
+                    .rounded(theme::RADIUS)
+                    .shadow({ let mut shadows = theme::selection_glow(&t, glow); if ring { shadows.extend(theme::focus_ring(&t)); } shadows })
                     .accessibility_label(format!("{}: {}", row.title, tr(cx, T, row.progress.label())))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.activate(key, cx)))
                     .when_some(tooltip_text, |this, text| {
@@ -1201,7 +1280,7 @@ impl Todo {
                             .relative()
                             .w_full()
                             .h(px(height))
-                            .when(running_unit && !row.selected, |this| this.bg(t.run.opacity(0.10)).rounded(px(6.0)))
+                            .when(running_unit && !row.selected, |this| this.bg(t.run.opacity(0.10)).rounded(theme::RADIUS))
                             .when_some(accent, |this, color| {
                                 this.child(
                                     div()
@@ -1256,7 +1335,7 @@ impl Todo {
                                     .child(
                                         div()
                                             .w(px(title_width))
-                                            .text_size(px(tier.font))
+                                            .text_size(theme::font(d, match key { RowKey::Goal(_) => TypeSize::Body, RowKey::Module { .. } => TypeSize::Label, _ => TypeSize::Caption }))
                                             .line_height(px(tier.line))
                                             .font_weight(weight)
                                             .text_color(title_color)
@@ -1272,24 +1351,25 @@ impl Todo {
                                         .absolute()
                                         .right(px(RIGHT_PAD - 4.0))
                                         .top(px(tier.pad))
-                                        .text_size(px(11.5))
+                                        .text_size(theme::font(d, TypeSize::Caption))
                                         .line_height(px(tier.line))
                                         .text_color(if done { t.muted } else { t.text })
                                         .child(fraction(row.tally)),
                                 )
-                            })
-                            .when(ring, |this| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .rounded(px(6.0))
-                                        .border_1()
-                                        .border_color(t.gold),
-                                )
                             }),
-                    ),
-            )
+                    );
+        let item = match target {
+            Some(target) => item.context_menu(move |menu, _, cx| palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx)).into_any_element(),
+            None => item.into_any_element(),
+        };
+        let row_bounds = self.row_bounds.clone();
+        div()
+            .w_full()
+            .h(px(height))
+            .px(theme::space(d, Step::Xs))
+            .when(arrival < 1.0, |this| this.relative().left(px(-ROW_DRIFT * (1.0 - arrival))).opacity(arrival))
+            .child(item)
+            .on_prepaint(move |bounds, _, _| { row_bounds.borrow_mut().insert(key, bounds); })
             .into_any_element()
     }
 
@@ -1304,6 +1384,7 @@ impl Todo {
 
     fn render_header(&self, glide: [f32; 5], cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let tally = self.tally;
         let filter = self.filter;
         let [verified, review, running, failed, total] = glide;
@@ -1327,10 +1408,10 @@ impl Todo {
         v_flex()
             .flex_none()
             .w_full()
-            .gap(px(8.0))
-            .px(px(12.0))
-            .pt(px(12.0))
-            .pb(px(8.0))
+            .gap(theme::space(d, Step::Sm))
+            .px(theme::space(d, Step::Md))
+            .pt(theme::space(d, Step::Md))
+            .pb(theme::space(d, Step::Sm))
             .border_b_1()
             .border_color(t.border)
             .child(
@@ -1340,27 +1421,27 @@ impl Todo {
                     .items_baseline()
                     .child(
                         h_flex()
-                            .gap(px(6.0))
+                            .gap(theme::space(d, Step::Sm))
                             .items_baseline()
                             .child(
                                 div()
-                                    .text_size(px(16.0))
+                                    .text_size(theme::font(d, TypeSize::Title))
                                     .line_height(px(20.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(t.text)
                                     .child(figure),
                             )
-                            .child(div().text_size(px(12.0)).text_color(t.muted).child(tr(cx, T, "verified"))),
+                            .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "verified"))),
                     )
                     .when_some(goals, |this, goals| {
-                        this.child(div().text_size(px(12.0)).text_color(t.muted).child(goals))
+                        this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(goals))
                     }),
             )
             .child(
                 h_flex()
                     .w_full()
                     .h(px(5.0))
-                    .gap(px(1.0))
+                    .gap(theme::space(d, Step::Xs))
                     .rounded_full()
                     .bg(t.border)
                     .children(segment(verified, t.ok))
@@ -1369,7 +1450,7 @@ impl Todo {
                     .children(segment(failed, t.fail)),
             )
             .child(
-                h_flex().w_full().flex_wrap().gap(px(2.0)).children(Filter::ALL.into_iter().map(|option| {
+                h_flex().w_full().flex_wrap().gap(theme::space(d, Step::Xs)).children(Filter::ALL.into_iter().map(|option| {
                     let count = option.count(tally);
                     let selected = filter == option;
                     Button::new(("todo-filter", option as usize))
@@ -1380,13 +1461,13 @@ impl Todo {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(option, cx)))
                         .child(
                             h_flex()
-                                .gap(px(3.0))
-                                .px(px(5.0))
-                                .text_size(px(12.0))
+                                .gap(theme::space(d, Step::Xs))
+                                .px(theme::space(d, Step::Sm))
+                                .text_size(theme::font(d, TypeSize::Caption))
                                 .text_color(if selected { t.text } else { t.muted })
                                 .child(tr(cx, T, option.label()))
                                 .when(count > 0, |this| {
-                                    this.child(div().text_size(px(11.0)).text_color(t.muted).child(count.to_string()))
+                                    this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(count.to_string()))
                                 }),
                         )
                 })),
@@ -1404,7 +1485,9 @@ impl Todo {
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let viewport = self.viewport.clone();
+        let list_bounds = self.list_bounds.clone();
         let painted = self.painted_scroll.clone();
         let handle = self.scroll.clone();
         let show_jump = !self.follow && self.target_visible(self.scroll_pos()) == Some(false);
@@ -1416,12 +1499,14 @@ impl Todo {
             .w_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(Self::open_cursor_menu))
             .child(
                 v_virtual_list(cx.entity(), "todo-rows", self.sizes.clone(), |this, range, window, cx| {
+                    this.row_bounds.borrow_mut().clear();
                     range.map(|index| this.render_row(index, window, cx)).collect::<Vec<_>>()
                 })
                 .track_scroll(&self.scroll)
-                .py(px(4.0)),
+                .py(theme::space(d, Step::Xs)),
             )
             .vertical_scrollbar(&self.scroll)
             .when(show_jump, |this| {
@@ -1437,6 +1522,7 @@ impl Todo {
                 )
             })
             .on_prepaint(move |bounds, window, _| {
+                list_bounds.set(bounds);
                 painted.set(-f32::from(handle.offset().y));
                 let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
                 if viewport.get() != size {
@@ -1587,15 +1673,15 @@ fn big_scene(run: &mut Run) {
     }
 }
 
-fn measure(rows: &mut [Row], list_width: f32, window: &Window) {
+fn measure(rows: &mut [Row], list_width: f32, density: theme::Density, window: &Window) {
     let system = window.text_system().clone();
     let base = window.text_style().font();
-    let wrapper = |tier: &Tier, weight: FontWeight| {
-        system.line_wrapper(Font { weight, ..base.clone() }, px(tier.font))
+    let wrapper = |size: TypeSize, weight: FontWeight| {
+        system.line_wrapper(Font { weight, ..base.clone() }, theme::font(density, size))
     };
-    let mut goal = wrapper(&GOAL, FontWeight::SEMIBOLD);
-    let mut module = wrapper(&MODULE, FontWeight::MEDIUM);
-    let mut unit = wrapper(&UNIT, FontWeight::NORMAL);
+    let mut goal = wrapper(TypeSize::Body, FontWeight::SEMIBOLD);
+    let mut module = wrapper(TypeSize::Label, FontWeight::MEDIUM);
+    let mut unit = wrapper(TypeSize::Caption, FontWeight::NORMAL);
     for row in rows.iter_mut() {
         let width = px(row.key.title_width(list_width));
         let fragments = [LineFragment::text(&row.title)];
@@ -1615,19 +1701,42 @@ impl Render for Todo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
         let t = cx.tokens();
+        let d = theme::density(cx);
         let mut frames = Driver::new(self.state.read(cx).reduce_motion, cx);
         let glide = self.figures.map(|tween| frames.value(&tween));
         let arriving = self.arrivals.iter().any(|(_, at)| frames.now().saturating_duration_since(*at) < Pace::Row.duration());
         frames.keep(arriving);
+        {
+            let state = self.state.read(cx);
+            let mut valid = HashSet::new();
+            if let Some(run) = state.run() {
+                for row in self.rows.iter() {
+                    if let Some(key) = menu_target(run, row.key).as_ref().and_then(GlowKey::of) {
+                        valid.insert(key.clone());
+                        self.glows.set(&key, glow_target(row.selected), frames.now(), state.reduce_motion);
+                        self.glow_levels.insert(key.clone(), self.glows.value(&key, &mut frames));
+                    }
+                }
+            }
+            self.glows.retain(|key| valid.contains(key));
+            self.glow_levels.retain(|key, _| valid.contains(key));
+        }
         frames.finish(window);
         let state = self.state.read(cx);
+        let planless = state.run().is_none_or(|run| run.goals.is_empty() && run.modules.is_empty());
+        let view = view_of(&panel_state(&state.feeds.runs, planless), planless);
+        match &view {
+            TodoView::Loading => return self.frame(&t).child(placeholder(None, tr(cx, T, "Loading checklist…"), None, &t, d)).into_any_element(),
+            TodoView::Failed { message } => return self.frame(&t).child(placeholder(None, tr(cx, T, "Checklist unavailable"), Some(message.clone()), &t, d)).into_any_element(),
+            _ => {}
+        }
         let Some(run) = state.run() else {
             return self
                 .frame(&t)
-                .child(placeholder(None, tr(cx, T, "Make a wish and its goals will be listed here."), None, &t))
+                .when_some(match &view { TodoView::Stale { message } => Some(message.clone()), _ => None }, |this, message| this.child(div().px(theme::space(d, Step::Md)).py(theme::space(d, Step::Sm)).text_size(theme::font(d, TypeSize::Caption)).text_color(t.fail).child(format!("{}: {}", tr(cx, T, "Checklist may be out of date"), message))))
+                .child(placeholder(None, tr(cx, T, "Make a wish and its goals will be listed here."), None, &t, d))
                 .into_any_element();
         };
-        let planless = run.goals.is_empty() && run.modules.is_empty();
         let building_note = run.modules.is_empty().then(|| plan_note(run));
         let reduce_motion = state.reduce_motion;
         let live = !reduce_motion;
@@ -1645,21 +1754,23 @@ impl Render for Todo {
             };
             return self
                 .frame(&t)
-                .child(placeholder(Some(mark), tr(cx, T, note.text), note.detail, &t))
+                .when_some(match &view { TodoView::Stale { message } => Some(message.clone()), _ => None }, |this, message| this.child(div().text_color(t.fail).child(format!("{}: {}", tr(cx, T, "Checklist may be out of date"), message))))
+                .child(placeholder(Some(mark), tr(cx, T, note.text), note.detail, &t, d))
                 .into_any_element();
         }
         self.frame(&t)
+            .when_some(match &view { TodoView::Stale { message } => Some(message.clone()), _ => None }, |this, message| this.child(div().px(theme::space(d, Step::Md)).py(theme::space(d, Step::Sm)).text_size(theme::font(d, TypeSize::Caption)).text_color(t.fail).child(format!("{}: {}", tr(cx, T, "Checklist may be out of date"), message))))
             .child(self.render_header(glide, cx))
             .when_some(building_note, |this, note| {
                 this.child(
                     h_flex()
                         .flex_none()
-                        .gap(px(8.0))
-                        .px(px(12.0))
-                        .py(px(8.0))
+                        .gap(theme::space(d, Step::Sm))
+                        .px(theme::space(d, Step::Md))
+                        .py(theme::space(d, Step::Sm))
                         .border_b_1()
                         .border_color(t.border)
-                        .text_size(px(12.0))
+                        .text_size(theme::font(d, TypeSize::Caption))
                         .text_color(t.muted)
                         .child(if note.busy && live {
                             Spin::new(IconName::LoaderCircle).size(px(14.0)).color(t.run).into_any_element()
@@ -1675,9 +1786,9 @@ impl Render for Todo {
                         .flex_1()
                         .items_center()
                         .justify_center()
-                        .gap(px(10.0))
-                        .px(px(20.0))
-                        .child(div().text_size(px(12.5)).text_color(t.muted).text_center().child(tr(cx, T, filter.empty_text())))
+                        .gap(theme::space(d, Step::Md))
+                        .px(theme::space(d, Step::Xl))
+                        .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).text_center().child(tr(cx, T, filter.empty_text())))
                         .when(filter != Filter::All, |this| {
                             this.child(
                                 Button::new("todo-show-all")
@@ -1694,26 +1805,31 @@ impl Render for Todo {
     }
 }
 
-fn placeholder(mark: Option<AnyElement>, text: &str, detail: Option<SharedString>, t: &Tokens) -> impl IntoElement {
+fn placeholder(mark: Option<AnyElement>, text: &str, detail: Option<SharedString>, t: &Tokens, d: theme::Density) -> impl IntoElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
-        .gap(px(10.0))
-        .px(px(24.0))
+        .gap(theme::space(d, Step::Md))
+        .px(theme::space(d, Step::Xl))
         .children(mark)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(theme::font(d, TypeSize::Body))
                 .line_height(px(20.0))
                 .text_color(t.text)
                 .text_center()
                 .child(text.to_owned()),
         )
         .when_some(detail, |this, detail| {
-            this.child(div().text_size(px(11.5)).text_color(t.muted).text_center().child(detail))
+            this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).text_center().child(detail))
         })
 }
+
+// HANDOFF OPEN: walk list: verify rendered keyboard focus ring, right-click menus, and glow frames in a GPUI window.
+// HANDOFF OPEN: walk list: shift-f10 opens the menu on the cursor row in a window.
+#[cfg(test)]
+mod accept;
 
 #[cfg(test)]
 mod tests {

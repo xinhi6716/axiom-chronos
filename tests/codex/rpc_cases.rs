@@ -3,9 +3,154 @@ use axiom::{
     base::Failure,
     codex::{role_matches, AppServer, TESTED_CODEX},
 };
-use std::time::Duration;
+use std::{sync::mpsc::RecvTimeoutError, time::Duration};
 
 const NEWER: &str = "--fake-version=codex-cli 999.1.2";
+
+fn account_update_server(dir: &std::path::Path, mode: &str) -> AppServer {
+    let wrapper = dir.join("account_wrapper.py");
+    std::fs::write(
+        &wrapper,
+        "import os, runpy, sys\nos.environ['FAKE_CODEX_ACCOUNT_UPDATE'] = sys.argv[1]\nrunpy.run_path(sys.argv[2], run_name='__main__')\n",
+    )
+    .unwrap();
+    AppServer::new(vec![
+        common::python(),
+        "-I".into(),
+        wrapper.to_string_lossy().into_owned(),
+        mode.into(),
+        common::fake("fake_codex")[2].clone(),
+    ])
+}
+
+#[test]
+fn rate_limits_returns_the_entire_result() {
+    let server = AppServer::new(common::fake("fake_codex"));
+    let limits = serde_json::json!({
+        "limitId": "codex",
+        "primary": {"usedPercent": 38, "windowDurationMins": 300, "resetsAt": 1900000000},
+        "secondary": {"usedPercent": 59, "windowDurationMins": 10080, "resetsAt": 1900500000}
+    });
+    assert_eq!(
+        server.read_rate_limits().unwrap(),
+        serde_json::json!({
+            "rateLimits": limits, "rateLimitsByLimitId": {"codex": limits}
+        })
+    );
+}
+
+#[test]
+fn account_events_include_notifications_without_thread_id_only_for_account_methods() {
+    let dir = common::temp();
+    let server = account_update_server(dir.path(), "two");
+    let events = server.account_events();
+    assert!(!server.alive());
+    assert_eq!(server.generation(), 0);
+    server.read_rate_limits().unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        serde_json::json!({
+            "method": "account/other", "params": {}
+        })
+    );
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {"primary": {"usedPercent": 41, "windowDurationMins": 300, "resetsAt": 1900000000}}}
+        })
+    );
+    assert_eq!(
+        events.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Timeout)
+    );
+}
+
+#[test]
+fn new_account_receiver_replaces_old_one() {
+    let dir = common::temp();
+    let server = account_update_server(dir.path(), "one");
+    let old = server.account_events();
+    let new = server.account_events();
+    assert_eq!(
+        old.recv_timeout(Duration::from_secs(1)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    server.read_rate_limits().unwrap();
+    assert_eq!(
+        new.recv_timeout(Duration::from_secs(5)).unwrap()["method"],
+        "account/rateLimits/updated"
+    );
+}
+
+#[test]
+fn rate_limits_uses_null_params_and_routes_account_events_with_thread_id() {
+    let dir = common::temp();
+    let script = dir.path().join("account_server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get('method') == 'initialize':
+        print(json.dumps({'id': msg['id'], 'result': {}}), flush=True)
+    elif msg.get('method') == 'account/rateLimits/read':
+        assert 'params' in msg and msg['params'] is None
+        print(json.dumps({'id': msg['id'], 'result': {}}), flush=True)
+        print(json.dumps({'method': 'account/other', 'params': {'threadId': 't'}}), flush=True)
+"#,
+    )
+    .unwrap();
+    let server = AppServer::new(vec![
+        common::python(),
+        script.to_string_lossy().into_owned(),
+    ]);
+    let events = server.account_events();
+    server.read_rate_limits().unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        serde_json::json!({"method": "account/other", "params": {"threadId": "t"}})
+    );
+}
+
+#[test]
+fn generation_counts_successful_starts() {
+    let server = AppServer::new(common::fake("fake_codex"));
+    assert_eq!(server.generation(), 0);
+    server.read_rate_limits().unwrap();
+    assert_eq!(server.generation(), 1);
+    server.read_rate_limits().unwrap();
+    assert_eq!(server.generation(), 1);
+    server.close();
+    assert_eq!(server.generation(), 1);
+    server.read_rate_limits().unwrap();
+    assert_eq!(server.generation(), 2);
+    server.read_rate_limits().unwrap();
+    assert_eq!(server.generation(), 2);
+
+    let broken = AppServer::new(common::fake_codex(&["--fake-break=initialize:exit"]));
+    assert!(broken.read_rate_limits().is_err());
+    assert_eq!(broken.generation(), 0);
+}
+
+#[test]
+fn account_receiver_survives_restart() {
+    let dir = common::temp();
+    let server = account_update_server(dir.path(), "one");
+    let events = server.account_events();
+    server.read_rate_limits().unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap()["method"],
+        "account/rateLimits/updated"
+    );
+    server.close();
+    server.read_rate_limits().unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap()["method"],
+        "account/rateLimits/updated"
+    );
+}
 
 fn assert_names_versions(failure: &Failure) {
     assert_eq!(failure.kind, "codex_protocol", "{failure}");

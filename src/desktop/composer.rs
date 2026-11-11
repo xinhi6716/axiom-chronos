@@ -6,7 +6,7 @@ use super::model::*;
 use super::motion::{self, Driver};
 use super::palette::{self, fuzzy, in_area, key_cap, marked, Area};
 use super::superswitch::{self, Activation, Members};
-use super::theme::Tokened as _;
+use super::theme::{self, Step, Tokened as _, TypeSize};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Dialog, DialogFooter};
 use gpui_kit::component::input::{
@@ -27,12 +27,13 @@ use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant;
 
 const T: Table = &[
     ("Choose folder…", "選擇資料夾…"),
     ("Choose the project folder", "選擇專案資料夾"),
+    ("Open recent project: {}", "開啟最近使用的專案：{}"),
+    ("Show or hide advanced options", "顯示或隱藏進階選項"),
+    ("Cancel", "取消"),
     ("Project folder", "專案資料夾"),
     ("No folder chosen yet", "尚未選擇資料夾"),
     ("Recent", "最近"),
@@ -98,6 +99,12 @@ const MENTION_SYNC: usize = 4000;
 const MENTION_ROW_H: f32 = 30.;
 const MENTION_ROWS: f32 = 7.5;
 const WISH_H: f32 = 132.;
+const DIALOG_W: f32 = 640.;
+const RESEARCH_CARD_MIN_H: f32 = 84.;
+const TURNS_INPUT_W: f32 = 96.;
+const ICON_SMALL: f32 = 12.;
+const ICON_MEDIUM: f32 = 13.;
+const ICON_LARGE: f32 = 14.;
 /// The list's header, footer and padding, which sit outside its scrolling rows.
 const MENTION_CHROME: f32 = 84.;
 /// Kept between the list and the window's bottom edge.
@@ -563,6 +570,7 @@ pub struct Composer {
     turns: Entity<InputState>,
     choose_focus: FocusHandle,
     open: bool,
+    invoker: Option<FocusHandle>,
     folder: Option<PathBuf>,
     check: FolderCheck,
     probe: Option<Task<()>>,
@@ -628,6 +636,7 @@ impl Composer {
             wish,
             turns,
             open: false,
+            invoker: None,
             folder: None,
             check: FolderCheck::Idle,
             probe: None,
@@ -647,6 +656,7 @@ impl Composer {
         }
     }
 
+    // Audit walk (decision 59): Esc, Cancel and Start return focus to the control that opened New wish.
     /// `AppState::composing` is the only truth about whether the dialog is up.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let composing = self.state.read(cx).composing;
@@ -655,10 +665,14 @@ impl Composer {
         }
         self.open = composing;
         if composing {
+            self.invoker = window.focused(cx);
             self.reset(window, cx);
             self.show(window, cx);
         } else {
             window.close_all_dialogs(cx);
+            if let Some(handle) = self.invoker.take() {
+                handle.focus(window, cx);
+            }
         }
     }
 
@@ -937,7 +951,7 @@ impl Composer {
     fn fill(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let view = cx.entity().downgrade();
         dialog
-            .w(px(640.))
+            .w(px(DIALOG_W))
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
             .on_cancel(move |_, window, cx| {
@@ -951,7 +965,7 @@ impl Composer {
     }
 
     fn label(&self, text: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
-        div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(cx, T, text))
+        div().text_size(theme::font(theme::density(cx), TypeSize::Body)).font_weight(FontWeight::MEDIUM).child(tr(cx, T, text))
     }
 
     fn form(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1026,16 +1040,16 @@ impl Composer {
                             .h_8()
                             .px_2()
                             .gap_1p5()
-                            .rounded(px(6.))
+                            .rounded(theme::RADIUS)
                             .border_1()
                             .border_color(t.border)
                             .bg(t.canvas)
-                            .text_sm()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Body))
                             .when_some(tip.clone(), |this, tip| {
                                 let tip: SharedString = tip.into();
                                 this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             })
-                            .child(Icon::new(IconName::Folder).size(px(14.)).text_color(t.muted))
+                            .child(Icon::new(IconName::Folder).size(px(ICON_LARGE)).text_color(t.muted))
                             .child(match tip {
                                 Some(path) => div()
                                     .flex_1()
@@ -1054,6 +1068,7 @@ impl Composer {
                             .small()
                             .icon(IconName::FolderOpen)
                             .label(tr(cx, T, "Choose folder…"))
+                            .tooltip(tr(cx, T, "Choose the project folder"))
                             .track_focus(&self.choose_focus)
                             .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx))),
                     ),
@@ -1063,13 +1078,14 @@ impl Composer {
                     h_flex()
                         .gap_1p5()
                         .flex_wrap()
-                        .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Recent")))
+                        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "Recent")))
                         .children(recents.into_iter().enumerate().map(|(i, (name, path))| {
-                            let tip = path.display().to_string();
+                            let tip = fill(tr(cx, T, "Open recent project: {}"), &[&path.display().to_string()]);
                             let selected = current.as_ref() == Some(&path);
                             Button::new(("composer-recent", i))
                                 .outline()
                                 .xsmall()
+                                .min_h(theme::TARGET_MIN)
                                 .label(name)
                                 .selected(selected)
                                 .tooltip(tip)
@@ -1092,11 +1108,11 @@ impl Composer {
                 .gap_1p5()
                 .px_2()
                 .py_1()
-                .rounded(px(6.))
+                .rounded(theme::RADIUS)
                 .bg(t.review.opacity(0.12))
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.review)
-                .child(div().pt(px(1.)).child(Icon::new(IconName::TriangleAlert).size(px(13.))))
+                .child(div().pt(theme::space(theme::density(cx), Step::Xs)).child(Icon::new(IconName::TriangleAlert).size(px(ICON_MEDIUM))))
                 .child(div().min_w_0().child(text))
                 .into_any_element()
         };
@@ -1108,13 +1124,13 @@ impl Composer {
             };
             h_flex()
                 .gap_1p5()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
                 .child(tr(cx, T, "branch"))
                 .child(
                     div()
                         .px_1p5()
-                        .rounded(px(4.))
+                        .rounded(theme::RADIUS)
                         .border_1()
                         .border_color(t.border)
                         .bg(t.canvas)
@@ -1126,7 +1142,7 @@ impl Composer {
         };
         let line: AnyElement = match &self.check {
             FolderCheck::Idle => div().into_any_element(),
-            FolderCheck::Checking => div().text_xs().text_color(t.muted).child(tr(cx, T, "Checking this folder…")).into_any_element(),
+            FolderCheck::Checking => div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "Checking this folder…")).into_any_element(),
             FolderCheck::Repo { head, changes } => {
                 let warning = match (head, changes) {
                     (Head::Unborn(_), _) => Some(tr(cx, T, "No commits yet. Commit first so this can be undone.").to_owned()),
@@ -1141,9 +1157,9 @@ impl Composer {
                         Some(text) => warn(text, cx),
                         None => h_flex()
                             .gap_1()
-                            .text_xs()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.muted)
-                            .child(Icon::new(IconName::Check).size(px(12.)).text_color(t.ok))
+                            .child(Icon::new(IconName::Check).size(px(ICON_SMALL)).text_color(t.ok))
                             .child(tr(cx, T, "No uncommitted changes"))
                             .into_any_element(),
                     })
@@ -1153,9 +1169,9 @@ impl Composer {
             FolderCheck::Unknown(error) => warn(tr(cx, T, "Could not read the git state: {error}").replace("{error}", error), cx),
             FolderCheck::Missing => h_flex()
                 .gap_1p5()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.fail)
-                .child(Icon::new(IconName::CircleX).size(px(13.)))
+                .child(Icon::new(IconName::CircleX).size(px(ICON_MEDIUM)))
                 .child(tr(cx, T, "This folder does not exist."))
                 .into_any_element(),
         };
@@ -1172,7 +1188,7 @@ impl Composer {
                     .justify_between()
                     .gap_3()
                     .child(self.label("Wish", cx))
-                    .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Type @ to point at a file or folder."))),
+                    .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "Type @ to point at a file or folder."))),
             )
             .child(
                 div()
@@ -1203,7 +1219,8 @@ impl Composer {
     fn mention_popup(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let mention = self.mention.as_ref()?;
         let t = cx.tokens();
-        let note = |text: String| div().px_3().py_2().text_xs().text_color(t.muted).child(text);
+        let caption = theme::font(theme::density(cx), TypeSize::Caption);
+        let note = |text: String| div().px_3().py_2().text_size(caption).text_color(t.muted).child(text);
         let mut rows: Vec<AnyElement> = vec![];
         let header: Option<String>;
         let mut footer = false;
@@ -1234,11 +1251,11 @@ impl Composer {
         let panel = v_flex()
             .id("composer-mention")
             .absolute()
-            .top(px(WISH_H + 4.))
+            .top(px(WISH_H) + theme::space(theme::density(cx), Step::Xs))
             .left_0()
             .right_0()
             .occlude()
-            .rounded(px(4.))
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(t.border)
             .bg(t.surface)
@@ -1269,7 +1286,7 @@ impl Composer {
                             h_flex()
                                 .gap_1()
                                 .children(shortcut.keys.iter().map(|&keys| key_cap(keys)))
-                                .child(div().pl_1().text_xs().text_color(t.muted).child(tr(cx, palette::T, shortcut.does)))
+                                .child(div().pl_1().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, palette::T, shortcut.does)))
                         })),
                 )
             });
@@ -1296,7 +1313,7 @@ impl Composer {
             .cursor_pointer()
             .when(selected, |this| this.bg(t.raised))
             .hover(|this| this.bg(t.raised))
-            .when(selected, |this| this.child(div().absolute().left_0().top(px(7.)).w(px(2.)).h(px(16.)).bg(t.gold)))
+            .when(selected, |this| this.child(div().absolute().left_0().top(theme::space(theme::density(cx), Step::Sm)).w(theme::RADIUS_SMALL).h(theme::space(theme::density(cx), Step::Lg)).bg(t.gold)))
             // On mouse down, before the wish box hears that it lost the keyboard and closes the list.
             .on_mouse_down(
                 MouseButton::Left,
@@ -1305,11 +1322,11 @@ impl Composer {
                     this.accept_mention(Some(ix), window, cx);
                 }),
             )
-            .child(Icon::new(if folder { IconName::Folder } else { IconName::File }).size(px(13.)).text_color(t.muted))
+            .child(Icon::new(if folder { IconName::Folder } else { IconName::File }).size(px(ICON_MEDIUM)).text_color(t.muted))
             .child(
                 h_flex()
                     .min_w_0()
-                    .text_sm()
+                    .text_size(theme::font(theme::density(cx), TypeSize::Body))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(div().flex_shrink(1.).min_w_0().truncate().text_color(t.muted).child(marked(dir.to_owned().into(), &dir_marks, t.text)))
@@ -1330,8 +1347,8 @@ impl Composer {
                         cx.notify();
                     })),
             )
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(cx, T, "Creative")))
-            .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Let Chronos find one small, evidence-backed improvement.")))
+            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).font_weight(FontWeight::MEDIUM).child(tr(cx, T, "Creative")))
+            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "Let Chronos find one small, evidence-backed improvement.")))
     }
 
     fn research_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1342,7 +1359,7 @@ impl Composer {
             .id("composer-research")
             .relative()
             .w_full()
-            .rounded(px(8.))
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(superswitch::border(look, &t))
             .bg(t.canvas)
@@ -1351,7 +1368,7 @@ impl Composer {
             .child(
                 h_flex()
                     .relative()
-                    .min_h(px(84.))
+                    .min_h(px(RESEARCH_CARD_MIN_H))
                     .pl(px(superswitch::EMBLEM_GUTTER))
                     .pr_4()
                     .py_3()
@@ -1361,8 +1378,8 @@ impl Composer {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(cx, T, "Advanced research")))
-                            .child(div().text_xs().text_color(t.muted).child(tr(
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).font_weight(FontWeight::MEDIUM).child(tr(cx, T, "Advanced research")))
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(
                                 cx,
                                 T,
                                 "Astra, Fable 5.2 and Argon, three models from different families, deliberate before the plan. Fable is capped at $5; Argon's quota is small.",
@@ -1370,9 +1387,9 @@ impl Composer {
                             .children(shortfall.map(|text| {
                                 h_flex()
                                     .gap_1p5()
-                                    .text_xs()
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                     .text_color(t.review)
-                                    .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                                    .child(Icon::new(IconName::TriangleAlert).size(px(ICON_SMALL)))
                                     .child(text)
                             })),
                     )
@@ -1380,6 +1397,7 @@ impl Composer {
                         Switch::new("composer-research-switch")
                             .checked(self.research.is_on())
                             .accessibility_label(tr(cx, T, "Advanced research"))
+                            .tooltip(tr(cx, T, "Advanced research"))
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.research.set(*checked, motion::now(cx));
                                 cx.notify();
@@ -1401,6 +1419,8 @@ impl Composer {
                         Button::new("composer-advanced")
                             .ghost()
                             .xsmall()
+                            .min_h(theme::TARGET_MIN)
+                            .tooltip(tr(cx, T, "Show or hide advanced options"))
                             .icon(if self.advanced { IconName::ChevronDown } else { IconName::ChevronRight })
                             .label(tr(cx, T, "Advanced"))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1408,16 +1428,16 @@ impl Composer {
                                 cx.notify();
                             })),
                     )
-                    .children(summary.map(|text| div().text_xs().text_color(t.muted).child(text))),
+                    .children(summary.map(|text| div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(text))),
             )
             .when(self.advanced, |this| {
                 this.child(
                     h_flex()
                         .gap_2()
                         .pl_5()
-                        .child(div().text_sm().child(tr(cx, T, "Maximum turns")))
-                        .child(div().w(px(96.)).child(Input::new(&self.turns).small()))
-                        .child(div().text_xs().text_color(t.muted).child(tr(cx, T, "Leave blank for no limit."))),
+                        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).child(tr(cx, T, "Maximum turns")))
+                        .child(div().w(px(TURNS_INPUT_W)).child(Input::new(&self.turns).small()))
+                        .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, T, "Leave blank for no limit."))),
                 )
             })
     }
@@ -1429,23 +1449,23 @@ impl Composer {
         let reason: AnyElement = if self.not_connected {
             h_flex()
                 .gap_1p5()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.fail)
-                .child(Icon::new(IconName::CircleAlert).size(px(13.)))
+                .child(Icon::new(IconName::CircleAlert).size(px(ICON_MEDIUM)))
                 .child(tr(cx, T, "Not connected to a session, so this wish cannot start."))
                 .into_any_element()
         } else if let Some(blocked) = blocked {
             h_flex()
                 .gap_1p5()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
-                .child(Icon::new(IconName::Info).size(px(13.)))
+                .child(Icon::new(IconName::Info).size(px(ICON_MEDIUM)))
                 .child(tr(cx, T, blocked.reason()))
                 .into_any_element()
         } else {
             h_flex()
                 .gap_1p5()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
                 .child(Kbd::new(Keystroke::parse("ctrl-enter").expect("valid keystroke")))
                 .child(tr(cx, T, "Start"))
@@ -1461,12 +1481,14 @@ impl Composer {
                     .child(
                         Button::new("composer-cancel")
                             .label(tr(cx, T, "Cancel"))
+                            .tooltip(tr(cx, T, "Cancel"))
                             .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     )
                     .child(
                         Button::new("composer-start")
                             .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
                             .label(tr(cx, T, "Start"))
+                            .tooltip(tr(cx, T, "Start"))
                             .disabled(blocked.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                     ),
@@ -1586,6 +1608,7 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
     use crate::desktop::demo;

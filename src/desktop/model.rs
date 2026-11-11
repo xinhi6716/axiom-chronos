@@ -6,6 +6,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod feed;
+mod undo;
+mod menu;
+mod board;
+pub use feed::*;
+pub use undo::*;
+pub use menu::*;
+pub use board::*;
+#[cfg(test)]
+mod accept;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Waiting,
@@ -429,6 +440,8 @@ const ERRORS_KEPT: usize = 50;
 /// never waits on the engine: `Err` means it could not be queued, and a failure that happens
 /// later arrives in `AppState::errors`.
 pub trait Backend: 'static {
+    fn restore_memory(&self, _id: i64, _prior: &MemoryPrior) -> Res<()> { Err(Failure::new("unsupported", "restore is not supported")) }
+    fn reload(&self, _f: FeedKind) -> Res<()> { self.refresh() }
     fn evolve_check(&self) -> Res<()> { Err(Failure::new("unsupported", "evolve check is not supported")) }
     fn evolve_start(&self, _repo: &Path) -> Res<()> { Err(Failure::new("unsupported", "evolve start is not supported")) }
     fn start_wish(&self, request: WishRequest) -> Res<()>;
@@ -457,6 +470,10 @@ pub struct Address {
 
 /// The single shared model. Screens read it and call its command methods.
 pub struct AppState {
+    pub feeds: Feeds,
+    pub undo: UndoStack,
+    pub quota: crate::usage::quota::Quotas,
+    pub board: HashMap<SharedString, BoardEntry>,
     pub evolve: EvolveState,
     pub view: Screen,
     pub runs: Vec<Run>,
@@ -679,13 +696,51 @@ impl AppState {
     /// `text` becomes the entry's new body, which is what later briefs see. With an engine
     /// connected the entry changes when the engine reports it; without one it changes here.
     pub fn correct_memory(&mut self, id: i64, text: &str, cx: &mut Context<Self>) {
+        self.apply_memory_correction(id, text);
+        cx.notify();
+    }
+
+    pub fn apply_memory_correction(&mut self, id: i64, text: &str) {
         if self.backend.is_some() {
             self.command(Action::CorrectMemory, None, |backend| backend.correct_memory(id, text));
         } else if let Some(entry) = self.memory.iter_mut().find(|m| m.id == id) {
+            let prior = MemoryPrior { body: entry.body.to_string(), summary: entry.title.to_string(), corrected: entry.corrected.then_some(0.0), confirmed: 0.0 };
             entry.body = text.trim().to_owned().into();
             entry.corrected = true;
+            self.undo.push(Undoable::Memory { id, prior });
         }
+    }
+
+    pub fn undo_memory(&mut self, id: i64, prior: MemoryPrior, cx: &mut Context<Self>) {
+        self.restore_memory(id, prior);
         cx.notify();
+    }
+
+    pub fn restore_memory(&mut self, id: i64, prior: MemoryPrior) {
+        if self.backend.is_some() {
+            self.command(Action::CorrectMemory, None, |backend| backend.restore_memory(id, &prior));
+        } else if let Some(entry) = self.memory.iter_mut().find(|m| m.id == id) {
+            entry.body = prior.body.into();
+            entry.corrected = prior.corrected.is_some();
+        }
+    }
+
+    pub fn take_undo(&mut self) -> Option<Undoable> { self.undo.pop() }
+    pub fn record_undo(&mut self, u: Undoable) { self.undo.push(u); }
+
+    pub fn retry(&mut self, f: FeedKind, cx: &mut Context<Self>) {
+        self.retry_feed(f);
+        cx.notify();
+    }
+
+    pub fn retry_feed(&mut self, f: FeedKind) {
+        if self.backend.is_some() {
+            self.command(Action::Refresh, None, |backend| backend.reload(f));
+        } else {
+            let feed = self.feeds.get_mut(f);
+            feed.loaded = true;
+            feed.error = None;
+        }
     }
 
     /// Asks the control bar to open its box for the current run, starting with `text`.

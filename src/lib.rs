@@ -1,5 +1,6 @@
 pub mod app;
 pub mod base;
+pub mod board;
 pub mod bridge;
 pub mod cli;
 pub mod codegraph;

@@ -2,7 +2,11 @@
 use super::i18n::{self, tr};
 use super::evolve::EvolvePanel;
 use super::model::*;
-use super::{ornament, theme};
+use super::{ornament, theme, settings};
+use super::theme::{Step, TypeSize};
+use std::{cell::Cell, rc::Rc};
+mod logic;
+#[cfg(test)] mod accept;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::{
     Table as BaseTable, TableBody as BaseBody, TableCell as BaseCell, TableHead as BaseHead,
@@ -11,7 +15,7 @@ use gpui_kit::base::{
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
@@ -22,6 +26,13 @@ use gpui_kit::*;
 use std::collections::BTreeMap;
 
 const TEXT: i18n::Table = &[
+    ("Summary board", "摘要看板"),
+    ("{input} in · {output} out", "輸入 {input} · 輸出 {output}"),
+    ("1 call without usage", "1 次呼叫未回報用量"),
+    ("{n} calls without usage", "{n} 次呼叫未回報用量"),
+    ("No summary calls yet", "摘要尚無呼叫紀錄"),
+    ("Loading usage", "正在載入用量"),
+    ("Try again", "重試"),
     ("This run", "這次執行"),
     ("All runs", "全部執行"),
     ("1 run", "共 1 次執行"),
@@ -105,15 +116,6 @@ pub(super) fn warning_texts(run: &Run, lang: i18n::Lang) -> Vec<SharedString> {
         .cloned()
         .chain(run.notes.iter().map(|note| note_text(note, lang).into()))
         .collect()
-}
-
-/// The raw ids behind a role's row, for its tooltip.
-fn ids_line(ids: &[SharedString], key: &SharedString) -> String {
-    if ids.is_empty() {
-        key.to_string()
-    } else {
-        ids.iter().map(|id| id.as_ref()).collect::<Vec<_>>().join(", ")
-    }
 }
 
 fn add_id(ids: &mut Vec<SharedString>, id: &SharedString) {
@@ -511,8 +513,8 @@ const fn right(width: f32) -> Col {
 
 const RUN_COLS: [Col; 7] = [left(144.), left(120.), grow(), right(88.), right(72.), right(104.), right(104.)];
 
-fn sized<E: Styled>(element: E, col: Col) -> E {
-    let element = element.flex().items_center().overflow_hidden().px_2().text_size(px(13.));
+fn sized<E: Styled>(element: E, col: Col, d: theme::Density) -> E {
+    let element = element.flex().items_center().overflow_hidden().px(theme::space(d, Step::Sm)).text_size(theme::font(d, TypeSize::Body));
     let element = match col.width {
         Some(width) => element.w(px(width)).flex_none(),
         None => element.flex_1().min_w_0(),
@@ -529,18 +531,18 @@ fn header_row(t: Tokens, cols: &[Col], labels: &[&'static str], cx: &App) -> Bas
         BaseRow::new("row", 1)
             .flex()
             .flex_row()
-            .h(px(30.))
+            .h(theme::row_height(theme::density(cx)))
             .border_b_1()
             .border_color(t.border)
             .text_color(t.muted)
             .children(cols.iter().zip(labels).enumerate().map(|(ix, (col, label))| {
-                sized(BaseHead::new(("th", ix), ix + 1), *col).text_xs().child(tr(cx, TEXT, label))
+                sized(BaseHead::new(("th", ix), ix + 1), *col, theme::density(cx)).text_size(theme::font(theme::density(cx), TypeSize::Caption)).child(tr(cx, TEXT, label))
             })),
     )
 }
 
-fn data_cell(ix: usize, col: Col, child: impl IntoElement) -> BaseCell {
-    sized(BaseCell::new(("td", ix), ix + 1), col).child(child)
+fn data_cell(ix: usize, col: Col, child: impl IntoElement, d: theme::Density) -> BaseCell {
+    sized(BaseCell::new(("td", ix), ix + 1), col, d).child(child)
 }
 
 fn tooltip_text(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
@@ -548,31 +550,31 @@ fn tooltip_text(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App)
     move |window, cx| Tooltip::new(text.clone()).build(window, cx)
 }
 
-fn panel(t: Tokens) -> Div {
+fn panel(t: Tokens, d: theme::Density) -> Div {
     ornament::frame(&t, t.gold.opacity(0.6), t.surface)
         .flex().flex_col()
         .min_w_0()
-        .gap_3()
-        .p_4()
+        .gap(theme::space(d, Step::Md))
+        .p(theme::space(d, Step::Lg))
 }
 
 fn panel_title(t: Tokens, text: &str) -> Div {
     ornament::section_label(&t, text)
 }
 
-fn tile(t: Tokens, label: &str, value: String, color: Hsla, note: Option<(String, Hsla)>) -> Div {
+fn tile(t: Tokens, d: theme::Density, label: &str, value: String, color: Hsla, note: Option<(String, Hsla)>) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
-        .px_4()
-        .py_3()
-        .gap_0p5()
-        .child(div().text_xs().text_color(t.muted).child(label.to_owned()))
-        .child(div().text_size(px(22.)).font_semibold().text_color(color).child(value))
+        .px(theme::space(d, Step::Lg))
+        .py(theme::space(d, Step::Md))
+        .gap(theme::space(d, Step::Xs))
+        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(label.to_owned()))
+        .child(div().text_size(theme::font(d, TypeSize::Heading)).font_semibold().text_color(color).child(value))
         .child(
             div()
-                .min_h(px(16.))
-                .text_xs()
+                .min_h(theme::space(d, Step::Lg))
+                .text_size(theme::font(d, TypeSize::Caption))
                 .text_color(note.as_ref().map_or(t.muted, |(_, color)| *color))
                 .child(note.map_or(String::new(), |(text, _)| text)),
         )
@@ -606,12 +608,13 @@ fn totals(summary: &Summary, cx: &App) -> Div {
         }
     });
     let tiles = [
-        tile(t, tr(cx, TEXT, "Cost at API prices"), fmt_dollars(summary.cost), t.gold, cost_note.map(|note| (note, t.muted))),
-        tile(t, tr(cx, TEXT, "Input"), fmt_count(summary.input, summary.token_reported[0], summary.token_missing[0]), t.text, None),
-        tile(t, tr(cx, TEXT, "Cached"), fmt_count(summary.cached, summary.token_reported[1], summary.token_missing[1]), t.text, None),
-        tile(t, tr(cx, TEXT, "Output"), fmt_count(summary.output, summary.token_reported[2], summary.token_missing[2]), t.text, None),
+        tile(t, theme::density(cx), tr(cx, TEXT, "Cost at API prices"), fmt_dollars(summary.cost), t.gold, cost_note.map(|note| (note, t.muted))),
+        tile(t, theme::density(cx), tr(cx, TEXT, "Input"), fmt_count(summary.input, summary.token_reported[0], summary.token_missing[0]), t.text, None),
+        tile(t, theme::density(cx), tr(cx, TEXT, "Cached"), fmt_count(summary.cached, summary.token_reported[1], summary.token_missing[1]), t.text, None),
+        tile(t, theme::density(cx), tr(cx, TEXT, "Output"), fmt_count(summary.output, summary.token_reported[2], summary.token_missing[2]), t.text, None),
         tile(
             t,
+            theme::density(cx),
             tr(cx, TEXT, "Peak context"),
             fmt_tokens(peak),
             if over_line(peak) { t.fail } else { t.text },
@@ -625,14 +628,14 @@ fn totals(summary: &Summary, cx: &App) -> Div {
         })))
         .child(
             h_flex()
-                .gap_2()
-                .px_4()
-                .py_2()
+                .gap(theme::space(theme::density(cx), Step::Sm))
+                .px(theme::space(theme::density(cx), Step::Lg))
+                .py(theme::space(theme::density(cx), Step::Sm))
                 .border_t_1()
                 .border_color(t.border)
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
-                .child(Icon::new(IconName::Info).size(px(14.)).flex_shrink_0())
+                .child(div().id("usage-price-info").tooltip(tooltip_text(tr(cx, TEXT, "Dollar figures are API-price equivalents. Subscription plans are not billed these amounts."))).child(Icon::new(IconName::Info).size(theme::font(theme::density(cx), TypeSize::Title)).flex_shrink_0()))
                 .child(tr(
                     cx,
                     TEXT,
@@ -644,12 +647,11 @@ fn totals(summary: &Summary, cx: &App) -> Div {
 const CHART_NAME: f32 = 152.;
 const CHART_VALUE: f32 = 92.;
 const CHART_GAP: f32 = 12.;
-const CHART_ROW: f32 = 30.;
 const CHART_LABEL: f32 = 20.;
 
 fn context_tooltip(row: &ContextRow, all_runs: bool, cx: &App) -> String {
     let mut lines = vec![
-        ids_line(&row.ids, &row.agent),
+        logic::role_tip(*cx.global::<i18n::Lang>(), &row.agent, &row.ids),
         tr(cx, TEXT, "{tokens} tokens at its largest").replace("{tokens}", &with_commas(row.peak)),
     ];
     if all_runs && row.runs_seen > 1 {
@@ -669,7 +671,7 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
     let share = |tokens: u64| relative(tokens as f32 / scale);
     h_flex()
         .id(("usage-context", ix))
-        .h(px(CHART_ROW))
+        .h(theme::row_height(theme::density(cx)))
         .gap(px(CHART_GAP))
         .tooltip(tooltip_text(context_tooltip(row, all_runs, cx)))
         .child(
@@ -677,7 +679,7 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
                 .w(px(CHART_NAME))
                 .flex_shrink_0()
                 .truncate()
-                .text_size(px(13.))
+                .text_size(theme::font(theme::density(cx), TypeSize::Body))
                 .text_color(if over { t.text } else { t.muted })
                 .child(role_name(*cx.global::<i18n::Lang>(), &row.agent)),
         )
@@ -686,8 +688,8 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
                 .relative()
                 .flex_1()
                 .min_w_0()
-                .h(px(14.))
-                .rounded(px(3.))
+                .h(theme::space(theme::density(cx), Step::Md))
+                .rounded(theme::RADIUS_SMALL)
                 .overflow_hidden()
                 .bg(t.border.opacity(0.45))
                 .child(div().absolute().top_0().bottom_0().left_0().w(share(row.peak.min(CONTEXT_WARNING_TOKENS))).bg(ornament::gold_fill(&t)).shadow(ornament::gold_glow(&t, 0.35)))
@@ -708,13 +710,13 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
                 .w(px(CHART_VALUE))
                 .flex_shrink_0()
                 .justify_end()
-                .gap_1()
-                .text_size(px(13.))
+                .gap(theme::space(theme::density(cx), Step::Xs))
+                .text_size(theme::font(theme::density(cx), TypeSize::Body))
                 .text_color(if over { t.fail } else { t.muted })
-                .when(over, |value| value.child(Icon::new(IconName::TriangleAlert).size(px(13.))))
+                .when(over, |value| value.child(Icon::new(IconName::TriangleAlert).size(theme::font(theme::density(cx), TypeSize::Body))))
                 .child(fmt_tokens(row.peak))
                 .when(over, |value| {
-                    value.child(div().text_xs().child(format!("{}×", fmt_ratio(row.peak))))
+                    value.child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).child(format!("{}×", fmt_ratio(row.peak))))
                 }),
         )
 }
@@ -723,9 +725,9 @@ fn context_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
     let t = cx.tokens();
     let title = tr(cx, TEXT, "Peak context per agent");
     if summary.contexts.is_empty() {
-        return panel(t)
+        return panel(t, theme::density(cx))
             .child(panel_title(t, title))
-            .child(div().text_sm().text_color(t.muted).child(tr(cx, TEXT, "No agent has reported its context size yet.")));
+            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).text_color(t.muted).child(tr(cx, TEXT, "No agent has reported its context size yet.")));
     }
     let scale = chart_scale(&summary.contexts) as f32;
     let line = CONTEXT_WARNING_TOKENS as f32 / scale;
@@ -735,13 +737,13 @@ fn context_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
         TEXT,
         "Each bar is the largest context that agent carried. Past the line, every step re-reads too much.",
     );
-    panel(t)
+    panel(t, theme::density(cx))
         .child(
             h_flex()
                 .justify_between()
-                .gap_4()
+                .gap(theme::space(theme::density(cx), Step::Lg))
                 .child(panel_title(t, title).flex_none())
-                .child(div().min_w_0().truncate().text_xs().text_color(t.muted).child(caption)),
+                .child(div().min_w_0().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(caption)),
         )
         .child(
         div()
@@ -762,7 +764,7 @@ fn context_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
                             .top_0()
                             .h(px(CHART_LABEL))
                             .whitespace_nowrap()
-                            .text_xs()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.review)
                             .map(|label| if line > 0.6 { label.right(relative(1. - line)).pr_1() } else { label.left(relative(line)).pl_1() })
                             .child(label),
@@ -819,17 +821,19 @@ fn warning_alert(ix: usize, warning: &Warning, all_runs: bool, cx: &App) -> Aler
 
 fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
     let t = cx.tokens();
-    panel(t)
+    panel(t, theme::density(cx))
         .child(panel_title(t, tr(cx, TEXT, "Warnings")))
         .when(summary.warnings.is_empty(), |panel| {
             panel.child(
                 h_flex()
-                    .gap_2()
+                    .id("usage-warning-clear")
+                    .tooltip(tooltip_text(tr(cx, TEXT, if summary.contexts.is_empty() { "Nothing to check yet." } else { "Nothing to fix. Every agent stayed under the line." })))
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
-                    .text_sm()
+                    .text_size(theme::font(theme::density(cx), TypeSize::Body))
                     .text_color(t.muted)
                     .when(!summary.contexts.is_empty(), |line| {
-                        line.child(Icon::new(IconName::CircleCheck).size(px(16.)).text_color(t.ok).mt(px(2.)).flex_shrink_0())
+                        line.child(Icon::new(IconName::CircleCheck).size(theme::font(theme::density(cx), TypeSize::Title)).text_color(t.ok).mt(px(2.)).flex_shrink_0())
                     })
                     .child(tr(
                         cx,
@@ -842,8 +846,13 @@ fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
                     )),
             )
         })
-        .child(div().flex().flex_wrap().gap_3().children(summary.warnings.iter().enumerate().map(|(ix, warning)| {
-            div().flex().flex_1().min_w(px(360.)).child(warning_alert(ix, warning, all_runs, cx))
+        .child(div().flex().flex_wrap().gap(theme::space(theme::density(cx), Step::Md)).children(summary.warnings.iter().enumerate().map(|(ix, warning)| {
+            let tip: SharedString = match warning {
+                Warning::ContextTooLarge { agent, .. } => format!("{}\n{}", i18n::role_tooltip(*cx.global::<i18n::Lang>(), agent), tr(cx, TEXT, "{agent}: context too large").replace("{agent}", &role_name(*cx.global::<i18n::Lang>(), agent))).into(),
+                Warning::Reported { text, .. } => text.clone(),
+                Warning::Ledger { note, .. } => note_text(note, *cx.global::<i18n::Lang>()).into(),
+            };
+            div().id(("usage-warning-tip", ix)).tooltip(tooltip_text(tip)).flex().flex_1().min_w(theme::READ_WIDTH / 2.).child(warning_alert(ix, warning, all_runs, cx))
         })))
 }
 
@@ -854,15 +863,15 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
     let roles = name_label == "Role";
     let shown = |row: &CostRow| -> (SharedString, SharedString) {
         if roles {
-            (role_name(lang, &row.name), ids_line(&row.ids, &row.name).into())
+            (role_name(lang, &row.name), logic::role_tip(lang, &row.name, &row.ids).into())
         } else {
             (row.name.clone(), row.name.clone())
         }
     };
     let cols = if roles {
-        vec![grow(), right(80.), right(80.), right(80.), right(80.)]
+        vec![grow(), Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }]
     } else {
-        vec![grow(), right(96.), right(104.), right(100.), right(92.), right(92.), right(96.)]
+        vec![grow(), Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }, Col { width: None, right: true }]
     };
     let labels: &[&str] = if roles { &[name_label, "API cost", "Input", "Cached", "Output"] }
         else { &[name_label, "Input", "Cached input", "Cache writes", "Output", "Total", "API cost"] };
@@ -875,19 +884,18 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
             let values = [row.input, row.cached, row.cache_write, row.output, row.total];
             let token = |i: usize| fmt_count(values[i], row.reported[i], row.missing[i]);
             let mut cells: Vec<AnyElement> = vec![data_cell(0, cols[0],
-                h_flex().id(("name", ix)).gap_2().min_w_0().tooltip(tooltip_text(tip))
+                h_flex().id(("name", ix)).gap(theme::space(theme::density(cx), Step::Sm)).min_w_0().tooltip(tooltip_text(tip))
                     .child(div().min_w_0().truncate().child(name))
-                    .when(row.tokens_only(), |name| name.child(Tag::secondary().outline().small().flex_none().child(tr(cx, TEXT, "Tokens only"))))
-            ).into_any_element()];
-            let cost = |i: usize| data_cell(i, cols[i], div().text_color(if row.usd.known.is_some() { t.text } else { t.muted }).child(fmt_dollars(row.usd))).into_any_element();
+                    .when(row.tokens_only(), |name| name.child(Tag::secondary().outline().small().flex_none().child(tr(cx, TEXT, "Tokens only")))), theme::density(cx)).into_any_element()];
+            let cost = |i: usize| data_cell(i, cols[i], div().min_w_0().truncate().text_color(if row.usd.known.is_some() { t.text } else { t.muted }).child(fmt_dollars(row.usd)), theme::density(cx)).into_any_element();
             if roles { cells.push(cost(1)); }
             let indices: &[usize] = if roles { &[0, 1, 3] } else { &[0, 1, 2, 3, 4] };
             for &index in indices {
                 let col = cells.len();
-                cells.push(data_cell(col, cols[col], div().text_color(t.muted).child(token(index))).into_any_element());
+                cells.push(data_cell(col, cols[col], div().min_w_0().truncate().text_color(t.muted).child(token(index)), theme::density(cx)).into_any_element());
             }
             if !roles { cells.push(cost(6)); }
-            BaseRow::new(("tr", ix), ix + 2).flex().flex_row().h(px(34.))
+            BaseRow::new(("tr", ix), ix + 2).flex().flex_row().h(theme::row_height(theme::density(cx)))
                 .when(ix > 0, |this| this.border_t_1().border_color(t.border.opacity(0.6)))
                 .children(cells)
         })))
@@ -895,19 +903,19 @@ fn cost_table(id: &'static str, name_label: &'static str, rows: &[CostRow], cx: 
 
 fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, rows: &[CostRow], unpriced: bool, cx: &App) -> Div {
     let t = cx.tokens();
-    panel(t)
+    panel(t, theme::density(cx))
         .flex_1()
         .child(panel_title(t, tr(cx, TEXT, title)))
         .map(|panel| {
             if rows.is_empty() {
-                panel.child(div().text_sm().text_color(t.muted).child(tr(cx, TEXT, "No model has reported usage yet.")))
+                panel.child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).text_color(t.muted).child(tr(cx, TEXT, "No model has reported usage yet.")))
             } else {
                 panel.child(cost_table(id, name_label, rows, cx))
             }
         })
         .when(name_label == "Model" && unpriced, |panel| {
             panel.child(
-                div().text_xs().text_color(t.muted).child(tr(
+                div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(
                     cx,
                     TEXT,
                     "Unpriced models are excluded from the total.",
@@ -921,6 +929,13 @@ pub struct UsageView {
     evolve: Entity<EvolvePanel>,
     scope: Scope,
     row_focus: Vec<FocusHandle>,
+    selected: Option<String>,
+    saved_scroll: f32,
+    restore: logic::Restore,
+    scroll: ScrollHandle,
+    last_scroll: Rc<Cell<f32>>,
+    scroll_ready: Rc<Cell<bool>>,
+    restore_pending: Rc<Cell<bool>>,
 }
 
 impl UsageView {
@@ -939,12 +954,17 @@ impl UsageView {
                 }
             });
         }
+        let (saved_scope, selected, saved_scroll) = logic::decode(&settings::view_memory(cx, "usage"));
+        let can_this = state.read(cx).current.is_some_and(|i| i < state.read(cx).runs.len());
+        let initial_scope = saved_scope.unwrap_or(if scene.contains("usage-all") { Scope::AllRuns } else { Scope::ThisRun });
+        let initial_scope = if initial_scope == Scope::ThisRun && !can_this { Scope::AllRuns } else { initial_scope };
         let evolve = cx.new(|cx| EvolvePanel::new(state.clone(), window, cx));
         Self {
             state,
             evolve,
-            scope: if scene.contains("usage-all") { Scope::AllRuns } else { Scope::ThisRun },
-            row_focus: Vec::new(),
+            scope: initial_scope,
+            row_focus: Vec::new(), selected, saved_scroll, restore: logic::Restore::default(), scroll: ScrollHandle::new(),
+            last_scroll: Rc::new(Cell::new(saved_scroll)), scroll_ready: Rc::new(Cell::new(false)), restore_pending: Rc::new(Cell::new(false)),
         }
     }
 
@@ -954,46 +974,55 @@ impl UsageView {
             .small()
             .selected_index(if scope == Scope::ThisRun { 0 } else { 1 })
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.scope = if *ix == 0 { Scope::ThisRun } else { Scope::AllRuns };
-                cx.notify();
+                let next = if *ix == 0 { Scope::ThisRun } else { Scope::AllRuns };
+                if this.scope != next {
+                    this.scope = next; this.restore.cancel(); this.restore_pending.set(false); if !this.scroll_ready.get() { this.last_scroll.set(logic::scroll(-f32::from(this.scroll.offset().y))); } this.scroll_ready.set(true);
+                    let sort = logic::encode(next, None, 0.).sort;
+                    if settings::view_memory(cx, "usage").sort != sort { settings::remember_view("usage", |v| v.sort = sort, cx); }
+                    cx.notify();
+                }
             }))
             .child(Tab::new().label(tr(cx, TEXT, "This run")).disabled(!can_show_run))
             .child(Tab::new().label(tr(cx, TEXT, "All runs")))
     }
 
-    fn run_table(&self, rows: &[RunRow], current: Option<usize>, cx: &App) -> BaseTable {
+    fn run_table(&self, rows: &[RunRow], current: Option<usize>, cx: &mut Context<Self>) -> BaseTable {
         let t = cx.tokens();
         BaseTable::new("usage-runs")
             .row_count(rows.len() + 1)
             .column_count(RUN_COLS.len())
             .child(header_row(t, &RUN_COLS, &["Status", "Project", "Wish", "API cost", "Tokens", "Peak context", "Started"], cx))
             .child(BaseBody::new("body").children(rows.iter().zip(&self.row_focus).enumerate().map(|(ix, (row, focus))| {
-                let state = self.state.clone();
                 let index = row.index;
+                let session = self.state.read(cx).runs[index].session.to_string();
                 let over = over_line(row.peak);
                 let is_current = current == Some(index);
                 BaseRow::new(("tr", ix), ix + 2)
                     .flex()
                     .flex_row()
-                    .h(px(36.))
+                    .h(theme::row_height(theme::density(cx)))
                     .cursor_pointer()
                     .track_focus(&focus.clone().tab_stop(true))
                     .border_l_2()
                     .border_color(if is_current { t.gold } else { transparent_black() })
                     .when(is_current, |this| this.bg(t.raised.opacity(0.6)))
                     .hover(|this| this.bg(t.raised))
-                    .focus_visible(|this| this.bg(t.raised).border_color(t.gold))
-                    .on_click(move |_, _, cx| state.update(cx, |state, cx| state.open_run(index, cx)))
+                    .focus_visible(|this| this.bg(t.raised).border_color(t.gold).shadow(theme::focus_ring(&t)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.restore.cancel(); this.restore_pending.set(false); if !this.scroll_ready.get() { this.last_scroll.set(logic::scroll(-f32::from(this.scroll.offset().y))); } this.scroll_ready.set(true);
+                        this.selected = Some(session.clone());
+                        if settings::view_memory(cx, "usage").selected.as_deref() != Some(session.as_str()) { let selected = session.clone(); settings::remember_view("usage", |v| v.selected = Some(selected), cx); }
+                        this.state.update(cx, |state, cx| state.open_run(index, cx)); cx.notify();
+                    }))
                     .child(data_cell(
                         0,
                         RUN_COLS[0],
                         h_flex()
                             .min_w_0()
-                            .gap_1p5()
+                            .gap(theme::space(theme::density(cx), Step::Xs))
                             .child(div().size_2().rounded_full().flex_shrink_0().bg(t.outcome(row.status, row.verified_end)))
-                            .child(div().min_w_0().truncate().text_color(t.text).child(tr(cx, TEXT, row.label))),
-                    ))
-                    .child(data_cell(1, RUN_COLS[1], div().min_w_0().truncate().text_color(t.text).child(row.project.clone())))
+                            .child(div().min_w_0().truncate().text_color(t.text).child(tr(cx, TEXT, row.label))), theme::density(cx)))
+                    .child(data_cell(1, RUN_COLS[1], div().min_w_0().truncate().text_color(t.text).child(row.project.clone()), theme::density(cx)))
                     .child(data_cell(
                         2,
                         RUN_COLS[2],
@@ -1003,39 +1032,47 @@ impl UsageView {
                             .truncate()
                             .text_color(t.muted)
                             .tooltip(tooltip_text(row.wish.clone()))
-                            .child(row.wish.clone()),
-                    ))
-                    .child(data_cell(3, RUN_COLS[3], div().text_color(t.text).child(fmt_dollars(Dollars { known: row.cost, missing: usize::from(row.cost_incomplete) }))))
-                    .child(data_cell(4, RUN_COLS[4], div().text_color(t.muted).child(fmt_count(row.tokens, row.tokens_reported, row.tokens_missing))))
+                            .child(row.wish.clone()), theme::density(cx)))
+                    .child(data_cell(3, RUN_COLS[3], div().text_color(t.text).child(fmt_dollars(Dollars { known: row.cost, missing: usize::from(row.cost_incomplete) })), theme::density(cx)))
+                    .child(data_cell(4, RUN_COLS[4], div().text_color(t.muted).child(fmt_count(row.tokens, row.tokens_reported, row.tokens_missing)), theme::density(cx)))
                     .child(data_cell(
                         5,
                         RUN_COLS[5],
                         h_flex()
-                            .gap_1()
+                            .id(("usage-run-peak", ix))
+                            .tooltip(tooltip_text(tr(cx, TEXT, "Over the warning line")))
+                            .gap(theme::space(theme::density(cx), Step::Xs))
                             .text_color(if over { t.fail } else { t.muted })
-                            .when(over, |peak| peak.child(Icon::new(IconName::TriangleAlert).size(px(13.))))
-                            .child(fmt_tokens(row.peak)),
-                    ))
-                    .child(data_cell(6, RUN_COLS[6], div().min_w_0().truncate().text_color(t.muted).child(row.started.clone())))
+                            .when(over, |peak| peak.child(Icon::new(IconName::TriangleAlert).size(theme::font(theme::density(cx), TypeSize::Body))))
+                            .child(fmt_tokens(row.peak)), theme::density(cx)))
+                    .child(data_cell(6, RUN_COLS[6], div().min_w_0().truncate().text_color(t.muted).child(row.started.clone()), theme::density(cx)))
             })))
+    }
+
+    fn retry_note(&self, message: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        h_flex().w_full().items_center().gap(theme::space(theme::density(cx), Step::Sm))
+            .child(ornament::stale_note(&cx.tokens(), message))
+            .child(Button::new("usage-retry").ghost().small().min_h(theme::TARGET_MIN).label(tr(cx, TEXT, "Try again"))
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.retry(FeedKind::Usage, cx))))
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> Div {
         let state = self.state.clone();
-        v_flex().size_full().items_center().justify_center().p_6().child(
+        v_flex().size_full().items_center().justify_center().p(theme::space(theme::density(cx), Step::Xl)).child(
             Empty::new()
                 .header(
                     EmptyHeader::new()
                         .media(
                             EmptyMedia::new()
                                 .with_variant(EmptyMediaVariant::Icon)
-                                .child(Icon::new(IconName::ChartPie)),
+                                .child(div().id("usage-empty-icon").tooltip(tooltip_text(tr(cx, TEXT, "No usage yet"))).child(Icon::new(IconName::ChartPie))),
                         )
                         .title(EmptyTitle::new().child(tr(cx, TEXT, "No usage yet")))
                         .description(EmptyDescription::new().child(tr(cx, TEXT, "Cost and token figures appear here once a wish has run."))),
                 )
                 .content(
-                    EmptyContent::new().child(h_flex().gap_3().child(
+                    EmptyContent::new().child(h_flex().gap(theme::space(theme::density(cx), Step::Md)).child(
                         theme::gold_leaf(Button::new("usage-make-wish")
                             .primary(), &cx.tokens())
                             .label(tr(cx, TEXT, "Make a wish"))
@@ -1047,11 +1084,38 @@ impl UsageView {
 }
 
 impl Render for UsageView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let state = self.state.read(cx);
+        let panel_state = panel_state(&state.feeds.usage, state.runs.is_empty());
+        let screen = logic::screen_state(&panel_state, !state.runs.is_empty());
+        if screen == logic::ScreenState::Loading { return ornament::empty_state(&t, tr(cx, TEXT, "Loading usage").into(), "".into()).size_full().into_any_element(); }
+        if let PanelState::Failed(message) = &panel_state { return v_flex().size_full().p(theme::space(theme::density(cx), Step::Xl)).child(self.retry_note(message.clone(), cx)).into_any_element(); }
+        if screen == logic::ScreenState::Empty { return self.render_empty(cx).into_any_element(); }
+        let mut clear_saved_selection = false;
+        let mut session_present = self.selected.as_ref().map(|id| state.runs.iter().any(|run| run.session.as_ref() == id));
+        // A ready feed is authoritative; a stale feed may still be waiting for the saved row.
+        if self.restore.pending() && !state.runs.is_empty() && matches!(panel_state, PanelState::Ready) && session_present == Some(false) {
+            self.selected = None;
+            session_present = None;
+            clear_saved_selection = true;
+        }
+        if let Some(offset) = self.restore.take(&panel_state, !state.runs.is_empty(), session_present, self.saved_scroll) {
+            let handle = self.scroll.clone(); let ready = self.scroll_ready.clone(); let pending = self.restore_pending.clone();
+            pending.set(true);
+            cx.on_next_frame(window, move |_, window, cx| cx.on_next_frame(window, move |_, _, cx| {
+                if pending.replace(false) {
+                    let mut point = handle.offset(); point.y = -px(offset); handle.set_offset(point);
+                    cx.notify();
+                    ready.set(true);
+                }
+            }));
+        }
         if state.runs.is_empty() {
-            return self.render_empty(cx).into_any_element();
+            if clear_saved_selection && settings::view_memory(cx, "usage").selected.is_some() { settings::remember_view("usage", |v| v.selected = None, cx); }
+            let mut empty = v_flex().size_full();
+            if let PanelState::Stale(message) = &panel_state { empty = empty.child(self.retry_note(message.clone(), cx)); }
+            return empty.child(self.render_empty(cx)).into_any_element();
         }
         let current = state.current.filter(|index| *index < state.runs.len());
         let scope = if current.is_some() { self.scope } else { Scope::AllRuns };
@@ -1069,50 +1133,58 @@ impl Render for UsageView {
         while self.row_focus.len() < rows.len() {
             self.row_focus.push(cx.focus_handle());
         }
+        let highlight = self.selected.as_ref().and_then(|id| state.runs.iter().position(|run| run.session.as_ref() == id)).or(current);
+        if clear_saved_selection && settings::view_memory(cx, "usage").selected.is_some() { settings::remember_view("usage", |v| v.selected = None, cx); }
+        let board_text = logic::board_text(logic::board_line(settings::board_tokens(cx)), |key| tr(cx, TEXT, key), fmt_tokens);
+        let wide = logic::cost_columns(f32::from(window.viewport_size().width)) == 2;
+        let handle = self.scroll.clone(); let last = self.last_scroll.clone(); let ready = self.scroll_ready.clone();
         let all_runs = scope == Scope::AllRuns;
         let has_roles = !summary.roles.is_empty();
         v_flex()
             .size_full()
-            .overflow_y_scrollbar()
+            .id("usage-scroll").overflow_y_scroll().track_scroll(&self.scroll)
+            .on_prepaint(move |_, _, cx| { if ready.get() { let value = logic::scroll(-f32::from(handle.offset().y)); if (value - last.get()).abs() > 1. { last.set(value); settings::remember_view("usage", |v| v.scroll = value, cx); } } })
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(1400.))
+                    .max_w(logic::page_cap())
                     .mx_auto()
-                    .p_6()
-                    .gap_4()
+                    .p(theme::space(theme::density(cx), Step::Xl))
+                    .gap(theme::space(theme::density(cx), Step::Lg))
                     .child(
                         h_flex()
                             .justify_between()
-                            .gap_4()
+                            .gap(theme::space(theme::density(cx), Step::Lg))
                             .child(
                                 v_flex()
                                     .min_w_0()
-                                    .gap_0p5()
+                                    .gap(theme::space(theme::density(cx), Step::Xs))
                                     .child(ornament::page_title(&t, tr(cx, TEXT, "Usage")))
-                                    .child(div().truncate().text_xs().text_color(t.muted).child(subtitle)),
+                                    .child(div().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(subtitle)),
                             )
-                            .child(h_flex().gap_3().flex_none().child(self.scope_tabs(scope, current.is_some(), cx)).child(self.evolve.clone())),
+                            .child(h_flex().gap(theme::space(theme::density(cx), Step::Md)).flex_none().child(self.scope_tabs(scope, current.is_some(), cx)).child(self.evolve.clone())),
                     )
+                    .when(matches!(panel_state, PanelState::Stale(_)), |view| { if let PanelState::Stale(message) = &panel_state { view.child(self.retry_note(message.clone(), cx)) } else { view } })
                     .child(totals(&summary, cx))
+                    .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(format!("{} · {}", tr(cx, TEXT, "Summary board"), board_text)))
                     .child(context_panel(&summary, all_runs, cx))
                     .child(warnings_panel(&summary, all_runs, cx))
                     .child(
-                        v_flex()
-                            .gap_4()
+                        div().flex().when(wide && has_roles, |v| v.flex_row()).when(!wide || !has_roles, |v| v.flex_col())
+                            .gap(theme::space(theme::density(cx), Step::Lg))
                             .child(cost_panel("usage-models", "Cost by model", "Model", &summary.models, summary.unpriced, cx))
                             .when(has_roles, |this| this.child(cost_panel("usage-roles", "Cost by role", "Role", &summary.roles, false, cx))),
                     )
                     .child(
-                        panel(t)
+                        panel(t, theme::density(cx))
                             .child(
                                 h_flex()
                                     .justify_between()
-                                    .gap_4()
+                                    .gap(theme::space(theme::density(cx), Step::Lg))
                                     .child(panel_title(t, tr(cx, TEXT, "Runs")))
-                                    .child(div().text_xs().text_color(t.muted).child(tr(cx, TEXT, "Newest first. Click a run to open it."))),
+                                    .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TEXT, "Newest first. Click a run to open it."))),
                             )
-                            .child(self.run_table(&rows, current, cx)),
+                            .child(self.run_table(&rows, highlight, cx)),
                     ),
             )
             .into_any_element()
@@ -1557,3 +1629,6 @@ mod tests {
         }
     }
 }
+
+
+

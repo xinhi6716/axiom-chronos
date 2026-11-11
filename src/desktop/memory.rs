@@ -1,7 +1,12 @@
 //! What Chronos has learned from verified units: filter by project, search, read, correct, delete.
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
-use super::ornament;
+use super::{motion, ornament, palette, settings, theme};
+use super::theme::{Step, TypeSize};
+use super::motion::{Driver, Pace};
+use logic::{correction_problem, Corrections, Problem, MAX_CORRECTION_LINES};
+mod logic;
+#[cfg(test)] mod accept;
 use super::theme::{gold_leaf, Tokened as _};
 use super::wishes::{
     bind_list_keys, empty_state, matches_terms, one_line, search_terms, select_row, started_label,
@@ -12,6 +17,9 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, Textarea, TextareaState};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -23,11 +31,20 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 gpui_kit::actions!(chronos_memory, [FocusMemorySearch, DeleteSelectedMemory]);
 
 const T: Table = &[
+    ("Memory copied", "已複製記憶"),
+    ("More actions", "更多操作"),
+    ("Loading memories", "正在載入記憶"),
+    ("Try again", "重試"),
+    ("Correction saved", "更正已儲存"),
+    ("Undo", "復原"),
+    ("Dismiss", "關閉"),
     ("All projects", "所有專案"),
     ("Search memories", "搜尋記憶"),
     ("Stale", "已過時"),
@@ -70,81 +87,6 @@ const T: Table = &[
     ("The text has not changed.", "內容還沒有修改。"),
     ("Correct this memory", "更正這筆記憶"),
 ];
-
-/// The longest correction the memory store accepts, in lines.
-const MAX_CORRECTION_LINES: usize = 12;
-
-/// Why a correction cannot be saved yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Problem {
-    Empty,
-    TooLong,
-    Unchanged,
-}
-
-/// What stops `text` from replacing `current`: blank, over the store's line limit, or no change.
-fn correction_problem(text: &str, current: &str) -> Option<Problem> {
-    let text = text.trim();
-    if text.is_empty() {
-        Some(Problem::Empty)
-    } else if text.lines().count() > MAX_CORRECTION_LINES {
-        Some(Problem::TooLong)
-    } else if text == current.trim() {
-        Some(Problem::Unchanged)
-    } else {
-        None
-    }
-}
-
-/// Corrections the person wrote and has not seen saved. Saving only queues the request, so the
-/// text is kept until the entry shows it; a failure hands it back for another try.
-#[derive(Default)]
-struct Corrections {
-    /// Texts set aside for entries the person moved away from, or whose save failed.
-    drafts: HashMap<i64, String>,
-    /// Texts handed to the engine, with how many errors had been reported by then.
-    sent: HashMap<i64, (String, u64)>,
-}
-
-impl Corrections {
-    fn submit(&mut self, id: i64, text: String, errors_seen: u64) {
-        self.drafts.remove(&id);
-        self.sent.insert(id, (text, errors_seen));
-    }
-
-    /// Settles what was sent: an entry that now says it is done, a failed save becomes a draft
-    /// again, and a gone entry is forgotten.
-    fn settle(&mut self, body_of: impl Fn(i64) -> Option<String>, errors: &[AppError]) {
-        let ids: Vec<i64> = self.sent.keys().copied().collect();
-        for id in ids {
-            let Some((text, mark)) = self.sent.get(&id).cloned() else { continue };
-            match body_of(id) {
-                None => {
-                    self.sent.remove(&id);
-                }
-                Some(body) if body.trim() == text.trim() => {
-                    self.sent.remove(&id);
-                }
-                Some(_) if errors.iter().any(|e| e.action == crate::desktop::model::Action::CorrectMemory && e.id > mark) => {
-                    self.sent.remove(&id);
-                    self.drafts.insert(id, text);
-                }
-                Some(_) => {}
-            }
-        }
-    }
-
-    /// What the box starts with when `id` is corrected: the unsaved text if there is any.
-    fn start_text(&mut self, id: i64, body: &str) -> String {
-        if let Some(draft) = self.drafts.remove(&id) {
-            return draft;
-        }
-        match self.sent.get(&id) {
-            Some((text, _)) => text.clone(),
-            None => body.to_owned(),
-        }
-    }
-}
 
 /// "Last confirmed Nov 3, 05:15", written in the interface language.
 fn confirmed_line(entry: &MemoryEntry, lang: Lang) -> String {
@@ -209,11 +151,11 @@ impl SelectItem for ProjectChoice {
         h_flex()
             .w_full()
             .justify_between()
-            .gap_3()
+            .gap(theme::space(theme::density(cx), Step::Md))
             .child(div().truncate().child(self.title.clone()))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                     .text_color(cx.tokens().muted)
                     .child(self.count.to_string()),
             )
@@ -235,15 +177,13 @@ fn project_choices(memory: &[MemoryEntry], cx: &App) -> Vec<ProjectChoice> {
         .collect()
 }
 
-const ROW_HEIGHT: Pixels = px(60.);
-const LIST_WIDTH: Pixels = px(360.);
 const PAGE_ROWS: usize = 8;
 
 fn stale_tag(cx: &App) -> Tag {
     let t = cx.tokens();
     Tag::custom(t.review.opacity(0.14), t.review, t.review.opacity(0.4))
         .xsmall()
-        .text_xs()
+        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
         .px_2()
         .flex_none()
         .rounded_full()
@@ -256,6 +196,12 @@ struct MemoryList {
     selected: Option<usize>,
     selected_id: Option<i64>,
     focus: Option<FocusHandle>,
+    hover_glows: motion::Glows<i64>,
+    select_glows: motion::Glows<i64>,
+    hovered: HashSet<i64>,
+    bounds: Rc<RefCell<HashMap<i64, Bounds<Pixels>>>>,
+    runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)>,
+    saving: bool,
 }
 
 impl ListDelegate for MemoryList {
@@ -273,64 +219,41 @@ impl ListDelegate for MemoryList {
     ) -> Option<ListItem> {
         let t = cx.tokens();
         let entry = self.state.read(cx).memory.get(*self.rows.get(ix.row)?)?;
+        let id = entry.id;
         let selected = self.selected == Some(ix.row);
-        let focused = selected && self.focus.as_ref().is_some_and(|f| f.is_focused(window));
-        let meaning = tr(
-            cx,
-            T,
-            "A file it was recorded from has changed or been removed since. Chronos reads the current file instead of quoting this note in a brief.",
-        );
+        let focused = self.focus.as_ref().is_some_and(|f| f.is_focused(window));
         let source = if entry.wish.trim().is_empty() { &entry.body } else { &entry.wish };
-        let summary = SharedString::from(format!("{} · {}", entry.project, one_line(source)));
+        let summary = format!("{} · {}", entry.project, one_line(source));
         let title = one_line(&entry.title);
         let stale = entry.stale;
-        Some(
-            ListItem::new(ix.row)
-                .accessibility_label(title.clone())
-                .h(ROW_HEIGHT)
-                .py_0()
-                .px_0()
-                .rounded(px(6.))
-                .child(
-                    v_flex()
-                        .relative()
-                        .w_full()
-                        .h(ROW_HEIGHT)
-                        .px_3()
-                        .justify_center()
-                        .gap_0p5()
-                        .when(focused, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_2()
-                                    .bottom_2()
-                                    .w(px(3.))
-                                    .rounded_full()
-                                    .bg(t.gold),
-                            )
-                        })
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .justify_between()
-                                .child(div().min_w_0().truncate().text_sm().child(title))
-                                .when(stale, |this| {
-                                    this.child(
-                                        div()
-                                            .id(("memory-stale", ix.row))
-                                            .flex_none()
-                                            .child(stale_tag(cx))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(meaning).build(window, cx)
-                                            }),
-                                    )
-                                }),
-                        )
-                        .child(div().truncate().text_xs().text_color(t.muted).child(summary)),
-                ),
-        )
+        let d = theme::density(cx);
+        let height = theme::row_height(d) * 2.0;
+        let reduce = cx.reduce_motion();
+        let hovered = self.hovered.contains(&id);
+        let mut frames = Driver::new(reduce, cx);
+        self.hover_glows.set(&id, if hovered { 1.0 } else { 0.0 }, frames.now(), reduce);
+        self.select_glows.set(&id, if selected { 1.0 } else { 0.0 }, frames.now(), reduce);
+        let (lift, glow, ring) = logic::levels(selected, hovered, focused, self.hover_glows.value(&id, &mut frames), self.select_glows.value(&id, &mut frames), reduce);
+        frames.finish(window);
+        let bounds = self.bounds.clone();
+        let target = MenuTarget::Memory(id);
+        let state = self.state.clone();
+        let runner = self.runner.clone();
+        Some(ListItem::new(ix.row).accessibility_label(title.clone()).disabled(true)
+            .h(height).py(theme::space(d, Step::Xs)).px(theme::space(d, Step::Xs)).cursor_pointer()
+            .child(ornament::raised_card(&t, lift, glow)
+                .id(("memory-row", id as u64)).relative().top(-theme::space(d, Step::Xs) * (lift * 0.5))
+                .w_full().h(height - theme::space(d, Step::Xs) * 2.0)
+                .shadow({ let mut shadows = ornament::raised_card_shadows(&t, lift, glow); if ring { shadows.extend(theme::focus_ring(&t)); } shadows })
+                .px(theme::space(d, Step::Md))
+                .on_prepaint(move |rect, _, _| { bounds.borrow_mut().insert(id, rect); })
+                .on_hover(cx.listener(move |list, inside: &bool, _, cx| { if *inside { list.delegate_mut().hovered.insert(id); } else { list.delegate_mut().hovered.remove(&id); } cx.notify(); }))
+                .context_menu(move |menu, _, cx| palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx))
+                .child(v_flex().w_full().h_full().justify_center().gap(theme::space(d, Step::Xs))
+                    .child(h_flex().min_w_0().gap(theme::space(d, Step::Sm)).justify_between()
+                        .child(div().min_w_0().truncate().text_size(theme::font(d, TypeSize::Body)).child(title))
+                        .when(stale, |this| this.child(stale_tag(cx))))
+                    .child(div().w_full().truncate().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(summary)))))
     }
 
     fn set_selected_index(
@@ -339,11 +262,16 @@ impl ListDelegate for MemoryList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) {
+        let previous = self.selected_id;
         self.selected = ix.map(|ix| ix.row);
         self.selected_id = ix
             .and_then(|ix| self.rows.get(ix.row))
             .and_then(|&index| self.state.read(cx).memory.get(index))
             .map(|entry| entry.id);
+        if self.saving && previous != self.selected_id {
+            let selected = self.selected_id.map(|id| id.to_string());
+            if settings::view_memory(cx, "memory").selected != selected { settings::remember_view("memory", |v| v.selected = selected, cx); }
+        }
     }
 }
 
@@ -363,6 +291,17 @@ pub struct MemoryView {
     editing: Option<i64>,
     /// Corrections not yet saved: set aside, or waiting for the engine.
     corrections: Corrections,
+    restore: logic::Restore,
+    saved_selected: Option<i64>,
+    saved_scroll: f32,
+    last_scroll: Rc<Cell<f32>>,
+    scroll_ready: Rc<Cell<bool>>,
+    restore_pending: Rc<Cell<bool>>,
+    bounds: Rc<RefCell<HashMap<i64, Bounds<Pixels>>>>,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    painted_scroll: Rc<Cell<f32>>,
+    offer: logic::UndoOffer,
+    undo_len: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -377,16 +316,26 @@ impl MemoryView {
             KeyBinding::new("delete", DeleteSelectedMemory, Some("MemoryList")),
         ]);
 
+        let saved = settings::view_memory(cx, "memory");
+        let (saved_filter, query, saved_selected, saved_scroll) = logic::decode(&saved);
+        let bounds = Rc::new(RefCell::new(HashMap::new()));
+        let weak = cx.entity().downgrade();
+        let runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> = Rc::new(move |action, target, window, cx| {
+            let _ = weak.update(cx, |view, cx| view.run_menu(action, target, window, cx));
+        });
         let placeholder = tr(cx, T, "Search memories");
         let search = cx.new(|cx| {
             InputState::new(window, cx)
                 .clean_on_escape()
                 .placeholder(placeholder)
         });
+        search.update(cx, |input, cx| input.set_value(query.clone(), window, cx));
         let choices = project_choices(&state.read(cx).memory, cx);
+        let filter_index = saved_filter.as_ref().and_then(|name| choices.iter().position(|c| c.project.as_ref() == name));
+        let project_filter = saved_filter.map(SharedString::from);
         let project = cx.new({
             let choices = choices.clone();
-            |cx| SelectState::new(choices, Some(IndexPath::default()), window, cx)
+            |cx| SelectState::new(choices, Some(IndexPath::new(filter_index.unwrap_or(0))), window, cx)
         });
         let list = cx.new(|cx| {
             ListState::new(
@@ -396,6 +345,8 @@ impl MemoryView {
                     selected: None,
                     selected_id: None,
                     focus: None,
+                    hover_glows: motion::Glows::new(Pace::Glow), select_glows: motion::Glows::new(Pace::Glow),
+                    hovered: HashSet::new(), bounds: bounds.clone(), runner: runner.clone(), saving: false,
                 },
                 window,
                 cx,
@@ -427,17 +378,24 @@ impl MemoryView {
             placeholder,
             project,
             choices,
-            project_filter: None,
+            project_filter,
             list,
-            query: SharedString::default(),
-            terms: Vec::new(),
+            query: query.clone().into(),
+            terms: search_terms(&query),
             on_screen,
             edit,
             editing: None,
             corrections: Corrections::default(),
+            restore: logic::Restore::default(), saved_selected, saved_scroll,
+            last_scroll: Rc::new(Cell::new(saved_scroll)), scroll_ready: Rc::new(Cell::new(false)),
+            restore_pending: Rc::new(Cell::new(false)), bounds, viewport: Rc::new(Cell::new(Bounds::default())),
+            painted_scroll: Rc::new(Cell::new(0.0)), offer: logic::UndoOffer::default(), undo_len: 0,
             _subscriptions,
         };
-        this.apply(true, window, cx);
+        this.undo_len = this.state.read(cx).undo.len();
+        this.offer.remember_top(this.state.read(cx).undo.clone().pop());
+        this.sync_choices(window, cx);
+        this.apply(false, window, cx);
         if on_screen {
             this.focus_list(window, cx);
         }
@@ -455,6 +413,7 @@ impl MemoryView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.observe_undo(cx);
         let on_screen = self.state.read(cx).view == Screen::Memory;
         if on_screen {
             self.sync_choices(window, cx);
@@ -478,9 +437,12 @@ impl MemoryView {
             // The input reports Change only for committed text, so a word still being composed in an IME never filters.
             InputEvent::Change => {
                 let value = input.read(cx).value();
-                if value != self.query {
-                    self.terms = search_terms(&value);
-                    self.query = value;
+                let capped: String = value.chars().take(120).collect();
+                if value.as_ref() != capped { self.search.update(cx, |input, cx| input.set_value(capped.clone(), window, cx)); }
+                if capped != self.query.as_ref() {
+                    self.terms = search_terms(&capped);
+                    self.query = capped.into();
+                    self.cancel_restore(); self.remember_filter(cx);
                     self.apply(true, window, cx);
                 }
             }
@@ -497,57 +459,79 @@ impl MemoryView {
         cx: &mut Context<Self>,
     ) {
         let SelectEvent::Confirm(project) = event;
-        self.project_filter = project.clone().filter(|project| !project.is_empty());
+        let next = project.clone().filter(|project| !project.is_empty());
+        if self.project_filter == next { return; }
+        self.project_filter = next;
+        self.cancel_restore(); self.remember_filter(cx);
         self.apply(true, window, cx);
     }
 
     /// Rebuilds the project menu after entries change, falling back to every project when the chosen one is gone.
     fn sync_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let choices = project_choices(&self.state.read(cx).memory, cx);
-        if choices == self.choices {
-            return;
-        }
+        let loaded = matches!(panel_state(&self.state.read(cx).feeds.memory, self.state.read(cx).memory.is_empty()), PanelState::Ready | PanelState::Stale(_) | PanelState::Empty);
+        let selected_index = self.project_filter.as_ref().and_then(|project| choices.iter().position(|choice| choice.project == *project));
+        let filter_gone = loaded && self.project_filter.is_some() && selected_index.is_none();
+        if choices == self.choices && !filter_gone { return; }
         self.choices = choices.clone();
-        let filter_gone = self
-            .project_filter
-            .as_ref()
-            .is_some_and(|project| !choices.iter().any(|choice| choice.project == *project));
         self.project.update(cx, |select, cx| {
             select.set_items(choices, window, cx);
-            if filter_gone {
-                select.set_selected_index(Some(IndexPath::default()), window, cx);
-            }
+            select.set_selected_index(Some(IndexPath::new(selected_index.unwrap_or(0))), window, cx);
         });
         if filter_gone {
             self.project_filter = None;
+            self.remember_filter(cx);
         }
     }
 
+    fn cancel_restore(&mut self) { self.restore.cancel(); self.restore_pending.set(false); self.scroll_ready.set(true); }
+    fn remember_filter(&self, cx: &mut Context<Self>) {
+        let encoded = logic::encode(self.project_filter.as_deref(), &self.query, None, 0.0);
+        let filter = encoded.filter;
+        let sort = encoded.sort;
+        let saved = settings::view_memory(cx, "memory");
+        if saved.filter != filter || saved.sort != sort { settings::remember_view("memory", |v| { v.filter = filter; v.sort = sort; }, cx); }
+    }
     fn apply(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let memory = &self.state.read(cx).memory;
+        let state = self.state.read(cx);
+        let memory = &state.memory;
+        let panel = panel_state(&state.feeds.memory, memory.is_empty());
         let rows = visible_memories(memory, self.project_filter.as_deref(), &self.terms);
-        let delegate = self.list.read(cx).delegate();
-        let row = if reset {
-            0
-        } else {
-            let kept = delegate.selected_id.and_then(|id| {
-                rows.iter().position(|&i| memory[i].id == id)
-            });
-            kept.or(delegate.selected).unwrap_or(0).min(rows.len().saturating_sub(1))
-        };
-        let selected = (!rows.is_empty()).then(|| IndexPath::new(row));
+        let restoring = self.restore.take(&panel);
+        let previous = self.list.read(cx).delegate().selected_id;
+        let (row, next, restored, save) = logic::selection(&rows, memory, self.saved_selected, previous, reset, restoring, self.restore.done());
+        let valid: HashSet<i64> = memory.iter().map(|e| e.id).collect();
         self.list.update(cx, |list, cx| {
-            list.delegate_mut().rows = rows;
-            list.set_selected_index(selected, window, cx);
-            if reset {
-                list.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx);
-            }
+            let delegate = list.delegate_mut();
+            delegate.saving = false; delegate.rows = rows;
+            delegate.hover_glows.retain(|id| valid.contains(id)); delegate.select_glows.retain(|id| valid.contains(id)); delegate.hovered.retain(|id| valid.contains(id));
+            list.set_selected_index(row.map(IndexPath::new), window, cx);
+            list.delegate_mut().saving = self.restore.done();
+            if reset && row.is_some() { list.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx); }
             cx.notify();
         });
+        if let Some(save) = save {
+            let selected = save.map(|id| id.to_string());
+            if settings::view_memory(cx, "memory").selected != selected { settings::remember_view("memory", |v| v.selected = selected, cx); }
+        }
+        if restoring {
+            if !restored { self.scroll_ready.set(true); }
+            else {
+                let handle = self.list.read(cx).scroll_handle().base_handle().clone();
+                let offset = self.saved_scroll; let ready = self.scroll_ready.clone(); let pending = self.restore_pending.clone();
+                pending.set(true);
+                cx.on_next_frame(window, move |_, window, cx| cx.on_next_frame(window, move |this, _, cx| {
+                    if !pending.replace(false) { return; }
+                    if this.list.read(cx).delegate().selected_id == next { let mut point = handle.offset(); point.y = -px(offset); handle.set_offset(point); cx.notify(); }
+                    ready.set(true);
+                }));
+            }
+        }
         cx.notify();
     }
 
     fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_restore();
         self.search.update(cx, |search, cx| search.set_value("", window, cx));
         self.query = SharedString::default();
         self.terms.clear();
@@ -555,6 +539,7 @@ impl MemoryView {
         self.project.update(cx, |select, cx| {
             select.set_selected_index(Some(IndexPath::default()), window, cx);
         });
+        self.remember_filter(cx);
         self.apply(true, window, cx);
         self.focus_list(window, cx);
     }
@@ -570,19 +555,24 @@ impl MemoryView {
     /// Selects one entry, as the command palette asks, and puts the keyboard on the list. A filter
     /// that would hide the entry is cleared first; one that shows it is left alone.
     pub(super) fn reveal(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_restore();
         let shown = {
             let memory = &self.state.read(cx).memory;
             visible_memories(memory, self.project_filter.as_deref(), &self.terms).iter().any(|&i| memory[i].id == id)
         };
         if !shown {
+            self.cancel_restore();
             self.search.update(cx, |search, cx| search.set_value("", window, cx));
             self.query = SharedString::default();
             self.terms.clear();
             self.project_filter = None;
             self.project.update(cx, |select, cx| select.set_selected_index(Some(IndexPath::default()), window, cx));
         }
+        self.remember_filter(cx);
         self.list.update(cx, |list, _| list.delegate_mut().selected_id = Some(id));
         self.apply(false, window, cx);
+        let selected = self.list.read(cx).delegate().selected_id.map(|id| id.to_string());
+        if settings::view_memory(cx, "memory").selected != selected { settings::remember_view("memory", |v| v.selected = selected, cx); }
         self.list.update(cx, |list, cx| list.scroll_to_selected_item(window, cx));
         self.focus_list(window, cx);
     }
@@ -597,6 +587,63 @@ impl MemoryView {
         self.list.read(cx).delegate().rows.len()
     }
 
+    fn run_menu(&mut self, action: MenuAction, target: MenuTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let effect = { let state = self.state.read(cx); if !state.menu_allowed(&target, action) { return; } logic::resolve(&state.memory, &target, action) };
+        match effect {
+            Some(logic::MemoryEffect::Copy(text)) => { cx.write_to_clipboard(ClipboardItem::new_string(text)); window.push_notification(Notification::success(tr(cx, T, "Memory copied")), cx); }
+            Some(logic::MemoryEffect::Correct(id)) => { self.reveal(id, window, cx); if let Some(body) = self.state.read(cx).memory.iter().find(|e| e.id == id).map(|e| e.body.clone()) { self.start_correcting(id, &body, window, cx); } }
+            Some(logic::MemoryEffect::Delete(id, title)) => self.confirm_delete(id, title.into(), window, cx),
+            None => {}
+        }
+    }
+    fn observe_undo(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let len = state.undo.len();
+        let top = state.undo.clone().pop();
+        self.offer.observe(top, self.undo_len, len);
+        self.undo_len = len;
+        if self.offer.offered.as_ref().is_some_and(|(id, _)| !self.state.read(cx).memory.iter().any(|e| e.id == *id)) { self.offer.clear(); }
+    }
+    fn undo_correction(&mut self, cx: &mut Context<Self>) {
+        let Some((id, prior)) = self.offer.take() else { return };
+        self.state.update(cx, |state, cx| {
+            let top = state.take_undo();
+            let memory_top = match &top { Some(Undoable::Memory { id, prior }) => Some((*id, prior)), _ => None };
+            if !logic::can_undo(id, &prior, state.memory.iter().any(|entry| entry.id == id), memory_top) {
+                if let Some(top) = top { state.record_undo(top); } return;
+            }
+            state.undo_memory(id, prior, cx);
+        });
+        self.undo_len = self.state.read(cx).undo.len();
+        self.offer.remember_top(self.state.read(cx).undo.clone().pop());
+        cx.notify();
+    }
+    fn cursor_menu_position(&self, id: i64, cx: &App) -> Option<Point<Pixels>> {
+        let scroll = -f32::from(self.list.read(cx).scroll_handle().base_handle().offset().y);
+        if (scroll - self.painted_scroll.get()).abs() > 0.5 { return None; }
+        let bounds = self.bounds.borrow().get(&id).copied()?.intersect(&self.viewport.get());
+        (bounds.size.width > px(0.) && bounds.size.height > px(0.)).then(|| point(bounds.origin.x + bounds.size.width / 2., bounds.origin.y + bounds.size.height / 2.))
+    }
+    fn dispatch_cursor_menu(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list.read(cx).focus_handle(cx).is_focused(window) || self.list.read(cx).delegate().selected_id != Some(id) { return; }
+        let Some(position) = self.cursor_menu_position(id, cx) else { return };
+        window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Right, position, click_count: 1, ..Default::default() }), cx);
+        window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Right, position, click_count: 1, ..Default::default() }), cx);
+    }
+    fn open_cursor_menu(&mut self, _: &palette::ContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list.read(cx).focus_handle(cx).is_focused(window) { return; }
+        let Some(id) = self.list.read(cx).delegate().selected_id else { return }; cx.stop_propagation();
+        if self.cursor_menu_position(id, cx).is_some() { cx.defer_in(window, move |this, window, cx| this.dispatch_cursor_menu(id, window, cx)); }
+        else { self.list.update(cx, |list, cx| list.scroll_to_selected_item(window, cx)); cx.on_next_frame(window, move |_, window, cx| cx.on_next_frame(window, move |this, window, cx| this.dispatch_cursor_menu(id, window, cx))); }
+    }
+    fn retry_note(&self, message: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        h_flex().w_full().items_center().gap(theme::space(theme::density(cx), Step::Sm))
+            .child(ornament::stale_note(&cx.tokens(), message))
+            .child(Button::new("memory-retry").ghost().small().label(tr(cx, T, "Try again"))
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.retry(FeedKind::Memory, cx))))
+    }
+
     fn confirm_delete(&self, id: i64, title: SharedString, window: &mut Window, cx: &mut App) {
         let state = self.state.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -607,7 +654,7 @@ impl MemoryView {
                 .title(tr(cx, T, "Delete this memory?"))
                 .description(
                     v_flex()
-                        .gap_1()
+                        .gap(theme::space(theme::density(cx), Step::Xs))
                         .child(div().font_medium().child(title.clone()))
                         .child(tr(
                             cx,
@@ -735,20 +782,20 @@ impl MemoryView {
         v_flex()
             .flex_1()
             .min_h_0()
-            .gap_2()
+            .gap(theme::space(theme::density(cx), Step::Sm))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                     .text_color(t.muted)
                     .child(tr(cx, T, "Your correction replaces this note's text and is what later briefs see.")),
             )
-            .child(Textarea::new(&self.edit).small().h(px(180.)))
+            .child(Textarea::new(&self.edit).small().h(theme::row_height(theme::density(cx)) * 5.0))
             .when_some(note, |this, note| {
-                this.child(div().text_xs().text_color(t.fail).child(note))
+                this.child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.fail).child(note))
             })
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .justify_end()
                     .child(
                         Button::new("memory-discard")
@@ -798,40 +845,46 @@ impl MemoryView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_size(theme::font(theme::density(cx), TypeSize::Body))
                 .text_color(t.muted)
                 .child(tr(cx, T, "Select a memory to read it"))
                 .into_any_element();
         };
         let (id, title) = (entry.id, entry.title.clone());
+        let d = theme::density(cx);
+        let target = MenuTarget::Memory(id);
+        let state = self.state.clone();
+        let weak = cx.entity().downgrade();
+        let runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> = Rc::new(move |action, target, window, cx| { let _ = weak.update(cx, |view, cx| view.run_menu(action, target, window, cx)); });
         v_flex()
             .size_full()
-            .p_5()
-            .gap_4()
+            .p(theme::space(d, Step::Xl))
+            .gap(theme::space(d, Step::Lg))
             .child(
                 v_flex()
                     .flex_none()
-                    .gap_1p5()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .text_color(t.text)
-                            .child(entry.title.clone()),
+                        h_flex().justify_between().gap(theme::space(d, Step::Sm))
+                            .child(div().min_w_0().text_size(theme::font(d, TypeSize::Heading)).font_semibold().text_color(t.text).child(entry.title.clone()))
+                            .child(Button::new("memory-menu").ghost().small().icon(IconName::Ellipsis).min_w(theme::TARGET_MIN).min_h(theme::TARGET_MIN)
+                                .accessibility_label(tr(cx, T, "More actions"))
+                                .tooltip(tr(cx, T, "More actions"))
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx))),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
-                            .text_xs()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.muted)
-                            .child(Icon::new(IconName::Folder).size(px(13.)))
+                            .child(Icon::new(IconName::Folder).size(theme::font(theme::density(cx), TypeSize::Body)))
                             .child(entry.project.clone())
                             .child(format!("#{}", entry.id)),
                     )
                     .child(
                         div()
                             .id(("memory-wish", entry.id as u64))
-                            .text_xs()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.muted)
                             .line_clamp(3)
                             .child(if entry.wish.trim().is_empty() {
@@ -842,11 +895,11 @@ impl MemoryView {
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(theme::space(theme::density(cx), Step::Sm))
                             .items_center()
-                            .text_xs()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                             .text_color(t.muted)
-                            .child(Icon::new(IconName::Calendar).size(px(13.)))
+                            .child(Icon::new(IconName::Calendar).size(theme::font(theme::density(cx), TypeSize::Body)))
                             .child(confirmed_line(&entry, *cx.global::<Lang>()))
                             .when(entry.corrected, |this| {
                                 this.child(
@@ -869,6 +922,12 @@ impl MemoryView {
                             }),
                     ),
             )
+            .when(self.offer.offered.as_ref().is_some_and(|(offered_id, _)| *offered_id == id), |this| {
+                this.child(h_flex().gap(theme::space(d, Step::Sm)).items_center().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted)
+                    .child(tr(cx, T, "Correction saved"))
+                    .child(Button::new("memory-undo").ghost().small().min_h(theme::TARGET_MIN).label(tr(cx, T, "Undo")).on_click(cx.listener(|this, _, _, cx| this.undo_correction(cx))))
+                    .child(Button::new("memory-dismiss-undo").ghost().small().min_h(theme::TARGET_MIN).label(tr(cx, T, "Dismiss")).on_click(cx.listener(|this, _, _, cx| { this.offer.clear(); cx.notify(); }))))
+            })
             .when(entry.stale, |this| {
                 this.child(
                     Alert::warning(
@@ -893,7 +952,7 @@ impl MemoryView {
                     .overflow_y_scrollbar()
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(theme::font(theme::density(cx), TypeSize::Body))
                             .line_height(relative(1.7))
                             .text_color(t.text)
                             .whitespace_normal()
@@ -950,85 +1009,44 @@ fn fill_for_stress(state: &mut AppState) {
 
 impl Render for MemoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.tokens();
+        let t = cx.tokens(); let d = theme::density(cx);
         let placeholder = tr(cx, T, "Search memories");
-        if self.placeholder != placeholder {
-            self.placeholder = placeholder;
-            self.search
-                .update(cx, |search, cx| search.set_placeholder(placeholder, window, cx));
-        }
-        let no_entries = self.state.read(cx).memory.is_empty();
+        if self.placeholder != placeholder { self.placeholder = placeholder; self.search.update(cx, |search, cx| search.set_placeholder(placeholder, window, cx)); }
+        let state = self.state.read(cx);
+        let no_entries = state.memory.is_empty();
+        let panel = panel_state(&state.feeds.memory, no_entries);
+        let view = logic::screen_state(&panel);
         let no_rows = self.row_count(cx) == 0;
         self.sync_editing(window, cx);
-
-        v_flex()
-            .key_context("MemoryScreen")
-            .on_action(cx.listener(Self::focus_search))
-            .size_full()
-            .min_h_0()
-            .pt_5()
-            .px_6()
-            .pb_5()
-            .gap_4()
+        let handle = self.list.read(cx).scroll_handle().base_handle().clone();
+        let last = self.last_scroll.clone(); let ready = self.scroll_ready.clone();
+        let viewport = self.viewport.clone(); let painted_scroll = self.painted_scroll.clone(); let bounds = self.bounds.clone();
+        let width = px(logic::list_width(f32::from(window.viewport_size().width)));
+        v_flex().key_context("MemoryScreen").on_action(cx.listener(Self::focus_search))
+            .size_full().min_h_0().pt(theme::space(d, Step::Lg)).px(theme::space(d, Step::Xl)).pb(theme::space(d, Step::Lg)).gap(theme::space(d, Step::Lg))
             .child(ornament::page_title(&t, tr(cx, T, "What Chronos has learned")).flex_none())
-            .when(no_entries, |this| this.child(self.nothing_yet(cx)))
-            .when(!no_entries, |this| {
-                this.child(
-                    h_flex()
-                        .flex_none()
-                        .gap_3()
-                        .child(div().w(px(200.)).flex_none().child(Select::new(&self.project).small()))
-                        .child(
-                            div()
-                                .w(px(280.))
-                                .flex_shrink(1.)
-                                .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                                    this.focus_list(window, cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child(
-                                    Input::new(&self.search).small().cleanable(true).prefix(
-                                        Icon::new(IconName::Search)
-                                            .size(px(14.))
-                                            .text_color(t.muted),
-                                    ),
-                                ),
-                        ),
-                )
-                .when(no_rows, |this| this.child(self.nothing_matches(cx)))
-                .when(!no_rows, |this| {
-                    this.child(
-                        h_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .items_start()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .key_context("MemoryList")
-                                    .on_action(cx.listener(Self::first_row))
-                                    .on_action(cx.listener(Self::last_row))
-                                    .on_action(cx.listener(Self::page_up))
-                                    .on_action(cx.listener(Self::page_down))
-                                    .on_action(cx.listener(Self::delete_selected))
-                                    .w(LIST_WIDTH)
-                                    .flex_none()
-                                    .h_full()
-                                    .child(List::new(&self.list).size_full()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .rounded(px(8.))
-                                    .border_1()
-                                    .border_color(t.border)
-                                    .bg(t.surface)
-                                    .child(self.detail(cx)),
-                            ),
-                    )
-                })
+            .when(view == logic::ScreenState::Loading, |this| this.child(ornament::empty_state(&t, tr(cx, T, "Loading memories").into(), "".into()).size_full()))
+            .when(matches!(view, logic::ScreenState::Failed | logic::ScreenState::Stale), |this| {
+                let message = match &panel { PanelState::Failed(message) | PanelState::Stale(message) => message.clone(), _ => unreachable!() };
+                this.child(self.retry_note(message, cx))
+            })
+            .when(matches!(view, logic::ScreenState::Empty | logic::ScreenState::Ready | logic::ScreenState::Stale), |this| {
+                this.when(no_entries, |this| this.child(self.nothing_yet(cx)))
+                    .when(!no_entries, |this| this.child(h_flex().flex_none().gap(theme::space(d, Step::Md))
+                        .child(div().w(theme::row_height(d) * 6.0).flex_none().child(Select::new(&self.project).small()))
+                        .child(div().w(theme::row_height(d) * 8.0).flex_shrink(1.)
+                            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| { this.focus_list(window, cx); cx.stop_propagation(); }))
+                            .child(Input::new(&self.search).small().cleanable(true).prefix(Icon::new(IconName::Search).size(theme::font(d, TypeSize::Body)).text_color(t.muted)))))
+                        .when(no_rows, |this| this.child(self.nothing_matches(cx)))
+                        .when(!no_rows, |this| this.child(h_flex().flex_1().min_h_0().items_start().gap(theme::space(d, Step::Lg))
+                            .child(div().key_context("MemoryList").on_action(cx.listener(Self::first_row)).on_action(cx.listener(Self::last_row))
+                                .on_action(cx.listener(Self::page_up)).on_action(cx.listener(Self::page_down)).on_action(cx.listener(Self::delete_selected)).on_action(cx.listener(Self::open_cursor_menu))
+                                .w(width).flex_none().h_full()
+                                // Clear before the List's row callbacks record this frame's bounds.
+                                .on_prepaint(move |rect, _, cx| { viewport.set(rect); bounds.borrow_mut().clear(); painted_scroll.set(-f32::from(handle.offset().y));
+                                    if ready.get() { let value = logic::scroll(-f32::from(handle.offset().y)); if (value - last.get()).abs() > 1.0 { last.set(value); settings::remember_view("memory", |v| v.scroll = value, cx); } }
+                                }).child(List::new(&self.list).size_full()))
+                            .child(div().flex_1().min_w_0().max_w(logic::detail_width(d)).h_full().rounded(theme::RADIUS).border_1().border_color(t.border).bg(t.surface).child(self.detail(cx))))))
             })
     }
 }

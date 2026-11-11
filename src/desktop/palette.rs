@@ -6,6 +6,7 @@ use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::motion::{self, Driver, Presence};
 use super::ornament;
+use super::settings::FocusPanel;
 use super::theme::{Tokened as _, Tokens};
 use super::wishes::{can_resume, one_line};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MovePageDown, MovePageUp, MoveUp};
@@ -17,7 +18,11 @@ use gpui_kit::*;
 use std::ops::Range;
 use std::sync::Arc;
 
-gpui_kit::actions!(chronos, [NewWish, OpenPalette, ShowShortcuts]);
+gpui_kit::actions!(chronos, [NewWish, OpenPalette, ShowShortcuts, Undo, ToggleFocus, ToggleMini, ToggleDensity, ContextMenu]);
+
+#[cfg(test)]
+mod accept;
+pub(super) mod menu;
 
 pub(super) const T: Table = &[
     ("Search wishes, goals, modules, units and memory, or run a command", "搜尋願望、目標、模組、單元與記憶，或執行指令"),
@@ -48,6 +53,33 @@ pub(super) const T: Table = &[
     ("Nothing matches “{}”.", "沒有符合「{}」的項目。"),
     ("Try fewer letters, or part of a word.", "試著少打幾個字，或只打詞的一部分。"),
     ("{} results", "{} 個結果"),
+    ("Focus on the graph", "聚焦圖譜"),
+    ("Focus on the checklist", "聚焦檢查清單"),
+    ("Back to the full window", "返回完整視窗"),
+    ("Mini window", "迷你視窗"),
+    ("Switch between comfortable and dense spacing", "切換舒適與緊湊間距"),
+    ("Keep the mini window on top", "讓迷你視窗保持最上層"),
+    ("Undo the last change", "復原上一次變更"),
+    ("Toggle focus mode", "切換聚焦模式"),
+    ("Toggle mini window", "切換迷你視窗"),
+    ("Open the context menu", "開啟內容選單"),
+    ("Graph", "圖譜"),
+    ("Column splitter", "欄位分隔線"),
+    ("Menu", "選單"),
+    ("Mini window shortcuts", "迷你視窗快捷鍵"),
+    ("Move between nodes", "在節點之間移動"),
+    ("Select the node", "選取節點"),
+    ("Fit the graph", "縮放至完整圖譜"),
+    ("Zoom in", "放大"),
+    ("Zoom out", "縮小"),
+    ("Reset zoom", "重設縮放"),
+    ("Resize the checklist column", "調整檢查清單欄寬"),
+    ("Resize the details column", "調整詳細資料欄寬"),
+    ("Default column widths", "還原預設欄寬"),
+    ("Move through the menu", "在選單中移動"),
+    ("Choose the entry", "選取項目"),
+    ("Close the menu", "關閉選單"),
+    ("Back to the full app", "返回完整應用程式"),
     // Areas of the shortcut table.
     ("Anywhere", "任何地方"),
     ("Command palette", "指令面板"),
@@ -104,11 +136,15 @@ pub(super) enum Area {
     Log,
     Message,
     Files,
+    Graph,
+    Columns,
+    Menu,
+    Mini,
 }
 
 impl Area {
-    pub(super) const ALL: [Area; 8] =
-        [Area::Anywhere, Area::Palette, Area::NewWish, Area::Files, Area::Message, Area::Lists, Area::Checklist, Area::Log];
+    pub(super) const ALL: [Area; 12] =
+        [Area::Anywhere, Area::Palette, Area::NewWish, Area::Files, Area::Message, Area::Lists, Area::Checklist, Area::Graph, Area::Columns, Area::Log, Area::Menu, Area::Mini];
 
     pub(super) fn title(self) -> &'static str {
         match self {
@@ -120,6 +156,10 @@ impl Area {
             Area::Log => "Event log",
             Area::Message => "Message to the run",
             Area::Files => "File list after @",
+            Area::Graph => "Graph",
+            Area::Columns => "Column splitter",
+            Area::Menu => "Menu",
+            Area::Mini => "Mini window shortcuts",
         }
     }
 }
@@ -130,6 +170,11 @@ pub(super) enum Global {
     Palette,
     NewWish,
     Shortcuts,
+    Undo,
+    ToggleFocus,
+    ToggleMini,
+    ToggleDensity,
+    ContextMenu,
 }
 
 pub(super) struct Shortcut {
@@ -160,6 +205,11 @@ pub(super) const SHORTCUTS: &[Shortcut] = &[
     Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-k", "cmd-k")], does: "Search and run commands", global: Some(Global::Palette) },
     Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-n", "cmd-n")], does: "Make a new wish", global: Some(Global::NewWish) },
     Shortcut { area: Area::Anywhere, keys: &["?"], does: "Show keyboard shortcuts", global: Some(Global::Shortcuts) },
+    Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-z", "cmd-z")], does: "Undo the last change", global: Some(Global::Undo) },
+    Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-shift-f", "cmd-shift-f")], does: "Toggle focus mode", global: Some(Global::ToggleFocus) },
+    Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-shift-m", "cmd-shift-m")], does: "Toggle mini window", global: Some(Global::ToggleMini) },
+    Shortcut { area: Area::Anywhere, keys: &[primary("ctrl-shift-d", "cmd-shift-d")], does: "Switch between comfortable and dense spacing", global: Some(Global::ToggleDensity) },
+    Shortcut { area: Area::Anywhere, keys: &["shift-f10", "menu"], does: "Open the context menu", global: Some(Global::ContextMenu) },
     row(Area::Anywhere, &["tab", "shift-tab"], "Move between controls"),
     row(Area::Palette, &["up", "down"], "Move through the results"),
     row(Area::Palette, &["pageup", "pagedown"], "Move a page at a time"),
@@ -185,6 +235,20 @@ pub(super) const SHORTCUTS: &[Shortcut] = &[
     row(Area::Checklist, &["home", "end"], "First or last item"),
     row(Area::Checklist, &["pageup", "pagedown"], "Move a page at a time"),
     row(Area::Checklist, &["escape"], "Clear the selection"),
+    row(Area::Graph, &["up", "down", "left", "right"], "Move between nodes"),
+    row(Area::Graph, &["enter"], "Select the node"),
+    row(Area::Graph, &["escape"], "Clear the selection"),
+    row(Area::Graph, &["f"], "Fit the graph"),
+    row(Area::Graph, &[primary("ctrl-=", "cmd-="), primary("ctrl-+", "cmd-+")], "Zoom in"),
+    row(Area::Graph, &[primary("ctrl--", "cmd--")], "Zoom out"),
+    row(Area::Graph, &[primary("ctrl-0", "cmd-0")], "Reset zoom"),
+    row(Area::Columns, &["alt-left", "alt-right"], "Resize the checklist column"),
+    row(Area::Columns, &["alt-shift-left", "alt-shift-right"], "Resize the details column"),
+    row(Area::Columns, &["alt-0"], "Default column widths"),
+    row(Area::Menu, &["up", "down"], "Move through the menu"),
+    row(Area::Menu, &["enter"], "Choose the entry"),
+    row(Area::Menu, &["escape"], "Close the menu"),
+    row(Area::Mini, &[primary("ctrl-shift-m", "cmd-shift-m")], "Back to the full app"),
     row(Area::Log, &["up", "down"], "Scroll a line"),
     row(Area::Log, &["pageup", "pagedown"], "Scroll a page"),
     row(Area::Log, &["home"], "Go to the oldest line"),
@@ -205,6 +269,11 @@ pub(super) fn global_bindings() -> Vec<KeyBinding> {
                 Global::Palette => KeyBinding::new(keys, OpenPalette, None),
                 Global::NewWish => KeyBinding::new(keys, NewWish, None),
                 Global::Shortcuts => KeyBinding::new(keys, ShowShortcuts, Some(OUTSIDE_TEXT)),
+                Global::Undo => KeyBinding::new(keys, Undo, Some(OUTSIDE_TEXT)),
+                Global::ToggleFocus => KeyBinding::new(keys, ToggleFocus, None),
+                Global::ToggleMini => KeyBinding::new(keys, ToggleMini, None),
+                Global::ToggleDensity => KeyBinding::new(keys, ToggleDensity, None),
+                Global::ContextMenu => KeyBinding::new(keys, ContextMenu, Some(OUTSIDE_TEXT)),
             })
         })
         .collect()
@@ -221,6 +290,11 @@ pub(super) fn keys_of(global: Global) -> &'static str {
 
 pub(super) fn in_area(area: Area) -> impl Iterator<Item = &'static Shortcut> {
     SHORTCUTS.iter().filter(move |shortcut| shortcut.area == area)
+}
+
+/// The sections and rows actually drawn by the shortcuts overlay.
+pub(super) fn overlay_rows() -> Vec<(Area, Vec<(&'static [&'static str], &'static str)>)> {
+    Area::ALL.iter().map(|&area| (area, in_area(area).map(|s| (s.keys, s.does)).collect())).collect()
 }
 
 /// A key cap. Keys that do not parse never reach here: the tests parse every row.
@@ -417,6 +491,12 @@ pub(super) enum Command {
     Stop,
     Resume,
     Shortcuts,
+    Focus(FocusPanel),
+    FullWindow,
+    Mini,
+    ToggleDensity,
+    ToggleOnTop,
+    Undo,
 }
 
 /// Where choosing a result goes. Runs, modules and units are named by id, so a refresh that
@@ -575,6 +655,17 @@ pub(super) fn index(state: &AppState, lang: Lang, dark: bool) -> Vec<Item> {
         Lang::ZhTw => command("Show the interface in English", Command::ToggleLanguage, IconKind::Globe, None, lang),
         Lang::En => command("Show the interface in Traditional Chinese (繁體中文)", Command::ToggleLanguage, IconKind::Globe, None, lang),
     });
+    for (title, target, icon, keys) in [
+        ("Focus on the graph", Command::Focus(FocusPanel::Graph), IconKind::Module, Some(keys_of(Global::ToggleFocus))),
+        ("Focus on the checklist", Command::Focus(FocusPanel::Checklist), IconKind::Goal, Some(keys_of(Global::ToggleFocus))),
+        ("Back to the full window", Command::FullWindow, IconKind::Run, None),
+        ("Mini window", Command::Mini, IconKind::Run, Some(keys_of(Global::ToggleMini))),
+        ("Switch between comfortable and dense spacing", Command::ToggleDensity, IconKind::Settings, Some(keys_of(Global::ToggleDensity))),
+        ("Keep the mini window on top", Command::ToggleOnTop, IconKind::Settings, None),
+        ("Undo the last change", Command::Undo, IconKind::Keys, Some(keys_of(Global::Undo))),
+    ] {
+        items.push(command(title, target, icon, keys, lang));
+    }
     items.push(command("Keyboard shortcuts", Command::Shortcuts, IconKind::Keys, Some(keys_of(Global::Shortcuts)), lang));
 
     for (i, run) in state.runs.iter().enumerate() {
@@ -1198,18 +1289,18 @@ impl Palette {
         Self::finish(scrim, live)
     }
 
-    fn area_section(&self, area: Area, cx: &mut Context<Self>) -> impl IntoElement {
+    fn area_section(&self, area: Area, rows: &[(&'static [&'static str], &'static str)], cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         v_flex()
             .gap_0p5()
             .child(div().pb_1().text_xs().font_semibold().text_color(t.muted).child(tr(cx, T, area.title())))
-            .children(in_area(area).map(|shortcut| {
+            .children(rows.iter().map(|&(keys, does)| {
                 h_flex()
                     .min_h(px(26.))
                     .gap_3()
                     .justify_between()
-                    .child(div().text_sm().text_color(t.text).child(tr(cx, T, shortcut.does)))
-                    .child(h_flex().flex_none().gap_1().children(shortcut.keys.iter().map(|&keys| key_cap(keys))))
+                    .child(div().text_sm().text_color(t.text).child(tr(cx, T, does)))
+                    .child(h_flex().flex_none().gap_1().children(keys.iter().map(|&keys| key_cap(keys))))
             }))
     }
 
@@ -1217,11 +1308,13 @@ impl Palette {
         let t = cx.tokens();
         // The list scrolls only when the window is too short to show it whole.
         let room = (f32::from(window.viewport_size().height) - SHORTCUTS_TOP - SHORTCUTS_CHROME).max(160.);
-        let column = |areas: &[Area], this: &Self, cx: &mut Context<Self>| {
-            v_flex().flex_1().min_w_0().gap_5().children(areas.iter().map(|&area| this.area_section(area, cx)).collect::<Vec<_>>())
+        let sections = overlay_rows();
+        let column = |areas: &[(Area, Vec<(&'static [&'static str], &'static str)>)], this: &Self, cx: &mut Context<Self>| {
+            v_flex().flex_1().min_w_0().gap_5().children(areas.iter().map(|(area, rows)| this.area_section(*area, rows, cx)).collect::<Vec<_>>())
         };
-        let left = column(&Area::ALL[..5], self, cx);
-        let right = column(&Area::ALL[5..], self, cx);
+        let middle = sections.len() / 2;
+        let left = column(&sections[..middle], self, cx);
+        let right = column(&sections[middle..], self, cx);
         let scrim = self.scrim("shortcuts-scrim", level, live, &t, cx)
             .child(
                 Self::panel_motion(div(), level)
@@ -1579,7 +1672,7 @@ mod tests {
         let bindings = global_bindings();
         let globals: Vec<&Shortcut> = SHORTCUTS.iter().filter(|s| s.global.is_some()).collect();
         assert_eq!(bindings.len(), globals.iter().map(|s| s.keys.len()).sum::<usize>());
-        for global in [Global::Palette, Global::NewWish, Global::Shortcuts] {
+        for global in [Global::Palette, Global::NewWish, Global::Shortcuts, Global::Undo, Global::ToggleFocus, Global::ToggleMini, Global::ToggleDensity, Global::ContextMenu] {
             assert_eq!(globals.iter().filter(|s| s.global == Some(global)).count(), 1, "{global:?} bound once");
         }
         let pairs = globals.iter().flat_map(|s| s.keys.iter().map(move |keys| (s.global.unwrap(), *keys)));
@@ -1592,6 +1685,11 @@ mod tests {
                 Global::Palette => "OpenPalette",
                 Global::NewWish => "NewWish",
                 Global::Shortcuts => "ShowShortcuts",
+                Global::Undo => "Undo",
+                Global::ToggleFocus => "ToggleFocus",
+                Global::ToggleMini => "ToggleMini",
+                Global::ToggleDensity => "ToggleDensity",
+                Global::ContextMenu => "ContextMenu",
             };
             assert!(binding.action().name().ends_with(action), "{keys} runs {}", binding.action().name());
         }
@@ -1615,8 +1713,37 @@ mod tests {
         }
     }
 
-    /// Every key a screen handles, read from the screens' own sources. A key handled anywhere in
-    /// the app but missing from the table fails here, so the overlay cannot fall behind.
+    // Match direct bindings, ordinary key arms and (key, command-modifier) arms.
+    fn scanned_keys(source: &str) -> Vec<String> {
+        let names = ["up", "down", "left", "right", "enter", "escape", "space", "tab", "home", "end", "pageup", "pagedown", "delete", "backspace"];
+        let direct = regex::Regex::new(r#"(?:KeyBinding::new\(\s*|keystroke\.key\s*==\s*|Keystroke::parse\()"([^"]+)""#).unwrap();
+        let arm = regex::Regex::new(r#"(?m)^\s*((?:"[a-z-]+"\s*\|\s*)*"[a-z-]+")\s*(?:if [^=\n]+)?=>"#).unwrap();
+        let tuple = regex::Regex::new(r#"(?m)^\s*\(\s*((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*,\s*(true|false)\s*\)\s*=>"#).unwrap();
+        let literal = regex::Regex::new(r#""([^"]+)""#).unwrap();
+        let mut keys: Vec<String> = direct.captures_iter(source).map(|c| c[1].to_owned()).collect();
+        for capture in arm.captures_iter(source) {
+            let arm_keys: Vec<&str> = literal.captures_iter(&capture[1]).map(|c| c.get(1).unwrap().as_str()).collect();
+            if arm_keys.iter().all(|k| names.contains(k)) {
+                keys.extend(arm_keys.into_iter().map(str::to_owned));
+            }
+        }
+        for capture in tuple.captures_iter(source) {
+            for key in literal.captures_iter(&capture[1]) {
+                keys.push(if &capture[2] == "true" { format!("{}-{}", primary("ctrl", "cmd"), &key[1]) } else { key[1].to_owned() });
+            }
+        }
+        if cfg!(target_os = "macos") {
+            keys = keys.into_iter().map(|key| key.replace("ctrl-", "cmd-")).collect();
+        }
+        keys
+    }
+
+    fn missing_scanned_keys(source: &str) -> Vec<String> {
+        let known: Vec<&str> = SHORTCUTS.iter().flat_map(|s| s.keys.iter().copied()).collect();
+        scanned_keys(source).into_iter().filter(|key| !known.contains(&key.as_str())).collect()
+    }
+
+    /// Screen-handled keys must be represented in the table.
     #[test]
     fn every_key_the_screens_handle_is_in_the_table() {
         let sources = [
@@ -1634,35 +1761,23 @@ mod tests {
             ("usage.rs", include_str!("usage.rs")),
             ("wishes.rs", include_str!("wishes.rs")),
         ];
-        let known: Vec<&str> = SHORTCUTS.iter().flat_map(|s| s.keys.iter().copied()).collect();
-        let names = ["up", "down", "left", "right", "enter", "escape", "space", "tab", "home", "end", "pageup", "pagedown", "delete", "backspace"];
-        let direct = regex::Regex::new(r#"(?:KeyBinding::new\(\s*|keystroke\.key\s*==\s*|Keystroke::parse\()"([^"]+)""#).unwrap();
-        let arm = regex::Regex::new(r#"(?m)^\s*((?:"[a-z-]+"\s*\|\s*)*"[a-z-]+")\s*=>"#).unwrap();
-        let literal = regex::Regex::new(r#""([a-z-]+)""#).unwrap();
         let mut found = 0;
         for (file, source) in sources {
-            let mut keys: Vec<String> = direct.captures_iter(source).map(|c| c[1].to_owned()).collect();
-            for capture in arm.captures_iter(source) {
-                let arm_keys: Vec<String> = literal.captures_iter(&capture[1]).map(|c| c[1].to_owned()).collect();
-                if arm_keys.iter().all(|k| names.contains(&k.as_str())) {
-                    keys.extend(arm_keys);
-                }
-            }
-            for key in keys {
-                found += 1;
-                let key = if cfg!(target_os = "macos") { key.replace("ctrl-", "cmd-") } else { key };
-                assert!(known.contains(&key.as_str()), "{file} handles {key}, which the shortcut table does not list");
-            }
+            found += scanned_keys(source).len();
+            let missing = missing_scanned_keys(source);
+            assert!(missing.is_empty(), "{file} handles keys absent from the shortcut table: {missing:?}");
         }
         assert!(found >= 20, "the scan found only {found} keys; the patterns no longer match the sources");
     }
 
     #[test]
     fn the_scan_catches_a_key_the_table_lacks() {
-        let direct = regex::Regex::new(r#"(?:KeyBinding::new\(\s*|keystroke\.key\s*==\s*|Keystroke::parse\()"([^"]+)""#).unwrap();
-        let source = r#"cx.bind_keys([KeyBinding::new("ctrl-shift-p", Thing, None)]);"#;
-        let key = direct.captures(source).unwrap()[1].to_owned();
-        assert!(!SHORTCUTS.iter().any(|s| s.keys.contains(&key.as_str())));
+        let source = r#"
+            ("enter", false) => (),
+            ("=" | "+" | "f12", true) => (),
+        "#;
+        let missing = missing_scanned_keys(source);
+        assert_eq!(missing, vec![format!("{}-f12", primary("ctrl", "cmd"))]);
     }
 
     #[test]

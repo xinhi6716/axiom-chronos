@@ -5,6 +5,7 @@
 //! `output_tokens` are far below what was billed.
 
 pub mod price;
+pub mod quota;
 mod report;
 mod scan;
 

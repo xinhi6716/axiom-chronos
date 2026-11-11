@@ -1,12 +1,18 @@
 //! The graph on the Run screen: Chronos on the left, then modules, then their units.
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
-use super::i18n::{tr, Table};
+mod logic;
+
+use super::i18n::{self, tr, Lang, Table};
+use logic::{glow_targets, menu_anchor_node, menu_target, mesh_view, node_center, scene_runs_needed, stage_role, MeshView};
 use super::model::*;
+use super::palette;
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament;
 use super::plain_text;
-use super::theme::{self, Tokened as _, Tokens};
+use super::theme::{self, Step as SpaceStep, TypeSize, Tokened as _, Tokens};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -15,6 +21,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const TABLE: Table = &[
+    ("Loading the plan…", "正在載入計畫…"),
+    ("Try again", "重試"),
+    ("Running: a unit is being worked on now", "執行中：單元目前正在處理。"),
+    ("Built: a unit is ready for verification", "已建造：單元等待驗收。"),
+    ("Failed: a unit needs attention", "失敗：單元需要處理。"),
+    ("Verified: a unit has passed verification", "已驗收：單元通過驗收。"),
+    ("Pending: a unit is waiting to start", "待處理：單元等待開始。"),
     ("verified", "已驗收"),
     ("pending", "待處理"),
     ("No wish to show", "還沒有願望"),
@@ -1258,6 +1271,7 @@ enum SceneView {
 pub struct Mesh {
     state: Entity<AppState>,
     focus: FocusHandle,
+    menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
     /// How the graph is looked at now, and how each other run was last looked at, kept while
     /// the app is open.
     view: View,
@@ -1274,6 +1288,8 @@ pub struct Mesh {
     view_h: f32,
     inside: bool,
     hover: Option<Node>,
+    select_glows: motion::Glows<Node>,
+    hover_glows: motion::Glows<Node>,
     clock: Instant,
     seen_selection: Selection,
     seen_session: Option<SharedString>,
@@ -1376,6 +1392,7 @@ impl Mesh {
         let mut this = Self {
             state,
             focus: cx.focus_handle(),
+            menu: None,
             view: View::default(),
             views: HashMap::new(),
             drag: None,
@@ -1396,6 +1413,8 @@ impl Mesh {
             view_h: 0.0,
             inside: false,
             hover: None,
+            select_glows: motion::Glows::new(Pace::Glow),
+            hover_glows: motion::Glows::new(Pace::Glow),
             clock: Instant::now(),
             seen_selection: Selection::None,
             seen_session: None,
@@ -1422,6 +1441,9 @@ impl Mesh {
             window.resize(size(px(w), px(h)));
         }
         self.pinned = true;
+        if self.state.read(cx).runs.len() < scene_runs_needed(name) {
+            return;
+        }
         self.state.update(cx, |s, cx| {
             let first_with = |run: &Run, state| run.units.iter().position(|u| u.state == state);
             match name {
@@ -1531,6 +1553,82 @@ impl Mesh {
         self.drag = empty.then_some(Drag { start: event.position, pan: self.view.pan, moved: false });
     }
 
+    fn open_menu(&mut self, node: Node, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.state.read(cx).run().and_then(|run| menu_target(run, node)) else {
+            if self.menu.take().is_some() { cx.notify(); }
+            return;
+        };
+        let weak = cx.weak_entity();
+        let runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> = Rc::new(move |action, target, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                let resolved = this.state.read(cx).run().and_then(|run| match &target {
+                    MenuTarget::Unit { session, unit } if &run.session == session => run.units.iter().position(|u| &u.id == unit)
+                        .map(|i| (Node::Unit(i), Selection::Unit(i), format!("{} — {}", run.units[i].id, run.units[i].title))),
+                    MenuTarget::Module { session, module } if &run.session == session => run.modules.iter().position(|m| &m.id == module)
+                        .map(|i| (Node::Module(i), Selection::Module(i), format!("{} — {}", run.modules[i].id, run.modules[i].purpose))),
+                    _ => None,
+                });
+                if let Some((node, selection, text)) = resolved {
+                    match action {
+                        MenuAction::CopyText => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                        MenuAction::OpenDetail | MenuAction::CommentOn => {
+                            this.cursor = Some(node);
+                            this.state.update(cx, |state, cx| state.select(selection, cx));
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+        let state = self.state.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, _, cx| palette::menu::context_menu(menu, target, state, runner, cx));
+        let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+            this.menu = None;
+            window.focus(&this.focus, cx);
+            cx.notify();
+        });
+        menu.focus_handle(cx).focus(window, cx);
+        self.menu = Some((menu, position, subscription));
+        cx.notify();
+    }
+
+    fn right_pressed(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let node = self.graph.hit(self.panel_point(event.position), self.view_h, &self.view);
+        if let Some(node @ (Node::Unit(_) | Node::Module(_))) = node {
+            self.cursor = Some(node);
+            self.open_menu(node, event.position, window, cx);
+        } else if self.menu.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn open_cursor_menu(&mut self, _: &palette::ContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) { return; }
+        let Some(node) = menu_anchor_node(self.cursor, selected_node(&self.state.read(cx).selection)) else { return };
+        let Some(target) = self.state.read(cx).run().and_then(|run| menu_target(run, node)) else { return };
+        let Some(rect) = self.graph.rect_of(node) else { return };
+        cx.stop_propagation();
+        let screen = self.view.rect(rect);
+        if screen.x < 0.0 || screen.y < 0.0 || screen.right() > self.view_w || screen.bottom() > self.view_h {
+            self.set_view(reveal_view(self.view, rect, self.view_w, self.view_h), cx);
+            cx.on_next_frame(window, move |this, window, cx| {
+                if this.state.read(cx).run().and_then(|run| menu_target(run, node)).as_ref() == Some(&target) {
+                    this.open_menu_at_node(node, window, cx);
+                }
+            });
+        } else {
+            self.open_menu_at_node(node, window, cx);
+        }
+    }
+
+    fn open_menu_at_node(&mut self, node: Node, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rect) = self.graph.rect_of(node).map(|rect| self.view.rect(rect)) else { return };
+        let (x, y) = node_center((f32::from(self.origin.x), f32::from(self.origin.y)), (rect.x, rect.y, rect.w, rect.h));
+        self.open_menu(node, point(px(x), px(y)), window, cx);
+    }
+
     fn moved(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if let (Some(drag), Some(MouseButton::Left)) = (self.drag.as_mut(), event.pressed_button) {
             let (dx, dy) = (f32::from(event.position.x - drag.start.x), f32::from(event.position.y - drag.start.y));
@@ -1625,20 +1723,20 @@ impl Mesh {
             .top(px(r.y - 4.0))
             .w(px(r.w + 8.0))
             .h(px(r.h + 8.0))
-            .rounded(px(4.))
+            .rounded(theme::RADIUS)
             .border(px(1.5))
             .border_color(t.gold.opacity(0.9))
             .into_any_element()
     }
 
-    fn card_view(&self, m: &ModuleBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
-        let selected = selected_node(&self.state.read(cx).selection) == Some(Node::Module(m.index));
-        let hovered = self.hover == Some(Node::Module(m.index));
+    fn card_view(&self, m: &ModuleBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, levels: &HashMap<Node, (f32, f32)>, cx: &App) -> AnyElement {
+        let (select, hover) = levels.get(&Node::Module(m.index)).copied().unwrap_or_default();
         let blend = self.blend_of(Node::Module(m.index), cx);
         let look = node_look(t, m.state, t.surface, dark);
         let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
-        let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
-        let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
+        let border = mix(mix(look.border, t.text.opacity(0.7), hover), t.gold, select);
+        let mut shadow = look.glow.map_or_else(Vec::new, |color| glow(color, 12.));
+        shadow.extend(theme::selection_glow(t, select));
         let body_breath = if m.running { breath } else { 0.0 };
         let side = glyph_side(r, self.view.zoom);
         let body: AnyElement = match blend {
@@ -1661,7 +1759,8 @@ impl Mesh {
         let share = |n: usize| if m.total == 0 { 0.0 } else { n as f32 / m.total as f32 };
         let zoom = self.view.zoom;
         let worded = CHIP_H * zoom >= LABEL_MIN_CHIP_H;
-        let text_px = (13.0 * zoom).clamp(12.0, 20.0);
+        let text_size = px((13.0 * zoom).clamp(12.0, 20.0));
+        let count_size = px((12.0 * zoom).clamp(12.0, 18.0));
         let run_ref = &run.modules[m.index];
         let count = |state| run_ref.units.iter().filter(|&&u| run.units[u].state == state).count();
         let segments = [
@@ -1682,20 +1781,20 @@ impl Mesh {
             .pl(px((4.0 * zoom).min(8.0)))
             .pr(px((8.0 * zoom).min(14.0)))
             .overflow_hidden()
-            .rounded(px(4.))
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(border)
             .bg(look.fill)
-            .when_some(shadow, |this, color| this.shadow(glow(color, 12.)))
+            .shadow(shadow)
             .child(
                 h_flex()
                     .gap(px((5.0 * zoom).min(8.0)))
                     .child(body)
                     .when(worded, |this| {
-                        this.child(div().flex_1().min_w_0().truncate().text_size(px(text_px)).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone()))
+                        this.child(div().flex_1().min_w_0().truncate().text_size(text_size).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone()))
                     })
                     .when(worded && r.w >= 120.0, |this| {
-                        this.child(div().flex_none().text_size(px((12.0 * zoom).clamp(12.0, 18.0))).text_color(t.muted).child(format!("{}/{}", m.verified, m.total)))
+                        this.child(div().flex_none().text_size(count_size).text_color(t.muted).child(format!("{}/{}", m.verified, m.total)))
                     }),
             )
             .child(
@@ -1712,18 +1811,19 @@ impl Mesh {
             .into_any_element()
     }
 
-    fn chip_view(&self, chip: &ChipBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, cx: &App) -> AnyElement {
-        let selected = selected_node(&self.state.read(cx).selection) == Some(chip.node);
-        let hovered = self.hover == Some(chip.node);
+    fn chip_view(&self, chip: &ChipBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, levels: &HashMap<Node, (f32, f32)>, cx: &App) -> AnyElement {
+        let (select, hover) = levels.get(&chip.node).copied().unwrap_or_default();
         let blend = self.blend_of(chip.node, cx);
         let look = node_look(t, chip.state, t.surface, dark);
         let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
-        let border = if selected { t.gold } else if hovered { t.text.opacity(0.7) } else { look.border };
-        let shadow = if selected { Some(t.gold.opacity(if dark { 0.35 } else { 0.22 })) } else { look.glow };
+        let border = mix(mix(look.border, t.text.opacity(0.7), hover), t.gold, select);
+        let mut shadow = look.glow.map_or_else(Vec::new, |color| glow(color, 9.));
+        shadow.extend(theme::selection_glow(t, select));
         let zoom = self.view.zoom;
         if r.h < LABEL_MIN_CHIP_H {
             // Too small for words: a tinted body in the state's color, its shape kept when it fits.
             let color = blend.map_or(t.unit(chip.state), |(from, k)| mix(t.unit(from), t.unit(chip.state), k));
+            let radius = px((3.0 * zoom).min(3.0));
             return div()
                 .opacity(self.presence_of(chip.node, cx))
                 .absolute()
@@ -1734,14 +1834,15 @@ impl Mesh {
                 .flex()
                 .items_center()
                 .px(px((6.0 * zoom).min(4.0)))
-                .rounded(px((3.0 * zoom).min(3.0)))
+                .rounded(radius)
                 .border_1()
-                .border_color(if selected || hovered { border } else { color.opacity(0.7) })
+                .border_color(border)
+                .shadow(shadow)
                 .bg(look.fill.blend(color.opacity(0.18)))
                 .when(r.h >= 10.0, |this| this.child(mark_between(blend, chip.state, r.h - 4.0, t, breath)))
                 .into_any_element();
         }
-        let text_px = (12.0 * zoom).clamp(12.0, 18.0);
+        let text_size = px((12.0 * zoom).clamp(12.0, 18.0));
         let label: SharedString = match chip.node {
             Node::Unit(u) => {
                 let unit = &run.units[u];
@@ -1767,49 +1868,52 @@ impl Mesh {
             .gap(px((4.0 * zoom).min(7.0)))
             .px(px((6.0 * zoom).min(10.0)))
             .overflow_hidden()
-            .rounded(px(3.))
+            .rounded(theme::RADIUS_SMALL)
             .border_1()
             .border_color(border)
             .bg(look.fill)
-            .when_some(shadow, |this, color| this.shadow(glow(color, 9.)))
+            .shadow(shadow)
             .child(mark_between(blend, chip.state, (13.0 * zoom).clamp(10.0, 22.0), t, breath))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text_px))
+                    .text_size(text_size)
                     .text_color(look.text)
                     .child(label),
             )
-            .when_some(retries, |this, text| this.child(div().flex_none().text_size(px(text_px)).text_color(t.muted).child(text)))
+            .when_some(retries, |this, text| this.child(div().flex_none().text_size(text_size).text_color(t.muted).child(text)))
             .into_any_element()
     }
 
     fn tooltip_body(&self, node: Node, run: &Run, t: &Tokens, cx: &App) -> Option<AnyElement> {
+        let d = theme::density(cx);
         let heading = |text: SharedString, mono: bool| {
             div()
-                .text_size(px(13.))
+                .text_size(theme::font(d, TypeSize::Body))
                 .text_color(t.text)
                 .when(mono, |this| this.font_family(cx.theme().mono_font_family.clone()))
                 .child(text)
         };
-        let note = |text: SharedString| div().text_size(px(12.)).text_color(t.muted).child(text);
+        let note = |text: SharedString| div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(text);
         let state_line = |state: UnitState, extra: Option<SharedString>| {
             h_flex()
-                .gap(px(5.))
-                .text_size(px(12.))
+                .gap(theme::space(d, SpaceStep::Sm))
+                .text_size(theme::font(d, TypeSize::Caption))
                 .child(state_mark(state, 12., t.unit(state), 0.))
                 .child(div().text_color(t.unit(state)).child(tr(cx, TABLE, state.label())))
                 .when_some(extra, |this, text| this.child(div().text_color(t.muted).child(text)))
         };
-        let body = v_flex().gap(px(4.));
+        let body = v_flex().gap(theme::space(d, SpaceStep::Xs));
         let body = match node {
             Node::Core => {
                 let stage = current_stage(run).map(|s| fmt_a(tr(cx, TABLE, "Stage: {a}"), stage_label(cx, &s.name)));
+                let role = current_stage(run).and_then(|s| stage_role(&s.name)).map(|id| i18n::role_tooltip(*cx.global::<Lang>(), id));
                 body.child(heading("Chronos".into(), false))
-                    .child(div().text_size(px(12.)).text_color(t.status(run.status)).child(tr(cx, TABLE, run.status.label())))
+                    .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.status(run.status)).child(tr(cx, TABLE, run.status.label())))
                     .when_some(stage, |this, line| this.child(note(line.into())))
+                    .when_some(role, |this, line| this.child(note(line)))
                     .child(note(tr(cx, TABLE, "Click to return to the overview").into()))
             }
             Node::Module(m) => {
@@ -1856,6 +1960,7 @@ impl Mesh {
     }
 
     fn tooltip_view(&self, node: Node, run: &Run, t: &Tokens, cx: &App) -> Option<AnyElement> {
+        let d = theme::density(cx);
         let body = self.tooltip_body(node, run, t, cx)?;
         let core = self.graph.core(self.view_h, &self.view);
         let at = match node {
@@ -1883,8 +1988,8 @@ impl Mesh {
                             .w(px(TIP_W))
                             .max_h(px(TIP_MAX_H))
                             .overflow_hidden()
-                            .p(px(10.))
-                            .rounded(px(4.))
+                            .p(theme::space(d, SpaceStep::Md))
+                            .rounded(theme::RADIUS)
                             .border_1()
                             .border_color(t.border)
                             .bg(t.raised)
@@ -1901,6 +2006,7 @@ impl Mesh {
     fn graph_view(&mut self, panel: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.tokens();
         let dark = cx.theme().is_dark();
+        let d = theme::density(cx);
         let (width, view_h) = (f32::from(panel.width), f32::from(panel.height));
         let state = self.state.read(cx);
         let Some(run) = state.run() else {
@@ -1932,7 +2038,6 @@ impl Mesh {
         self.track_blends(&graph, &run.session, state.reduce_motion, motion::now(cx));
         let mut frames = Driver::new(state.reduce_motion, cx);
         frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
-        frames.finish(window);
         let view = self.view;
         if self.cursor.is_some_and(|n| n != Node::Core && graph.rect_of(n).is_none()) {
             self.cursor = None;
@@ -1961,19 +2066,34 @@ impl Mesh {
         let time = moving.then(|| self.clock.elapsed().as_secs_f32());
         let breath = time.map_or(0.0, ornament::breath);
         let reach = Rect { x: -OVERSCAN, y: -OVERSCAN, w: width + OVERSCAN * 2.0, h: view_h + OVERSCAN * 2.0 };
+        let nodes: std::collections::HashSet<Node> = graph.modules.iter().map(|m| Node::Module(m.index))
+            .chain(graph.chips.iter().map(|c| c.node)).collect();
+        self.select_glows.retain(|node| nodes.contains(node));
+        self.hover_glows.retain(|node| nodes.contains(node));
+        let mut levels = HashMap::new();
+        let visible = graph.modules.iter().map(|m| (Node::Module(m.index), m.rect))
+            .chain(graph.chips.iter().map(|c| (c.node, c.rect)))
+            .filter(|(_, rect)| view.rect(*rect).overlaps(&reach));
+        for (node, _) in visible {
+            let (select, over) = glow_targets(selected_node(&selection), hover, node);
+            self.select_glows.set(&node, select, frames.now(), reduced);
+            self.hover_glows.set(&node, over, frames.now(), reduced);
+            levels.insert(node, (self.select_glows.value(&node, &mut frames), self.hover_glows.value(&node, &mut frames)));
+        }
+        frames.finish(window);
         let cards: Vec<AnyElement> = graph
             .modules
             .iter()
             .map(|m| (m, view.rect(m.rect)))
             .filter(|(_, r)| r.overlaps(&reach))
-            .map(|(m, r)| self.card_view(m, r, run, &t, dark, breath, cx))
+            .map(|(m, r)| self.card_view(m, r, run, &t, dark, breath, &levels, cx))
             .collect();
         let chips: Vec<AnyElement> = graph
             .chips
             .iter()
             .map(|c| (c, view.rect(c.rect)))
             .filter(|(_, r)| r.overlaps(&reach))
-            .map(|(c, r)| self.chip_view(c, r, run, &t, dark, breath, cx))
+            .map(|(c, r)| self.chip_view(c, r, run, &t, dark, breath, &levels, cx))
             .collect();
         let ring = ring.and_then(|n| graph.rect_of(n)).map(|r| self.cursor_ring(view.rect(r), &t));
 
@@ -2018,8 +2138,10 @@ impl Mesh {
             .when(hover.is_some() && !dragging, |this| this.cursor_pointer())
             .when(dragging, |this| this.cursor_grabbing())
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key(event, cx)))
+            .on_action(cx.listener(Self::open_cursor_menu))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| this.scrolled(event, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.pressed(event, window, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::right_pressed))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
                 if this.drag.take().is_some_and(|d| d.moved) {
                     cx.notify();
@@ -2061,26 +2183,30 @@ impl Mesh {
                         .top(px(core.y + core_r + 22.0))
                         .w(px(label_w))
                         .items_center()
-                        .child(div().text_size(px(12.)).text_color(t.gold).child("C H R O N O S"))
-                        .child(div().text_size(px(12.)).text_color(t.status(status)).child(sub)),
+                        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.gold).child("C H R O N O S"))
+                        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.status(status)).child(sub)),
                 )
             })
             .child(self.view_controls(zoom_label, &t, cx))
             .when_some(tooltip, |this, tip| this.child(tip))
+            .when_some(self.menu.as_ref(), |this, (menu, position, _)| {
+                this.child(deferred(anchored().position(*position).snap_to_window_with_margin(px(8.)).child(menu.clone())).with_priority(2))
+            })
             .into_any_element()
     }
 
     /// Zoom out, the zoom (which returns to true size), zoom in, and fit, at the panel's corner.
     fn view_controls(&self, zoom_label: SharedString, t: &Tokens, cx: &mut Context<Self>) -> impl IntoElement {
-        let button = |id: &'static str| Button::new(id).ghost().small().h(px(28.)).min_w(px(28.));
+        let d = theme::density(cx);
+        let button = |id: &'static str| Button::new(id).ghost().small().h(theme::TARGET_MIN).min_w(theme::TARGET_MIN);
         h_flex()
             .id("mesh-view-controls")
             .absolute()
-            .right(px(10.))
-            .bottom(px(10.))
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded(px(4.))
+            .right(theme::space(d, SpaceStep::Md))
+            .bottom(theme::space(d, SpaceStep::Md))
+            .gap(theme::space(d, SpaceStep::Xs))
+            .p(theme::space(d, SpaceStep::Xs))
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(t.border)
             .bg(t.surface.opacity(0.92))
@@ -2140,20 +2266,31 @@ fn edge_fade(t: Tokens, top: bool) -> impl IntoElement {
 }
 
 fn legend(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
+    let d = theme::density(cx);
     let order = [UnitState::Running, UnitState::Built, UnitState::Failed, UnitState::Verified, UnitState::Pending];
     h_flex()
         .flex_wrap()
         .flex_none()
-        .gap(px(14.))
-        .px(px(14.))
-        .py(px(8.))
+        .gap(theme::space(d, SpaceStep::Md))
+        .px(theme::space(d, SpaceStep::Md))
+        .py(theme::space(d, SpaceStep::Sm))
         .border_b_1()
         .border_color(t.border)
-        .children(order.into_iter().map(|state| {
+        .children(order.into_iter().enumerate().map(|(i, state)| {
+            let tip = match state {
+                UnitState::Running => "Running: a unit is being worked on now",
+                UnitState::Built => "Built: a unit is ready for verification",
+                UnitState::Failed => "Failed: a unit needs attention",
+                UnitState::Verified => "Verified: a unit has passed verification",
+                UnitState::Pending => "Pending: a unit is waiting to start",
+            };
+            let tip: SharedString = tr(cx, TABLE, tip).into();
             let n = run.count(state);
             h_flex()
-                .gap(px(5.))
-                .text_size(px(12.))
+                .id(("mesh-legend", i))
+                .tooltip(move |window, cx| Tooltip::element({ let tip = tip.clone(); move |_, _| div().child(tip.clone()) }).build(window, cx))
+                .gap(theme::space(d, SpaceStep::Sm))
+                .text_size(theme::font(d, TypeSize::Caption))
                 .text_color(if n > 0 { t.text } else { t.muted })
                 .child(state_mark(state, 12., t.unit(state), 0.))
                 .child(tr(cx, TABLE, state.label()))
@@ -2161,14 +2298,15 @@ fn legend(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         }))
 }
 
-fn summary_fact(t: &Tokens, label: &'static str, value: SharedString, color: Hsla) -> impl IntoElement {
+fn summary_fact(d: theme::Density, t: &Tokens, label: &'static str, value: SharedString, color: Hsla) -> impl IntoElement {
     v_flex()
-        .child(div().text_size(px(12.)).text_color(t.muted).child(label))
-        .child(div().text_size(px(14.)).text_color(color).child(value))
+        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(label))
+        .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(color).child(value))
 }
 
 /// What a finished run produced. Units that are not verified are named, never counted as done.
 fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
+    let d = theme::density(cx);
     let total = run.units.len();
     let verified = run.count(UnitState::Verified);
     let headline = if total > 0 && verified == total {
@@ -2199,31 +2337,31 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         .flex()
         .flex_col()
         .flex_none()
-        .m(px(12.))
-        .px(px(16.))
-        .py(px(12.))
-        .gap(px(8.))
+        .m(theme::space(d, SpaceStep::Md))
+        .px(theme::space(d, SpaceStep::Lg))
+        .py(theme::space(d, SpaceStep::Md))
+        .gap(theme::space(d, SpaceStep::Sm))
         .child(
             h_flex()
-                .gap(px(8.))
+                .gap(theme::space(d, SpaceStep::Sm))
                 .child(state_mark(
                     if complete { UnitState::Verified } else { UnitState::Built },
                     15.,
                     if complete { t.ok } else { t.review },
                     0.,
                 ))
-                .child(div().text_size(px(15.)).text_color(t.text).child(headline)),
+                .child(div().text_size(theme::font(d, TypeSize::Title)).text_color(t.text).child(headline)),
         )
         .child(ornament::divider(t, 0.0))
         .child(
             h_flex()
                 .flex_wrap()
-                .gap(px(20.))
-                .child(summary_fact(t, tr(cx, TABLE, "Full test"), test.into(), test_color))
-                .child(summary_fact(t, tr(cx, TABLE, "Cost"), cost, t.text))
-                .child(summary_fact(t, tr(cx, TABLE, "Time"), time, t.text)),
+                .gap(theme::space(d, SpaceStep::Xl))
+                .child(summary_fact(d, t, tr(cx, TABLE, "Full test"), test.into(), test_color))
+                .child(summary_fact(d, t, tr(cx, TABLE, "Cost"), cost, t.text))
+                .child(summary_fact(d, t, tr(cx, TABLE, "Time"), time, t.text)),
         )
-        .when_some(report, |this, text| this.child(div().text_size(px(12.)).text_color(t.muted).line_clamp(2).child(text)))
+        .when_some(report, |this, text| this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).line_clamp(2).child(text)))
         .when_some(report_path, |this, path| {
             this.child(
                 Button::new("mesh-open-report")
@@ -2237,12 +2375,12 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         .when(!open.is_empty(), |this| {
             this.child(
                 v_flex()
-                    .gap(px(3.))
-                    .child(div().text_size(px(12.)).text_color(t.muted).child(tr(cx, TABLE, "Not verified")))
+                    .gap(theme::space(d, SpaceStep::Xs))
+                    .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).child(tr(cx, TABLE, "Not verified")))
                     .children(open.iter().take(shown).map(|u| {
                         h_flex()
-                            .gap(px(5.))
-                            .text_size(px(12.))
+                            .gap(theme::space(d, SpaceStep::Sm))
+                            .text_size(theme::font(d, TypeSize::Caption))
                             .child(state_mark(u.state, 12., t.unit(u.state), 0.))
                             .child(div().text_color(t.text).child(u.id.clone()))
                             .child(div().text_color(t.muted).child(tr(cx, TABLE, u.state.label())))
@@ -2250,7 +2388,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
                     .when(open.len() > shown, |this| {
                         this.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(theme::font(d, TypeSize::Caption))
                                 .text_color(t.muted)
                                 .child(fmt_a(tr(cx, TABLE, "and {a} more"), open.len() - shown)),
                         )
@@ -2259,77 +2397,55 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         })
 }
 
-/// The portrait, large and dim, above the words of an empty state.
-fn empty_state(t: &Tokens, dark: bool, height: f32) -> Div {
-    let side = (height * 0.5).clamp(160.0, 340.0);
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap(px(8.))
-        .child(div().mb(px(-side * 0.1)).child(ornament::portrait_backdrop(t, side, dark)))
-}
-
 impl Render for Mesh {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
-        let dark = cx.theme().is_dark();
-        let height = f32::from(window.viewport_size().height) - 220.0;
-        let state_entity = self.state.clone();
+        let d = theme::density(cx);
         let state = self.state.read(cx);
-        let Some(run) = state.run() else {
-            return empty_state(&t, dark, height)
-                .child(div().text_size(px(15.)).text_color(t.text).child(tr(cx, TABLE, "No wish to show")))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(t.muted)
-                        .text_center()
-                        .px_4()
-                        .child(tr(cx, TABLE, "Make a wish and its work appears here as a live graph.")),
-                )
-                .child(
-                    div().mt_2().child(
-                        theme::gold_leaf(
-                            Button::new("mesh-make-wish")
-                                .label(tr(cx, TABLE, "Make a wish"))
-                                .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))),
-                            &t,
-                        ),
-                    ),
-                )
-                .into_any_element();
+        let run = state.run();
+        let panel = panel_state(&state.feeds.runs, run.is_none());
+        let view = mesh_view(&panel, run.is_some(), run.is_some_and(|r| !r.modules.is_empty()));
+        let state_entity = self.state.clone();
+        let retry = || {
+            let state = state_entity.clone();
+            Button::new("mesh-retry").label(tr(cx, TABLE, "Try again"))
+                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.retry(FeedKind::Runs, cx)))
         };
-        if run.modules.is_empty() {
-            return empty_state(&t, dark, height)
-                .child(div().text_size(px(15.)).text_color(t.text).child(tr(cx, TABLE, planning_line(run))))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(t.muted)
-                        .text_center()
-                        .px_4()
-                        .child(tr(cx, TABLE, "Modules and units appear here once the plan is ready.")),
-                )
-                .into_any_element();
+        match view {
+            MeshView::Loading => return v_flex().size_full().items_center().justify_center()
+                .text_size(theme::font(d, TypeSize::Body)).text_color(t.muted)
+                .child(tr(cx, TABLE, "Loading the plan…")).into_any_element(),
+            MeshView::Empty => return v_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
+                .child(ornament::empty_state(&t, tr(cx, TABLE, "No wish to show").into(), tr(cx, TABLE, "Make a wish and its work appears here as a live graph.").into()))
+                .child(theme::gold_leaf(Button::new("mesh-make-wish").label(tr(cx, TABLE, "Make a wish"))
+                    .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))), &t))
+                .into_any_element(),
+            MeshView::Planning => return v_flex().size_full().items_center().justify_center()
+                .child(ornament::empty_state(&t, tr(cx, TABLE, planning_line(run.unwrap())).into(), tr(cx, TABLE, "Modules and units appear here once the plan is ready.").into()))
+                .into_any_element(),
+            MeshView::Failed(message) => return v_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
+                .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(message))
+                .child(retry()).into_any_element(),
+            MeshView::Graph { stale } => {
+                let run = run.unwrap();
+                let mut frames = Driver::new(state.reduce_motion, cx).capped();
+                frames.keep(animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
+                frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
+                frames.finish(window);
+                let finished = (run.status == RunStatus::Done).then(|| summary(run, &t, cx));
+                let legend = legend(run, &t, cx);
+                let this = cx.entity();
+                v_flex().size_full()
+                    .when_some(stale, |this, text| this.child(h_flex().gap(theme::space(d, SpaceStep::Sm))
+                        .px(theme::space(d, SpaceStep::Md)).child(ornament::stale_note(&t, text).flex_1().min_w_0()).child(retry())))
+                    .child(legend)
+                    .when_some(finished, |this, card| this.child(card))
+                    .child(div().flex_1().min_h_0().relative().child(container_query(move |panel, window, cx| {
+                        this.update(cx, |this, cx| this.graph_view(panel, window, cx))
+                    })))
+                    .into_any_element()
+            }
         }
-        let mut frames = Driver::new(state.reduce_motion, cx).capped();
-        frames.keep(animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
-        frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
-        frames.finish(window);
-        let finished = (run.status == RunStatus::Done).then(|| summary(run, &t, cx));
-        let legend = legend(run, &t, cx);
-        let this = cx.entity();
-        v_flex()
-            .size_full()
-            .child(legend)
-            .when_some(finished, |this, card| this.child(card))
-            .child(
-                div().flex_1().min_h_0().relative().child(container_query(move |panel, window, cx| {
-                    this.update(cx, |this, cx| this.graph_view(panel, window, cx))
-                })),
-            )
-            .into_any_element()
     }
 }
 
@@ -2386,6 +2502,10 @@ fn large_run(mut run: Run, modules: usize, units: usize) -> Run {
     }
     run
 }
+
+// walk list: gpui-only, verify in a window: selection and hover glow fade, Empty/Loading/Failed/Stale panels, legend and Core tooltips, graph fills the window in focus mode; right-click and shift-f10 open the menu on a unit and a module in a window; a menu open while the run list reorders acts on the right id; Escape/click-away closes it and focus returns to the graph.
+#[cfg(test)]
+mod accept;
 
 #[cfg(test)]
 mod tests {

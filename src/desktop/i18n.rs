@@ -67,26 +67,28 @@ pub const COMMON: Table = &[
 
 /// Every role the engine reports, under the ids it may use, with the one name people see for it.
 /// The first id is the role's key. Ids are matched without a plugin prefix such as `chronos:`.
-const ROLES: [(&[&str], &str, &str); 7] = [
-    (&["main", "core", "chronos"], "Core", "主控"),
-    (&["dispatcher"], "Dispatcher", "調度員"),
-    (&["reviewer"], "Reviewer", "審查員"),
-    (&["architect"], "Architect", "架構師"),
-    (&["memory-keeper"], "Memory keeper", "記憶管理員"),
-    (&["critic"], "Critic", "第二審"),
-    (&["astra"], "Astra", "Astra"),
+pub(super) const ROLES: [(&[&str], &str, &str, &str, &str); 7] = [
+    (&["main", "core", "chronos"], "Core", "主控", "Coordinates the overall work.", "統籌整體工作。"),
+    (&["dispatcher"], "Dispatcher", "調度員", "Assigns and coordinates tasks.", "分派並協調任務。"),
+    (&["reviewer"], "Reviewer", "審查員", "Reviews work against its requirements.", "依照需求審查工作成果。"),
+    (&["architect"], "Architect", "架構師", "Designs the structure of the work.", "設計工作的整體架構。"),
+    (&["memory-keeper"], "Memory keeper", "記憶管理員", "Maintains useful project memory.", "維護有用的專案記憶。"),
+    (&["critic"], "Critic", "第二審", "Independently challenges and reviews conclusions.", "獨立檢視並質疑結論。"),
+    (&["astra"], "Astra", "Astra", "Helps reason through demanding problems.", "協助推理複雜問題。"),
 ];
 
-fn role_of(id: &str) -> Option<&'static (&'static [&'static str], &'static str, &'static str)> {
+type Role = (&'static [&'static str], &'static str, &'static str, &'static str, &'static str);
+
+fn role_of(id: &str) -> Option<&'static Role> {
     let bare = id.trim().rsplit(':').next().unwrap_or(id).to_ascii_lowercase().replace('_', "-");
-    ROLES.iter().find(|(ids, _, _)| ids.contains(&bare.as_str()))
+    ROLES.iter().find(|(ids, _, _, _, _)| ids.contains(&bare.as_str()))
 }
 
 /// One key per role, so `chronos:dispatcher` and `dispatcher` are counted together. An id that
 /// names no known role is its own key, exactly as reported.
 pub(super) fn role_key(id: &str) -> SharedString {
     match role_of(id) {
-        Some((ids, _, _)) => ids[0].into(),
+        Some((ids, _, _, _, _)) => ids[0].into(),
         None => SharedString::from(id.to_owned()),
     }
 }
@@ -94,9 +96,21 @@ pub(super) fn role_key(id: &str) -> SharedString {
 /// The name a role is shown under in `lang`. An unknown id is shown as reported.
 pub(super) fn role_name(lang: Lang, id: &str) -> SharedString {
     match (role_of(id), lang) {
-        (Some((_, en, _)), Lang::En) => (*en).into(),
-        (Some((_, _, zh)), Lang::ZhTw) => (*zh).into(),
+        (Some((_, en, _, _, _)), Lang::En) => (*en).into(),
+        (Some((_, _, zh, _, _)), Lang::ZhTw) => (*zh).into(),
         (None, _) => SharedString::from(id.to_owned()),
+    }
+}
+
+/// The role's duty in the selected language, if the id is known.
+pub fn role_duty(lang: Lang, id: &str) -> Option<&'static str> {
+    role_of(id).map(|(_, _, _, en, zh)| match lang { Lang::En => *en, Lang::ZhTw => *zh })
+}
+
+pub(super) fn role_tooltip(lang: Lang, id: &str) -> SharedString {
+    match role_duty(lang, id) {
+        Some(duty) => format!("{} — {}", role_name(lang, id), duty).into(),
+        None => SharedString::from(id.to_owned()),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Auto-evolve preview and explicit confirmation.
 use super::i18n::{self, tr};
 use super::model::{AppState, EvolveOutcome, EvolveState, Verdict};
-use super::theme::Tokened as _;
+use super::theme::{Tokened as _, Step, TypeSize};
 use super::{ornament, theme};
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::button::Button;
@@ -11,6 +11,9 @@ use gpui_kit::component::{v_flex, Disableable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
+
+const DIALOG_WIDTH: Pixels = px(620.);
+const DIALOG_HEIGHT_RESERVE: Pixels = px(200.);
 
 const TEXT: i18n::Table = &[
     ("Auto-evolve", "自動演進"),
@@ -159,14 +162,15 @@ impl EvolvePanel {
 
     fn dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
+        let d = theme::density(cx);
         let evolve = self.state.read(cx).evolve.clone();
         let repo = self.picked.as_ref().or_else(|| evolve.preview.as_ref().and_then(|p| p.repo.as_ref()));
         let disabled = confirm_disabled(&evolve, true, repo.map(PathBuf::as_path));
-        let mut body = v_flex().gap_3().w_full().text_sm().text_color(t.text);
+        let mut body = v_flex().gap(theme::space(d, Step::Md)).w_full().text_size(theme::font(d, TypeSize::Body)).text_color(t.text);
         if evolve.checking { body = body.child(tr(cx, TEXT, "Checking for issues…")); }
         if evolve.starting { body = body.child(tr(cx, TEXT, "Starting…")); }
         if let Some(preview) = &evolve.preview {
-            let mut issues = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Issues")));
+            let mut issues = v_flex().gap(theme::space(d, Step::Xs)).child(div().font_medium().child(tr(cx, TEXT, "Issues")));
             for (ix, issue) in preview.issues.iter().enumerate() {
                 let line: SharedString = tr(cx, TEXT, "{title} — {count} occurrences")
                     .replace("{title}", &issue.title).replace("{count}", &issue.count.to_string()).into();
@@ -181,11 +185,11 @@ impl EvolvePanel {
             }
             let cost: SharedString = cost_wording(preview.estimate_usd, tr(cx, TEXT, "Cannot estimate")).into();
             body = body.child(issues)
-                .child(v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Estimated cost")))
+                .child(v_flex().gap(theme::space(d, Step::Xs)).child(div().font_medium().child(tr(cx, TEXT, "Estimated cost")))
                     .child(div().id("evolve-cost").role(Role::Label).aria_label(cost.clone())
                         .child(cost.clone().test_text(cost)).test_support()));
             if !preview.gaps.is_empty() {
-                let mut gaps = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Source gaps")));
+                let mut gaps = v_flex().gap(theme::space(d, Step::Xs)).child(div().font_medium().child(tr(cx, TEXT, "Source gaps")));
                 for (ix, gap) in preview.gaps.iter().enumerate() {
                     let line: SharedString = format!("{} — {} — {}", gap.family, gap.location, gap.reason).into();
                     gaps = gaps.child(div().id(("evolve-gap", ix)).role(Role::Label).aria_label(line.clone())
@@ -195,7 +199,7 @@ impl EvolvePanel {
             }
         }
         if evolve.preview.is_some() || self.picked.is_some() {
-            let mut repository = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Repository to change")));
+            let mut repository = v_flex().gap(theme::space(d, Step::Xs)).child(div().font_medium().child(tr(cx, TEXT, "Repository to change")));
             if let Some(repo) = repo {
                 let path: SharedString = repo.to_string_lossy().into_owned().into();
                 repository = repository.child(div().id("evolve-repo").role(Role::Label).aria_label(path.clone())
@@ -208,7 +212,7 @@ impl EvolvePanel {
         if let Some(error) = &evolve.error {
             let message = error.message.clone();
             let wording: SharedString = tr(cx, TEXT, failure_wording(&error.kind)).into();
-            body = body.child(v_flex().gap_1().text_color(t.fail)
+            body = body.child(v_flex().gap(theme::space(d, Step::Xs)).text_color(t.fail)
                 .child(div().id("evolve-error").role(Role::Label).aria_label(wording.clone())
                     .child(wording.clone().test_text(wording)).test_support())
                 .child(Button::new("evolve-copy").label(tr(cx, TEXT, "Copy details"))
@@ -222,12 +226,12 @@ impl EvolvePanel {
             body = body.child(div().id("evolve-outcome").role(Role::Label).aria_label(result.clone())
                 .child(result.clone().test_text(result)).test_support());
         }
-        let mut runs = v_flex().gap_1().child(div().font_medium().child(tr(cx, TEXT, "Past runs")));
+        let mut runs = v_flex().gap(theme::space(d, Step::Xs)).child(div().font_medium().child(tr(cx, TEXT, "Past runs")));
         if evolve.runs.is_empty() { runs = runs.child(tr(cx, TEXT, "No past runs.")); }
         for (ix, run) in evolve.runs.iter().enumerate() {
             let summary: SharedString = format!("{} — {}", tr(cx, TEXT, verdict_label(run.verdict)), run.repo).into();
             let detail: SharedString = format!("{} · {}", run.branch, run.state).into();
-            runs = runs.child(div().id(("evolve-run", ix)).py_1().border_b_1().border_color(t.border)
+            runs = runs.child(div().id(("evolve-run", ix)).py(theme::space(d, Step::Xs)).border_b_1().border_color(t.border)
                 .role(Role::Label).aria_label(format!("{} — {}", summary, detail))
                 .child(summary.clone().test_text(summary))
                 .child(div().text_color(t.muted).child(detail.clone().test_text(detail)))
@@ -250,10 +254,10 @@ impl EvolvePanel {
         backdrop.a = 0.8;
         anchored().position_mode(AnchoredPositionMode::Window).position(point(px(0.), px(0.)))
             .child(div().w(viewport.width).h(viewport.height).bg(backdrop).flex().items_center().justify_center().occlude()
-                .child(ornament::frame(&t, t.gold, t.surface).w(px(620.)).max_w(viewport.width - px(32.))
-                    .p_5().shadow_lg().child(v_flex().gap_4().w_full()
-                        .child(div().text_lg().font_medium().text_color(t.text).child(tr(cx, TEXT, "Check and improve this repository")))
-                        .child(div().id("evolve-content").max_h(viewport.height - px(200.)).overflow_y_scrollbar().child(body))
+                .child(ornament::frame(&t, t.gold, t.surface).w(DIALOG_WIDTH).max_w(viewport.width - theme::space(d, Step::Xxl))
+                    .p(theme::space(d, Step::Xl)).shadow_lg().child(v_flex().gap(theme::space(d, Step::Lg)).w_full()
+                        .child(div().text_size(theme::font(d, TypeSize::Title)).font_medium().text_color(t.text).child(tr(cx, TEXT, "Check and improve this repository")))
+                        .child(div().id("evolve-content").max_h(viewport.height - DIALOG_HEIGHT_RESERVE).overflow_y_scrollbar().child(body))
                         .child(footer))))
     }
 }

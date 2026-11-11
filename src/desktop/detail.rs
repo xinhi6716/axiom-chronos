@@ -2,7 +2,7 @@
 use super::i18n::{self, tr};
 use super::model::*;
 use super::{ornament, plain_text, theme};
-use super::theme::{Tokened as _, Tokens};
+use super::theme::{Step, TypeSize, Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
@@ -26,6 +26,16 @@ use std::time::{Duration, SystemTime};
 /// How much of a file is shown. Anything longer is cut and says so.
 const SHOWN_BYTES: usize = 200 * 1024;
 const RECENT_EVENTS: usize = 8;
+const ICON_SMALL: Pixels = px(12.);
+const ICON_STATUS: Pixels = px(13.);
+const ICON_ROW: Pixels = px(14.);
+const ICON_EMPTY: Pixels = px(18.);
+const DOT_SIZE: Pixels = px(4.);
+const NOTE_MIN_WIDTH: Pixels = px(120.);
+const NARROW_WIDTH: Pixels = px(320.);
+const TOOLTIP_MAX_WIDTH: Pixels = px(340.);
+// TextView's paragraph gap is specified in rems, based on GPUI's default 16px rem.
+const REM_BASE: Pixels = px(16.);
 /// How long Resume stays disabled after a click if the run does not visibly react.
 const RESUME_SETTLE: Duration = Duration::from_secs(8);
 const STAGE_NAMES: [&str; 7] = ["Astra", "Critic", "Architect", "Build", "Full test", "Memory", "Report"];
@@ -33,6 +43,13 @@ const BRIEF_FIELDS: [&str; 4] = ["GOAL", "SCOPE", "VERIFY", "CONTEXT"];
 
 const TABLE: i18n::Table = &[
     ("Overview", "總覽"),
+    ("Back to overview", "返回總覽"),
+    ("Open module", "開啟模組"),
+    ("Resume", "接續"),
+    ("Copy", "複製"),
+    ("Open in editor", "在編輯器開啟"),
+    ("Comment on this item", "評論此項目"),
+    ("Opens the message box with this item named at the start.", "開啟訊息框，並在開頭標明此項目。"),
     ("No wish is open.", "目前沒有開啟的願望。"),
     ("The item you selected is no longer in this run.", "你選的項目已不在這次執行中。"),
     ("Running now", "正在進行"),
@@ -995,42 +1012,42 @@ fn attempts_text(attempts: u32, cx: &App) -> String {
 
 fn tooltip_of(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
-    move |window, cx| Tooltip::new(text.clone()).max_w(px(340.)).build(window, cx)
+    move |window, cx| Tooltip::new(text.clone()).max_w(TOOLTIP_MAX_WIDTH).build(window, cx)
 }
 
 fn section_title(text: &'static str, t: &Tokens, cx: &App) -> Div {
-    div().text_xs().font_weight(FontWeight::MEDIUM).text_color(t.muted).child(tr(cx, TABLE, text))
+    div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).font_weight(FontWeight::MEDIUM).text_color(t.muted).child(tr(cx, TABLE, text))
 }
 
 fn quiet_line(text: impl Into<SharedString>, t: &Tokens) -> Div {
     div().text_color(t.muted).child(text.into())
 }
 
-fn quiet_panel(icon: IconName, text: impl Into<SharedString>, detail: Option<SharedString>, t: &Tokens) -> Div {
+fn quiet_panel(icon: IconName, text: impl Into<SharedString>, detail: Option<SharedString>, t: &Tokens, cx: &App) -> Div {
     v_flex()
         .w_full()
         .items_center()
-        .px_6()
-        .py_10()
-        .gap_2()
+        .px(theme::space(theme::density(cx), Step::Xl))
+        .py(theme::space(theme::density(cx), Step::Xxl))
+        .gap(theme::space(theme::density(cx), Step::Sm))
         .text_color(t.muted)
-        .child(Icon::new(icon).size(px(18.)).text_color(t.idle))
+        .child(Icon::new(icon).size(ICON_EMPTY).text_color(t.idle))
         .child(div().text_center().child(text.into()))
         .when_some(detail, |this, detail| {
-            this.child(div().w_full().text_xs().text_center().child(SelectableText::new("quiet-detail", detail)))
+            this.child(div().w_full().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_center().child(SelectableText::new("quiet-detail", detail)))
         })
 }
 
-fn markdown_style() -> TextViewStyle {
+fn markdown_style(density: theme::Density) -> TextViewStyle {
     TextViewStyle::default()
-        .paragraph_gap(rems(0.65))
-        .heading_font_size(|level, _| match level {
-            1 => px(17.),
-            2 => px(15.),
-            3 => px(14.),
-            _ => px(12.),
+        .paragraph_gap(rems(theme::space(density, Step::Sm) / REM_BASE))
+        .heading_font_size(move |level, _| match level {
+            1 => theme::font(density, TypeSize::Heading),
+            2 => theme::font(density, TypeSize::Title),
+            3 => theme::font(density, TypeSize::Title),
+            _ => theme::font(density, TypeSize::Caption),
         })
-        .code_block(StyleRefinement::default().text_size(px(12.)).px_3().py_2())
+        .code_block(StyleRefinement::default().text_size(theme::font(density, TypeSize::Caption)).px(theme::space(density, Step::Md)).py(theme::space(density, Step::Sm)))
 }
 
 /// CommonMark does not end bold when the closing `**` follows punctuation and a letter comes right
@@ -1111,10 +1128,10 @@ fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
 }
 
 /// Markdown, with web links opened in the browser and file references in the editor.
-fn markdown_view(id: impl Into<ElementId>, text: SharedString, project: Option<PathBuf>) -> TextView {
+fn markdown_view(id: impl Into<ElementId>, text: SharedString, project: Option<PathBuf>, cx: &App) -> TextView {
     TextView::markdown(id, mend_bold(&text))
         .selectable(true)
-        .style(markdown_style())
+        .style(markdown_style(theme::density(cx)))
         .on_link_click(move |url, _, window, cx| {
             if url.starts_with(CITE_SCHEME) {
                 open_cite(url, project.as_deref(), window, cx);
@@ -1284,9 +1301,27 @@ impl Detail {
         Button::new("detail-back")
             .ghost()
             .xsmall()
+            .min_h(theme::TARGET_MIN)
+            .tooltip(tr(cx, TABLE, "Back to overview"))
             .icon(IconName::ChevronLeft)
             .label(tr(cx, TABLE, "Overview"))
             .on_click(self.go(Selection::None))
+    }
+
+    fn comment_button(&self, run: &Run, cx: &Context<Self>) -> Option<Button> {
+        let app = self.state.read(cx);
+        let subject = super::control::subject_of(run, &app.selection)?;
+        let state = self.state.clone();
+        // todo.rs and mesh.rs CommentOn entries only select the item; this button then comments (decision 59).
+        Some(Button::new("detail-comment")
+            .ghost()
+            .icon(IconName::ArrowUp)
+            .label(tr(cx, TABLE, "Comment on this item"))
+            .tooltip(tr(cx, TABLE, "Opens the message box with this item named at the start."))
+            .on_click(move |_, _, cx| {
+                let text = super::control::address_text(&subject, cx);
+                state.update(cx, |s, cx| s.address_interjection(text, cx));
+            }))
     }
 
     fn overview(&self, run: &Run, cx: &Context<Self>) -> AnyElement {
@@ -1294,19 +1329,19 @@ impl Detail {
         let lost = self.lost_in.as_ref() == Some(&run.session);
         v_flex()
             .size_full()
-            .p_4()
-            .gap_5()
+            .p(theme::space(theme::density(cx), Step::Lg))
+            .gap(theme::space(theme::density(cx), Step::Xl))
             .overflow_y_scrollbar()
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, TABLE, "Overview")))
+            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Title)).font_weight(FontWeight::SEMIBOLD).child(tr(cx, TABLE, "Overview")))
             .when(lost, |this| {
                 this.child(quiet_line(tr(cx, TABLE, "The item you selected is no longer in this run."), &t))
             })
             .children(super::usage::warning_texts(run, *cx.global::<i18n::Lang>()).into_iter().enumerate().map(|(i, warning)| {
                 h_flex()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
                     .text_color(t.muted)
-                    .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(t.review).mt(px(2.)))
+                    .child(Icon::new(IconName::TriangleAlert).size(ICON_ROW).text_color(t.review).mt(theme::space(theme::density(cx), Step::Xs)))
                     .child(div().flex_1().min_w_0().child(SelectableText::new(("warning", i), warning)))
             }))
             .child(self.running_section(run, cx))
@@ -1349,7 +1384,7 @@ impl Detail {
             })
         };
         v_flex()
-            .gap_1()
+            .gap(theme::space(theme::density(cx), Step::Xs))
             .child(section_title("Running now", &t, cx))
             .when_some(line, |this, line| this.child(quiet_line(line, &t)))
             .children(units.into_iter().map(|i| self.unit_row(run, i, cx)))
@@ -1364,23 +1399,24 @@ impl Detail {
             .ghost()
             .w_full()
             .h_auto()
-            .px_1()
-            .py_1()
+            .min_h(theme::TARGET_MIN)
+            .px(theme::space(theme::density(cx), Step::Xs))
+            .py(theme::space(theme::density(cx), Step::Xs))
             .tooltip(title.original.unwrap_or_else(|| title.shown.clone()))
             .on_click(self.go(Selection::Unit(index)))
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
-                    .child(Icon::new(unit_icon(unit.state)).size(px(14.)).text_color(t.unit(unit.state)).mt(px(2.)))
+                    .child(Icon::new(unit_icon(unit.state)).size(ICON_ROW).text_color(t.unit(unit.state)).mt(theme::space(theme::density(cx), Step::Xs)))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(13.)).text_color(t.text).truncate().child(title.shown))
-                            .child(div().text_xs().text_color(t.muted).truncate().child(detail)),
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).text_color(t.text).truncate().child(title.shown))
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).truncate().child(detail)),
                     ),
             )
     }
@@ -1388,7 +1424,7 @@ impl Detail {
     fn needs_section(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
         let last = run.needs.len() - 1;
         v_flex()
-            .gap_2()
+            .gap(theme::space(theme::density(cx), Step::Sm))
             .children(run.needs.iter().enumerate().map(|(i, need)| self.need_card(run, i, need, i == last, cx)))
     }
 
@@ -1406,18 +1442,18 @@ impl Detail {
         ornament::frame(&t, color.opacity(0.6), t.surface.blend(color.opacity(0.06)))
             .flex()
             .flex_col()
-            .gap_2()
-            .px_4()
-            .py_3()
+            .gap(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Lg))
+            .py(theme::space(theme::density(cx), Step::Md))
             .child(
                 h_flex()
-                    .gap_1p5()
-                    .text_xs()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
+                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                     .text_color(color)
-                    .child(Icon::new(icon).size(px(14.)))
+                    .child(Icon::new(icon).size(ICON_ROW))
                     .child(tr(cx, TABLE, kind)),
             )
-            .child(div().id(("need-title", index)).text_size(px(14.)).font_weight(FontWeight::MEDIUM)
+            .child(div().id(("need-title", index)).text_size(theme::font(theme::density(cx), TypeSize::Title)).font_weight(FontWeight::MEDIUM)
                 .when_some(title.original, |this, original| this.tooltip(tooltip_of(original))).child(title.shown))
             .child(div().id(("need-note-tip", index)).text_color(t.muted)
                 .when_some(note.original, |this, original| this.tooltip(tooltip_of(original)))
@@ -1425,9 +1461,10 @@ impl Detail {
             .when(with_action, |this| {
                 this.child(
                     h_flex().justify_end().child(
-                        theme::gold_leaf(Button::new(("need-resume", index)), &t)
+                        theme::gold_leaf(Button::new(("need-resume", index)).tooltip(tr(cx, TABLE, label)), &t)
                             .small()
                             .label(tr(cx, TABLE, label))
+                            .min_h(theme::TARGET_MIN)
                             .loading(resuming)
                             .disabled(resuming)
                             .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
@@ -1439,16 +1476,16 @@ impl Detail {
     fn decisions_section(&self, run: &Run, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         v_flex()
-            .gap_2()
+            .gap(theme::space(theme::density(cx), Step::Sm))
             .child(section_title("Decisions made for you", &t, cx))
             .when(run.decisions.is_empty(), |this| {
                 this.child(quiet_line(tr(cx, TABLE, "Chronos has not decided anything on your behalf."), &t))
             })
             .children(run.decisions.iter().enumerate().map(|(i, decision)| {
                 h_flex()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
-                    .child(div().mt(px(7.)).size(px(4.)).flex_none().rounded_full().bg(t.gold))
+                    .child(div().mt(theme::space(theme::density(cx), Step::Sm)).size(DOT_SIZE).flex_none().rounded(theme::RADIUS_SMALL).bg(t.gold))
                     .child(div().flex_1().min_w_0().child(SelectableText::new(("decision", i), decision.clone())))
             }))
     }
@@ -1457,24 +1494,24 @@ impl Detail {
         let t = cx.tokens();
         let mono = cx.theme().mono_font_family.clone();
         v_flex()
-            .gap_2()
+            .gap(theme::space(theme::density(cx), Step::Sm))
             .child(section_title("Recent events", &t, cx))
             .when(run.log.is_empty(), |this| {
                 this.child(quiet_line(tr(cx, TABLE, "Nothing has been logged yet."), &t))
             })
             .children(run.log.iter().rev().take(RECENT_EVENTS).enumerate().map(|(i, line)| {
                 h_flex()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
-                    .child(Icon::new(level_icon(line.level)).size(px(14.)).text_color(t.log(line.level)).mt(px(2.)))
+                    .child(Icon::new(level_icon(line.level)).size(ICON_ROW).text_color(t.log(line.level)).mt(theme::space(theme::density(cx), Step::Xs)))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .child(
                                 h_flex()
-                                    .gap_1p5()
-                                    .text_xs()
+                                    .gap(theme::space(theme::density(cx), Step::Sm))
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                     .text_color(t.muted)
                                     .child(div().flex_none().font_family(mono.clone()).child(line.time.clone()))
                                     .child(div().min_w_0().truncate().child(super::control::source_label(&line.source, cx))),
@@ -1503,23 +1540,24 @@ impl Detail {
         let units: Vec<usize> = module.units.iter().copied().filter(|&u| u < run.units.len()).collect();
         v_flex()
             .size_full()
-            .p_4()
-            .gap_5()
+            .p(theme::space(theme::density(cx), Step::Lg))
+            .gap(theme::space(theme::density(cx), Step::Xl))
             .overflow_y_scrollbar()
             .id(("module-page", index))
             .child(
                 v_flex()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
                     .child(self.back_button(cx))
+                    .children(self.comment_button(run, cx))
                     .child(
                         v_flex()
                             .w_full()
-                            .gap_1()
-                            .child(div().text_xs().text_color(t.muted).child(tr(cx, TABLE, "Module")))
+                            .gap(theme::space(theme::density(cx), Step::Xs))
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(cx, TABLE, "Module")))
                             .child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Title))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .child(SelectableText::new(("module-id", index), module.id.clone())),
@@ -1527,10 +1565,10 @@ impl Detail {
                             .child(div().child(SelectableText::new(("module-purpose", index), module.purpose.clone())))
                             .child(
                                 h_flex()
-                                    .gap_1p5()
-                                    .text_xs()
+                                    .gap(theme::space(theme::density(cx), Step::Sm))
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                     .text_color(t.unit(module_state(run, module)))
-                                    .child(Icon::new(unit_icon(module_state(run, module))).size(px(13.)))
+                                    .child(Icon::new(unit_icon(module_state(run, module))).size(ICON_STATUS))
                                     .child(progress),
                             ),
                     ),
@@ -1538,7 +1576,7 @@ impl Detail {
             .child(self.contract_section(module, index, cx))
             .child(
                 v_flex()
-                    .gap_1()
+                    .gap(theme::space(theme::density(cx), Step::Xs))
                     .child(section_title("Depends on", &t, cx))
                     .when(depends.is_empty(), |this| {
                         this.child(quiet_line(tr(cx, TABLE, "This module depends on nothing else."), &t))
@@ -1547,7 +1585,7 @@ impl Detail {
             )
             .child(
                 v_flex()
-                    .gap_1()
+                    .gap(theme::space(theme::density(cx), Step::Xs))
                     .child(section_title("Units", &t, cx))
                     .when(units.is_empty(), |this| {
                         this.child(quiet_line(tr(cx, TABLE, "This module has no units yet."), &t))
@@ -1562,7 +1600,7 @@ impl Detail {
         let load = module.contract.as_ref().map(|source| self.load_of(source));
         let key = 1_000_000 + index;
         v_flex()
-            .gap_1()
+            .gap(theme::space(theme::density(cx), Step::Xs))
             .child(
                 h_flex()
                     .justify_between()
@@ -1586,25 +1624,26 @@ impl Detail {
             .ghost()
             .w_full()
             .h_auto()
-            .px_1()
-            .py_1()
+            .min_h(theme::TARGET_MIN)
+            .px(theme::space(theme::density(cx), Step::Xs))
+            .py(theme::space(theme::density(cx), Step::Xs))
             .tooltip(module.purpose.clone())
             .on_click(self.go(Selection::Module(index)))
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
-                    .gap_2()
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
-                    .child(Icon::new(unit_icon(state)).size(px(14.)).text_color(t.unit(state)).mt(px(2.)))
+                    .child(Icon::new(unit_icon(state)).size(ICON_ROW).text_color(t.unit(state)).mt(theme::space(theme::density(cx), Step::Xs)))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(13.)).text_color(t.text).truncate().child(module.id.clone()))
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Body)).text_color(t.text).truncate().child(module.id.clone()))
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                     .text_color(t.muted)
                                     .truncate()
                                     .child(format!("{} · {done}/{total}", module.purpose)),
@@ -1627,17 +1666,18 @@ impl Detail {
             .child(
                 v_flex()
                     .w_full()
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
-                    .gap_2()
+                    .px(theme::space(theme::density(cx), Step::Lg))
+                    .pt(theme::space(theme::density(cx), Step::Lg))
+                    .pb(theme::space(theme::density(cx), Step::Sm))
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
                     .child(self.back_button(cx))
+                    .children(self.comment_button(run, cx))
                     .child(
                         div()
                             .id("unit-title")
                             .w_full()
-                            .text_size(px(15.))
+                            .text_size(theme::font(theme::density(cx), TypeSize::Title))
                             .font_weight(FontWeight::SEMIBOLD)
                             .line_clamp(3)
                             .tooltip(tooltip_of(title.original.unwrap_or_else(|| title.shown.clone())))
@@ -1647,7 +1687,7 @@ impl Detail {
                         this.child(
                             div()
                                 .w_full()
-                                .text_xs()
+                                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                                 .text_color(t.muted)
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .child(SelectableText::new(("unit-id", index), unit.id.clone())),
@@ -1658,29 +1698,31 @@ impl Detail {
                             .w_full()
                             .flex_wrap()
                             .items_center()
-                            .gap_x_2()
-                            .gap_y_1()
+                            .gap_x(theme::space(theme::density(cx), Step::Sm))
+                            .gap_y(theme::space(theme::density(cx), Step::Xs))
                             .child(
                                 Tag::custom(color.opacity(0.12), color, color.opacity(0.35))
-                                    .rounded_full()
+                                    .rounded(theme::RADIUS_SMALL)
                                     .child(
                                         h_flex()
-                                            .gap_1()
-                                            .child(Icon::new(unit_icon(unit.state)).size(px(12.)))
+                                            .gap(theme::space(theme::density(cx), Step::Xs))
+                                            .child(Icon::new(unit_icon(unit.state)).size(ICON_SMALL))
                                             .child(label)
                                             .when(raw_differs, |this| {
                                                 this.child(div().opacity(0.7).child(unit.raw_state.clone()))
                                             }),
                                     ),
                             )
-                            .child(div().text_xs().text_color(t.muted).child(attempts_text(unit.attempts, cx)))
+                            .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(attempts_text(unit.attempts, cx)))
                             .when_some(module, |this, module| {
                                 this.child(
                                     Button::new("unit-module")
                                         .ghost()
                                         .xsmall()
+                                        .min_h(theme::TARGET_MIN)
+                                        .tooltip(tr(cx, TABLE, "Open module"))
                                         .label(format!("{} {}", tr(cx, TABLE, "Module"), module.id))
-                                        .child(Icon::new(IconName::ChevronRight).size(px(12.)))
+                                        .child(Icon::new(IconName::ChevronRight).size(ICON_SMALL))
                                         .on_click(self.go(Selection::Module(unit.module))),
                                 )
                             }),
@@ -1690,7 +1732,7 @@ impl Detail {
                 TabBar::new("unit-tabs")
                     .underline()
                     .small()
-                    .prefix(div().w_4())
+                    .prefix(div().w(theme::space(theme::density(cx), Step::Lg)))
                     .selected_index(selected)
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         if let Some(tab) = DocTab::ALL.get(*ix) {
@@ -1707,7 +1749,7 @@ impl Detail {
     fn tab_body(&self, unit: &Unit, key: usize, cx: &Context<Self>) -> AnyElement {
         let t = cx.tokens();
         let Some(source) = self.tab.source(&unit.files) else {
-            return quiet_panel(IconName::FileText, tr(cx, TABLE, empty_reason(self.tab, unit.state)), None, &t)
+            return quiet_panel(IconName::FileText, tr(cx, TABLE, empty_reason(self.tab, unit.state)), None, &t, cx)
                 .into_any_element();
         };
         let load = self.load_of(source);
@@ -1716,10 +1758,10 @@ impl Detail {
             .child(
                 h_flex()
                     .w_full()
-                    .h_8()
+                    .h(theme::row_height(theme::density(cx)))
                     .flex_none()
-                    .px_4()
-                    .gap_2()
+                    .px(theme::space(theme::density(cx), Step::Lg))
+                    .gap(theme::space(theme::density(cx), Step::Sm))
                     .justify_between()
                     .child(self.source_label(key, source, cx))
                     .child(self.doc_actions(key, source, &load, cx)),
@@ -1736,7 +1778,7 @@ impl Detail {
                 .id(("doc-name", key))
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption))
                 .text_color(t.muted)
                 .truncate()
                 .tooltip(tooltip_of(path.display().to_string()))
@@ -1758,25 +1800,26 @@ impl Detail {
         let open_tip = match (source, load) {
             (TextSource::Inline(_), _) => tr(cx, TABLE, "This text is not saved as a file."),
             (_, Load::Missing) => tr(cx, TABLE, "This file is no longer there."),
-            _ => tr(cx, &[], "Open in editor"),
+            _ => tr(cx, TABLE, "Open in editor"),
         };
         let copy_tip = if file.as_ref().is_some_and(|f| f.cut_from.is_some()) {
             tr(cx, TABLE, "Copy the part shown")
         } else {
-            tr(cx, &[], "Copy")
+            tr(cx, TABLE, "Copy")
         };
         h_flex()
             .flex_none()
-            .gap_0p5()
+            .gap(theme::space(theme::density(cx), Step::Xs))
             .map(|this| match file {
-                Some(file) => this.child(Clipboard::new(("doc-copy", key)).value(file.text.clone()).tooltip(copy_tip)),
-                None => this.child(Button::new(("doc-copy", key)).ghost().xsmall().icon(IconName::Copy).disabled(true)),
+                Some(file) => this.child(Clipboard::new(("doc-copy", key)).with_size(theme::TARGET_MIN).value(file.text.clone()).tooltip(copy_tip)),
+                None => this.child(Button::new(("doc-copy", key)).ghost().xsmall().min_h(theme::TARGET_MIN).icon(IconName::Copy).tooltip(copy_tip).disabled(true)),
             })
             .child(
                 Button::new(("doc-open", key))
                     .ghost()
                     .xsmall()
                     .icon(IconName::ExternalLink)
+                    .min_h(theme::TARGET_MIN)
                     .tooltip(open_tip)
                     .disabled(path.is_none())
                     .when_some(path, |this, path| {
@@ -1788,12 +1831,13 @@ impl Detail {
     fn doc_content(&self, key: usize, tab: DocTab, source: &TextSource, load: Load, scrolls: bool, cx: &Context<Self>) -> AnyElement {
         let t = cx.tokens();
         match load {
-            Load::Reading => quiet_panel(IconName::Loader, tr(cx, TABLE, "Loading…"), None, &t).into_any_element(),
+            Load::Reading => quiet_panel(IconName::Loader, tr(cx, TABLE, "Loading…"), None, &t, cx).into_any_element(),
             Load::Missing => quiet_panel(
                 IconName::File,
                 tr(cx, TABLE, "This file is no longer there."),
                 source_path(source),
                 &t,
+                cx,
             )
             .into_any_element(),
             Load::Unreadable(reason) => quiet_panel(
@@ -1801,10 +1845,11 @@ impl Detail {
                 tr(cx, TABLE, "This file could not be read."),
                 Some(reason),
                 &t,
+                cx,
             )
             .into_any_element(),
             Load::Text(file) if file.text.trim().is_empty() => {
-                quiet_panel(IconName::File, tr(cx, TABLE, "This file is empty."), None, &t).into_any_element()
+                quiet_panel(IconName::File, tr(cx, TABLE, "This file is empty."), None, &t, cx).into_any_element()
             }
             Load::Text(file) => v_flex()
                 .size_full()
@@ -1828,25 +1873,27 @@ impl Detail {
             TextSource::Inline(_) => None,
         };
         h_flex()
-            .mx_4()
-            .mb_2()
-            .px_2p5()
-            .py_1p5()
+            .mx(theme::space(theme::density(cx), Step::Lg))
+            .mb(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Md))
+            .py(theme::space(theme::density(cx), Step::Sm))
             .flex_wrap()
-            .gap_x_2()
-            .gap_y_1()
+            .gap_x(theme::space(theme::density(cx), Step::Sm))
+            .gap_y(theme::space(theme::density(cx), Step::Xs))
             .items_center()
-            .rounded(px(6.))
+            .rounded(theme::RADIUS)
             .bg(t.review.opacity(0.1))
-            .text_xs()
-            .child(Icon::new(IconName::TriangleAlert).size(px(13.)).text_color(t.review))
-            .child(div().flex_1().min_w(px(120.)).child(message))
+            .text_size(theme::font(theme::density(cx), TypeSize::Caption))
+            .child(Icon::new(IconName::TriangleAlert).size(ICON_STATUS).text_color(t.review))
+            .child(div().flex_1().min_w(NOTE_MIN_WIDTH).child(message))
             .when_some(path, |this, path| {
                 this.child(
                     Button::new(("doc-open-full", key))
                         .link()
                         .xsmall()
                         .label(tr(cx, TABLE, "Open the full file"))
+                        .min_h(theme::TARGET_MIN)
+                        .tooltip(tr(cx, TABLE, "Open the full file"))
                         .on_click(move |_, _, cx| cx.open_with_system(&path)),
                 )
             })
@@ -1904,10 +1951,10 @@ impl Detail {
             // With a project, the log is drawn as Markdown so its references can be links;
             // without one there is nothing to follow and it stays plain selectable text.
             let body = match project.as_deref() {
-                Some(root) => markdown_view(("doc-mono", key), self.linked_text(key, tab, file, Some(root), cx), project.clone())
+                Some(root) => markdown_view(("doc-mono", key), self.linked_text(key, tab, file, Some(root), cx), project.clone(), cx)
                     .font_family(mono.clone())
-                    .text_size(px(12.))
-                    .line_height(px(18.))
+                    .text_size(theme::font(theme::density(cx), TypeSize::Caption))
+                    .line_height(theme::font(theme::density(cx), TypeSize::Caption) * 1.5)
                     .into_any_element(),
                 None => SelectableText::new(("doc-mono", key), file.text.clone()).into_any_element(),
             };
@@ -1917,17 +1964,17 @@ impl Detail {
                 .id(("doc-scroll", key))
                 .child(
                     div()
-                        .mx_4()
-                        .mb_4()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(6.))
+                        .mx(theme::space(theme::density(cx), Step::Lg))
+                        .mb(theme::space(theme::density(cx), Step::Lg))
+                        .px(theme::space(theme::density(cx), Step::Md))
+                        .py(theme::space(theme::density(cx), Step::Sm))
+                        .rounded(theme::RADIUS)
                         .bg(t.canvas)
                         .border_1()
                         .border_color(t.border)
                         .font_family(mono)
-                        .text_size(px(12.))
-                        .line_height(px(18.))
+                        .text_size(theme::font(theme::density(cx), TypeSize::Caption))
+                        .line_height(theme::font(theme::density(cx), TypeSize::Caption) * 1.5)
                         .child(body),
                 )
                 .into_any_element();
@@ -1948,16 +1995,16 @@ impl Detail {
                 return div().id(("review-original", key))
                     .when(scrolls, |this| this.size_full())
                     .when_some(tip, |this, original| this.tooltip(tooltip_of(original)))
-                    .child(markdown_view(("doc-text", key), text.into(), project)
+                    .child(markdown_view(("doc-text", key), text.into(), project, cx)
                         .scrollable(scrolls)
-                        .when(scrolls, |this| this.size_full().px_4()))
+                        .when(scrolls, |this| this.size_full().px(theme::space(theme::density(cx), Step::Lg))))
                     .into_any_element();
             }
         }
         let text = self.linked_text(key, tab, file, project.as_deref(), cx);
-        markdown_view(("doc-text", key), text, project)
+        markdown_view(("doc-text", key), text, project, cx)
             .scrollable(scrolls)
-            .when(scrolls, |this| this.size_full().px_4())
+            .when(scrolls, |this| this.size_full().px(theme::space(theme::density(cx), Step::Lg)))
             .into_any_element()
     }
 
@@ -2110,7 +2157,7 @@ impl Render for Detail {
         let t = cx.tokens();
         let app = self.state.read(cx);
         let body = match app.run() {
-            None => quiet_panel(IconName::Inbox, tr(cx, TABLE, "No wish is open."), None, &t).into_any_element(),
+            None => quiet_panel(IconName::Inbox, tr(cx, TABLE, "No wish is open."), None, &t, cx).into_any_element(),
             Some(run) => match pane_for(run, &app.selection) {
                 Pane::Overview => self.overview(run, cx),
                 Pane::Module(i) => self.module_page(run, i, cx),
@@ -2119,14 +2166,17 @@ impl Render for Detail {
         };
         div()
             .size_full()
-            .when(self.narrow, |this| this.w(px(320.)))
+            .when(self.narrow, |this| this.w(NARROW_WIDTH))
             .bg(t.surface)
             .text_color(t.text)
-            .text_size(px(13.))
+            .text_size(theme::font(theme::density(cx), TypeSize::Body))
             .overflow_hidden()
             .child(body)
     }
 }
+
+#[cfg(test)]
+mod accept;
 
 #[cfg(test)]
 mod cite_tests {

@@ -10,11 +10,13 @@ mod launch;
 mod live;
 mod memory;
 mod mesh;
+mod mini;
 pub mod model;
 mod motion;
 mod ornament;
 mod palette;
 pub mod plain_text;
+mod quota;
 mod run_view;
 mod settings;
 mod shell;
@@ -42,6 +44,8 @@ pub struct Options {
     /// Demo data with no runs, to see the empty states.
     pub empty: bool,
     pub scene: Option<String>,
+    pub mode: Option<settings::WindowMode>,
+    pub density: Option<theme::Density>,
     /// Open off-screen without taking focus, for capturing screenshots while someone uses the machine.
     pub offscreen: bool,
     pub quit_after: Option<u64>,
@@ -66,6 +70,24 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
             "--scene" => {
                 i += 1;
                 options.scene = Some(args.get(i).ok_or("--scene takes a name")?.clone());
+            }
+            "--mode" => {
+                i += 1;
+                options.mode = Some(match args.get(i).map(String::as_str) {
+                    Some("full") => settings::WindowMode::Full,
+                    Some("focus-graph") => settings::WindowMode::Focus(settings::FocusPanel::Graph),
+                    Some("focus-checklist") => settings::WindowMode::Focus(settings::FocusPanel::Checklist),
+                    Some("mini") => settings::WindowMode::Mini,
+                    _ => return Err("--mode takes full, focus-graph, focus-checklist or mini".into()),
+                });
+            }
+            "--density" => {
+                i += 1;
+                options.density = Some(match args.get(i).map(String::as_str) {
+                    Some("comfortable") => theme::Density::Comfortable,
+                    Some("dense") => theme::Density::Dense,
+                    _ => return Err("--density takes comfortable or dense".into()),
+                });
             }
             "--offscreen" => options.offscreen = true,
             "--size" => {
@@ -102,6 +124,10 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+pub fn state_scene(options: &Options) -> Option<String> {
+    if options.demo { options.scene.clone() } else { None }
+}
+
 pub fn run(options: Options) -> i32 {
     // Read before the event loop starts, so no frame ever waits on the disk.
     let ephemeral = options.demo || options.offscreen;
@@ -112,6 +138,8 @@ pub fn run(options: Options) -> i32 {
             store.settings.language = settings::LanguageChoice::English;
         }
     }
+    if let Some(mode) = options.mode { store.settings.mode = mode; }
+    if let Some(density) = options.density { store.settings.density = density; }
     let prefs = store.settings.clone();
     gpui_kit::application().with_assets(ornament::Assets).run(move |cx| {
         gpui_kit::init(cx);
@@ -119,24 +147,31 @@ pub fn run(options: Options) -> i32 {
         theme::apply(mode, None, cx);
         i18n::set(if options.english { i18n::Lang::En } else { prefs.language.resolve() }, cx);
         cx.set_global(store);
+        theme::set_density(prefs.density, cx);
         let source = if ephemeral {
             plain_text::Source::Fake(std::sync::Arc::new(plain_text::DemoRunner))
         } else {
             plain_text::Source::Claude { cache: crate::base::axiom_home().join("desktop").join("plain-text.json") }
         };
         plain_text::install(cx, prefs.plain_words, source);
+        // The quit hook captures the system motion setting before the stored override is applied.
         settings::Store::save_on_quit(cx);
         if let Some(on) = prefs.reduce_motion {
             cx.set_reduce_motion(on);
         }
         let mut initial = demo::state();
-        initial.scene = options.scene.clone();
+        initial.scene = state_scene(&options);
         initial.reduce_motion = cx.reduce_motion();
         if !options.demo || options.empty {
             initial.runs.clear();
             initial.current = None;
             initial.memory.clear();
             initial.checks.clear();
+        }
+        if options.demo {
+            if let Some(scene) = options.scene.as_deref() {
+                demo::apply_data_scene(&mut initial, scene);
+            }
         }
         initial.view = options.view.unwrap_or(prefs.last_screen);
         let state = cx.new(|_| initial);
@@ -169,10 +204,16 @@ pub fn run(options: Options) -> i32 {
         } else {
             launch::Launch::none()
         };
-        gpui_kit::open_window(window, cx, |window, cx| {
-            cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening))
-        })
-        .expect("could not open the main window");
+        if shell::start_mini_only(ephemeral, prefs.mode) {
+                if let Err(error) = mini::open_mini_at(state.clone(), prefs.mini_on_top, options.offscreen, cx) {
+                    eprintln!("{error}");
+                    cx.quit();
+                }
+        } else {
+                gpui_kit::open_window(window, cx, |window, cx| {
+                    cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening))
+                }).expect("could not open the main window");
+        }
         if let Some(seconds) = options.quit_after {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(seconds)).await;
