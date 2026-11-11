@@ -2,6 +2,7 @@
 name = "axiom-chronos"
 version = "2.0.0"
 edition = "2021"
+default-run = "axiom"
 
 [lib]
 name = "axiom"
