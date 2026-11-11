@@ -51,8 +51,12 @@ def package_release(version, out_dir, windows_axiom=None, windows_chronos=None,
     sums = []
     for path in sorted(out_dir.iterdir()):
         if path.is_file() and path.name != 'SHA256SUMS':
+            # hashlib.file_digest needs Python 3.11; read in chunks so 3.8+ works.
+            hasher = hashlib.sha256()
             with path.open('rb') as stream:
-                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                for chunk in iter(lambda: stream.read(1 << 20), b''):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
             sums.append(f'{digest}  {path.name}\n')
     (out_dir / 'SHA256SUMS').write_text(''.join(sums), encoding='utf-8', newline='\n')
     return archives
