@@ -2,6 +2,10 @@ use super::board::*;
 use super::super::i18n::Lang;
 use super::super::model::{board_facts, board_runs, BoardEntry, BoardFacts, BoardStatus, BoardText, RunStatus};
 
+fn board_layout(height: f32, count: usize, padding: f32) -> Option<super::BoardLayout> {
+    super::board_layout(height, count, count, padding)
+}
+
 // Estimate the full Run screen with its taller, running control bar. The real
 // board always uses the measured column height, including any optional cards.
 fn details_column_height(window_height: f32, d: super::theme::Density) -> f32 {
@@ -43,6 +47,42 @@ fn text(next: Option<&str>) -> BoardText {
 }
 
 #[test]
+fn board_input_contract_demo_sentences() {
+    let pairs = [
+        ("Work progress has been updated.", "工作進度已更新。"),
+        ("Continue with the next step.", "繼續下一步。"),
+    ];
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for (en, zh) in pairs {
+        for input in [en, zh] {
+            for (lang, output) in [(Lang::En, en), (Lang::ZhTw, zh)] {
+                actual.push(crate::desktop::demo::board_sentence(input, lang));
+                expected.push(Some(output));
+            }
+        }
+    }
+    for lang in [Lang::En, Lang::ZhTw] {
+        actual.push(crate::desktop::demo::board_sentence("A real summary.", lang));
+        expected.push(None);
+    }
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn board_input_contract_preserves_real_summary() {
+    let run = &crate::desktop::demo::state().runs[0];
+    let entry = BoardEntry { status: BoardStatus::Idle, text: Some(BoardText {
+        recent: "A real summary.".into(), next: Some("A real next step.".into()), written_unix: 1_000,
+    }) };
+    let actual: Vec<_> = [Lang::En, Lang::ZhTw].into_iter().map(|lang| {
+        let lines = board_lines(run, Some(&entry), 1_000, lang);
+        (lines.recent, lines.next)
+    }).collect();
+    assert_eq!(actual, vec![(Some("A real summary.".into()), Some("A real next step.".into())); 2]);
+}
+
+#[test]
 fn facts_report_only_supplied_counts_and_attention() {
     for lang in [Lang::En, Lang::ZhTw] {
         let f = facts();
@@ -77,23 +117,14 @@ fn facts_are_translated() {
 }
 
 #[test]
-fn next_step_is_explicit_even_when_unknown() {
+fn unknown_next_is_omitted_in_both_languages() {
     let run = &crate::desktop::demo::state().runs[0];
-    for (lang, expected) in [(Lang::En, "Next step: unknown"), (Lang::ZhTw, "下一步：未知")] {
-        let mut entry = BoardEntry { status: BoardStatus::Idle, text: Some(text(None)) };
+    let actual: Vec<_> = [Lang::En, Lang::ZhTw].into_iter().map(|lang| {
+        let entry = BoardEntry { status: BoardStatus::Idle, text: Some(text(None)) };
         let lines = board_lines(run, Some(&entry), 1_000, lang);
-        assert_eq!(lines.recent.as_deref(), Some("recent"));
-        assert_eq!(lines.next.as_deref(), Some(expected));
-        assert!(board_line(&lines, lang).contains(expected));
-        let without_recent = BoardLines { recent: None, ..lines };
-        let line = board_line(&without_recent, lang);
-        assert_eq!(line, expected);
-        entry.text = Some(text(Some("x")));
-        assert_eq!(board_lines(run, Some(&entry), 1_000, lang).next.as_deref(), Some("x"));
-        entry.text = None;
-        let lines = board_lines(run, Some(&entry), 1_000, lang);
-        assert_eq!((lines.recent, lines.next, lines.note), (None, None, None));
-    }
+        (lines.next.clone(), board_line(&lines, lang), card_parts(&lines, true, lang).next)
+    }).collect();
+    assert_eq!(actual, vec![(None, "recent".into(), Some("recent".into())); 2]);
 }
 
 #[test]
@@ -110,11 +141,6 @@ fn board_line_removes_trailing_punctuation_only_when_joining() {
         lines.recent = Some(recent.into());
         assert_eq!(board_line(&lines, lang), recent);
     }
-}
-
-#[test]
-fn strip_content_begins_with_project() {
-    assert_eq!(strip_content("ml_hfo2", "等待批次", "工作進度"), "ml_hfo2 · 等待批次 · 工作進度");
 }
 
 #[test]
@@ -386,7 +412,7 @@ fn overview_board_share_is_bounded() {
 
 #[test]
 fn board_appears_at_1100x700_in_both_densities() {
-    use super::{board_layout, DETAIL_OVERVIEW_MIN, theme::{self, Density, Step}};
+    use super::{DETAIL_OVERVIEW_MIN, theme::{self, Density, Step}};
     const OLD_RESERVE: f32 = 340.0;
     // Extra space above the board's minimum threshold.
     const BOARD_MARGIN: f32 = 8.0;
@@ -428,11 +454,11 @@ fn overview_board_budget_reserves_detail() {
 
 #[test]
 fn overview_board_layout_reserves_space_for_cards_and_more_row() {
-    use super::{board_layout, BoardLayout, BoardMode, DETAIL_OVERVIEW_MIN};
+    use super::{BoardLayout, BoardMode, DETAIL_OVERVIEW_MIN};
     assert_eq!(board_layout(DETAIL_OVERVIEW_MIN, 5, 8.0), None);
     assert_eq!(board_layout(DETAIL_OVERVIEW_MIN + 24.0, 5, 8.0), Some(BoardLayout { mode: BoardMode::Strip, visible: 1, max_height: 24.0, min_height: 24.0 }));
     assert_eq!(board_layout(DETAIL_OVERVIEW_MIN + 40.0, 5, 8.0), Some(BoardLayout { mode: BoardMode::Strip, visible: 1, max_height: 24.0, min_height: 24.0 }));
-    assert_eq!(board_layout(DETAIL_OVERVIEW_MIN + 65.0, 5, 8.0), Some(BoardLayout { mode: BoardMode::Strip, visible: 1, max_height: 48.0, min_height: 48.0 }));
+    assert_eq!(board_layout(DETAIL_OVERVIEW_MIN + 65.0, 5, 8.0), Some(BoardLayout { mode: BoardMode::Strip, visible: 1, max_height: 24.0, min_height: 24.0 }));
     for count in 1..=5 {
         let layout = board_layout(DETAIL_OVERVIEW_MIN + 65.0, count, 8.0).unwrap();
         assert_eq!(layout.mode, BoardMode::Strip);
@@ -486,17 +512,14 @@ fn hidden_project_names_are_listed_in_order() {
 fn card_parts_place_recent_next_and_status_for_both_modes() {
     let run = &crate::desktop::demo::state().runs[0];
     for lang in [Lang::En, Lang::ZhTw] {
-        let unknown = if lang == Lang::En { "Next step: unknown" } else { "下一步：未知" };
         let mut entry = BoardEntry { status: BoardStatus::Idle, text: Some(BoardText { recent: "R".into(), next: None, written_unix: 1_000 }) };
         let lines = board_lines(run, Some(&entry), 1_000, lang);
         let compact = card_parts(&lines, true, lang);
         assert_eq!(compact.facts, lines.facts);
         assert_eq!(compact.recent, None);
         assert!(compact.next.as_deref().unwrap().contains("R"));
-        assert!(compact.next.as_deref().unwrap().contains(unknown));
         assert_eq!(compact.note, None);
         assert!(compact.tip.as_deref().unwrap().contains("R"));
-        assert!(compact.tip.as_deref().unwrap().contains(unknown));
         assert!(compact.tip.as_deref().unwrap().contains(&lines.facts));
         let full = card_parts(&lines, false, lang);
         assert_eq!(full.recent, lines.recent);
@@ -544,9 +567,6 @@ fn compact_board_shows_facts_once_for_each_status() {
         for entry in &entries {
             let lines = board_lines(run, entry.as_ref(), 1_000, lang);
             let line = line_with_note(&board_line(&lines, lang), lines.note.as_deref());
-            let strip = strip_content("P", &lines.facts, &line);
-            assert_eq!(strip.matches(&lines.facts).count(), 1);
-            assert_eq!(strip, if line.is_empty() { format!("P · {}", lines.facts) } else { format!("P · {} · {line}", lines.facts) });
             let card = card_parts(&lines, true, lang);
             let visible = std::iter::once(card.facts.as_str()).chain(card.recent.as_deref()).chain(card.next.as_deref()).chain(card.note.as_deref()).collect::<Vec<_>>().join("\n");
             assert_eq!(visible.matches(&lines.facts).count(), 1);
@@ -558,4 +578,60 @@ fn compact_board_shows_facts_once_for_each_status() {
             }
         }
     }
+}
+
+#[test]
+fn demo_lines_and_notes_obey_bilingual_contract() {
+    let state = crate::desktop::demo::state_at(1_793_700_120);
+    let run = &state.runs[0];
+    let mut outcomes = Vec::new();
+    for lang in [Lang::En, Lang::ZhTw] {
+        let recent = if lang == Lang::En { "Work progress has been updated." } else { "工作進度已更新。" };
+        let next = if lang == Lang::En { "Continue with the next step." } else { "繼續下一步。" };
+        for (r, n) in [("工作進度已更新。", "Continue with the next step."), ("Work progress has been updated.", "繼續下一步。")] {
+            let mut entry = BoardEntry { status: BoardStatus::Idle, text: Some(BoardText { recent: r.into(), next: Some(n.into()), written_unix: 1_793_700_000 }) };
+            let lines = board_lines(run, Some(&entry), 1_793_700_120, lang);
+            let joined = if lang == Lang::En { "Work progress has been updated — Continue with the next step." } else { "工作進度已更新，接下來：繼續下一步。" };
+            outcomes.push(lines.recent.as_deref() == Some(recent) && lines.next.as_deref() == Some(next) && board_line(&lines, lang) == joined);
+            entry.text.as_mut().unwrap().next = None;
+            for status in [BoardStatus::Idle, BoardStatus::Writing, BoardStatus::Failed("oops".into())] {
+                entry.status = status;
+                let lines = board_lines(run, Some(&entry), 1_793_700_120, lang);
+                let line = line_with_note(&board_line(&lines, lang), lines.note.as_deref());
+                let compact = card_parts(&lines, true, lang);
+                outcomes.push(lines.next.is_none() && board_line(&lines, lang) == recent && !line.contains("接下來：下一步") && !compact.tip.unwrap().contains("接下來：下一步"));
+            }
+            entry.status = BoardStatus::Off;
+            let off = board_lines(run, Some(&entry), 1_793_700_120, lang);
+            outcomes.push(board_line(&off, lang).is_empty() && off.note.is_none());
+        }
+    }
+    let prefixed = BoardLines { facts: String::new(), recent: Some("已更新。".into()), next: Some("下一步：繼續。".into()), note: None };
+    outcomes.push(board_line(&prefixed, Lang::ZhTw) == "已更新，接下來：繼續。");
+    assert_eq!(outcomes, vec![true; 21]);
+}
+
+#[test]
+fn needs_counts_statuses_and_empty_layout() {
+    use super::super::model::needs_you;
+    let mut actual = Vec::new();
+    for lang in [Lang::En, Lang::ZhTw] {
+        for projects in [&[][..], &["a"][..], &["a", "b"][..]] {
+            actual.push(needs_text(projects, lang));
+        }
+        let mut state = crate::desktop::demo::state_at(1_793_700_120);
+        let need = state.runs[2].needs[0].clone();
+        let mut run = state.runs[0].clone();
+        run.project = "a".into();
+        for status in [RunStatus::Active, RunStatus::Waiting, RunStatus::Interrupted, RunStatus::Done, RunStatus::Blocked] {
+            run.status = status;
+            run.needs = if status == RunStatus::Active { vec![need.clone()] } else { vec![] };
+            state.runs = vec![run.clone()];
+            let projects: Vec<_> = board_runs(&state).into_iter().map(|i| &state.runs[i]).filter(|run| needs_you(run)).map(|run| run.project.as_ref()).collect();
+            actual.push(needs_text(&projects, lang));
+        }
+    }
+    actual.push(Some(super::board_layout(super::DETAIL_OVERVIEW_MIN + 24.0, 1, 0, 8.0).is_none().to_string()));
+    let values = [None, Some("1 wish needs you: a"), Some("2 wishes need you: a, b"), Some("1 wish needs you: a"), Some("1 wish needs you: a"), Some("1 wish needs you: a"), None, Some("1 wish needs you: a"), None, Some("1 個願望需要你：a"), Some("2 個願望需要你：a、b"), Some("1 個願望需要你：a"), Some("1 個願望需要你：a"), Some("1 個願望需要你：a"), None, Some("1 個願望需要你：a"), Some("true")];
+    assert_eq!(actual, values.into_iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>());
 }

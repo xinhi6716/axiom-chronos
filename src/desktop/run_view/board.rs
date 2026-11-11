@@ -1,9 +1,10 @@
 //! A factual overview and the latest model-written summary for each open run.
 use super::super::i18n::{fill, tr, translate, Lang, Table};
-use super::super::model::{board_facts, board_runs, AppState, BoardEntry, BoardFacts, BoardStatus, Run};
+use super::super::model::{board_facts, board_runs, needs_you, AppState, BoardEntry, BoardFacts, BoardStatus, Run};
 use super::super::ornament;
 use super::super::plain_text;
 use super::super::theme::{self, Step, Tokened as _, TypeSize};
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,7 +17,6 @@ pub(super) const TEXT: Table = &[
     ("{} running", "{} 個進行中"),
     ("{} failed", "{} 個失敗"),
     ("needs you", "需要你處理"),
-    ("Next step: unknown", "下一步：未知"),
     ("just now", "剛剛"),
     ("{} min ago", "{} 分鐘前"),
     ("{} h ago", "{} 小時前"),
@@ -74,8 +74,9 @@ pub(super) fn board_lines(run: &Run, entry: Option<&BoardEntry>, now_unix: i64, 
     let Some(entry) = entry else { return lines; };
     if matches!(entry.status, BoardStatus::Off) { return lines; }
     if let Some(text) = &entry.text {
-        lines.recent = Some(text.recent.to_string());
-        lines.next = Some(text.next.as_ref().map_or_else(|| translate(lang, TEXT, "Next step: unknown").to_owned(), ToString::to_string));
+        let localize = |text: &str| super::super::demo::board_sentence(text, lang).unwrap_or(text).to_owned();
+        lines.recent = Some(localize(&text.recent));
+        lines.next = text.next.as_deref().map(localize);
     }
     lines.note = match (&entry.status, &entry.text) {
         (BoardStatus::Writing, Some(text)) => Some(fill(translate(lang, TEXT, "Updating — last written {}"), &[&age_text(now_unix.saturating_sub(text.written_unix), lang)])),
@@ -98,7 +99,10 @@ pub(super) struct CardParts {
 
 pub(super) fn board_line(lines: &BoardLines, lang: Lang) -> String {
     match (lines.recent.as_deref(), lines.next.as_deref()) {
-        (Some(recent), Some(next)) => fill(translate(lang, TEXT, "{} — {}"), &[recent.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '。' | ',' | '，' | ';' | '；' | '!' | '！' | '?' | '？')), next]),
+        (Some(recent), Some(next)) => {
+            let next = if lang == Lang::ZhTw { next.strip_prefix("下一步：").unwrap_or(next) } else { next };
+            fill(translate(lang, TEXT, "{} — {}"), &[recent.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '。' | ',' | '，' | ';' | '；' | '!' | '！' | '?' | '？')), next])
+        },
         (Some(recent), None) => recent.to_owned(),
         (None, Some(next)) => next.to_owned(),
         (None, None) => String::new(),
@@ -113,8 +117,24 @@ pub(super) fn line_with_note(line: &str, note: Option<&str>) -> String {
     }
 }
 
-pub(super) fn strip_content(project: &str, facts: &str, line: &str) -> String {
-    if line.is_empty() { format!("{project} · {facts}") } else { format!("{project} · {facts} · {line}") }
+pub(super) fn needs_text(projects: &[&str], lang: Lang) -> Option<String> {
+    let count = projects.len();
+    if count == 0 { return None; }
+    Some(match lang {
+        Lang::En if count == 1 => format!("1 wish needs you: {}", projects.join(", ")),
+        Lang::En => format!("{count} wishes need you: {}", projects.join(", ")),
+        Lang::ZhTw => format!("{count} 個願望需要你：{}", projects.join("、")),
+    })
+}
+
+pub(in crate::desktop) fn compact_line(state: &AppState, index: usize, cx: &App) -> String {
+    let run = &state.runs[index];
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX));
+    let lang = *cx.global::<Lang>();
+    let lines = board_lines(run, state.board.get(&run.session), now, lang);
+    let line = plain_text::plain(cx, &SharedString::from(board_line(&lines, lang))).shown;
+    let note = lines.note.map(|note| plain_text::plain(cx, &SharedString::from(note)).shown);
+    line_with_note(&line, note.as_deref())
 }
 
 pub(super) fn card_parts(lines: &BoardLines, compact: bool, lang: Lang) -> CardParts {
@@ -176,21 +196,25 @@ fn tooltip(text: SharedString) -> impl Fn(&mut Window, &mut App) -> AnyView + 's
     }
 }
 
-pub(in crate::desktop) fn board(state: &AppState, compact: bool, cx: &App) -> AnyElement {
-    board_with(state, compact, &|_| 0.0, cx)
+pub(super) fn board_strip(state: &AppState, cx: &App) -> AnyElement {
+    let t = cx.tokens();
+    let d = theme::density(cx);
+    let lang = *cx.global::<Lang>();
+    let runs = board_runs(state);
+    let projects: Vec<&str> = runs.iter().map(|&i| &state.runs[i]).filter(|run| needs_you(run)).map(|run| run.project.as_ref()).collect();
+    let Some(text) = needs_text(&projects, lang) else { return div().into_any_element(); };
+    let tip = SharedString::from(text.clone());
+    div().id("board-strip").h(px(STRIP_ROW_HEIGHT)).flex().flex_none().w_full().min_w_0().items_center().px(px(4.0))
+        .tooltip(tooltip(tip)).child(div().flex_1().min_w_0().truncate().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(text.clone().test_text(text))).test_support().into_any_element()
 }
 
-pub(super) fn board_with(state: &AppState, compact: bool, lift: &dyn Fn(&SharedString) -> f32, cx: &App) -> AnyElement {
-    board_with_hover(state, compact, false, false, None, lift, std::rc::Rc::new(|_, _, _| {}), cx)
-}
-
-pub(super) fn board_with_hover(state: &AppState, compact: bool, strip: bool, inline_more: bool, limit: Option<usize>, lift: &dyn Fn(&SharedString) -> f32, hover: std::rc::Rc<dyn Fn(SharedString, bool, &mut App)>, cx: &App) -> AnyElement {
+pub(super) fn board_with_hover(state: &AppState, compact: bool, limit: Option<usize>, lift: &dyn Fn(&SharedString) -> f32, hover: std::rc::Rc<dyn Fn(SharedString, bool, &mut App)>, cx: &App) -> AnyElement {
     let t = cx.tokens();
     let d = theme::density(cx);
     let lang = *cx.global::<Lang>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX));
     let runs = board_runs(state);
-    let mut list = v_flex().gap(if strip { px(0.0) } else { theme::space(d, Step::Sm) }).w_full()
+    let mut list = v_flex().gap(theme::space(d, Step::Sm)).w_full()
         .when(!compact, |this| this.max_w(theme::READ_WIDTH));
     if runs.is_empty() {
         return list.child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).child(tr(cx, TEXT, "Nothing is running"))).into_any_element();
@@ -212,22 +236,9 @@ pub(super) fn board_with_hover(state: &AppState, compact: bool, strip: bool, inl
             Some(BoardStatus::Off) | None => (IconName::Dash, t.muted),
         };
         let sentence = |text: String, muted: bool| div().min_w_0().text_size(theme::font(d, TypeSize::Body))
-            .text_color(if muted { t.muted } else { t.text }).when(compact, |this| this.truncate().line_height(px(16.0))).child(text);
+            .text_color(if muted { t.muted } else { t.text }).when(compact, |this| this.truncate().line_height(px(16.0))).child(text.clone().test_text(text));
         let key = run.session.clone();
         let on_hover = hover.clone();
-        if strip {
-            let line = line_with_note(&board_line(&lines, lang), lines.note.as_deref());
-            let content = strip_content(&run.project, &facts, &line);
-            let row = ornament::raised_card(&t, lift(&run.session), 0.0)
-                .id(("board-row", index)).h(px(STRIP_ROW_HEIGHT)).flex().flex_none().w_full().min_w_0().justify_start().overflow_hidden().px(px(4.0))
-                .when_some(tip, |this, tip| this.tooltip(tooltip(tip)))
-                .on_hover(move |inside: &bool, _, cx| on_hover(key.clone(), *inside, cx))
-                .child(h_flex().size_full().flex_1().min_w_0().justify_start().overflow_hidden().items_center().gap(px(4.0))
-                    .child(div().flex_1().min_w_0().truncate().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(content))
-                    .when(inline_more && visible < runs.len(), |this| this.child(div().flex_none().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).child(more_text(runs.len() - visible, lang)))));
-            list = list.child(row);
-            continue;
-        }
         let card = ornament::raised_card(&t, lift(&run.session), 0.0)
             .id(("board-row", index))
             .when_some(tip, |this, tip| this.tooltip(tooltip(tip)))
@@ -246,23 +257,13 @@ pub(super) fn board_with_hover(state: &AppState, compact: bool, strip: bool, inl
                 .when_some(note, |this, text| this.child(sentence(text, true))));
         list = list.child(card);
     }
-    if visible < runs.len() && !inline_more {
+    if visible < runs.len() {
         let projects: Vec<&str> = runs.iter().map(|&i| state.runs[i].project.as_ref()).collect();
         let names = SharedString::from(hidden_names(&projects, visible));
-        list = list.child(div().id("board-more").h(px(if strip { STRIP_ROW_HEIGHT } else { MORE_ROW_HEIGHT })).flex_none()
+        list = list.child(div().id("board-more").h(px(MORE_ROW_HEIGHT)).flex_none()
             .text_size(theme::font(d, TypeSize::Body)).text_color(t.muted)
             .tooltip(tooltip(names)).child(more_text(runs.len() - visible, lang)));
     }
     list.into_any_element()
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn board_is_visible_to_desktop_mini() {
-        let run_view = include_str!("../run_view.rs");
-        let board = include_str!("board.rs").split_once("#[cfg(test)]").unwrap().0;
-        assert!(run_view.contains("pub(super) mod board;"));
-        assert!(board.contains("pub(in crate::desktop) fn board("));
-    }
-}

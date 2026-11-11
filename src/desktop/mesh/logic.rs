@@ -1,5 +1,9 @@
 use super::{MenuTarget, Node, PanelState, Run, SharedString};
 
+pub(super) fn should_auto_refit(last: Option<(f32, f32)>, viewport: (f32, f32)) -> bool {
+    last.is_some_and(|last| last != viewport)
+}
+
 pub(super) fn scene_runs_needed(name: &str) -> usize {
     match name {
         "mesh-partial" | "mesh-done" => 4,

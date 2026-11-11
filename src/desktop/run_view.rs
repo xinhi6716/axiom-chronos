@@ -54,7 +54,7 @@ struct BoardLayout {
     min_height: f32,
 }
 
-fn board_layout(details_height: f32, run_count: usize, padding: f32) -> Option<BoardLayout> {
+fn board_layout(details_height: f32, run_count: usize, needs_count: usize, padding: f32) -> Option<BoardLayout> {
     if run_count == 0 { return None; }
     let max_height = board_card_budget(details_height);
     let visible = board::compact_visible_count(run_count, max_height, padding);
@@ -64,11 +64,8 @@ fn board_layout(details_height: f32, run_count: usize, padding: f32) -> Option<B
         return Some(BoardLayout { mode: BoardMode::Card, visible, max_height, min_height });
     }
     if details_height < DETAIL_OVERVIEW_MIN + board::STRIP_ROW_HEIGHT || !details_height.is_finite() { return None; }
-    let rows = ((max_height / board::STRIP_ROW_HEIGHT).floor() as usize).max(1);
-    let visible = if run_count > rows { rows.saturating_sub(1).max(1) } else { run_count };
-    let used_rows = visible + usize::from(visible < run_count && rows > 1);
-    let height = used_rows as f32 * board::STRIP_ROW_HEIGHT;
-    Some(BoardLayout { mode: BoardMode::Strip, visible, max_height: height, min_height: height })
+    if needs_count == 0 { return None; }
+    Some(BoardLayout { mode: BoardMode::Strip, visible: 1, max_height: board::STRIP_ROW_HEIGHT, min_height: board::STRIP_ROW_HEIGHT })
 }
 
 const TEXT: Table = &[
@@ -1100,7 +1097,7 @@ impl RunView {
         let runs = board_runs(app);
         let d = theme::density(cx);
         let padding = f32::from(theme::space(d, Step::Sm));
-        let layout = board_layout(self.details_height.get(), runs.len(), padding)
+        let layout = board_layout(self.details_height.get(), runs.len(), runs.iter().filter(|&&i| needs_you(&app.runs[i])).count(), padding)
             .filter(|_| *selection == Selection::None);
         let measured_height = self.details_height.clone();
         let board = layout.map(|layout| {
@@ -1116,8 +1113,10 @@ impl RunView {
                     cx.notify();
                 });
             });
-            let strip = layout.mode == BoardMode::Strip;
-            let board = board::board_with_hover(app, true, strip, strip && layout.max_height <= board::STRIP_ROW_HEIGHT, Some(layout.visible), &lift, hover, cx);
+            let board = match layout.mode {
+                BoardMode::Strip => board::board_strip(app, cx),
+                BoardMode::Card => board::board_with_hover(app, true, Some(layout.visible), &lift, hover, cx),
+            };
             (layout, board)
         });
         column(

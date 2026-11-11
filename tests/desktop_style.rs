@@ -1,6 +1,7 @@
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
 
 // Preserve byte offsets and newlines so that matches still point into the original source.
 fn blank(bytes: &mut [u8], start: usize, end: usize) {
@@ -186,4 +187,104 @@ fn src_desktop_follows_decision_19() {
     scan_tree(&root.join("src/desktop"), root, &mut found);
     found.sort();
     assert!(found.is_empty(), "decision 19 violations:\n{}", found.join("\n"));
+}
+
+const NOT_VERIFIED: &str = "## Not verified\n\n\
+- Native minimise and restore of the main window when Mini opens.\n\
+- Mini always-on-top on and off (no capture or test signal for a PopUp window).\n\
+- Delete-confirmation title text (plain text not in snapshots).\n\
+- Selection glow and focus-ring painting (no shadow in snapshots).\n\
+- 60 s quota repaint.\n\
+- Startup with a saved Mini.\n\
+- Tooltip rendering.\n\
+- Real-engine and native-window behaviour.";
+
+const OLD_W4: &str = "W4 FAIL wishes-dark-1100x700.png - running wish title still ends in an ellipsis at 1100x700";
+const OLD_W10: &str = "W10 FAIL usage-dark-1100x700.png - model-cost table not visible at 1100x700, below the warning panel";
+
+fn section(doc: &str, heading: &str) -> String {
+    let mut lines = doc.lines().skip_while(|line| *line != heading);
+    let first = lines.next().expect("section heading missing");
+    std::iter::once(first)
+        .chain(lines.take_while(|line| !line.starts_with("## ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn not_verified_section(doc: &str) -> String {
+    section(doc, "## Not verified")
+}
+
+fn capture_files(doc: &str) -> Vec<String> {
+    let captures = section(doc, "## Captures");
+    let mut lines = captures.lines().skip(2);
+    assert_eq!(lines.next().map(str::trim), Some("| name | file |"));
+    assert_eq!(lines.next().map(str::trim), Some("| --- | --- |"));
+    let files: Vec<_> = lines.filter(|line| !line.trim().is_empty()).map(|line| {
+        let cells: Vec<_> = line.split('|').map(str::trim).collect();
+        assert!(cells.len() == 4 && cells[0].is_empty() && cells[3].is_empty(), "invalid capture row: {line}");
+        let path = Path::new(cells[2]);
+        assert!(path.is_absolute() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")), "invalid capture path: {line}");
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), cells[1], "capture name mismatch: {line}");
+        cells[2].to_owned()
+    }).collect();
+    assert!(!files.is_empty(), "capture table is empty");
+    files
+}
+
+fn differs_from_old(line: &str, old: &str) -> bool {
+    line != old
+}
+
+fn newer_than(candidate: SystemTime, baseline: SystemTime) -> bool {
+    candidate > baseline
+}
+
+fn ui_after_doc() -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/ui-after.md")).unwrap()
+}
+
+#[test]
+fn not_verified_block_is_verbatim() {
+    let doc = ui_after_doc();
+    assert_eq!(not_verified_section(&doc), NOT_VERIFIED);
+    let altered = doc.replace("- Tooltip rendering.", "- Tooltip painting.");
+    assert_ne!(not_verified_section(&altered), NOT_VERIFIED);
+}
+
+#[test]
+fn w4_and_w10_verdicts_are_rewritten_and_reference_captures() {
+    let doc = ui_after_doc();
+    let files = capture_files(&doc);
+    let format = Regex::new(r"^(W4|W10) (PASS|FAIL) ([^ /\\]+\.png) - (\S.*)$").unwrap();
+    let mut unchanged = Vec::new();
+    for (id, old) in [("W4", OLD_W4), ("W10", OLD_W10)] {
+        assert!(!differs_from_old(old, old), "negative control for {id}");
+        let prefix = format!("{id} ");
+        let lines: Vec<_> = doc.lines().filter(|line| line.starts_with(&prefix)).collect();
+        assert_eq!(lines.len(), 1, "expected exactly one {id} line");
+        let line = lines[0];
+        let verdict = format.captures(line).unwrap_or_else(|| panic!("invalid verdict: {line}"));
+        assert!(files.iter().any(|file| Path::new(file).file_name().unwrap() == &verdict[3]), "capture not in table: {line}");
+        if !differs_from_old(line, old) { unchanged.push(id); }
+    }
+    assert!(unchanged.is_empty(), "unchanged verdicts: {}", unchanged.join(", "));
+}
+
+#[test]
+fn after_captures_are_newer_than_all_before_captures() {
+    let before = Path::new("C:/Users/gppup/.axiom/orchestrate/r6-app/captures/before/");
+    let newest_before = fs::read_dir(before).expect("cannot read before captures")
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")))
+        .map(|path| fs::metadata(path).unwrap().modified().unwrap())
+        .max().expect("no before PNG captures");
+    assert!(!newer_than(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)));
+    for file in capture_files(&ui_after_doc()) {
+        let modified = fs::metadata(&file).unwrap_or_else(|err| panic!("cannot read {file}: {err}"))
+            .modified().unwrap();
+        assert!(newer_than(modified, newest_before), "capture is not newer than all before captures: {file}");
+    }
 }

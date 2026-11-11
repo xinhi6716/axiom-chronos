@@ -52,9 +52,8 @@ pub fn cancels_restore(old_filter: Filter, new_filter: Filter, old_query: &str, 
     old_filter != new_filter || old_query != new_query
 }
 
-pub fn row_meta(run: &Run, started: &str) -> String {
-    let place = run.cwd.as_ref().map_or_else(|| run.project.to_string(), |cwd| cwd.display().to_string());
-    format!("{place} · {started}")
+pub fn row_meta(run: &Run) -> String {
+    run.cwd.as_ref().map_or_else(|| "—".to_string(), |cwd| cwd.display().to_string())
 }
 
 #[derive(Debug, PartialEq)]

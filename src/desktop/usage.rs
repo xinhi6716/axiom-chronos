@@ -67,6 +67,8 @@ const TEXT: i18n::Table = &[
     ("Highest in {project}", "最高出現在 {project}"),
     ("Over the line in {over} of {seen} runs", "{seen} 次中有 {over} 次超過警戒線"),
     ("Warnings", "警告"),
+    ("1 warning", "1 個警告"),
+    ("{n} warnings", "{n} 個警告"),
     ("Nothing to fix. Every agent stayed under the line.", "沒有需要處理的事，每個 agent 都在警戒線內。"),
     ("Nothing to check yet.", "還沒有可檢查的資料。"),
     ("{agent}: context too large", "{agent}：上下文過大"),
@@ -665,7 +667,7 @@ fn context_tooltip(row: &ContextRow, all_runs: bool, cx: &App) -> String {
     lines.join("\n")
 }
 
-fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App) -> Stateful<Div> {
+fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App) -> impl IntoElement {
     let t = cx.tokens();
     let over = over_line(row.peak);
     let share = |tokens: u64| relative(tokens as f32 / scale);
@@ -718,7 +720,7 @@ fn context_row(ix: usize, row: &ContextRow, scale: f32, all_runs: bool, cx: &App
                 .when(over, |value| {
                     value.child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).child(format!("{}×", fmt_ratio(row.peak))))
                 }),
-        )
+        ).test_support()
 }
 
 fn context_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
@@ -843,7 +845,7 @@ fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
                         } else {
                             "Nothing to fix. Every agent stayed under the line."
                         },
-                    )),
+                    )).test_support(),
             )
         })
         .child(div().flex().flex_wrap().gap(theme::space(theme::density(cx), Step::Md)).children(summary.warnings.iter().enumerate().map(|(ix, warning)| {
@@ -852,7 +854,7 @@ fn warnings_panel(summary: &Summary, all_runs: bool, cx: &App) -> Div {
                 Warning::Reported { text, .. } => text.clone(),
                 Warning::Ledger { note, .. } => note_text(note, *cx.global::<i18n::Lang>()).into(),
             };
-            div().id(("usage-warning-tip", ix)).tooltip(tooltip_text(tip)).flex().flex_1().min_w(theme::READ_WIDTH / 2.).child(warning_alert(ix, warning, all_runs, cx))
+            div().id(("usage-warning-tip", ix)).tooltip(tooltip_text(tip)).flex().flex_1().min_w(theme::READ_WIDTH / 2.).child(warning_alert(ix, warning, all_runs, cx)).test_support()
         })))
 }
 
@@ -929,6 +931,8 @@ pub struct UsageView {
     evolve: Entity<EvolvePanel>,
     scope: Scope,
     row_focus: Vec<FocusHandle>,
+    warning_focus: FocusHandle,
+    warnings_expanded: bool,
     selected: Option<String>,
     saved_scroll: f32,
     restore: logic::Restore,
@@ -963,9 +967,29 @@ impl UsageView {
             state,
             evolve,
             scope: initial_scope,
-            row_focus: Vec::new(), selected, saved_scroll, restore: logic::Restore::default(), scroll: ScrollHandle::new(),
+            row_focus: Vec::new(), warning_focus: cx.focus_handle(), warnings_expanded: false, selected, saved_scroll, restore: logic::Restore::default(), scroll: ScrollHandle::new(),
             last_scroll: Rc::new(Cell::new(saved_scroll)), scroll_ready: Rc::new(Cell::new(false)), restore_pending: Rc::new(Cell::new(false)),
         }
+    }
+
+    fn warning_summary(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let label = logic::warning_summary_text(count, |key| tr(cx, TEXT, key));
+        h_flex()
+            .id("usage-warnings-summary")
+            .role(Role::Button).aria_label(label.clone()).aria_expanded(self.warnings_expanded)
+            .min_h(theme::TARGET_MIN)
+            .gap(theme::space(theme::density(cx), Step::Sm))
+            .px(theme::space(theme::density(cx), Step::Sm))
+            .border_1().border_color(t.border)
+            .cursor_pointer()
+            .text_size(theme::font(theme::density(cx), TypeSize::Body)).text_color(t.text)
+            .hover(|this| this.bg(t.raised))
+            .focus_visible(|this| this.bg(t.raised).border_color(t.gold).shadow(theme::focus_ring(&t)))
+            .on_click(cx.listener(|this, _, _, cx| { this.warnings_expanded = !this.warnings_expanded; cx.notify(); }))
+            .child(Icon::new(if self.warnings_expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(theme::font(theme::density(cx), TypeSize::Title)))
+            .child(label)
+            .test_support().track_focus(&self.warning_focus.clone().tab_stop(true))
     }
 
     fn scope_tabs(&self, scope: Scope, can_show_run: bool, cx: &mut Context<Self>) -> TabBar {
@@ -1136,7 +1160,8 @@ impl Render for UsageView {
         let highlight = self.selected.as_ref().and_then(|id| state.runs.iter().position(|run| run.session.as_ref() == id)).or(current);
         if clear_saved_selection && settings::view_memory(cx, "usage").selected.is_some() { settings::remember_view("usage", |v| v.selected = None, cx); }
         let board_text = logic::board_text(logic::board_line(settings::board_tokens(cx)), |key| tr(cx, TEXT, key), fmt_tokens);
-        let wide = logic::cost_columns(f32::from(window.viewport_size().width)) == 2;
+        let compact = logic::one_column_order(logic::cost_columns(f32::from(window.viewport_size().width)));
+        let wide = !compact;
         let handle = self.scroll.clone(); let last = self.last_scroll.clone(); let ready = self.scroll_ready.clone();
         let all_runs = scope == Scope::AllRuns;
         let has_roles = !summary.roles.is_empty();
@@ -1167,14 +1192,19 @@ impl Render for UsageView {
                     .when(matches!(panel_state, PanelState::Stale(_)), |view| { if let PanelState::Stale(message) = &panel_state { view.child(self.retry_note(message.clone(), cx)) } else { view } })
                     .child(totals(&summary, cx))
                     .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(format!("{} · {}", tr(cx, TEXT, "Summary board"), board_text)))
-                    .child(context_panel(&summary, all_runs, cx))
-                    .child(warnings_panel(&summary, all_runs, cx))
+                    .when(wide, |view| view.child(context_panel(&summary, all_runs, cx)).child(warnings_panel(&summary, all_runs, cx)))
+                    .when(compact && !summary.warnings.is_empty(), |view| {
+                        view.child(v_flex().gap(theme::space(theme::density(cx), Step::Sm))
+                            .child(self.warning_summary(summary.warnings.len(), cx))
+                            .when(self.warnings_expanded, |group| group.child(warnings_panel(&summary, all_runs, cx))))
+                    })
                     .child(
                         div().flex().when(wide && has_roles, |v| v.flex_row()).when(!wide || !has_roles, |v| v.flex_col())
                             .gap(theme::space(theme::density(cx), Step::Lg))
                             .child(cost_panel("usage-models", "Cost by model", "Model", &summary.models, summary.unpriced, cx))
                             .when(has_roles, |this| this.child(cost_panel("usage-roles", "Cost by role", "Role", &summary.roles, false, cx))),
                     )
+                    .when(compact, |view| view.child(context_panel(&summary, all_runs, cx)))
                     .child(
                         panel(t, theme::density(cx))
                             .child(
@@ -1187,7 +1217,7 @@ impl Render for UsageView {
                             .child(self.run_table(&rows, highlight, cx)),
                     ),
             )
-            .into_any_element()
+            .test_support().into_any_element()
     }
 }
 

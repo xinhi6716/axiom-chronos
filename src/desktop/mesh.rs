@@ -3,7 +3,7 @@
 mod logic;
 
 use super::i18n::{self, tr, Lang, Table};
-use logic::{glow_targets, menu_anchor_node, menu_target, mesh_view, node_center, scene_runs_needed, stage_role, MeshView};
+use logic::{glow_targets, menu_anchor_node, menu_target, mesh_view, node_center, scene_runs_needed, should_auto_refit, stage_role, MeshView};
 use super::model::*;
 use super::palette;
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
@@ -15,6 +15,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -111,7 +112,7 @@ const CONTROLS_W: f32 = 200.0;
 const CONTROLS_H: f32 = 36.0;
 const CONTROLS_INSET: f32 = 10.0;
 /// Clear space kept between the controls and anything else drawn near them.
-const CONTROLS_GAP: f32 = 6.0;
+const CONTROLS_GAP: f32 = 12.0;
 /// The strip along the bottom that Fit and keyboard reveal leave free for the controls.
 const CONTROLS_BAND: f32 = CONTROLS_H + CONTROLS_INSET + CONTROLS_GAP;
 const TIP_W: f32 = 260.0;
@@ -195,7 +196,7 @@ impl View {
 
     /// Zoomed by `factor` about a point on screen, which keeps the same spot of the graph under it.
     fn zoomed_about(self, anchor: Pt, factor: f32) -> View {
-        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let zoom = (self.zoom * factor).clamp(self.zoom.min(MIN_ZOOM), MAX_ZOOM);
         let under = self.to_graph(anchor);
         View { zoom, pan: Pt { x: anchor.x - under.x * zoom, y: anchor.y - under.y * zoom } }
     }
@@ -224,7 +225,8 @@ fn clamp_axis(pan: f32, lo: f32, hi: f32, zoom: f32, panel: f32) -> f32 {
 
 /// The view with the graph kept in reach and the zoom within its range.
 fn clamp_view(view: View, content: Option<Rect>, width: f32, height: f32) -> View {
-    let zoom = view.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    // An initial fit can be smaller than the interactive zoom floor for very large runs.
+    let zoom = view.zoom.clamp(f32::MIN_POSITIVE, MAX_ZOOM);
     let Some(c) = content else {
         return View { zoom, ..view };
     };
@@ -417,11 +419,11 @@ struct Columns {
     count: usize,
 }
 
-fn columns(width: f32) -> Columns {
+fn columns(width: f32, min_card_w: f32) -> Columns {
     let pad = (width * 0.03).clamp(8.0, 20.0);
     let core_r = if width < 420.0 { 15.0 } else { 26.0 };
     let reach = (width * 0.085).clamp(14.0, 96.0);
-    let card_w = (width * 0.26).clamp(92.0, 220.0);
+    let card_w = (width * 0.26).clamp(92.0, 220.0).max(min_card_w);
     let fan = (width * 0.08).clamp(16.0, 96.0);
     let core_x = pad + core_r;
     let card_x = pad + core_r * 2.0 + reach;
@@ -494,7 +496,21 @@ fn lane_items(run: &Run, index: usize, selection: &Selection) -> Vec<(Node, Unit
 
 /// Lays the run out inside a panel of the given size. Pure: the same inputs give the same graph.
 fn layout(run: &Run, width: f32, view_h: f32, selection: &Selection) -> Graph {
-    let cols = columns(width);
+    layout_with_min_card(run, width, view_h, selection, 0.0)
+}
+
+/// Choose the same layout for painting and fitting a panel.
+fn panel_layout(run: &Run, width: f32, view_h: f32, selection: &Selection) -> Graph {
+    let graph = layout(run, width, view_h, selection);
+    if width < 720.0 && graph.content().is_some_and(|c| c.h > (view_h - CONTROLS_BAND).max(0.0)) {
+        layout_with_min_card(run, 720.0, view_h, selection, 240.0)
+    } else {
+        graph
+    }
+}
+
+fn layout_with_min_card(run: &Run, width: f32, view_h: f32, selection: &Selection, min_card_w: f32) -> Graph {
+    let cols = columns(width, min_card_w);
     let slot = |i: usize| -> (usize, f32) {
         match cols.count {
             1 => (0, i as f32 * STEP_SINGLE),
@@ -660,12 +676,6 @@ impl Graph {
             _ => self.chips.iter().find(|c| c.node == node).map(|c| c.module),
         }
     }
-
-    /// The first thing a person should see when the graph first opens.
-    fn most_urgent(&self) -> Option<Rect> {
-        let first = |state| self.chips.iter().find(|c| c.state == state).map(|c| c.rect);
-        first(UnitState::Running).or_else(|| first(UnitState::Failed)).or_else(|| first(UnitState::Built))
-    }
 }
 
 /// An arrow key.
@@ -686,15 +696,26 @@ fn selection_of(node: Option<Node>) -> Selection {
     }
 }
 
-/// The view a run opens with: true size, scrolled so the most urgent work is in sight.
+/// Fit the laid-out content above the controls, without enlarging small runs.
 fn initial_view(graph: &Graph, width: f32, view_h: f32) -> View {
-    let mut view = View::default();
-    if let Some(rect) = graph.most_urgent() {
-        view = reveal_view(view, rect, width, view_h);
-        view.pan.x = 0.0;
-        view.pan.y = view.pan.y.min(0.0).max(-(graph.height - view_h).max(0.0));
+    let Some(content) = graph.content() else { return View::default() };
+    let height = (view_h - CONTROLS_BAND).max(f32::MIN_POSITIVE);
+    let mut zoom = (width / content.w.max(f32::MIN_POSITIVE)).min(height / content.h.max(f32::MIN_POSITIVE)).min(1.0);
+    // The core stays legible below 60% instead of shrinking with the cards.
+    // Account for its actual radius when horizontal space is the limiting axis.
+    let radius = graph.core_r * zoom.clamp(0.6, 1.6);
+    let left = (content.x * zoom).min(graph.core_x * zoom - radius);
+    if content.right() * zoom - left > width && zoom < 0.6 {
+        zoom = zoom.min(((width - graph.core_r * 0.6) / (content.right() - graph.core_x)).max(f32::MIN_POSITIVE));
     }
-    view
+    if zoom == 1.0 && content.x >= 0.0 && content.right() <= width && content.y >= 0.0 && content.bottom() <= height {
+        return View::default();
+    }
+    let left = (content.x * zoom).min(graph.core_x * zoom - graph.core_r * zoom.clamp(0.6, 1.6));
+    View { zoom, pan: Pt {
+        x: (width - (content.right() * zoom - left)) / 2.0 - left,
+        y: (height - content.h * zoom) / 2.0 - content.y * zoom,
+    } }
 }
 
 fn selected_node(selection: &Selection) -> Option<Node> {
@@ -1272,10 +1293,8 @@ pub struct Mesh {
     state: Entity<AppState>,
     focus: FocusHandle,
     menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
-    /// How the graph is looked at now, and how each other run was last looked at, kept while
-    /// the app is open.
+    /// The current run's view; each opening starts fitted again.
     view: View,
-    views: HashMap<SharedString, View>,
     drag: Option<Drag>,
     /// The last press turned into a pan, so its release is not a click.
     dragged: bool,
@@ -1293,6 +1312,8 @@ pub struct Mesh {
     clock: Instant,
     seen_selection: Selection,
     seen_session: Option<SharedString>,
+    /// Viewport of the last automatic fit, until the user changes the view or selection.
+    auto_fit: Option<(f32, f32)>,
     /// Demo only: a captured scene keeps its hover whatever the real pointer does.
     pinned: bool,
     ceremonies: Ceremonies,
@@ -1385,6 +1406,9 @@ impl Mesh {
         }
         cx.observe(&state, |this, state, cx| {
             let s = state.read(cx);
+            if s.view != Screen::Run {
+                this.seen_session = None;
+            }
             this.ceremonies.observe(&s.runs, &s.renames, s.reduce_motion, Instant::now());
             cx.notify();
         })
@@ -1394,7 +1418,6 @@ impl Mesh {
             focus: cx.focus_handle(),
             menu: None,
             view: View::default(),
-            views: HashMap::new(),
             drag: None,
             dragged: false,
             cursor: None,
@@ -1418,6 +1441,7 @@ impl Mesh {
             clock: Instant::now(),
             seen_selection: Selection::None,
             seen_session: None,
+            auto_fit: None,
             pinned: false,
             ceremonies,
             frozen: None,
@@ -1504,6 +1528,7 @@ impl Mesh {
         match scene {
             SceneView::ZoomAt(factor, node) => {
                 if let Some(rect) = self.graph.rect_of(node) {
+                    self.auto_fit = None;
                     let at = self.view.rect(rect);
                     self.view = self.view.zoomed_about(Pt { x: at.x + at.w / 2.0, y: at.cy() }, factor);
                     self.view = reveal_view(self.view, rect, self.view_w, self.view_h);
@@ -1515,6 +1540,7 @@ impl Mesh {
     }
 
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
+        self.auto_fit = None;
         let view = clamp_view(view, self.graph.content(), self.view_w, self.view_h);
         if view != self.view {
             self.view = view;
@@ -1523,6 +1549,7 @@ impl Mesh {
     }
 
     fn fit(&mut self) {
+        self.auto_fit = None;
         if let Some(content) = self.graph.content() {
             self.view = fit_view(content, self.view_w, self.view_h);
         }
@@ -1549,7 +1576,7 @@ impl Mesh {
     fn pressed(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.dragged = false;
-        let empty = self.graph.hit(self.panel_point(event.position), self.view_h, &self.view).is_none();
+        let empty = self.hit(self.panel_point(event.position)).is_none();
         self.drag = empty.then_some(Drag { start: event.position, pan: self.view.pan, moved: false });
     }
 
@@ -1594,7 +1621,7 @@ impl Mesh {
     }
 
     fn right_pressed(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let node = self.graph.hit(self.panel_point(event.position), self.view_h, &self.view);
+        let node = self.hit(self.panel_point(event.position));
         if let Some(node @ (Node::Unit(_) | Node::Module(_))) = node {
             self.cursor = Some(node);
             self.open_menu(node, event.position, window, cx);
@@ -1644,7 +1671,7 @@ impl Mesh {
         if self.pinned {
             return;
         }
-        let node = self.graph.hit(self.panel_point(event.position), self.view_h, &self.view);
+        let node = self.hit(self.panel_point(event.position));
         self.set_hover(node, cx);
     }
 
@@ -1674,10 +1701,12 @@ impl Mesh {
         match (event.keystroke.key.as_str(), command) {
             ("enter", false) => {
                 let Some(node) = self.cursor else { return };
+                self.auto_fit = None;
                 self.state.update(cx, |s, cx| s.select(selection_of(Some(node)), cx));
             }
             ("escape", false) => {
                 self.cursor = None;
+                self.auto_fit = None;
                 self.state.update(cx, |s, cx| s.select(Selection::None, cx));
             }
             ("f", false) => {
@@ -1699,6 +1728,10 @@ impl Mesh {
         }
     }
 
+    fn hit(&self, point: Pt) -> Option<Node> {
+        (point.y < self.view_h - CONTROLS_BAND).then(|| self.graph.hit(point, self.view_h, &self.view)).flatten()
+    }
+
     fn set_hover(&mut self, node: Option<Node>, cx: &mut Context<Self>) {
         if node != self.hover {
             self.hover = node;
@@ -1710,7 +1743,8 @@ impl Mesh {
         if std::mem::take(&mut self.dragged) {
             return;
         }
-        let node = self.graph.hit(self.panel_point(position), self.view_h, &self.view);
+        let node = self.hit(self.panel_point(position));
+        self.auto_fit = None;
         self.cursor = node.filter(|&n| n != Node::Core);
         self.state.update(cx, |s, cx| s.select(selection_of(node), cx));
     }
@@ -1758,7 +1792,7 @@ impl Mesh {
         };
         let share = |n: usize| if m.total == 0 { 0.0 } else { n as f32 / m.total as f32 };
         let zoom = self.view.zoom;
-        let worded = CHIP_H * zoom >= LABEL_MIN_CHIP_H;
+        let worded = r.h >= 12.0;
         let text_size = px((13.0 * zoom).clamp(12.0, 20.0));
         let count_size = px((12.0 * zoom).clamp(12.0, 18.0));
         let run_ref = &run.modules[m.index];
@@ -1770,6 +1804,7 @@ impl Mesh {
             (count(UnitState::Failed), t.fail),
         ];
         v_flex()
+            .id(("mesh-module-node", m.index))
             .opacity(self.presence_of(Node::Module(m.index), cx))
             .absolute()
             .left(px(r.x))
@@ -1791,7 +1826,7 @@ impl Mesh {
                     .gap(px((5.0 * zoom).min(8.0)))
                     .child(body)
                     .when(worded, |this| {
-                        this.child(div().flex_1().min_w_0().truncate().text_size(text_size).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone()))
+                        this.child(div().id(("mesh-module-label", m.index)).flex_1().min_w_0().truncate().text_size(text_size).line_height(text_size * 1.15).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone().test_text(run_ref.id.clone())).test_support())
                     })
                     .when(worded && r.w >= 120.0, |this| {
                         this.child(div().flex_none().text_size(count_size).text_color(t.muted).child(format!("{}/{}", m.verified, m.total)))
@@ -1808,10 +1843,10 @@ impl Mesh {
                         div().h_full().w(relative(share(n))).bg(if quiet { color.opacity(0.55) } else { color })
                     })),
             )
-            .into_any_element()
+            .test_support().into_any_element()
     }
 
-    fn chip_view(&self, chip: &ChipBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, levels: &HashMap<Node, (f32, f32)>, cx: &App) -> AnyElement {
+    fn chip_view(&self, index: usize, chip: &ChipBox, r: Rect, run: &Run, t: &Tokens, dark: bool, breath: f32, levels: &HashMap<Node, (f32, f32)>, cx: &App) -> AnyElement {
         let (select, hover) = levels.get(&chip.node).copied().unwrap_or_default();
         let blend = self.blend_of(chip.node, cx);
         let look = node_look(t, chip.state, t.surface, dark);
@@ -1825,6 +1860,7 @@ impl Mesh {
             let color = blend.map_or(t.unit(chip.state), |(from, k)| mix(t.unit(from), t.unit(chip.state), k));
             let radius = px((3.0 * zoom).min(3.0));
             return div()
+                .id(("mesh-chip-node", index))
                 .opacity(self.presence_of(chip.node, cx))
                 .absolute()
                 .left(px(r.x))
@@ -1840,7 +1876,7 @@ impl Mesh {
                 .shadow(shadow)
                 .bg(look.fill.blend(color.opacity(0.18)))
                 .when(r.h >= 10.0, |this| this.child(mark_between(blend, chip.state, r.h - 4.0, t, breath)))
-                .into_any_element();
+                .test_support().into_any_element();
         }
         let text_size = px((12.0 * zoom).clamp(12.0, 18.0));
         let label: SharedString = match chip.node {
@@ -1859,6 +1895,7 @@ impl Mesh {
             _ => None,
         };
         h_flex()
+            .id(("mesh-chip-node", index))
             .opacity(self.presence_of(chip.node, cx))
             .absolute()
             .left(px(r.x))
@@ -1884,7 +1921,7 @@ impl Mesh {
                     .child(label),
             )
             .when_some(retries, |this, text| this.child(div().flex_none().text_size(text_size).text_color(t.muted).child(text)))
-            .into_any_element()
+            .test_support().into_any_element()
     }
 
     fn tooltip_body(&self, node: Node, run: &Run, t: &Tokens, cx: &App) -> Option<AnyElement> {
@@ -2008,31 +2045,37 @@ impl Mesh {
         let dark = cx.theme().is_dark();
         let d = theme::density(cx);
         let (width, view_h) = (f32::from(panel.width), f32::from(panel.height));
+        if width <= 0.0 || view_h <= 0.0 {
+            return div().into_any_element();
+        }
         let state = self.state.read(cx);
         let Some(run) = state.run() else {
             return div().into_any_element();
         };
         let selection = state.selection.clone();
         let moving = animates(run, state.reduce_motion);
-        let graph = Rc::new(layout(run, width, view_h, &selection));
+        // A narrow overflowing panel gets wider cards and two chip columns before fitting.
+        let graph = Rc::new(panel_layout(run, width, view_h, &selection));
         self.view_w = width;
         self.view_h = view_h;
         self.graph = graph.clone();
 
         if self.seen_session.as_ref() != Some(&run.session) {
-            // Each run keeps the zoom and pan it was left at while the app stays open.
-            if let Some(left) = self.seen_session.replace(run.session.clone()) {
-                self.views.insert(left, self.view);
-            }
+            self.seen_session = Some(run.session.clone());
             self.seen_selection = selection.clone();
             self.cursor = None;
-            self.view = self.views.get(&run.session).copied().unwrap_or_else(|| initial_view(&graph, width, view_h));
+            self.view = initial_view(&graph, width, view_h);
+            self.auto_fit = Some((width, view_h));
             self.apply_scene_view();
         } else if selection != self.seen_selection {
             self.seen_selection = selection.clone();
+            self.auto_fit = None;
             if let Some(rect) = selected_node(&selection).and_then(|n| graph.rect_of(n)) {
                 self.view = reveal_view(self.view, rect, width, view_h);
             }
+        } else if should_auto_refit(self.auto_fit, (width, view_h)) {
+            self.view = initial_view(&graph, width, view_h);
+            self.auto_fit = Some((width, view_h));
         }
         self.view = clamp_view(self.view, graph.content(), width, view_h);
         self.track_blends(&graph, &run.session, state.reduce_motion, motion::now(cx));
@@ -2045,7 +2088,7 @@ impl Mesh {
 
         if self.inside && self.drag.is_none() {
             let p = self.panel_point(window.mouse_position());
-            self.hover = graph.hit(p, view_h, &view);
+            self.hover = self.hit(p);
         }
         let hover = self.hover.filter(|&node| node == Node::Core || graph.rect_of(node).is_some());
         // The cursor shows while the graph is being driven by keys, or in a captured scene.
@@ -2091,9 +2134,10 @@ impl Mesh {
         let chips: Vec<AnyElement> = graph
             .chips
             .iter()
-            .map(|c| (c, view.rect(c.rect)))
-            .filter(|(_, r)| r.overlaps(&reach))
-            .map(|(c, r)| self.chip_view(c, r, run, &t, dark, breath, &levels, cx))
+            .enumerate()
+            .map(|(i, c)| (i, c, view.rect(c.rect)))
+            .filter(|(_, _, r)| r.overlaps(&reach))
+            .map(|(i, c, r)| self.chip_view(i, c, r, run, &t, dark, breath, &levels, cx))
             .collect();
         let ring = ring.and_then(|n| graph.rect_of(n)).map(|r| self.cursor_ring(view.rect(r), &t));
 
@@ -2131,6 +2175,7 @@ impl Mesh {
         let dragging = self.drag.is_some_and(|d| d.moved);
         div()
             .id("mesh-graph")
+            .test_support()
             .track_focus(&self.focus.clone().tab_stop(true))
             .size_full()
             .relative()
@@ -2165,28 +2210,21 @@ impl Mesh {
             }))
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| this.clicked(event.position(), cx)))
             .child(
-                canvas(
-                    move |bounds, _, cx| this.update(cx, |this, _| this.origin = bounds.origin),
-                    move |bounds, _, window, _| backdrop.paint(bounds, window),
-                )
-                .absolute()
-                .size_full(),
+                div().absolute().top_0().left_0().right_0().bottom(px(CONTROLS_BAND)).overflow_hidden()
+                    .child(canvas(
+                        move |bounds, _, cx| this.update(cx, |this, _| this.origin = bounds.origin),
+                        move |bounds, _, window, _| backdrop.paint(bounds, window),
+                    ).absolute().w_full().h(px(view_h)))
+                    .child(div().absolute().w_full().h(px(view_h)).children(cards).children(chips).children(ring))
+                    .when(above, |this| this.child(edge_fade(t, true)))
+                    .when(below, |this| this.child(edge_fade(t, false)))
+                    .when(wide, |this| this.child(
+                        v_flex().absolute().left(px(core.x - label_w / 2.0)).top(px(core.y + core_r + 22.0))
+                            .w(px(label_w)).items_center()
+                            .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.gold).child("C H R O N O S"))
+                            .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.status(status)).child(sub)),
+                    )),
             )
-            .child(div().absolute().size_full().children(cards).children(chips).children(ring))
-            .when(above, |this| this.child(edge_fade(t, true)))
-            .when(below, |this| this.child(edge_fade(t, false)))
-            .when(wide, |this| {
-                this.child(
-                    v_flex()
-                        .absolute()
-                        .left(px(core.x - label_w / 2.0))
-                        .top(px(core.y + core_r + 22.0))
-                        .w(px(label_w))
-                        .items_center()
-                        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.gold).child("C H R O N O S"))
-                        .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.status(status)).child(sub)),
-                )
-            })
             .child(self.view_controls(zoom_label, &t, cx))
             .when_some(tooltip, |this, tip| this.child(tip))
             .when_some(self.menu.as_ref(), |this, (menu, position, _)| {
@@ -2249,6 +2287,7 @@ impl Mesh {
                         cx.notify();
                     })),
             )
+            .test_support()
     }
 }
 
@@ -2940,15 +2979,52 @@ mod tests {
     }
 
     #[test]
-    fn a_new_run_opens_at_true_size_with_urgent_work_in_sight() {
+    fn an_overflowing_run_opens_fitted() {
         let run = large_run(sample_run(), 60, 900);
-        let graph = layout(&run, 640.0, 600.0, &Selection::None);
+        let graph = panel_layout(&run, 640.0, 600.0, &Selection::None);
+        assert!(graph.modules[0].rect.w >= 240.0, "narrow overflow retains wide cards");
+        assert!(graph.chips.iter().any(|c| c.rect.x != graph.chips[0].rect.x), "overflow uses two chip columns");
         let view = initial_view(&graph, 640.0, 600.0);
-        assert_eq!(view.zoom, 1.0);
-        assert_eq!(view.pan.x, 0.0);
-        let urgent = view.rect(graph.most_urgent().unwrap());
-        assert!(urgent.y >= 0.0 && urgent.bottom() <= 600.0);
-        assert!(view.pan.y <= 0.0 && view.pan.y >= -(graph.height - 600.0));
+        let content = graph.content().unwrap();
+        let expected = (640.0 / content.w).min((600.0 - CONTROLS_BAND) / content.h).min(1.0);
+        assert!((view.zoom - expected).abs() < 0.0001, "largest fitting zoom: {view:?}, expected {expected}");
+        for rect in graph.modules.iter().map(|m| m.rect).chain(graph.chips.iter().map(|c| c.rect)) {
+            let shown = view.rect(rect);
+            assert!(shown.x >= -0.01 && shown.right() <= 640.01 && shown.y >= -0.01 && shown.bottom() <= 600.01 - CONTROLS_BAND, "{shown:?}");
+        }
+    }
+
+    #[test]
+    fn fitted_zoom_below_interactive_floor_is_preserved() {
+        let run = large_run(sample_run(), 60, 900);
+        let graph = panel_layout(&run, 640.0, 600.0, &Selection::None);
+        let fitted = initial_view(&graph, 640.0, 600.0);
+        assert!(fitted.zoom < MIN_ZOOM);
+        assert_eq!(clamp_view(fitted, graph.content(), 640.0, 600.0), fitted);
+        let zoomed_out = fitted.zoomed_about(Pt { x: 320.0, y: 300.0 }, 0.8);
+        assert!((zoomed_out.zoom - fitted.zoom).abs() < 0.000001);
+        assert!((zoomed_out.pan.x - fitted.pan.x).abs() < 0.001 && (zoomed_out.pan.y - fitted.pan.y).abs() < 0.001);
+        let zoomed_in = fitted.zoomed_about(Pt { x: 320.0, y: 300.0 }, 1.25);
+        assert!((zoomed_in.zoom - fitted.zoom * 1.25).abs() < 0.000001);
+    }
+
+    #[test]
+    fn panel_layout_keeps_regular_layout_when_wide_or_not_overflowing() {
+        let small = run_of(&[&[Running]]);
+        let large = large_run(sample_run(), 60, 900);
+        for (run, width) in [(&small, 640.0), (&large, 720.0)] {
+            let normal = layout(run, width, 600.0, &Selection::None);
+            let panel = panel_layout(run, width, 600.0, &Selection::None);
+            assert_eq!(panel.modules.iter().map(|m| m.rect).collect::<Vec<_>>(), normal.modules.iter().map(|m| m.rect).collect::<Vec<_>>());
+            assert_eq!(panel.chips.iter().map(|c| c.rect).collect::<Vec<_>>(), normal.chips.iter().map(|c| c.rect).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn a_small_run_opens_at_true_size() {
+        let run = run_of(&[&[Running]]);
+        let graph = layout(&run, 640.0, 600.0, &Selection::None);
+        assert_eq!(initial_view(&graph, 640.0, 600.0).zoom, 1.0);
     }
 
     #[test]
