@@ -74,7 +74,7 @@ impl Bridge {
     pub fn codex(&self) -> Res<Arc<AppServer>> {
         let mut lock = self.codex.lock().unwrap_or_else(|e| e.into_inner());
         if lock.is_none() {
-            *lock = Some(Arc::new(AppServer::new(self.config.codex.clone()?)));
+            *lock = Some(Arc::new(AppServer::new(self.config.codex.clone()?).with_slots_home(self.config.data_home.clone().unwrap_or_else(crate::codex::slots::home))));
         }
         Ok(lock.as_ref().unwrap().clone())
     }
@@ -205,8 +205,10 @@ pub fn call_body(body: impl FnOnce() -> Res<Value>) -> Value {
 }
 pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
     let mut bridge = Bridge::new(config);
-    if let Some(setup) = council::Setup::from_env() {
-        bridge = bridge.with_council(setup);
+    match council::Setup::from_env() {
+        Ok(Some(setup)) => bridge = bridge.with_council(setup),
+        Ok(None) => (),
+        Err(e) => { eprintln!("axiom: {}", e.message); return 2; }
     }
     let bridge = Arc::new(bridge);
     let out = Arc::new(Mutex::new(output));

@@ -158,7 +158,7 @@ impl Render for MiniView {
                     .child(div().text_color(ink).text_size(theme::font(d, TypeSize::Caption)).child(tr(cx, &[], run.status_label()).test_text(tr(cx, &[], run.status_label())))))
                 .child(div().w_full().text_color(t.muted).text_size(theme::font(d, TypeSize::Caption)).child(line.clone().test_text(line))));
         }
-        let strip = quota::compact_strip(state, cx);
+        let strip = quota::compact_strip(state, window, cx);
         let back_tip = back_tip_text(palette::keys_of(palette::Global::ToggleMini), lang);
         let pin_ring = self.pin_focus.is_focused(window);
         let back_ring = self.back_focus.is_focused(window);

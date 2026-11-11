@@ -212,3 +212,16 @@ fn cost_result_and_wait_are_not_quota() {
     poller.follow("s1");
     assert!(scan(&poller.poll()).rate_limit.is_none());
 }
+
+#[test]
+fn scans_keep_reported_models_for_sessions_and_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path(), "20261110-120000-wish-1.jsonl", &format!("{}\n{}\n",
+        json!({"type":"system","subtype":"init","model":"claude-opus-5"}),
+        json!({"type":"assistant","agent_id":"a","message":{"model":"claude-sonnet-5-5","content":[]}})));
+    let mut poller = Poller::new(dir.path()); poller.follow("s1");
+    let snapshot = poller.poll();
+    let value = serde_json::to_value(scan(&snapshot)).unwrap();
+    assert_eq!(value["model"], "claude-opus-5");
+    assert_eq!(value["agents"][0]["model"], "claude-sonnet-5-5");
+}

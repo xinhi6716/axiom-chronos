@@ -7,6 +7,7 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 #[test]
 fn required_phrases_are_present() {
     let cases = [
+        ("skills/wish/BATCH.md", "A batch that calls Codex sizes its worker pool from `AXIOM_CODEX_MAX_PARALLEL`, minus the slots the wish itself still needs, and never hard-codes a smaller pool."),
         ("agents/dispatcher.md", "Call `codex_run` yourself"),
         ("agents/dispatcher.md", "Never forward Codex work through another agent"),
         ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),

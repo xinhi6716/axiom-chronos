@@ -12,6 +12,28 @@ fn command(home: &std::path::Path) -> Command {
     c.env_remove("ORCH_STORE");
     c
 }
+
+#[test]
+fn wish_exports_validated_codex_parallel_limit() {
+    let t = common::temp(); let record = t.path().join("record.json");
+    for (value, expected) in [(None, "48"), (Some("2"), "2")] {
+        let mut c = command(t.path());
+        c.args(["wish", "test"]).env_remove("AXIOM_CODEX_MAX_PARALLEL")
+            .env("AXIOM_CLAUDE_CMD", serde_json::to_string(&common::fake("fake_claude")).unwrap())
+            .env("FAKE_CLAUDE_RECORD", &record).stdin(Stdio::null());
+        if let Some(value) = value { c.env("AXIOM_CODEX_MAX_PARALLEL", value); }
+        let out = c.output().unwrap(); assert!(out.status.success());
+        let v: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(v["env"]["AXIOM_CODEX_MAX_PARALLEL"], expected);
+    }
+    std::fs::remove_file(&record).unwrap();
+    let out = command(t.path()).args(["wish", "test"])
+        .env("AXIOM_CODEX_MAX_PARALLEL", "bad")
+        .env("AXIOM_CLAUDE_CMD", serde_json::to_string(&common::fake("fake_claude")).unwrap())
+        .env("FAKE_CLAUDE_RECORD", &record).stdin(Stdio::null()).output().unwrap();
+    assert!(!out.status.success()); assert!(!record.exists());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("AXIOM_CODEX_MAX_PARALLEL"));
+}
 #[test]
 fn wish_and_research() {
     let temp = common::temp();
@@ -132,7 +154,7 @@ fn bridge_hook_and_unicode_path() {
     std::fs::copy(env!("CARGO_BIN_EXE_axiom"), &exe).unwrap();
     assert_eq!(
         Command::new(&exe).arg("--version").output().unwrap().stdout,
-        b"axiom-chronos 2.0.0\n"
+        b"axiom-chronos 2.0.1\n"
     );
     let input = format!(
         "{}\n{}\n",

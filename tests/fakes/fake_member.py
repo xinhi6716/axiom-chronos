@@ -24,7 +24,11 @@ argv = [arg for arg in sys.argv[1:] if not arg.startswith('--fake-')]
 is_fable = '--strict-mcp-config' in argv
 role = 'fable' if is_fable else 'argon'
 prompt = sys.stdin.read() if is_fable else argv[-1]
-round2 = 'CROSS-EXAMINATION' in prompt
+phase_match = re.search(r'COUNCIL PHASE ([ABC])', prompt)
+phase = phase_match[1] if phase_match else ''
+round_match = re.search(r'COUNCIL ROUND (\d+)', prompt)
+round_n = int(round_match[1]) if round_match else (2 if 'CROSS-EXAMINATION' in prompt else 1)
+round2 = round_n > 1 or phase == 'C'
 log = option('log')
 if log:
     keep = {k: os.environ.get(k) for k in ('AXIOM_ADVANCED_RESEARCH', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDECODE')}
@@ -40,7 +44,7 @@ if log:
             time.sleep(0.01)
     try:
         with open(log, 'a', encoding='utf-8') as f:
-            f.write(json.dumps({'role': role, 'round': 2 if round2 else 1, 'pid': os.getpid(), 'argv': argv, 'prompt': prompt, 'env': keep, 'cwd': os.getcwd()}, ensure_ascii=False) + '\n')
+            f.write(json.dumps({'role': role, 'round': round_n, 'phase': phase, 'pid': os.getpid(), 'argv': argv, 'prompt': prompt, 'env': keep, 'cwd': os.getcwd()}, ensure_ascii=False) + '\n')
     finally:
         os.close(lock)
         os.remove(log + '.lock')
@@ -69,11 +73,32 @@ def stances():
 
 
 answer = stances() if round2 else position()
+if phase:
+    answer = stances()
+    answer['approved'] = 'disagree' not in scenario and 'disagree-bare' not in scenario
+    if is_fable and phase == 'A' and round_n == 1 and 'no-claims' not in scenario:
+        answer['claims'] = [{'claim': c['change'] + ' ' + c['problem'], 'evidence': c['evidence']} for c in position()['changes']]
+    elif not is_fable and 'add-claims' in scenario:
+        answer['claims'] = [{'claim': c['change'] + ' ' + c['problem'], 'evidence': c['evidence']} for c in position()['changes']]
+    else:
+        answer['claims'] = []
+    if 'settle' in scenario and phase == 'C':
+        ids = sorted(set(re.findall(r'^(C\d+) \[Position', prompt, flags=re.M)))
+        answer['resolutions'] = [{'claim': i, 'decision': 'accepted' if 'accept' in scenario else 'rejected', 'reason': 'src/mod.py:12 already covers this', 'change': 'bound the cache at 100 entries' if 'accept' in scenario else ''} for i in ids]
+    if 'resolve-a' in scenario and round_n > 1:
+        answer['approved'] = True
+        for item in answer['stances']: item['stance'], item['evidence'] = 'agree', ''
+    if 'approve-with-rebuttal' in scenario: answer['approved'] = True
+
 if 'DIFF REVIEW' in prompt:
     answer = {'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'agy reviewed this diff'}]} if 'BLOCKME' in prompt else {'verdict': 'pass', 'findings': []}
+if 'missing-approval' in scenario:
+    answer.pop('approved', None)
+if 'partial-review' in scenario:
+    answer['stances'] = []
 if 'wrong-shape' in scenario:
     answer = {'wrong': 'shape'}
-garbage = 'garbage' in scenario or (round2 and 'r2-garbage' in scenario)
+garbage = ('fail-third' in scenario and round_n == 3) or 'garbage' in scenario or (round2 and 'r2-garbage' in scenario)
 out_of_quota = 'quota' in scenario or (round2 and 'r2-quota' in scenario)
 
 if 'hang' in scenario:

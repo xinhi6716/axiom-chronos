@@ -19,13 +19,13 @@ fn columns_and_split() {
     for n in [1, 2] {
         let columns = split(n);
         assert_eq!(columns.len(), n);
-        for card in [Card::Environment, Card::Versions, Card::Preferences] {
+        for card in [Card::Environment, Card::Versions, Card::Budgets, Card::Preferences] {
             assert_eq!(columns.iter().flatten().filter(|c| **c == card).count(), 1);
         }
         if n == 1 {
-            assert_eq!(columns, vec![vec![Card::Environment, Card::Versions, Card::Preferences]]);
+            assert_eq!(columns, vec![vec![Card::Environment, Card::Versions, Card::Budgets, Card::Preferences]]);
         } else {
-            assert_eq!(columns, vec![vec![Card::Environment, Card::Versions], vec![Card::Preferences]]);
+            assert_eq!(columns, vec![vec![Card::Budgets, Card::Environment, Card::Versions], vec![Card::Preferences]]);
         }
     }
 }
@@ -93,9 +93,10 @@ fn source_guard_has_negative_controls() {
 }
 #[test]
 fn new_translations_are_present() {
-    for key in ["Summary board", "luna", "Haiku", "Off", "luna uses Codex quota, Haiku uses Claude quota, off costs nothing.", "Density", "Comfortable", "Dense", "Mini window always on top", "Keeps the mini window above other windows.", "Checking the environment…", "Try again"] {
+    for key in ["Codex parallel limit", "Codex parallel limit must be a positive whole number.", "Invalid limit: {} = {}. {}", "Advanced research budgets", "Fable dollars", "Astra tokens", "Argon tokens (one review)", "Maximum council rounds", "Fable must be a positive dollar amount, at most $200; a larger cap is probably a typo.", "Tokens and rounds must be positive whole numbers.", "Saved for the next wish. Advanced research stays off until you turn it on.", "Invalid budget: {} = {}. {}", "Summary board", "luna", "Haiku", "Off", "luna uses Codex quota, Haiku uses Claude quota, off costs nothing.", "Density", "Comfortable", "Dense", "Mini window always on top", "Keeps the mini window above other windows.", "Checking the environment…", "Try again"] {
         let zh = T.iter().find(|(en, _)| *en == key).expect(key).1;
         assert!(!zh.is_empty());
+        assert_eq!(super::super::i18n::translate(super::super::i18n::Lang::En,T,key),key);
         if key != "luna" && key != "Haiku" { assert_ne!(key, zh); }
     }
 }

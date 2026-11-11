@@ -81,6 +81,7 @@ pub struct Review {
     pub omitted: Vec<String>,
     /// Why Codex did not do this review, when agy did.
     pub fallback: Option<String>,
+    pub slot_wait: Option<String>,
 }
 #[derive(Debug)]
 pub enum Outcome {
@@ -114,6 +115,7 @@ impl Outcome {
                 "files": r.files,
                 "omitted": r.omitted,
                 "fallback": r.fallback,
+                "slot_wait": r.slot_wait,
             }),
         }
     }
@@ -132,6 +134,7 @@ impl Outcome {
                 if let Some(why) = &r.fallback {
                     out.push_str(&format!("codex did not review: {why}\n"));
                 }
+                if let Some(wait) = &r.slot_wait { out.push_str(&format!("{wait}\n")); }
                 for f in &r.findings {
                     out.push_str(&format!(
                         "- {} {}: {}\n",
@@ -320,10 +323,11 @@ fn review_of(
         files: files.iter().map(|f| f.0.clone()).collect(),
         omitted: p.omitted.clone(),
         fallback: None,
+        slot_wait: None,
     }
 }
 
-fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &Value) -> Attempt {
+fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &Value, stop: &AtomicBool) -> Attempt {
     let command = match &config.codex {
         Ok(command) => command.clone(),
         Err(e) if e.kind == "not_installed" => {
@@ -358,7 +362,7 @@ fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &V
         keep_plugins: vec![],
         web_search: false,
     };
-    let report = match server.run_capped(&run, Some(token_cap())) {
+    let report = match server.run_cancellable(&run, Some(token_cap()), Some(stop)) {
         Ok(report) => report,
         Err(e) => return Attempt::Failed(e),
     };
@@ -367,14 +371,14 @@ fn try_codex(config: &Config, repo: &Path, range: &str, files: &Files, shape: &V
     if report["status"] == "completed" && !report["structured_output"].is_null() {
         let out = &report["structured_output"];
         return match schema::validate(shape, out) {
-            Ok(()) => Attempt::Done(review_of(
+            Ok(()) => { let mut review = review_of(
                 out,
                 "codex",
                 model,
                 report["usage"]["totalTokens"].as_u64().unwrap_or(0),
                 &p,
                 files,
-            )),
+            ); review.slot_wait = report["slot_wait"].as_str().map(str::to_owned); Attempt::Done(review) },
             Err(e) => Attempt::Failed(Failure::new(
                 "review_malformed",
                 format!("codex reply does not match the verdict shape: {e}"),
@@ -460,7 +464,7 @@ pub fn run(config: &Config, repo: &Path, range: &str, stop: &AtomicBool) -> Res<
         return Err(invalid(format!("range {range} changes no file")));
     }
     let shape = verdict_schema();
-    let why = match try_codex(config, &repo, range, &files, &shape) {
+    let why = match try_codex(config, &repo, range, &files, &shape, stop) {
         Attempt::Done(review) => return Ok(Outcome::Reviewed(review)),
         Attempt::Failed(e) => return Err(e),
         Attempt::Unavailable(why) => why,

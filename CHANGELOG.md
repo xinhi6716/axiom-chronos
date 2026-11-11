@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.1
+
+- The desktop strip hides quota windows absent from fresh plan snapshots and draws live per-model concurrency as celestial vectors, including Mini and dense layouts. 桌面底欄隱藏新鮮方案快照未提供的額度視窗，並以天體向量圖符顯示各模型即時並行數，支援迷你與密集模式。
+
+- `AXIOM_CODEX_MAX_PARALLEL` defaults to 48 shared Codex turns across Chronos processes, using crash-safe OS slots with cancellable waits; wishes export it, Settings persists it, and the quota strip and doctor show occupancy. 全機 Codex 並行預設 48，跨程序共用並支援等待取消、桌面設定及使用量顯示。
+
+- Configurable advanced research budgets in the environment, CLI and persisted desktop Settings, with shared validation and effective-cap notices. The council stays off by default; dollar/token defaults remain $5, 200k, 400k.
+- Three phases: ordered Astra/Fable planning, exactly one Argon review, and ordered replies only to objections. Each dialogue phase has a configurable positive round cap (default 3); phase/turn provenance, open disputes and degraded accounting survive for the core.
+- The New wish dialog shows budgets and a Settings link when research is enabled. Inline errors prevent invalid advanced wishes.
+- 進階研究預算可由環境變數、CLI 與桌面設定調整，使用共用驗證並顯示實際上限；議會預設關閉，金額／token 預設維持 $5、200k、400k。
+- 議會改為 Astra／Fable 有序規劃、Argon 單次審查、有異議才答辯；兩個對話階段各預設最多 3 輪，保存未解爭議與來源供核心裁決。許願視窗顯示預算與設定連結，無效值以行內錯誤阻止啟動。
+
+See [2.0.1 release notes / 發行說明](docs/releases/2.0.1.md).
+
 ## 2.0.0
 
 Chronos 2.0 adds a Windows desktop app, install packages and engine changes that reduce repeated context and stop more kinds of failure. Data in `~/.axiom` from 1.0.0 stays readable.

@@ -7,10 +7,10 @@ pub(super) fn record_if_changed(current: SettingPrior, choice: SettingPrior, set
 }
 pub(super) fn settings_columns(width: Pixels) -> usize { theme::columns_for(width) }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Card { Environment, Versions, Preferences }
+pub(super) enum Card { Environment, Versions, Preferences, Budgets }
 pub(super) fn split(columns: usize) -> Vec<Vec<Card>> {
-    if columns < 2 { vec![vec![Card::Environment, Card::Versions, Card::Preferences]] }
-    else { vec![vec![Card::Environment, Card::Versions], vec![Card::Preferences]] }
+    if columns < 2 { vec![vec![Card::Environment, Card::Versions, Card::Budgets, Card::Preferences]] }
+    else { vec![vec![Card::Budgets, Card::Environment, Card::Versions], vec![Card::Preferences]] }
 }
 #[derive(Debug, PartialEq)]
 pub(super) enum ChecksView { Loading, Empty, Ready, Failed(SharedString), Stale(SharedString) }

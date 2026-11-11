@@ -26,6 +26,26 @@ fn doctor(home: &std::path::Path) -> Command {
 }
 
 #[test]
+fn codex_parallel_limit_and_live_occupancy() {
+    let t = common::temp();
+    std::fs::create_dir(t.path().join("codex-slots")).unwrap();
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(t.path().join("codex-slots/0.lock")).unwrap();
+    lock.lock().unwrap();
+    for (cap, expected) in [(None, "1 / 48"), (Some("2"), "1 / 2")] {
+        let mut c = doctor(t.path());
+        c.env_remove("AXIOM_CODEX_MAX_PARALLEL");
+        if let Some(value) = cap { c.env("AXIOM_CODEX_MAX_PARALLEL", value); }
+        let out = c.output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("codex parallel") && text.contains(expected), "{text}");
+    }
+    let out = doctor(t.path()).env("AXIOM_CODEX_MAX_PARALLEL", "0").output().unwrap();
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("AXIOM_CODEX_MAX_PARALLEL") && text.contains("\"0\""), "{text}");
+}
+
+#[test]
 fn all_present_and_missing_codex() {
     let temp = common::temp();
     let output = doctor(temp.path()).output().unwrap();

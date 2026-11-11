@@ -206,6 +206,8 @@ fn codex_sparse_update_and_merge() {
 fn merge_order_ties_and_no_clearing() {
     let mut q = Quotas::default();
     let item = |used, at| ProviderQuota {
+        observed_at: None,
+        present: [false; 2],
         five_hour: Some(window(WindowKind::FiveHour, used, at)),
         weekly: None,
     };

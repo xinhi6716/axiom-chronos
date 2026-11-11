@@ -127,3 +127,48 @@ fn an_at_sign_in_a_wish_offers_the_project_files(cx: &mut TestAppContext) {
     assert!(!shown(cx, window, "composer-mention"), "enter inserts the path and closes the list");
     assert!(state.read_with(cx, |s, _| s.composing));
 }
+
+#[gpui_kit::test]
+fn research_budgets_link_keeps_the_wish_and_reopens_with_research_off(cx: &mut TestAppContext) {
+    let repo=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let (window,state)=open_with(cx,|s|s.runs[0].cwd=Some(repo));
+    press(cx,window,NEW_WISH);
+    type_text(cx,window,"keep the typed wish");
+    cx.update_window(window,|_,window,cx|window.click("composer-research-switch",cx)).unwrap();frame(cx,window);
+    assert!(shown(cx,window,"composer-budget-settings"));
+    let height=cx.update_window(window,|_,window,_|window.find("composer-budget-summary").bounds().size.height).unwrap();
+    assert!(height<=px(24.),"the budget summary stays on one quiet line: {height:?}");
+    let text=cx.update_window(window,|_,window,_|gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ")).unwrap();
+    assert!(text.contains("Fable $5.00") && text.contains("Astra 200k") && text.contains("Argon 400k tokens") && text.contains("3 rounds/phase"),"{text}");
+    cx.update_window(window,|_,window,cx|window.click("composer-budget-settings",cx)).unwrap();frame(cx,window);
+    assert_eq!(state.read_with(cx,|s,_|s.view),Screen::Doctor);
+    assert!(!state.read_with(cx,|s,_|s.composing));
+    press(cx,window,NEW_WISH);
+    assert!(!shown(cx,window,"composer-budget-settings"),"research starts off again");
+    press(cx,window,"ctrl-a");press(cx,window,"ctrl-c");
+    let draft=cx.update(|cx|cx.read_from_clipboard().and_then(|item|item.text()));
+    assert_eq!(draft.as_deref(),Some("keep the typed wish"));
+}
+#[gpui_kit::test]
+fn settings_budget_input_updates_the_store_and_shows_inline_validation(cx: &mut TestAppContext) {
+    let (window,state)=open_with(cx,|s|s.view=Screen::Doctor);
+    let _=state;
+    cx.update_window(window,|_,window,cx|window.click(("council-budget",0_usize),cx)).unwrap();frame(cx,window);
+    press(cx,window,"ctrl-a");type_text(cx,window,"NaN");
+    let value=cx.update(|cx|Store::current(cx).council_budgets.fable.clone());assert_eq!(value,"NaN");
+    let text=cx.update_window(window,|_,window,_|gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ")).unwrap();
+    assert!(text.contains("Invalid budget") && text.contains("AXIOM_FABLE_CAP_USD") && text.contains("NaN"),"{text}");
+}
+
+#[gpui_kit::test]
+fn settings_codex_limit_validates_inline(cx: &mut TestAppContext) {
+    let (window, _)=open_with(cx,|s|s.view=Screen::Doctor);
+    cx.update_window(window,|_,window,cx|window.click("codex-parallel-limit",cx)).unwrap();frame(cx,window);
+    press(cx,window,"ctrl-a");type_text(cx,window,"0");
+    let text=cx.update_window(window,|_,window,_|gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ")).unwrap();
+    assert!(text.contains("AXIOM_CODEX_MAX_PARALLEL") && text.contains("positive whole number"),"{text}");
+    press(cx,window,"ctrl-a");type_text(cx,window,"3");
+    assert!(!shown(cx,window,"codex-parallel-error"));
+    let saved=cx.update(|cx|Store::current(cx).to_json());
+    assert!(saved.contains("\"codex_max_parallel\": \"3\""), "{saved}");
+}

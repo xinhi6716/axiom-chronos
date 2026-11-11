@@ -63,7 +63,7 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         keep_plugins: vec![],
         web_search: false,
     };
-    let report = match server.run_capped(&run, Some(request.token_cap)) {
+    let report = match server.run_cancellable(&run, Some(request.token_cap), Some(b.council_flags().1)) {
         Ok(report) => report,
         Err(e) => return failed(e),
     };
@@ -84,7 +84,8 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         output: (status == Status::Ok).then(|| report["structured_output"].clone()),
         tokens: report["usage"]["totalTokens"].as_u64().unwrap_or(0),
         model: Some(model),
-        detail: (status != Status::Ok).then(|| report["error"]["message"].to_string()),
+        detail: if status == Status::Ok { report["slot_wait"].as_str().map(str::to_owned) }
+            else { Some(format!("{}{}", report["error"]["message"], report["slot_wait"].as_str().map(|s| format!("; {s}")).unwrap_or_default())) },
     }
 }
 
@@ -154,7 +155,7 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
 pub fn descriptor() -> Value {
     json!({
         "name": "council",
-        "description": "Advanced research, available only because this session opted in. After Astra has written its plan, `run` puts the same brief to the two other members, cross-examines all positions once and settles the claims mechanically. The reply is a bounded digest; do not read the position files. `rule` records your rulings and its reply carries the next unruled claims until none remain.",
+        "description": "Advanced research, available only because this session opted in. After Astra has written its plan, `run` conducts an ordered Astra/Fable dialogue, one Argon review, and ordered Astra/Fable replies only to objections. Dialogue phases stop on agreement, budgets or their round cap; the digest identifies each phase and turn. The reply is a bounded digest; do not read the position files. `rule` records your rulings and its reply carries the next unruled claims until none remain.",
         "inputSchema": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["run", "rule"], "default": "run"},
             "project": {"type": "string", "description": "Program slug."},

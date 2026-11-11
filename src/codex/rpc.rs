@@ -27,10 +27,12 @@ struct Connection {
 }
 pub struct AppServer {
     command: Vec<String>,
+    pub(super) slots_home: std::path::PathBuf,
     connection: Mutex<Option<Arc<Connection>>>,
     start: Mutex<()>,
     ids: AtomicU64,
     generation: AtomicU64,
+    pub(super) cancellation: AtomicU64,
     account_events: Arc<Mutex<Option<Sender<Value>>>>,
     turns: Mutex<HashSet<(String, String)>>,
     request_timeout: Option<Duration>,
@@ -43,10 +45,12 @@ impl AppServer {
     pub fn with_request_timeout(command: Vec<String>, timeout: Option<Duration>) -> Self {
         Self {
             command,
+            slots_home: super::slots::home(),
             connection: Mutex::new(None),
             start: Mutex::new(()),
             ids: AtomicU64::new(1),
             generation: AtomicU64::new(0),
+            cancellation: AtomicU64::new(0),
             account_events: Arc::new(Mutex::new(None)),
             turns: Mutex::new(HashSet::new()),
             request_timeout: timeout,
@@ -70,6 +74,14 @@ impl AppServer {
         self.request("account/rateLimits/read", Value::Null)
     }
     pub fn close(&self) {
+        self.cancellation.fetch_add(1, Ordering::AcqRel);
+        self.close_connection();
+    }
+    pub fn with_slots_home(mut self, home: std::path::PathBuf) -> Self {
+        self.slots_home = home;
+        self
+    }
+    fn close_connection(&self) {
         if let Some(c) = self.connection.lock().unwrap().take() {
             c.alive.store(false, Ordering::Release);
             proc::kill_tree(&mut c.child.lock().unwrap());
@@ -88,7 +100,7 @@ impl AppServer {
                 .clone()
                 .ok_or_else(|| Failure::new("codex_exited", "codex app-server closed"));
         }
-        self.close();
+        self.close_connection();
         if self.command.is_empty() {
             return Err(Failure::new("not_installed", "empty codex command"));
         }
@@ -302,6 +314,7 @@ impl AppServer {
             .remove(&(thread_id.into(), turn_id.into()));
     }
     pub fn cancel_all(&self) {
+        self.cancellation.fetch_add(1, Ordering::AcqRel);
         let turns: Vec<_> = self.turns.lock().unwrap().iter().cloned().collect();
         let Some(c) = self.connection.lock().unwrap().clone() else {
             return;

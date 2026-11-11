@@ -16,7 +16,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _};
-use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -29,6 +29,10 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 const T: Table = &[
+    ("Fix the Codex parallel limit in Settings.", "請到設定修正 Codex 並行上限。"),
+    ("Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase", "Fable ${} · Astra {} · Argon {} tokens · 每階段 {} 輪"),
+    ("Change budgets in Settings", "到設定調整預算"),
+    ("Fix advanced research budgets in Settings.", "請到設定修正進階研究預算。"),
     ("Choose folder…", "選擇資料夾…"),
     ("Choose the project folder", "選擇專案資料夾"),
     ("Open recent project: {}", "開啟最近使用的專案：{}"),
@@ -65,8 +69,8 @@ const T: Table = &[
     ("Not connected to a session, so this wish cannot start.", "目前沒有連上工作階段，無法開始這個願望。"),
     ("Advanced research", "高級研究"),
     (
-        "Astra, Fable 5.2 and Argon, three models from different families, deliberate before the plan. Fable is capped at $5; Argon's quota is small.",
-        "Astra、Fable 5.2、Argon 三個不同家族的模型先討論再定計畫。Fable 上限 $5，Argon 額度很小。",
+        "Astra and Fable discuss the plan, then Argon reviews once. Objections get a reply before the core rules.",
+        "Astra 與 Fable 討論計畫，Argon 接著審查一次；有異議先答辯，再由核心裁決。",
     ),
     ("agy is not installed, so the council will run with fewer members: without Argon.", "沒有安裝 agy，議會會少一位成員：沒有 Argon。"),
     ("claude is not installed, so the council will run with fewer members: without Fable.", "沒有安裝 claude，議會會少一位成員：沒有 Fable。"),
@@ -152,6 +156,8 @@ pub(super) enum Blocked {
     Checking,
     NoWish,
     BadTurns,
+    BadBudgets,
+    BadCodexLimit,
 }
 
 impl Blocked {
@@ -161,6 +167,8 @@ impl Blocked {
             Self::FolderMissing => "Pick a folder that exists to start.",
             Self::Checking => "Checking the folder first…",
             Self::NoWish => "Write your wish to start.",
+            Self::BadBudgets => "Fix advanced research budgets in Settings.",
+            Self::BadCodexLimit => "Fix the Codex parallel limit in Settings.",
             Self::BadTurns => "Maximum turns must be a whole number above 0.",
         }
     }
@@ -208,8 +216,8 @@ pub(super) fn asks_before_discarding(wish: &str) -> bool {
 }
 
 /// The request Start sends. The council is on only when the switch was turned on in this dialog.
-pub(super) fn request(cwd: PathBuf, ready: Ready, creative: bool, research: &Activation) -> WishRequest {
-    WishRequest { cwd, wish: ready.wish, creative, max_turns: ready.max_turns, advanced_research: research.is_on() }
+pub(super) fn request(cwd: PathBuf, ready: Ready, creative: bool, research: &Activation, budgets: crate::council::Budgets) -> WishRequest {
+    WishRequest { cwd, wish: ready.wish, creative, max_turns: ready.max_turns, advanced_research: research.is_on(), council_budgets:research.is_on().then_some(budgets), codex_max_parallel:None }
 }
 
 /// Reads `git status --porcelain=v2 --branch`.
@@ -576,6 +584,7 @@ pub struct Composer {
     probe: Option<Task<()>>,
     creative: bool,
     research: Activation,
+    preserve_for_settings: bool,
     /// Which council members this machine can run; `None` until the background look finishes.
     members: Option<Members>,
     members_probe: Option<Task<()>>,
@@ -642,6 +651,7 @@ impl Composer {
             probe: None,
             creative: false,
             research: Activation::default(),
+            preserve_for_settings:false,
             members: None,
             members_probe: None,
             advanced: false,
@@ -677,9 +687,10 @@ impl Composer {
     }
 
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.creative = false;
         // Every new wish starts with the council off; it is never carried over or remembered.
         self.research = Activation::default();
+        if std::mem::take(&mut self.preserve_for_settings) { self.look_for_members(cx); return; }
+        self.creative = false;
         self.look_for_members(cx);
         self.advanced = false;
         self.not_connected = false;
@@ -909,6 +920,8 @@ impl Composer {
     }
 
     fn verdict(&self, cx: &App) -> Result<Ready, Blocked> {
+        if super::settings::Store::current(cx).codex_limit().is_err() { return Err(Blocked::BadCodexLimit); }
+        if self.research.is_on() && super::settings::Store::current(cx).council_budgets.validate().is_err() { return Err(Blocked::BadBudgets); }
         validate(self.folder.is_some(), &self.check, &self.wish.read(cx).value(), &self.turns.read(cx).value())
     }
 
@@ -920,7 +933,9 @@ impl Composer {
             cx.notify();
             return;
         }
-        let request = request(cwd, ready, self.creative, &self.research);
+        let budgets=super::settings::Store::current(cx).council_budgets.validate().unwrap_or_default();
+        let mut request = request(cwd, ready, self.creative, &self.research, budgets);
+        request.codex_max_parallel = super::settings::Store::current(cx).codex_limit().ok();
         self.state.update(cx, |s, cx| {
             s.set_view(Screen::Run, cx);
             s.start_wish(request, cx);
@@ -1354,6 +1369,11 @@ impl Composer {
     fn research_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let look = self.research.look(motion::now(cx), self.state.read(cx).reduce_motion);
+        let budgets=super::settings::Store::current(cx).council_budgets.validate();
+        let summary=match budgets {
+            Ok(b)=>fill(tr(cx,T,"Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase"),&[&format!("{:.2}",b.fable_cap_usd),&crate::council::budgets::tokens(b.astra_token_cap),&crate::council::budgets::tokens(b.argon_token_cap),&b.rounds.to_string()]),
+            Err(_)=>tr(cx,T,"Fix advanced research budgets in Settings.").to_owned(),
+        };
         let shortfall = self.members.and_then(Members::shortfall).map(|text| tr(cx, T, text));
         div()
             .id("composer-research")
@@ -1382,8 +1402,15 @@ impl Composer {
                             .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(
                                 cx,
                                 T,
-                                "Astra, Fable 5.2 and Argon, three models from different families, deliberate before the plan. Fable is capped at $5; Argon's quota is small.",
+                                "Astra and Fable discuss the plan, then Argon reviews once. Objections get a reply before the core rules.",
                             )))
+                            .when(self.research.is_on(),|this|this
+                                .child(div().id("composer-budget-summary").text_size(theme::font(theme::density(cx),TypeSize::Caption)).text_color(t.muted).child(summary.clone().test_text(summary)).test_support())
+                                .child(Button::new("composer-budget-settings").ghost().small().label(tr(cx,T,"Change budgets in Settings")).tooltip(tr(cx,T,"Change budgets in Settings"))
+                                    .on_click(cx.listener(|this,_,_,cx| {
+                                        this.preserve_for_settings=true;
+                                        this.state.update(cx,|state,cx| {state.composing=false;state.set_view(Screen::Doctor,cx);});
+                                    }))))
                             .children(shortfall.map(|text| {
                                 h_flex()
                                     .gap_1p5()
@@ -1678,14 +1705,17 @@ mod tests {
     #[test]
     fn the_request_carries_the_research_switch_only_when_it_was_turned_on() {
         let ready = || Ready { wish: "wish".into(), max_turns: Some(9) };
-        let off = request(PathBuf::from("C:\\p"), ready(), true, &Activation::default());
+        let off = request(PathBuf::from("C:\\p"), ready(), true, &Activation::default(), crate::council::Budgets::default());
         assert!(!off.advanced_research);
+        assert_eq!(off.council_budgets,None);
         assert_eq!((off.wish.as_str(), off.creative, off.max_turns), ("wish", true, Some(9)));
         let mut switch = Activation::default();
         switch.set(true, Instant::now());
-        assert!(request(PathBuf::from("C:\\p"), ready(), false, &switch).advanced_research);
+        assert!(request(PathBuf::from("C:\\p"), ready(), false, &switch, crate::council::Budgets::default()).advanced_research);
+        let budgets=crate::council::Budgets {fable_cap_usd:20.0,astra_token_cap:600000,argon_token_cap:400000,rounds:5};
+        assert_eq!(request(PathBuf::from("C:\\p"),ready(),false,&switch,budgets).council_budgets,Some(budgets));
         switch.set(false, Instant::now());
-        assert!(!request(PathBuf::from("C:\\p"), ready(), false, &switch).advanced_research);
+        assert!(!request(PathBuf::from("C:\\p"), ready(), false, &switch, crate::council::Budgets::default()).advanced_research);
     }
 
     #[test]
@@ -1906,6 +1936,10 @@ mod tests {
             assert!(known, "missing translation: {}", &capture[1]);
         }
         assert!(found > 20);
+        for key in ["Fix the Codex parallel limit in Settings.","Change budgets in Settings","Fix advanced research budgets in Settings.","Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase"] {
+            assert_ne!(super::super::i18n::translate(super::super::i18n::Lang::ZhTw,T,key),key);
+            assert_eq!(super::super::i18n::translate(super::super::i18n::Lang::En,T,key),key);
+        }
     }
 
     #[test]

@@ -305,9 +305,15 @@ pub fn state_at(now: i64) -> AppState {
     let mut state = AppState {
         feeds: Feeds::default(),
         undo: UndoStack::default(),
+        codex_slots: Some(15),
+        codex_models: [("gpt-6.1-terra", 12), ("gpt-6-astra", 1), ("gpt-6.1-sol", 2)].into_iter()
+            .map(|(model, count)| RunningModel { provider: ModelProvider::Codex, model: model.into(), count }).collect(),
+        live_models: [(ModelProvider::Claude, "claude-opus-5", 1), (ModelProvider::Claude, "claude-sonnet-5-5", 4),
+            (ModelProvider::Claude, "claude-haiku-5", 2), (ModelProvider::Gemini, "gemini-4-argon-high", 1)].into_iter()
+            .map(|(provider, model, count)| RunningModel { provider, model: model.into(), count }).collect(),
         quota: Quotas {
-            claude: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.62), weekly: window(WindowKind::Weekly, 0.41) },
-            codex: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.15), weekly: None },
+            claude: ProviderQuota { present: [false; 2], observed_at: None, five_hour: window(WindowKind::FiveHour, 0.62), weekly: window(WindowKind::Weekly, 0.41) },
+            codex: ProviderQuota { present: [false, true], observed_at: Some(now), five_hour: None, weekly: window(WindowKind::Weekly, 0.58) },
         },
         board: Default::default(),
         evolve: EvolveState::default(),
@@ -360,10 +366,13 @@ pub fn apply_data_scene(state: &mut AppState, scene: &str) -> bool {
 pub fn apply_data_scene_at(state: &mut AppState, scene: &str, now: i64) -> bool {
     use std::time::SystemTime;
     match scene {
-        "at-rest" => for run in &mut state.runs {
+        "at-rest" => {
+            state.codex_slots=Some(0); state.codex_models.clear(); state.live_models.clear();
+            for run in &mut state.runs {
             run.status = RunStatus::Done;
             run.needs.clear();
             for unit in &mut run.units { unit.state = UnitState::Verified; unit.raw_state = "verified".into(); }
+            }
         },
         "loading" | "feed-error" | "stale" => {
             for kind in [FeedKind::Runs, FeedKind::Memory, FeedKind::Checks, FeedKind::Usage, FeedKind::Quota] {
@@ -373,12 +382,14 @@ pub fn apply_data_scene_at(state: &mut AppState, scene: &str, now: i64) -> bool 
             }
             if scene == "stale" {
                 for provider in [&mut state.quota.claude, &mut state.quota.codex] {
+                    provider.observed_at = Some(now - 604_800);
                     for window in [&mut provider.five_hour, &mut provider.weekly].into_iter().flatten() {
                         window.observed_at = now - 604_800;
                     }
                 }
             }
             if scene != "stale" { state.runs.clear(); state.memory.clear(); state.checks.clear(); }
+            state.codex_slots = None; state.codex_models.clear(); state.live_models.clear();
         }
         "quota-low" | "quota-out" => {
             use crate::usage::quota::{Window, WindowKind};
@@ -393,6 +404,11 @@ pub fn apply_data_scene_at(state: &mut AppState, scene: &str, now: i64) -> bool 
             }
         }
         "quota-unknown" => state.quota = Default::default(),
+        "model-glyphs" => {
+            state.codex_slots=Some(16);
+            state.codex_models.push(RunningModel { provider:ModelProvider::Codex,model:"gpt-6-luna".into(),count:1 });
+            state.live_models.push(RunningModel { provider:ModelProvider::Claude,model:"claude-fable-5-2".into(),count:1 });
+        },
         "board-writing" => for entry in state.board.values_mut() { entry.status = BoardStatus::Writing; },
         "board-failed" => for entry in state.board.values_mut() { entry.status = BoardStatus::Failed("Summary could not be written".into()); },
         _ => return false,
@@ -454,11 +470,11 @@ mod usage_tests {
         }
 
         for provider in [&mut state.quota.claude, &mut state.quota.codex] {
-            provider.five_hour.as_mut().unwrap().observed_at = before - 604_800;
+            if let Some(window)=provider.five_hour.as_mut() { window.observed_at = before - 604_800; }
         }
         assert!(apply_data_scene(&mut state, "quota-low"));
         let after = now();
-        assert_eq!(windows(&state.quota).count(), 3);
+        assert_eq!(windows(&state.quota).count(), 4);
         for window in windows(&state.quota) {
             assert!((before..=after + 5).contains(&window.observed_at));
             assert_eq!(freshness(window, after + 5), Freshness::Fresh);
@@ -466,7 +482,7 @@ mod usage_tests {
 
         assert!(apply_data_scene(&mut state, "stale"));
         let after = now();
-        assert_eq!(windows(&state.quota).count(), 3);
+        assert_eq!(windows(&state.quota).count(), 4);
         for window in windows(&state.quota) {
             assert!((before - 604_800..=after + 5 - 604_800).contains(&window.observed_at));
             assert!(matches!(freshness(window, after + 5), Freshness::Stale { .. }));
@@ -484,7 +500,9 @@ mod usage_tests {
         }
         assert_eq!(state.quota.claude.five_hour.as_ref().unwrap().used, 1.0 - 0.62);
         assert_eq!(state.quota.claude.weekly.as_ref().unwrap().used, 1.0 - 0.41);
-        assert_eq!(state.quota.codex.five_hour.as_ref().unwrap().used, 1.0 - 0.15);
+        assert!(state.quota.codex.five_hour.is_none());
+        assert_eq!(state.quota.codex.weekly.as_ref().unwrap().used, 1.0 - 0.58);
+        assert_eq!(state.codex_slots,Some(state.codex_models.iter().map(|m|m.count).sum()));
     }
 
     #[test]
@@ -514,7 +532,7 @@ mod usage_tests {
     #[test]
     fn stale_scene_quotas_are_stale() {
         let mut state = state_at(NOW);
-        state.quota.codex.weekly = state.quota.claude.weekly.clone();
+        state.quota.codex.five_hour = state.quota.claude.five_hour.clone();
         assert!(apply_data_scene_at(&mut state, "stale", NOW));
         assert_eq!(windows(&state.quota).count(), 4);
         for window in windows(&state.quota) {

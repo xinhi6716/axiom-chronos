@@ -169,7 +169,7 @@ fn models_and_binary_configuration() {
         );
     }
     let plugin = json_asset(".claude-plugin/plugin.json");
-    assert_eq!(plugin["version"], "2.0.0");
+    assert_eq!(plugin["version"], "2.0.1");
     assert_eq!(
         plugin["mcpServers"]["bridge"],
         json!({"command":"${AXIOM_BIN:-axiom}","args":["bridge"]})
@@ -191,7 +191,7 @@ fn models_and_binary_configuration() {
     )
     .unwrap();
     assert_eq!(marketplace["plugins"][0]["source"], "./engine");
-    assert_eq!(marketplace["plugins"][0]["version"], "2.0.0");
+    assert_eq!(marketplace["plugins"][0]["version"], "2.0.1");
     for (path, text) in engine::FILES {
         for forbidden in ["AXIOM_PYTHON", "bun", "vendor", "orch.ts"] {
             assert!(!text.contains(forbidden), "{path}: {forbidden}");

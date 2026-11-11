@@ -369,6 +369,7 @@ pub struct Spawned {
     project: PathBuf,
     max_turns: Option<u32>,
     advanced_research: bool,
+    codex_max_parallel: u64,
 }
 
 /// What a launch opts in to. The default is a launch exactly as it has always been.
@@ -376,6 +377,8 @@ pub struct Spawned {
 pub struct Launch {
     /// Advanced research: the council of Astra, Fable 5.2 and Argon. Costs real money.
     pub advanced_research: bool,
+    pub council_budgets: Option<council::Budgets>,
+    pub codex_max_parallel: Option<u64>,
 }
 
 pub fn spawn(
@@ -407,10 +410,17 @@ pub fn spawn_with(
     launch: &Launch,
 ) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
-    let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
+    let codex_max_parallel = match launch.codex_max_parallel {
+        Some(n) => crate::codex::slots::parse(Some(n.to_string())).map_err(Failure::from)?,
+        None => crate::codex::slots::from_env()?,
+    };
     let advanced_research = launch.advanced_research
         || resume.is_some_and(|id| council::switch_remembered(&config.home, id));
+    let budgets = if advanced_research { Some(match launch.council_budgets {
+        Some(b) => b.validate()?, None => council::Budgets::from_env()?,
+    }) } else { None };
+    let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
+    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if advanced_research {
         if let Some(tools) = argv
             .iter()
@@ -462,6 +472,7 @@ pub fn spawn_with(
     child
         .current_dir(project)
         .env("AXIOM_DATA_HOME", &config.home)
+        .env(crate::codex::slots::ENV, codex_max_parallel.to_string())
         .env("AXIOM_HEADLESS", "1")
         .env("AXIOM_BIN", &config.bin)
         .envs(CACHE_TTL_ENV)
@@ -473,6 +484,7 @@ pub fn spawn_with(
         .stdout(Stdio::piped());
     if advanced_research {
         child.env(council::ENV, "1");
+        if let Some(budgets) = budgets { child.envs(budgets.env()); eprintln!("axiom: {}", budgets.notice()); }
     }
     let mut child = child
         .spawn()
@@ -519,6 +531,7 @@ pub fn spawn_with(
         project: project.to_path_buf(),
         max_turns,
         advanced_research,
+        codex_max_parallel,
     })
 }
 
@@ -602,6 +615,7 @@ pub fn drive(
         spawned.project.clone(),
         spawned.max_turns,
     );
+    let codex_max_parallel = spawned.codex_max_parallel;
     let mut spawned = spawned;
     loop {
         let outcome = drive_once(spawned, config, out, stop, observe)?;
@@ -626,7 +640,8 @@ pub fn drive(
             return Ok(130);
         }
         let prompt = continue_prompt(config, &session)?;
-        let mut next = spawn(config, &skill, &prompt, &project, max_turns, Some(&session))?;
+        let launch = Launch { codex_max_parallel: Some(codex_max_parallel), ..Launch::default() };
+        let mut next = spawn_with(config, &skill, &prompt, &project, max_turns, Some(&session), &launch)?;
         *writer.lock().unwrap_or_else(|e| e.into_inner()) =
             next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
         next.writer = Arc::clone(&writer);
