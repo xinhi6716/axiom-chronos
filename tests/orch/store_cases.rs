@@ -415,6 +415,14 @@ fn errors_name_the_missing_file_and_the_commands() {
 }
 
 #[test]
+fn commands_list_fix_units_and_waivers() {
+    let t = Temp::new();
+    let out = call(&t.0, &["help"], false, false);
+    assert!(out.stderr.contains("unit add <id> --track <t> [--brief <path>] [--fixes <old>]"), "{}", out.stderr);
+    assert!(out.stderr.contains("waive <unit> <n> --reason <text>"), "{}", out.stderr);
+}
+
+#[test]
 fn unit_add_reports_the_next_step() {
     let t = Temp::new();
     let p = &t.0;

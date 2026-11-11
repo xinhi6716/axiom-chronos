@@ -105,6 +105,39 @@ impl Fixture {
 }
 
 #[test]
+fn passing_verify_returns_pack_with_verified_tree() {
+    let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
+    let result = f.run("one");
+    let pack = result["pack"].as_str().expect("pack path is missing");
+    let text = fs::read_to_string(pack).expect("pack must exist");
+    let rows = orch::evidence(&f.store, "one").unwrap();
+    let verify = rows.iter().rev().find(|row| row.kind == "verify").unwrap();
+    assert!(verify.commit.starts_with("tree:"));
+    assert!(text.contains(&format!("Tree reviewed: {}\n", verify.commit)));
+}
+
+#[test]
+fn failing_verify_returns_null_pack() {
+    let f = Fixture::new(&[("one", "exit 1")], "echo accepted");
+    let result = f.run("one");
+    assert_eq!(result.get("pack"), Some(&Value::Null));
+    assert!(result.get("pack_error").is_none());
+}
+
+#[test]
+fn pack_failure_does_not_change_unit_result() {
+    let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
+    fs::create_dir_all(orch::pack_path(&f.store, "one")).unwrap();
+    let result = f.run("one");
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["state"], "built", "{result}");
+    assert_eq!(result["accept"]["ran"], true, "{result}");
+    assert!(result["error"].is_null());
+    assert_eq!(result.get("pack"), Some(&Value::Null));
+    assert!(result["pack_error"].as_str().is_some(), "{result}");
+}
+
+#[test]
 fn auto_accept_and_verify_failure() {
     let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
     let result = f.run("one");

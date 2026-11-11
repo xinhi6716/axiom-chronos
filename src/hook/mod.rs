@@ -14,6 +14,7 @@ pub mod context;
 
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
 const GOAL: &str = "mcp__plugin_chronos_bridge__goal";
+const ORCH: &str = "mcp__plugin_chronos_bridge__orch";
 
 fn deny(reason: &str) -> Option<Value> {
     Some(
@@ -229,8 +230,7 @@ fn waiting_loop(input: &Value) -> bool {
     re.is_match(input.get("command").and_then(Value::as_str).unwrap_or(""))
 }
 
-fn oversized_read(input: &Value) -> bool {
-    let path = Path::new(input.get("file_path").and_then(Value::as_str).unwrap_or(""));
+fn binary_read(path: &Path) -> bool {
     let binary = path
         .extension()
         .and_then(|e| e.to_str())
@@ -238,12 +238,85 @@ fn oversized_read(input: &Value) -> bool {
         .is_some_and(|e| {
             ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"].contains(&e.as_str())
         });
-    !binary
+    binary
+}
+fn oversized_read(input: &Value) -> bool {
+    let path = Path::new(input.get("file_path").and_then(Value::as_str).unwrap_or(""));
+    !binary_read(path)
         && std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_WHOLE_READ)
         && input
             .get("limit")
             .and_then(Value::as_u64)
             .map_or(true, |limit| limit > MAX_READ_LINES)
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+// Resolve links before removing parent components, as the filesystem does.
+fn resolved_path(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    let p = Path::new(path);
+    let p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(cwd?).join(p)
+    };
+    if !p.is_absolute() {
+        return None;
+    }
+    Some(normalize(&real(&p)))
+}
+
+fn reviewer_binding(store: &Path, event: &Value, input: &Value, tool: &str) -> Option<String> {
+    let key = context::agent_key(event)?;
+    let marker = store.join("agents").join(format!("{key}.reviewer"));
+    let read_binding = || {
+        std::fs::read_to_string(&marker)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(bound) = read_binding() {
+        return Some(bound);
+    }
+    if tool != "Read" {
+        return None;
+    }
+    let given = input.get("file_path")?.as_str()?;
+    let path = resolved_path(given, event.get("cwd").and_then(Value::as_str))?;
+    let unit = [Path::new(given), path.as_path()]
+        .into_iter()
+        .find_map(|p| {
+            let filename = p.file_name()?.to_str()?;
+            let filename = if cfg!(windows) {
+                filename.to_lowercase()
+            } else {
+                filename.to_string()
+            };
+            let unit = filename.strip_suffix(".review.md")?;
+            (base::require_slug("unit", unit).is_ok()
+                && same_path(&path, &real(&crate::orch::pack_path(store, unit))))
+            .then(|| unit.to_string())
+        })?;
+    crate::orch::with_lock(store, false, || {
+        if let Some(bound) = read_binding() {
+            return Ok(bound);
+        }
+        std::fs::create_dir_all(store.join("agents"))
+            .map_err(|e| base::Failure::new("io", e.to_string()))?;
+        base::atomic_write(&marker, unit.as_bytes())
+            .map_err(|e| base::Failure::new("io", e.to_string()))?;
+        Ok(unit)
+    })
+    .ok()
 }
 
 /// With a module map, a dispatcher stays on the first module it dispatches, so its context stays small.
@@ -612,6 +685,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             if tool == GOAL && agent {
                 return deny("Only the core session may change the goal; report back instead.");
             }
+            if tool == ORCH && agent {
+                let args = input.get("args").and_then(Value::as_array);
+                let first = args.and_then(|a| a.first()).and_then(Value::as_str);
+                let second = args.and_then(|a| a.get(1)).and_then(Value::as_str);
+                if first == Some("waive") || (first == Some("--json") && second == Some("waive")) {
+                    return deny("Only the core session may waive findings; report back instead.");
+                }
+            }
             let home = home?;
             let g = match goal::load(home, session) {
                 Ok(Some(g)) => g,
@@ -625,6 +706,52 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     ))
                 }
             };
+            let reviewer = agent
+                && event.get("agent_type").and_then(Value::as_str) == Some("chronos:reviewer");
+            let store = reviewer
+                .then(|| store_of(home, g.project.as_deref()))
+                .flatten();
+            let bound = store
+                .as_deref()
+                .and_then(|store| reviewer_binding(store, event, input, tool));
+            if reviewer && matches!(tool, "Write" | "Edit" | "NotebookEdit") {
+                let allowed = store.as_ref().zip(bound.as_ref()).map(|(store, unit)| {
+                    store.join("reports").join(format!("{unit}.verdict.json"))
+                });
+                let path = input
+                    .get("file_path")
+                    .or_else(|| input.get("notebook_path"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let actual = resolved_path(path, event.get("cwd").and_then(Value::as_str));
+                if !allowed
+                    .as_ref()
+                    .zip(actual.as_ref())
+                    .is_some_and(|(allowed, actual)| same_path(&real(allowed), actual))
+                {
+                    return deny(&allowed.map_or_else(
+                        || "Read your review pack first before writing a verdict.".to_string(),
+                        |path| format!("A reviewer may write only its verdict: {}", path.display()),
+                    ));
+                }
+            }
+            if reviewer && tool == "Read" && input.get("limit").is_none() {
+                let path = input.get("file_path").and_then(Value::as_str).unwrap_or("");
+                let path = resolved_path(path, event.get("cwd").and_then(Value::as_str));
+                let own_pack = store
+                    .as_ref()
+                    .zip(bound.as_ref())
+                    .zip(path.as_ref())
+                    .is_some_and(|((store, unit), path)| {
+                        same_path(&real(&crate::orch::pack_path(store, unit)), path)
+                    });
+                if path.as_ref().is_some_and(|path| {
+                    !binary_read(path) && std::fs::metadata(path).is_ok_and(|m| m.len() > 50_000)
+                }) && !own_pack
+                {
+                    return deny("Reviewers may not read files larger than 50,000 bytes whole; use Read with a limit.");
+                }
+            }
             let mut warning = None;
             if g.status == "active" {
                 if context::in_dispatcher(event) {
@@ -691,7 +818,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                         "Goals, units, claims and evidence change only through the engine.",
                     );
                 }
-                if restricted && !inside(home, path, cwd) {
+                if restricted && !reviewer && !inside(home, path, cwd) {
                     return deny("Writes outside the data home are not allowed for this caller or goal mode.");
                 }
             }

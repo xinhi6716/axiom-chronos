@@ -7,7 +7,7 @@ use std::{
 };
 
 const PACK_BYTES: usize = 80_000;
-const PACK_CONTEXT: &str = "-U20";
+const PACK_CONTEXT: &str = "-U8";
 const MAX_PATHS: usize = 200;
 const MAX_FINDINGS: usize = 30;
 const FINDING_CHARS: usize = 240;
@@ -202,6 +202,33 @@ fn module_of(store: &Path, track: &str) -> Res<Option<Module>> {
         .map_err(|e| Failure::new("invalid_argument", e))?;
     Ok(map.modules.into_iter().find(|m| m.id == track))
 }
+fn severity(f: &findings::Finding) -> &'static str {
+    match f.severity {
+        findings::Severity::Blocker => "blocker",
+        findings::Severity::Major => "major",
+        findings::Severity::Minor => "minor",
+    }
+}
+fn pack_findings(store: &Path, unit: &str, rows: &[Evidence], head: &mut String) -> Res<()> {
+    let waived = findings::waivers(rows);
+    if let Some(verdict) = findings::read_verdict(store, unit)? {
+        for f in verdict
+            .findings
+            .iter()
+            .filter(|f| f.is_serious() && !waived.iter().any(|w| w.number == f.number))
+        {
+            head.push_str(&format!(
+                "{}. {} {} {}: {}\n",
+                f.number,
+                severity(f),
+                f.check,
+                f.location,
+                f.evidence
+            ));
+        }
+    }
+    Ok(())
+}
 /// Write the unit's review pack: its contract, then the diff of every file the worker changed.
 pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
     let row = read_units(store)?
@@ -223,18 +250,40 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
             )
         })?;
     let mut head = format!("# Review pack for unit {unit}\n\nTree reviewed: {tree}\n");
+    let earlier = rows
+        .iter()
+        .rev()
+        .find(|r| r.kind == "review")
+        .filter(|r| r.commit.starts_with("tree:") && r.commit != tree);
+    if let Some(review) = earlier {
+        head.push_str(&format!("Earlier review at: {}\n", review.commit));
+    }
+    let fixed = fixed_unit(store, unit)?;
+    if let Some(old) = &fixed {
+        head.push_str(&format!("Fixes unit: {old}\n"));
+    }
     if let Some(module) = module_of(store, &row.track)? {
         head.push_str(&format!("\n## Module contract\n\n{}\n", module.contract));
     }
     head.push_str(&format!("\n## Brief\n\n{}\n", brief.text.trim_end()));
+    if earlier.is_some() {
+        head.push_str("\n## Earlier findings\n\n");
+        pack_findings(store, unit, &rows, &mut head)?;
+    }
+    if let Some(old) = &fixed {
+        head.push_str("\n## Findings to fix\n\n");
+        pack_findings(store, old, &evidence(store, old)?, &mut head)?;
+        head.push_str("\nThe review checks these findings and the changed lines only.\n");
+    }
     let mut listing = String::from("\n## Changed files\n\n");
     let mut diffs = String::new();
     let mut omitted = Vec::new();
     let mut file_count = 0;
-    let base = rows
-        .iter()
-        .find(|r| r.kind == "run" && r.commit.starts_with("tree:"))
-        .map(|r| r.commit.as_str());
+    let base = earlier.map(|r| r.commit.as_str()).or_else(|| {
+        rows.iter()
+            .find(|r| r.kind == "run" && r.commit.starts_with("tree:"))
+            .map(|r| r.commit.as_str())
+    });
     let deleted_dir = store.join("reports").join(format!("{unit}.deleted"));
     match std::fs::remove_dir_all(&deleted_dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(e)),
@@ -245,8 +294,10 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
             let mut files = changed_files(repo, base, &tree)?;
             file_count = files.len();
             if files.is_empty() {
-                listing.push_str("The worker changed no file in the unit's SCOPE.
-");
+                listing.push_str(
+                    "The worker changed no file in the unit's SCOPE.
+",
+                );
             }
             omitted = pack_diffs_noting(
                 PACK_BYTES,
@@ -286,14 +337,14 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         .filter(|path| base.is_some() || !brief.scope.iter().any(|s| s == *path))
         .cloned()
         .collect();
-    if !outside.is_empty() {
+    if earlier.is_none() && !outside.is_empty() {
         listing.push_str(&format!(
             "\nThe worker also reports these, which git does not show as changed (ignored, or unchanged at the end). Read any that exist: {}\n",
             outside.join(", ")
         ));
     }
     let text = format!(
-        "{head}{listing}\n## Diffs\n\nEvery changed file follows with 20 lines of surrounding code; a new file appears in full.\n\n{diffs}"
+        "{head}{listing}\n## Diffs\n\nEvery changed file follows with 8 lines of surrounding code; a new file appears in full.\n\n{diffs}"
     );
     let path = pack_path(store, unit);
     base::atomic_write(&path, text.as_bytes()).map_err(io)?;
@@ -307,7 +358,9 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
 }
 
 fn label(state: &str) -> &str {
-    if state == "built" {
+    if state.starts_with("superseded") {
+        "superseded"
+    } else if state == "built" {
         "unreviewed"
     } else {
         state
@@ -368,12 +421,22 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
         units.len(),
         summary.join(", ")
     ));
-    let unverified: Vec<_> = units.iter().filter(|u| u.state != "verified").collect();
+    let unverified: Vec<_> = units
+        .iter()
+        .filter(|u| u.state != "verified" && !u.state.starts_with("superseded"))
+        .collect();
     if !unverified.is_empty() {
         out.push_str("not verified:\n");
         for u in &unverified {
             out.push_str(&format!("  {}  {}\n", u.id, label(&u.state)));
         }
+    }
+    let superseded = units
+        .iter()
+        .filter(|u| u.state.starts_with("superseded"))
+        .count();
+    if superseded > 0 {
+        out.push_str(&format!("superseded units: {superseded}\n"));
     }
     for h in pending_handoffs(store)?
         .iter()
@@ -463,30 +526,55 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
     let mut minors = 0;
     let mut minor_units = 0;
     let mut open = Vec::new();
+    let mut answered = 0;
+    let mut needs = Vec::new();
+    let mut ruled = Vec::new();
     for u in &units {
-        let Ok(text) =
-            std::fs::read_to_string(store.join("reports").join(format!("{}.verdict.json", u.id)))
-        else {
+        let Ok(Some(verdict)) = findings::read_verdict(store, &u.id) else {
             continue;
         };
-        let verdict: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let waivers = findings::waivers(&evidence(store, &u.id)?);
         let mut minor_here = 0;
-        for f in verdict["findings"].as_array().into_iter().flatten() {
-            let severity = f["severity"].as_str().unwrap_or("");
-            if severity.eq_ignore_ascii_case("blocker") || severity.eq_ignore_ascii_case("major") {
-                if u.state != "verified" {
-                    let (evidence, more) = cut(f["evidence"].as_str().unwrap_or(""), FINDING_CHARS);
+        for f in &verdict.findings {
+            match findings::classify(&all, u, f, &waivers) {
+                findings::Class::Open => {
+                    let (evidence, more) = cut(&f.evidence, FINDING_CHARS);
                     open.push(format!(
                         "  {}  {}  {}  {}: {evidence}{}\n",
                         u.id,
-                        severity,
-                        f["check"].as_str().unwrap_or(""),
-                        f["location"].as_str().unwrap_or(""),
+                        severity(f),
+                        f.check,
+                        f.location,
                         if more { "…" } else { "" }
                     ));
                 }
-            } else {
-                minor_here += 1;
+                findings::Class::Answered => answered += 1,
+                findings::Class::NeedsCheck => {
+                    let (evidence, more) = cut(&f.evidence, FINDING_CHARS);
+                    let kind = match f.needs {
+                        Some(findings::Needs::Smoke) => "smoke",
+                        Some(findings::Needs::Manual) => "manual",
+                        None => unreachable!(),
+                    };
+                    needs.push(format!(
+                        "  {}  {}  {}  {}: {evidence}{}\n",
+                        u.id,
+                        severity(f),
+                        kind,
+                        f.location,
+                        if more { "…" } else { "" }
+                    ));
+                }
+                findings::Class::Ruled(reason) => ruled.push(format!(
+                    "  {}  #{}  {}  {}: {}\n",
+                    u.id,
+                    f.number,
+                    severity(f),
+                    f.location,
+                    reason
+                )),
+                findings::Class::Minor => minor_here += 1,
+                findings::Class::Resolved => {}
             }
         }
         minors += minor_here;
@@ -504,6 +592,24 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
             "  ... {} more in reports/<unit>.verdict.json\n",
             open.len() - MAX_FINDINGS
         ));
+    }
+    if answered > 0 {
+        out.push_str(&format!("answered by later units: {answered}\n"));
+    }
+    if !needs.is_empty() {
+        out.push_str(&format!(
+            "needs a smoke or manual check ({}):\n",
+            needs.len()
+        ));
+        for line in needs {
+            out.push_str(&line);
+        }
+    }
+    if !ruled.is_empty() {
+        out.push_str(&format!("ruled ({}):\n", ruled.len()));
+        for line in ruled {
+            out.push_str(&line);
+        }
     }
     if module.is_none() {
         let path = store.join("decisions.md");

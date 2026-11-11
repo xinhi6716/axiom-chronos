@@ -277,3 +277,45 @@ fn structured_coverage_array_result_and_summed_tokens() {
     r.summary(&mut out);
     assert_eq!(String::from_utf8(out).unwrap(), "  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n  - codex astra: inspect\n    astra read: src/a\n    astra did not read: src/b\n\nfirst\n\nsecond\n\n2s · $0.50 (opus $0.40)\ncodex tokens: model-x 2,000 in (400 cached) / 60 out\n");
 }
+
+fn codex_summary(contents: &[Value]) -> String {
+    let mut r = Renderer::new();
+    let mut out = Vec::new();
+    for (id, content) in contents.iter().enumerate() {
+        let id = id.to_string();
+        r.event(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":format!("{BRIDGE}codex_run"),"input":{"role":"astra"}}]}}), &mut out);
+        r.event(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content}]}}), &mut out);
+    }
+    out.clear();
+    r.summary(&mut out);
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn codex_summary_mixed_usage() {
+    assert_eq!(
+        codex_summary(&[
+            json!(r#"{"model":"model-x","usage":{"inputTokens":1050,"cachedInputTokens":200,"outputTokens":32}}"#),
+            json!(r#"{"usage":null}"#),
+            json!("not JSON"),
+            Value::Null,
+        ]),
+        "codex tokens: model-x 1,050 in (200 cached) / 32 out (1 run reported no usage)\n"
+    );
+}
+
+#[test]
+fn codex_summary_one_missing_usage() {
+    assert_eq!(
+        codex_summary(&[json!(r#"{}"#)]),
+        "codex tokens: none reported (1 run reported no usage)\n"
+    );
+}
+
+#[test]
+fn codex_summary_two_missing_usage() {
+    assert_eq!(
+        codex_summary(&[json!(r#"{}"#), json!(r#"{"usage":false}"#)]),
+        "codex tokens: none reported (2 runs reported no usage)\n"
+    );
+}

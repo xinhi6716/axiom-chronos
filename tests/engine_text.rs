@@ -17,7 +17,14 @@ fn contract_sentences_are_embedded() {
         ("DISPATCH.md", unit_mode),
         ("DISPATCH.md", "Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit."),
         ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
-        ("agents/dispatcher.md", "When a fix or later unit of the same module takes over from a unit for good, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`: the old unit keeps its history and stops blocking `done` and dependent modules once `<new>` is verified."),
+        ("agents/dispatcher.md", "Before dispatching a fix, register it separately with `orch` `[\"unit\", \"add\", <new>, \"--track\", <module>, \"--brief\", <path>, \"--fixes\", <old>]`."),
+        ("agents/dispatcher.md", "For other takeovers by a later unit of the same module, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`"),
+        ("agents/dispatcher.md", "If the reply is `fix_rounds`, report it to the core."),
+        ("agents/dispatcher.md", "Take the pack path from the VERIFY reply: `codex_run` `pack`, or `orch verify` `pack=`."),
+        ("agents/dispatcher.md", "Call `orch` `[\"review-pack\", <unit>, \"--repo\", <dir>]` only to rebuild a pack."),
+        ("agents/dispatcher.md", "the reviewer writes its verdict file, not you."),
+        ("agents/dispatcher.md", "Call `orch` `[\"review\", <unit>, \"--repo\", <dir>, \"--reviewer\", \"chronos:reviewer\"]` for each unit."),
+        ("agents/dispatcher.md", "Skip step 7 when you are named one module"),
         ("agents/dispatcher.md", "A `stale review` error means files in the unit's SCOPE changed after its VERIFY ran: call `orch` `[\"verify\", <unit>, \"--repo\", <dir>]`, follow the ACCEPT reply rule, then review again."),
         ("DISPATCH.md", "`EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model."),
         ("DISPATCH.md", "The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them."),
@@ -33,6 +40,15 @@ fn contract_sentences_are_embedded() {
         ("agents/reviewer.md", "You review one whole unit per call: the unit id, every file in it, tests included, and its contract."),
         ("agents/reviewer.md", "{\"unit\": \"<unit id>\", \"tree\": \"<tree id>\", \"verdict\": \"pass\" | \"fail\", \"findings\": ["),
         ("agents/reviewer.md", "Write the unit id you were given into `unit`, and the pack's `Tree reviewed` value into `tree`."),
+        ("agents/reviewer.md", "For a pack with `Fixes unit:`, check only the listed findings and the changed lines."),
+        ("agents/reviewer.md", "For a pack with `Earlier review at:`, check the earlier findings and the diff shown."),
+        ("agents/reviewer.md", "A `blocker` prevents the goal's essential operation or causes severe harm."),
+        ("agents/reviewer.md", "A `major` materially violates the contract or leaves important behaviour untested."),
+        ("agents/reviewer.md", "A `minor` is a limited issue that does not prevent the essential operation or materially violate the contract."),
+        ("agents/reviewer.md", "The optional `needs` field is `\"smoke\"` or `\"manual\"`, only for an `untested` finding that a lib test cannot reach."),
+        ("agents/reviewer.md", "Write verdict JSON to `<unit>.verdict.json` in the directory of the review pack (`<store>/reports/`)"),
+        ("agents/reviewer.md", "Each finding has `check`, `severity`, `location`, `evidence` and `fix`; quote evidence from the code."),
+        ("agents/reviewer.md", "Return exactly one line: `<unit> <tree> <verdict> blocker=<n> major=<n> minor=<n>`."),
         ("agents/dispatcher.md", "`orch` refuses a verdict whose `tree` is not the tree of the unit's last VERIFY"),
         ("agents/critic.md", "Gives the second ruling on an Astra or research plan."),
         ("agents/critic.md", "In the second review"),
@@ -80,7 +96,10 @@ fn reviewer_and_critic_use_claude() {
     let reviewer = asset("agents/reviewer.md");
     let frontmatter = reviewer.strip_prefix("---\n").or_else(|| reviewer.strip_prefix("---\r\n")).unwrap().split_once("\n---").unwrap().0;
     let tools: Vec<_> = frontmatter.lines().filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:")).collect();
-    assert_eq!(tools, [" Read, Glob, Grep, mcp__codegraph__codegraph_explore"]);
+    assert_eq!(tools, [" Read, Glob, Grep, Write, mcp__codegraph__codegraph_explore"]);
+    for line in ["name: reviewer", "model: sonnet", "autoCompactWindow: 200000"] {
+        assert!(frontmatter.lines().any(|actual| actual.trim_end_matches('\r') == line));
+    }
     assert!(!reviewer.contains("Gemini"));
     let critic_description = asset("agents/critic.md").lines().find(|line| line.starts_with("description:")).unwrap();
     assert!(!critic_description.contains("Gemini"));

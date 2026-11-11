@@ -232,6 +232,7 @@ pub struct Renderer {
     agents: BTreeMap<String, String>,
     calls: BTreeMap<String, (String, usize)>,
     usage: BTreeMap<String, (u64, u64, u64)>,
+    missing_usage: usize,
 }
 impl Renderer {
     pub(super) fn is_error(&self) -> bool {
@@ -345,6 +346,8 @@ impl Renderer {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             v.2 += u.get("outputTokens").and_then(Value::as_u64).unwrap_or(0);
+        } else {
+            self.missing_usage += 1;
         }
     }
     pub fn summary(&self, out: &mut dyn Write) {
@@ -370,7 +373,7 @@ impl Renderer {
                 }
             );
         }
-        if !self.usage.is_empty() {
+        if !self.usage.is_empty() || self.missing_usage > 0 {
             let totals = self
                 .usage
                 .iter()
@@ -384,7 +387,18 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let _ = writeln!(out, "codex tokens: {totals}");
+            let totals = if totals.is_empty() {
+                "none reported"
+            } else {
+                &totals
+            };
+            let note = if self.missing_usage == 0 {
+                String::new()
+            } else {
+                let plural = if self.missing_usage == 1 { "" } else { "s" };
+                format!(" ({} run{plural} reported no usage)", self.missing_usage)
+            };
+            let _ = writeln!(out, "codex tokens: {totals}{note}");
         }
     }
 }

@@ -24,6 +24,8 @@ pub struct Finished {
     pub verify_tail: String,
     pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
+    pub pack: Option<PathBuf>,
+    pub pack_error: Option<String>,
 }
 struct Claim {
     // Units of different projects never block or excuse each other.
@@ -626,6 +628,8 @@ pub fn finish_unit(
     let mut verify_exit = None;
     let mut verify_tail = String::new();
     let mut verify_error = None;
+    let mut pack = None;
+    let mut pack_error = None;
     if status == "completed" && outside_scope.is_empty() {
         match base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800)) {
             Ok(result) => {
@@ -652,9 +656,10 @@ pub fn finish_unit(
                     .chars()
                     .rev()
                     .collect();
-                append_evidence(
+                super::evidence::append_check(
                     store,
                     unit,
+                    repo,
                     &mk(
                         "verify",
                         &brief.verify,
@@ -662,6 +667,12 @@ pub fn finish_unit(
                         snapshot(repo, &brief.scope),
                     ),
                 )?;
+                if result.exit_code == 0 {
+                    match super::report::review_pack(store, unit, repo) {
+                        Ok(info) => pack = Some(info.path),
+                        Err(e) => pack_error = Some(e.message),
+                    }
+                }
             }
             Err(e) => verify_error = Some(e.message),
         }
@@ -702,5 +713,7 @@ pub fn finish_unit(
         verify_tail,
         verify_output,
         outside_scope,
+        pack,
+        pack_error,
     })
 }

@@ -224,3 +224,58 @@ fn anchors_respect_order_budgets_cap_and_store() {
     fs::remove_file(&map_path).unwrap();
     fs::remove_dir(&store).unwrap();
 }
+
+#[test]
+fn oversized_module_keeps_contract_incomplete_line_whole() {
+    let store = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/restore-long-module");
+    fs::create_dir_all(&store).unwrap();
+    let module = "界".repeat(10_000);
+    let contract = format!("CONTRACT {}", "x".repeat(CONTRACT_BUDGET));
+    let map_path = store.join("modules.md");
+    fs::write(&map_path, format!("## {module}\n{contract}\n")).unwrap();
+
+    let output = anchor_text(
+        &store,
+        &Anchor {
+            rules: false,
+            wish: None,
+            wish_file: None,
+            module: Some(&module),
+        },
+    );
+    assert!(output.len() <= RESTORE_CAP);
+    let last_line = output.split_inclusive('\n').last().unwrap();
+    assert_eq!(
+        last_line,
+        format!(
+            "INCOMPLETE: contract is cut at {CONTRACT_BUDGET} of {} bytes; read the rest in {}.\n",
+            contract.len(),
+            map_path.display()
+        )
+    );
+
+    let wish = "w".repeat(WISH_BUDGET + 1);
+    let output_with_wish = anchor_text(
+        &store,
+        &Anchor {
+            rules: false,
+            wish: Some(&wish),
+            wish_file: None,
+            module: Some(&module),
+        },
+    );
+    assert!(output_with_wish.len() <= RESTORE_CAP);
+    let markers: Vec<_> = output_with_wish
+        .split_inclusive('\n')
+        .filter(|line| line.starts_with("INCOMPLETE:"))
+        .collect();
+    assert_eq!(markers.len(), 2);
+    assert_eq!(
+        markers[0],
+        format!("INCOMPLETE: wish is cut at {WISH_BUDGET} of {} bytes; read the rest in the goal file.\n", wish.len())
+    );
+    assert_eq!(markers[1], last_line);
+
+    fs::remove_file(map_path).unwrap();
+    fs::remove_dir(store).unwrap();
+}

@@ -148,5 +148,33 @@ pub fn anchor_text(store: &Path, anchor: &Anchor<'_>) -> String {
     }
     result.push_str(&rest);
     // Unbounded caller-supplied paths or module names can alone exceed the cap.
-    prefix(&result, RESTORE_CAP).to_owned()
+    if result.len() <= RESTORE_CAP {
+        return result;
+    }
+
+    let mut before_markers = result.len();
+    let mut offset = 0;
+    let mut markers = String::new();
+    for line in result.split_inclusive('\n') {
+        if line.starts_with("INCOMPLETE:") {
+            before_markers = before_markers.min(offset);
+            // A caller-supplied line or path can itself exceed the entire cap.
+            if line.len() <= RESTORE_CAP - markers.len() {
+                markers.push_str(line);
+            }
+        }
+        offset += line.len();
+    }
+    let budget = RESTORE_CAP - markers.len();
+    let text = &result[..before_markers];
+    let mut kept = prefix(text, budget);
+    if !kept.is_empty() && !kept.ends_with('\n') {
+        kept = prefix(text, budget - 1);
+    }
+    let mut output = kept.to_owned();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&markers);
+    output
 }

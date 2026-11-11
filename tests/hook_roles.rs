@@ -8,6 +8,7 @@ use std::{
 
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
 const GOAL: &str = "mcp__plugin_chronos_bridge__goal";
+const ORCH: &str = "mcp__plugin_chronos_bridge__orch";
 
 fn tool(name: &str, input: Value) -> Value {
     json!({"hook_event_name":"PreToolUse","session_id":"s","tool_name":name,"tool_input":input})
@@ -26,6 +27,214 @@ fn change_goal(home: &Path) {
 }
 fn write(path: &Path) -> Value {
     tool("Write", json!({ "file_path": path }))
+}
+
+fn reviewer(mut e: Value, id: &str) -> Value {
+    e["agent_id"] = json!(id);
+    e["agent_type"] = json!("chronos:reviewer");
+    e
+}
+fn reviewer_store(home: &Path) -> std::path::PathBuf {
+    let project = home.join("project");
+    let g = goal::open(home, "s", "wish", Some(project.to_str().unwrap())).unwrap();
+    goal::set_mode(home, "s", "change").unwrap();
+    let store = orch::store_for(home, g.project.as_deref().unwrap()).unwrap();
+    fs::create_dir_all(store.join("reports")).unwrap();
+    store
+}
+fn read(path: &Path) -> Value {
+    tool("Read", json!({"file_path":path}))
+}
+
+#[test]
+fn reviewer_reads_are_bounded_and_bind_only_the_first_pack() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    let store = reviewer_store(h);
+    let small = h.join("small.txt");
+    let large = h.join("large.txt");
+    let pack = orch::pack_path(&store, "u");
+    let other = orch::pack_path(&store, "v");
+    fs::write(&small, vec![b'x'; 50_000]).unwrap();
+    fs::write(&large, vec![b'x'; 50_001]).unwrap();
+    fs::write(&pack, vec![b'x'; 50_001]).unwrap();
+    fs::write(&other, vec![b'x'; 50_001]).unwrap();
+    assert!(!denied(h, &reviewer(read(&small), "a")));
+    assert!(denied(h, &reviewer(read(&large), "a")));
+    let mut limited = read(&large);
+    limited["tool_input"]["limit"] = json!(501);
+    assert!(!denied(h, &reviewer(limited, "a")));
+    fs::create_dir_all(store.join("agents")).unwrap();
+    fs::write(store.join("agents/a.reviewer"), "").unwrap();
+    assert!(!denied(h, &reviewer(read(&pack), "a")));
+    assert_eq!(
+        fs::read_to_string(store.join("agents/a.reviewer")).unwrap(),
+        "u"
+    );
+    assert!(denied(h, &reviewer(read(&other), "a")));
+    assert!(denied(h, &reviewer(read(&large), "a")));
+    let mut other_limited = read(&other);
+    other_limited["tool_input"]["limit"] = json!(1);
+    assert!(!denied(h, &reviewer(other_limited, "a")));
+    assert_eq!(
+        fs::read_to_string(store.join("agents/a.reviewer")).unwrap(),
+        "u"
+    );
+    assert!(!denied(h, &sub(read(&large))));
+    assert!(!denied(h, &read(&large)));
+    let binary = h.join("large.PNG");
+    fs::write(&binary, vec![b'x'; 50_001]).unwrap();
+    assert!(!denied(h, &reviewer(read(&binary), "a")));
+    fs::write(&pack, vec![b'x'; 256 * 1024 + 1]).unwrap();
+    assert!(
+        denied(h, &reviewer(read(&pack), "a")),
+        "256 KB rule still applies"
+    );
+}
+
+#[test]
+fn reviewer_may_write_only_its_bound_verdict() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    let store = reviewer_store(h);
+    let pack = orch::pack_path(&store, "u");
+    fs::write(&pack, "pack").unwrap();
+    let verdict = store.join("reports/u.verdict.json");
+    assert!(denied(h, &reviewer(write(&verdict), "unbound")));
+    assert!(!denied(h, &reviewer(read(&pack), "a")));
+    for name in ["Write", "Edit", "NotebookEdit"] {
+        let key = if name == "NotebookEdit" {
+            "notebook_path"
+        } else {
+            "file_path"
+        };
+        let call = |path: &Path| reviewer(tool(name, json!({key:path})), "a");
+        assert!(!denied(h, &call(&verdict)), "{name}");
+        for path in [
+            store.join("reports/v.verdict.json"),
+            h.join("orchestrate/other/reports/u.verdict.json"),
+            h.join("project/file"),
+            store.join("reports/../../other/reports/u.verdict.json"),
+        ] {
+            assert!(denied(h, &call(&path)), "{name}: {}", path.display());
+        }
+    }
+    assert!(
+        !denied(h, &sub(write(&h.join("project/file")))),
+        "change-mode non-reviewer retains write access"
+    );
+    goal::set_status(h, "s", "blocked", Some("note")).unwrap();
+    assert!(denied(h, &reviewer(write(&h.join("project/file")), "a")));
+
+    let review = tempfile::tempdir().unwrap();
+    let home = review.path();
+    let g = goal::open(
+        home,
+        "s",
+        "wish",
+        Some(home.join("project").to_str().unwrap()),
+    )
+    .unwrap();
+    goal::set_mode(home, "s", "review").unwrap();
+    let store = orch::store_for(home, g.project.as_deref().unwrap()).unwrap();
+    fs::create_dir_all(store.join("reports")).unwrap();
+    let pack = orch::pack_path(&store, "u");
+    fs::write(&pack, "pack").unwrap();
+    assert!(!denied(home, &reviewer(read(&pack), "a")));
+    assert!(!denied(
+        home,
+        &reviewer(write(&store.join("reports/u.verdict.json")), "a")
+    ));
+}
+
+#[test]
+fn concurrent_reviewer_pack_reads_bind_once() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path().to_path_buf();
+    let store = reviewer_store(&h);
+    for unit in ["u", "v"] {
+        fs::write(orch::pack_path(&store, unit), "pack").unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let threads: Vec<_> = ["u", "v"]
+        .into_iter()
+        .map(|unit| {
+            let (h, store, barrier) = (h.clone(), store.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                assert!(!denied(
+                    &h,
+                    &reviewer(read(&orch::pack_path(&store, unit)), "a")
+                ));
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let bound = fs::read_to_string(store.join("agents/a.reviewer")).unwrap();
+    assert!(["u", "v"].contains(&bound.as_str()));
+    for unit in ["u", "v"] {
+        assert_eq!(
+            !denied(
+                &h,
+                &reviewer(
+                    write(&store.join(format!("reports/{unit}.verdict.json"))),
+                    "a"
+                )
+            ),
+            unit == bound
+        );
+    }
+}
+
+#[test]
+fn reviewer_verdict_resolves_links_and_parent_components() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    let store = reviewer_store(h);
+    let pack = orch::pack_path(&store, "u");
+    fs::write(&pack, "pack").unwrap();
+    assert!(!denied(h, &reviewer(read(&pack), "a")));
+    let alias = h.join("alias");
+    if !dir_link(&alias, &store.join("reports")) {
+        eprintln!("SKIPPED reviewer link checks: links unavailable");
+        return;
+    }
+    assert!(!denied(
+        h,
+        &reviewer(write(&alias.join("u.verdict.json")), "a")
+    ));
+    let outside = h.join("elsewhere");
+    fs::create_dir_all(outside.join("child")).unwrap();
+    let link = store.join("reports/link");
+    if !dir_link(&link, &outside.join("child")) {
+        return;
+    }
+    assert!(denied(
+        h,
+        &reviewer(write(&link.join("../u.verdict.json")), "a")
+    ));
+    #[cfg(windows)]
+    assert!(!denied(
+        h,
+        &reviewer(write(&store.join("REPORTS/U.VERDICT.JSON")), "a")
+    ));
+}
+
+#[test]
+fn only_the_core_may_waive_findings_even_without_a_goal() {
+    let d = tempfile::tempdir().unwrap();
+    for args in [json!(["waive", "u"]), json!(["--json", "waive", "u"])] {
+        let call = tool(ORCH, json!({"project":"p", "args":args}));
+        assert!(denied(d.path(), &sub(call.clone())));
+        assert!(hook::handle(&sub(call.clone()), None, false).is_some());
+        assert!(!denied(d.path(), &call));
+    }
+    assert!(!denied(
+        d.path(),
+        &sub(tool(ORCH, json!({"project":"p","args":["status"]})))
+    ));
 }
 
 #[test]

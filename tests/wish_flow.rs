@@ -203,10 +203,25 @@ fn dispatcher_reports_the_digest_and_reviews_through_the_pack() {
     assert!(reviewer.contains("Read the review pack you were given."));
     assert!(reviewer.contains("\"tree\": \"<tree id>\""));
     assert!(reviewer.contains("the pack's `Tree reviewed` value into `tree`"));
-    assert!(dispatcher.contains("save its verdict unedited"));
+    assert!(dispatcher.contains("the reviewer writes its verdict file, not you"));
+    assert!(dispatcher.contains(r#"`orch` `["review", <unit>, "--repo", <dir>, "--reviewer", "chronos:reviewer"]`"#));
+    assert!(!dispatcher.contains("save its verdict"));
+    assert!(!dispatcher.contains("--verdict-file"));
+    assert!(!dispatcher.contains("When a fix or later unit of the same module takes over"));
     assert!(reviewer.contains("tests included"));
     assert!(!reviewer.contains("Read every file you were given"));
     for check in ["contract_mismatch", "vacuous_check", "untested", "platform"] {
         assert!(reviewer.contains(check), "{check}");
     }
+}
+
+#[test]
+fn fix_rounds_are_resolved_by_the_core() {
+    let skill = axiom::engine::FILES.iter()
+        .find(|(path, _)| *path == "skills/wish/SKILL.md")
+        .unwrap().1;
+    let sentence = r#"After a `fix_rounds` report, waive findings with `orch` `["waive", <unit>, <n>, "--reason", <text>]` or close the goal as `blocked`."#;
+    assert!(skill.contains(sentence));
+    assert_eq!(skill.matches(sentence).count(), 1);
+    assert!(!skill.replace(sentence, "").contains(sentence));
 }

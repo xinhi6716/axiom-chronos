@@ -157,15 +157,16 @@ fn pack_has_contract_changed_lines_and_new_files_only() {
         "GOAL build u",
         "-line 100",
         "+line one hundred",
-        "line 80\n",
-        "line 120\n",
+        "\n line 92\n",
+        "\n line 108\n",
+        "Every changed file follows with 8 lines of surrounding code; a new file appears in full.",
         "+brand new file",
         "- a.txt  +1 -1",
         "- new.txt  +1 -0",
     ] {
         assert!(text.contains(present), "{present}\n{text}");
     }
-    for absent in ["\n line 79\n", "\n line 121\n", "outside text"] {
+    for absent in ["\n line 91\n", "\n line 109\n", "outside text"] {
         assert!(!text.contains(absent), "{absent}");
     }
 }
@@ -267,8 +268,12 @@ fn a_verdict_needs_a_pack_of_the_verified_tree() {
     let f = Fixture::new();
     f.built();
     record_accept(&f.store, "m", &f.repo).unwrap();
-    let verdict = f.verdict("u", &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}));
+    let verdict = f.verdict(
+        "u",
+        &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}),
+    );
     let before = evidence(&f.store, "u").unwrap().len();
+    fs::remove_file(pack_path(&f.store, "u")).unwrap();
     let refused = f.review("u", &verdict);
     assert_eq!(refused.exit_code, 1);
     assert!(refused.stderr.contains("run orch review-pack first"));
@@ -295,7 +300,10 @@ fn review_stays_cross_family_with_a_pack() {
     );
     record_accept(&f.store, "m", &f.repo).unwrap();
     review_pack(&f.store, "u", &f.repo).unwrap();
-    let verdict = f.verdict("u", &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}));
+    let verdict = f.verdict(
+        "u",
+        &json!({"unit":"u","tree":verified_tree(&f.store, "u"),"verdict":"pass","findings":[]}),
+    );
     assert!(f.review("u", &verdict).stderr.contains("same family"));
 }
 
@@ -453,7 +461,10 @@ fn an_old_verdict_cannot_pass_a_new_pack() {
     assert!(fs::read_to_string(&pack.path)
         .unwrap()
         .contains(&format!("\nTree reviewed: {first}\n")));
-    let old = f.verdict("u", &json!({"unit":"u","tree":first,"verdict":"pass","findings":[]}));
+    let old = f.verdict(
+        "u",
+        &json!({"unit":"u","tree":first,"verdict":"pass","findings":[]}),
+    );
     fs::write(f.repo.join("a.txt"), "rewritten after the first review\n").unwrap();
     assert_eq!(record_verify(&f.store, "u", &f.repo).unwrap().exit_code, 0);
     record_accept(&f.store, "m", &f.repo).unwrap();
@@ -462,11 +473,20 @@ fn an_old_verdict_cannot_pass_a_new_pack() {
     let before = evidence(&f.store, "u").unwrap().len();
     let refused = f.review("u", &old);
     assert_eq!(refused.exit_code, 1, "{}", refused.stdout);
-    assert!(refused.stderr.contains(&format!("the verdict reviewed {first}")), "{}", refused.stderr);
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("the verdict reviewed {first}")),
+        "{}",
+        refused.stderr
+    );
     assert_eq!(evidence(&f.store, "u").unwrap().len(), before);
     let untreed = f.verdict("u", &json!({"unit":"u","verdict":"pass","findings":[]}));
     assert!(f.review("u", &untreed).stderr.contains("missing tree"));
-    let current = f.verdict("u", &json!({"unit":"u","tree":second,"verdict":"pass","findings":[]}));
+    let current = f.verdict(
+        "u",
+        &json!({"unit":"u","tree":second,"verdict":"pass","findings":[]}),
+    );
     let accepted = f.review("u", &current);
     assert_eq!(accepted.exit_code, 0, "{}", accepted.stderr);
     assert!(accepted.stdout.contains("u\tverified"));
@@ -477,7 +497,11 @@ fn a_large_deletion_keeps_its_last_version_readable() {
     let f = Fixture::new();
     fs::create_dir_all(f.repo.join("sub")).unwrap();
     fs::write(f.repo.join("sub/a.txt"), "a\n").unwrap();
-    fs::write(f.repo.join("sub/big.txt"), "big line of text\n".repeat(8000)).unwrap();
+    fs::write(
+        f.repo.join("sub/big.txt"),
+        "big line of text\n".repeat(8000),
+    )
+    .unwrap();
     f.add("u", "m", "sub/");
     f.work(
         "u",
@@ -556,4 +580,223 @@ fn digest_lists_changes_the_worker_did_not_report() {
         text.contains("u: git cannot compare its snapshots"),
         "{text}"
     );
+}
+
+fn set_state(f: &Fixture, unit: &str, state: &str) {
+    let path = f.store.join("units.tsv");
+    let rows = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        rows.replace(
+            &format!("{unit}\tm\tpending\t"),
+            &format!("{unit}\tm\t{state}\t"),
+        ),
+    )
+    .unwrap();
+}
+
+fn put_verdict(f: &Fixture, unit: &str, findings: Value) {
+    fs::create_dir_all(f.store.join("reports")).unwrap();
+    fs::write(
+        f.store.join(format!("reports/{unit}.verdict.json")),
+        json!({"unit":unit,"tree":"tree:old","verdict":"fail","findings":findings}).to_string(),
+    )
+    .unwrap();
+}
+
+fn row(kind: &str, command: &str, tree: &str) -> Evidence {
+    Evidence {
+        kind: kind.into(),
+        command: command.into(),
+        exit_code: 0,
+        commit: tree.into(),
+        ts: "2026-01-01".into(),
+    }
+}
+
+#[test]
+fn digest_classifies_one_and_multi_level_chains() {
+    for (states, answered) in [
+        (vec![("a", "superseded:b"), ("b", "verified")], true),
+        (
+            vec![
+                ("a", "superseded:b"),
+                ("b", "superseded:c"),
+                ("c", "verified"),
+            ],
+            true,
+        ),
+        (vec![("a", "superseded:b"), ("b", "pending")], false),
+        (vec![("a", "superseded:missing")], false),
+    ] {
+        let f = Fixture::new();
+        for (unit, state) in &states {
+            f.add(unit, "m", "a.txt");
+            set_state(&f, unit, state);
+        }
+        put_verdict(
+            &f,
+            "a",
+            json!([{"severity":"major","check":"correctness","location":"a:1","evidence":"chain finding"}]),
+        );
+        let text = report(&f, &[]);
+        let count = states
+            .iter()
+            .filter(|(_, s)| s.starts_with("superseded"))
+            .count();
+        assert!(
+            text.contains(&format!("superseded units: {count}\n")),
+            "{text}"
+        );
+        assert!(!text.contains("  a  superseded"), "{text}");
+        if answered {
+            assert!(text.contains("open findings (0;"), "{text}");
+            assert!(text.contains("answered by later units: 1\n"), "{text}");
+            assert!(!text.contains("chain finding"), "{text}");
+        } else {
+            assert!(text.contains("open findings (1;"), "{text}");
+            assert!(
+                text.contains("a  major  correctness  a:1: chain finding"),
+                "{text}"
+            );
+            assert!(!text.contains("answered by later units:"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn digest_separates_needs_ruled_minor_and_open() {
+    let f = Fixture::new();
+    f.add("u", "m", "a.txt");
+    put_verdict(
+        &f,
+        "u",
+        json!([
+            {"severity":"major","check":"untested","needs":"smoke","location":"a:1","evidence":"smoke evidence"},
+            {"severity":"blocker","check":"untested","needs":"manual","location":"a:2","evidence":"manual evidence"},
+            {"severity":"major","check":"correctness","location":"a:3","evidence":"waived evidence"},
+            {"severity":"minor","check":"style","location":"a:4","evidence":"minor evidence"},
+            {"severity":"blocker","check":"correctness","location":"a:5","evidence":"open evidence"}
+        ]),
+    );
+    append_evidence(&f.store, "u", &row("review", "reviewer", "tree:old")).unwrap();
+    append_evidence(
+        &f.store,
+        "u",
+        &findings::waive_row(3, "accepted reason", "tree:old", false),
+    )
+    .unwrap();
+    let text = report(&f, &[]);
+    for present in [
+        "open findings (1; 1 minor findings across 1 units",
+        "u  blocker  correctness  a:5: open evidence",
+        "needs a smoke or manual check (2):",
+        "u  major  smoke  a:1: smoke evidence",
+        "u  blocker  manual  a:2: manual evidence",
+        "ruled (1):",
+        "u  #3  major  a:3: accepted reason",
+    ] {
+        assert!(text.contains(present), "{present}\n{text}");
+    }
+    assert!(!text.contains("waived evidence"), "{text}");
+    assert!(!text.contains("minor evidence"), "{text}");
+}
+
+#[test]
+fn re_review_pack_contains_only_new_diff_and_unwaived_serious_findings() {
+    let f = Fixture::new();
+    f.built();
+    let first = verified_tree(&f.store, "u");
+    put_verdict(
+        &f,
+        "u",
+        json!([
+            {"severity":"blocker","check":"safety","location":"a:1","evidence":"old blocker"},
+            {"severity":"major","check":"logic","location":"a:2","evidence":"old major"},
+            {"severity":"minor","check":"style","location":"a:3","evidence":"old minor"},
+            {"severity":"major","check":"logic","location":"a:4","evidence":"old waived"}
+        ]),
+    );
+    append_evidence(&f.store, "u", &row("review", "reviewer", &first)).unwrap();
+    append_evidence(
+        &f.store,
+        "u",
+        &findings::waive_row(4, "waived", &first, true),
+    )
+    .unwrap();
+    let same_tree = review_pack(&f.store, "u", &f.repo).unwrap();
+    let same_text = fs::read_to_string(same_tree.path).unwrap();
+    assert_eq!(same_tree.files, 2);
+    assert!(same_text.contains("+line one hundred"));
+    assert!(!same_text.contains("## Earlier findings"));
+    let text = fs::read_to_string(f.repo.join("a.txt"))
+        .unwrap()
+        .replace("line 150\n", "second edit\n");
+    fs::write(f.repo.join("a.txt"), text).unwrap();
+    assert_eq!(record_verify(&f.store, "u", &f.repo).unwrap().exit_code, 0);
+    let pack = review_pack(&f.store, "u", &f.repo).unwrap();
+    let text = fs::read_to_string(pack.path).unwrap();
+    assert_eq!(pack.files, 1);
+    for present in [
+        &format!("Earlier review at: {first}"),
+        "## Earlier findings",
+        "1. blocker safety a:1: old blocker",
+        "2. major logic a:2: old major",
+        "+second edit",
+    ] {
+        assert!(text.contains(present), "{present}\n{text}");
+    }
+    for absent in ["old minor", "old waived", "+line one hundred", "new.txt"] {
+        // new.txt is in the original brief; only its diff and file listing must disappear.
+        if absent == "new.txt" {
+            assert!(!text.contains("diff --git a/new.txt"));
+            assert!(!text.contains("- new.txt  +"));
+        } else {
+            assert!(!text.contains(absent), "{absent}\n{text}");
+        }
+    }
+}
+
+#[test]
+fn fix_pack_lists_old_unwaived_serious_findings() {
+    let f = Fixture::new();
+    f.add("old", "m", "a.txt");
+    put_verdict(
+        &f,
+        "old",
+        json!([
+            {"severity":"blocker","check":"safety","location":"a:1","evidence":"fix blocker"},
+            {"severity":"major","check":"logic","location":"a:2","evidence":"fix major"},
+            {"severity":"minor","check":"style","location":"a:3","evidence":"fix minor"},
+            {"severity":"major","check":"logic","location":"a:4","evidence":"fix waived"}
+        ]),
+    );
+    append_evidence(&f.store, "old", &row("review", "reviewer", "tree:old")).unwrap();
+    append_evidence(
+        &f.store,
+        "old",
+        &findings::waive_row(4, "reason", "tree:old", true),
+    )
+    .unwrap();
+    f.add("fix", "m", "a.txt");
+    f.work(
+        "fix",
+        "gpt-6.1-terra",
+        |repo| fs::write(repo.join("a.txt"), "fixed\n").unwrap(),
+        json!({"status":"completed"}),
+    );
+    append_evidence(&f.store, "fix", &row(FIXES_KIND, "old", "")).unwrap();
+    let text = fs::read_to_string(review_pack(&f.store, "fix", &f.repo).unwrap().path).unwrap();
+    for present in [
+        "Fixes unit: old",
+        "## Findings to fix",
+        "1. blocker safety a:1: fix blocker",
+        "2. major logic a:2: fix major",
+        "The review checks these findings and the changed lines only.",
+        "+fixed",
+    ] {
+        assert!(text.contains(present), "{present}\n{text}");
+    }
+    assert!(!text.contains("fix minor"), "{text}");
+    assert!(!text.contains("fix waived"), "{text}");
 }

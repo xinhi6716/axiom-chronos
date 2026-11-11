@@ -1,6 +1,11 @@
 use crate::base;
 use serde::{Deserialize, Serialize};
 
+pub const WAIVE_KIND: &str = "waive";
+pub const FIXES_KIND: &str = "fixes";
+pub const CARRY_ENV: &str = "AXIOM_REVIEW_CARRY";
+pub const CARRIED_MARK: &str = " carried-by:";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
     pub kind: String,
@@ -8,6 +13,22 @@ pub struct Evidence {
     pub exit_code: i32,
     pub commit: String,
     pub ts: String,
+}
+
+pub fn carried_by(row: &Evidence) -> Option<Vec<String>> {
+    if row.kind != "review" {
+        return None;
+    }
+    let (_, ids) = row.command.split_once(CARRIED_MARK)?;
+    Some(ids.split(',').map(str::to_owned).collect())
+}
+
+fn review_passes(rows: &[Evidence], index: usize) -> bool {
+    let review = &rows[index];
+    review.exit_code == 0
+        || rows[index + 1..]
+            .iter()
+            .any(|r| r.kind == WAIVE_KIND && r.exit_code == 0 && r.commit == review.commit)
 }
 
 pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
@@ -43,29 +64,39 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
         .filter(|&(n, r)| {
             r.kind == "review" && checks.iter().all(|&c| n > c || rest[c].commit == r.commit)
         })
-        .map(|(_, r)| r)
+        .map(|(n, r)| (n, r))
         .collect();
-    let Some(last) = reviews.last() else {
+    let Some(&(_, last)) = reviews.last() else {
         return "built".into();
     };
-    let current: Vec<_> = reviews.iter().filter(|r| r.commit == last.commit).collect();
-    if current.iter().any(|r| r.exit_code != 0) {
+    let current: Vec<_> = reviews
+        .iter()
+        .filter(|(_, r)| r.commit == last.commit)
+        .collect();
+    if current.iter().any(|(n, _)| !review_passes(rest, *n)) {
         return "review-failed".into();
     }
-    if last.commit.is_empty() || last.commit != rest[v].commit {
+    let expected = if carried_by(last).is_some() {
+        *checks.iter().max().unwrap()
+    } else {
+        v
+    };
+    if last.commit.is_empty() || last.commit != rest[expected].commit {
         return "built".into();
     }
-    if current
-        .iter()
-        .any(|r| base::family_of(&r.command) == base::family_of(&run.command))
-    {
+    if current.iter().any(|(_, r)| {
+        let command = r
+            .command
+            .split_once(CARRIED_MARK)
+            .map_or(r.command.as_str(), |(command, _)| command);
+        base::family_of(command) == base::family_of(&run.command)
+    }) {
         return "built".into();
     }
     "verified".into()
 }
 use super::{
-    parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief,
-    with_lock,
+    parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief, with_lock,
 };
 use crate::base::{proc::ShellRun, Failure, Res};
 use std::{path::Path, time::Duration};
@@ -116,56 +147,58 @@ pub fn evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
 }
 /// Append one evidence row under the store lock.
 pub fn append_evidence(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
+    with_lock(store, false, || append_evidence_locked(store, unit, row))
+}
+/// Append a row while the caller holds the store lock.
+pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
     if !["_full", "_stages"].contains(&unit) {
         base::require_slug("unit", unit)?;
     }
-    with_lock(store, false, || {
-        let mut all = rows(store, unit)?;
-        if unit == "_stages" {
-            let dir = store.join("reports");
-            let path = dir.join("_stages.evidence.tsv");
-            let mut text = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    format!("{HEADER}\n").into_bytes()
-                }
-                Err(e) => return Err(io(e)),
-            };
-            if !text.ends_with(b"\n") {
-                text.push(b'\n');
-            }
-            let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
-            text.extend_from_slice(
-                format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    clean(&row.kind),
-                    clean(&row.command),
-                    row.exit_code,
-                    clean(&row.commit),
-                    clean(&row.ts)
-                )
-                .as_bytes(),
-            );
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            return base::atomic_write(&path, &text).map_err(io);
-        }
-        all.push(row.clone());
-        let mut text = format!("{HEADER}\n");
-        for r in all {
-            let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
-            text.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
-                clean(&r.kind),
-                clean(&r.command),
-                r.exit_code,
-                clean(&r.commit),
-                clean(&r.ts)
-            ));
-        }
+    let mut all = rows(store, unit)?;
+    if unit == "_stages" {
         let dir = store.join("reports");
+        let path = dir.join("_stages.evidence.tsv");
+        let mut text = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                format!("{HEADER}\n").into_bytes()
+            }
+            Err(e) => return Err(io(e)),
+        };
+        if !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+        text.extend_from_slice(
+            format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                clean(&row.kind),
+                clean(&row.command),
+                row.exit_code,
+                clean(&row.commit),
+                clean(&row.ts)
+            )
+            .as_bytes(),
+        );
         std::fs::create_dir_all(&dir).map_err(io)?;
-        base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
-    })
+        return base::atomic_write(&path, &text).map_err(io);
+    }
+    all.push(row.clone());
+    let mut text = format!("{HEADER}\n");
+    for r in all {
+        let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            clean(&r.kind),
+            clean(&r.command),
+            r.exit_code,
+            clean(&r.commit),
+            clean(&r.ts)
+        ));
+    }
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
 }
 fn git(repo: &Path, args: &[&str]) -> String {
     base::proc::cmd("git")
@@ -258,6 +291,122 @@ fn row(kind: &str, command: &str, exit_code: i32, commit: String) -> Evidence {
         ts: base::now_iso(),
     }
 }
+
+// Fail closed on invalid or unavailable trees; -z preserves unusual path names.
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<std::collections::BTreeSet<String>> {
+    let from = from.strip_prefix("tree:").filter(|s| !s.is_empty())?;
+    let to = to.strip_prefix("tree:").filter(|s| !s.is_empty())?;
+    let output = base::proc::cmd("git")
+        .current_dir(repo)
+        .args([
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            from,
+            to,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for path in output.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        paths.insert(std::str::from_utf8(path).ok()?.to_owned());
+    }
+    Some(paths)
+}
+
+/// Append a check and, when its changes are covered by other units, carry the review.
+pub fn append_check(
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+    check: &Evidence,
+) -> Res<Option<Vec<String>>> {
+    if !["accept", "verify"].contains(&check.kind.as_str()) {
+        return Err(invalid("expected an accept or verify row"));
+    }
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        let target = units
+            .iter()
+            .find(|u| u.id == unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        let rs = evidence(store, unit)?;
+        let mut carried = None;
+        if check.exit_code == 0
+            && std::env::var_os(CARRY_ENV).as_deref() != Some(std::ffi::OsStr::new("0"))
+        {
+            if let Some(i) = rs.iter().rposition(|r| r.kind == "review") {
+                let review = &rs[i];
+                if review_passes(&rs, i) && review.commit != check.commit {
+                    if let Some(mut remaining) =
+                        changed_paths(repo, &review.commit, &check.commit).filter(|d| !d.is_empty())
+                    {
+                        let mut ids = carried_by(review).unwrap_or_default();
+                        for other in units
+                            .iter()
+                            .filter(|u| u.id != unit && u.track == target.track)
+                        {
+                            let other_rows = evidence(store, &other.id)?;
+                            let Some(latest) = other_rows
+                                .iter()
+                                .rev()
+                                .find(|r| r.commit.starts_with("tree:"))
+                            else {
+                                continue;
+                            };
+                            let mut contributed = false;
+                            for run in other_rows
+                                .iter()
+                                .filter(|r| r.kind == "run" && r.exit_code == 0 && r.ts > review.ts)
+                            {
+                                if let Some(paths) =
+                                    changed_paths(repo, &run.commit, &latest.commit)
+                                {
+                                    for path in paths {
+                                        contributed |= remaining.remove(&path);
+                                    }
+                                }
+                            }
+                            if contributed && !ids.contains(&other.id) {
+                                ids.push(other.id.clone());
+                            }
+                            if remaining.is_empty() {
+                                break;
+                            }
+                        }
+                        if remaining.is_empty() {
+                            let command = review
+                                .command
+                                .split_once(CARRIED_MARK)
+                                .map_or(review.command.as_str(), |(command, _)| command);
+                            carried = Some((
+                                ids.clone(),
+                                row(
+                                    "review",
+                                    &format!("{command}{CARRIED_MARK}{}", ids.join(",")),
+                                    0,
+                                    check.commit.clone(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        append_evidence_locked(store, unit, check)?;
+        if let Some((_, review)) = &carried {
+            append_evidence_locked(store, unit, review)?;
+        }
+        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+        save_unit_state(store, unit, &state)?;
+        Ok(carried.map(|(ids, _)| ids))
+    })
+}
 /// Derives and saves under one lock, so a state derived from older evidence cannot land last.
 pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
     with_lock(store, false, || {
@@ -282,9 +431,10 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .collect::<Res<Vec<_>>>()?;
     let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
     for (u, scope) in units.into_iter().zip(scopes) {
-        append_evidence(
+        append_check(
             store,
             &u.id,
+            repo,
             &row(
                 "accept",
                 &m.accept_command,
@@ -292,7 +442,6 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
                 snapshot(repo, &scope),
             ),
         )?;
-        update_unit_state(store, &u.id)?;
     }
     Ok(result)
 }
@@ -325,9 +474,10 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
         .rev()
         .collect();
     base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
-    append_evidence(
+    append_check(
         store,
         unit,
+        repo,
         &row(
             "verify",
             &brief.verify,
@@ -335,7 +485,6 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
             snapshot(repo, &brief.scope),
         ),
     )?;
-    update_unit_state(store, unit)?;
     Ok(result)
 }
 pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<ShellRun> {

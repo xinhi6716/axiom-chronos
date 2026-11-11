@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod evidence;
+pub mod findings;
 pub mod handoff;
 pub mod lifecycle;
 pub mod parse;
@@ -9,6 +10,7 @@ pub mod store;
 
 pub use commands::*;
 pub use evidence::*;
+pub use findings::*;
 pub use handoff::*;
 pub use lifecycle::*;
 pub use parse::*;

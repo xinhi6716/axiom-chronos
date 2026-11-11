@@ -294,7 +294,10 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         } else {
             json!({"kind":"unit_not_built","message":"unit was not built"})
         };
-        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"registered":registered,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error});
+        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"registered":registered,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error,"pack":finished.pack});
+        if let Some(error) = finished.pack_error {
+            result["pack_error"] = json!(error);
+        }
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }

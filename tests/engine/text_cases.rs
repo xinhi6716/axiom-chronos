@@ -91,8 +91,6 @@ fn deleted_rules_have_enforcing_tests() {
         ("agents/architect.md", "Order the modules so each depends only on earlier ones and on existing code.", "orch/parse_cases.rs::map_rejections_name_module"),
         ("agents/astra.md", "Write its `structured_output` to the given path.", "bridge/codex_cases.rs::astra_save_records_only_astra"),
         ("agents/astra.md", "or the model is not an Astra model", "bridge/codex_cases.rs::sol_and_astra_restrictions"),
-        ("agents/reviewer.md", "You change nothing.", "engine/text_cases.rs::reviewer_tools_are_read_only"),
-        ("agents/reviewer.md", "and the verdict is `fail` when any finding is a blocker or major", "orch/lifecycle_cases.rs::extra_commands_preserve_output_and_failures"),
         ("agents/memory-keeper.md", "Only units in state `verified` count; that state means the dispatcher confirmed VERIFY passed and its review passed.", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "never read another unit's brief in its place", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "at most 12 lines", "memory.rs::record_search_stale_digest_and_validation"),
@@ -136,5 +134,5 @@ fn reviewer_tools_are_read_only() {
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:"))
         .collect();
-    assert_eq!(tools, [" Read, Glob, Grep, mcp__codegraph__codegraph_explore"]);
+    assert_eq!(tools, [" Read, Glob, Grep, Write, mcp__codegraph__codegraph_explore"]);
 }

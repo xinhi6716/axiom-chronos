@@ -830,7 +830,8 @@ fn verify_command_refreshes_a_stale_unit() {
     );
     let out = verify(false);
     assert_eq!(out.exit_code, 0, "{}", out.stderr);
-    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\nok"), "{}", out.stdout);
+    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\tpack="), "{}", out.stdout);
+    assert!(out.stdout.contains("\nok"), "{}", out.stdout);
     assert_eq!(
         fs::read_to_string(store.join("reports/a.verify.txt")).unwrap().trim(),
         "ok"
@@ -1019,7 +1020,7 @@ fn review_is_bound_to_unit_and_reviewer() {
     let before = evidence(&store, "a").unwrap().len();
     fs::write(
         &verdict,
-        r#"{"unit":"proc","verdict":"pass","findings":[]}"#,
+        r#"{"unit":"proc","tree":"tree:0","verdict":"pass","findings":[]}"#,
     )
     .unwrap();
     let out = call(&["a"], "chronos:reviewer", false);
@@ -1053,6 +1054,7 @@ fn review_is_bound_to_unit_and_reviewer() {
         json!({"unit":"a","tree":tree,"verdict":"pass","findings":[]}).to_string(),
     )
     .unwrap();
+    fs::remove_file(pack_path(&store, "a")).unwrap();
     assert!(call(&["a"], "chronos:reviewer", false)
         .stderr
         .contains("run orch review-pack first"));

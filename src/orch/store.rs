@@ -10,7 +10,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -151,14 +151,55 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
         .into_iter()
         .find(|u| u.id == unit)
         .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    brief_for_row(&row)
+}
+fn brief_for_row(row: &Unit) -> Res<Brief> {
     if row.brief.is_empty() {
         return Err(Failure::new(
             "no_brief",
-            format!("unit {unit} has no brief"),
+            format!("unit {} has no brief", row.id),
         ));
     }
     let text = std::fs::read_to_string(&row.brief).map_err(io)?;
     parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))
+}
+fn validate_add_brief(store: &Path, row: &Unit) -> Res<()> {
+    if !row.brief.is_empty() {
+        let text = std::fs::read_to_string(&row.brief).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                fail(format!(
+                    "brief {} does not exist; write the brief file, then add the unit",
+                    row.brief
+                ))
+            } else {
+                io(e)
+            }
+        })?;
+        let b = parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))?;
+        let path = store.join("modules.md");
+        if path.exists() {
+            let map = crate::orch::parse_map(&std::fs::read_to_string(path).map_err(io)?)
+                .map_err(fail)?;
+            if let Some(module) = map.modules.iter().find(|m| m.id == row.track) {
+                for path in &b.scope {
+                    if !crate::orch::covers(&module.paths, path) {
+                        return Err(fail(format!(
+                            "{path} is outside module {}; its PATHS are {}",
+                            module.id,
+                            module.paths.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+pub fn fixed_unit(store: &Path, unit: &str) -> Res<Option<String>> {
+    Ok(crate::orch::evidence(store, unit)?
+        .into_iter()
+        .find(|row| row.kind == crate::orch::FIXES_KIND)
+        .map(|row| row.command))
 }
 static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
 const LOCK_WAIT: Duration = Duration::from_secs(30);
@@ -377,6 +418,11 @@ pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> 
 }
 fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     let mut rows = read_units(store)?;
+    let out = supersede_rows(store, &mut rows, id, by)?;
+    save_units(store, &rows)?;
+    Ok(out)
+}
+fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Unit> {
     let find = |name: &str| {
         rows.iter()
             .find(|u| u.id == name)
@@ -392,7 +438,7 @@ fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
         )));
     }
     if new.superseded_by().is_some() {
-        return Err(fail(match standing_unit(&rows, new) {
+        return Err(fail(match standing_unit(rows, new) {
             Some(end) if end.id == id => format!("superseding {id} by {by} would form a cycle"),
             Some(end) => format!("unit {by} is already superseded; name {} instead", end.id),
             None => format!("unit {by} is already superseded and its replacement chain is broken"),
@@ -423,15 +469,15 @@ fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     let mut scope: Vec<String> = vec![];
     for u in rows
         .iter()
-        .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == id))
+        .filter(|u| standing_unit(rows, u).is_some_and(|end| end.id == id))
     {
-        match unit_brief(store, &u.id) {
+        match brief_for_row(u) {
             Ok(brief) => scope.extend(brief.scope),
             Err(e) if e.kind == "no_brief" => {}
             Err(e) => return Err(e),
         }
     }
-    let replacement = unit_brief(store, by)?.scope;
+    let replacement = brief_for_row(new)?.scope;
     let mut missing: Vec<&str> = scope
         .iter()
         .filter(|path| !crate::orch::covers(&replacement, path))
@@ -447,9 +493,7 @@ fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     }
     let row = rows.iter_mut().find(|u| u.id == id).unwrap();
     row.state = format!("{SUPERSEDED}:{by}");
-    let out = row.clone();
-    save_units(store, &rows)?;
-    Ok(out)
+    Ok(row.clone())
 }
 fn push(
     store: &Path,
@@ -1059,35 +1103,11 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     .map(|s| required(s, "brief"))
                     .transpose()?
                     .unwrap_or_default();
-                if !brief.is_empty() {
-                    let text = std::fs::read_to_string(&brief).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            fail(format!(
-                                "brief {brief} does not exist; write the brief file, then add the unit"
-                            ))
-                        } else {
-                            io(e)
-                        }
-                    })?;
-                    let b =
-                        parse_brief(&text).map_err(|why| fail(format!("brief {brief} {why}")))?;
-                    let path = store.join("modules.md");
-                    if path.exists() {
-                        let map =
-                            crate::orch::parse_map(&std::fs::read_to_string(path).map_err(io)?)
-                                .map_err(fail)?;
-                        if let Some(module) = map.modules.iter().find(|m| m.id == track) {
-                            for path in &b.scope {
-                                if !crate::orch::covers(&module.paths, path) {
-                                    return Err(fail(format!(
-                                        "{path} is outside module {}; its PATHS are {}",
-                                        module.id,
-                                        module.paths.join(", ")
-                                    )));
-                                }
-                            }
-                        }
-                    }
+                let fixes = option(args, "--fixes")?
+                    .map(|s| required(s, "fixes"))
+                    .transpose()?;
+                if fixes.is_some() && brief.is_empty() {
+                    return Err(fail("--fixes requires --brief"));
                 }
                 let row = Unit {
                     id,
@@ -1098,17 +1118,80 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     sha: String::new(),
                     brief,
                 };
+                if fixes.is_none() {
+                    validate_add_brief(store, &row)?;
+                }
                 locked(store, force, &mut note, || {
+                    if fixes.is_some() {
+                        validate_add_brief(store, &row)?;
+                    }
                     let mut rows = read_units(store)?;
+                    if let Some(old) = &fixes {
+                        if !rows.iter().any(|u| u.id == *old) {
+                            return Err(Failure::new("not_found", format!("unit {old} not found")));
+                        }
+                    }
                     if rows.iter().any(|u| u.id == row.id) {
                         return Err(fail(format!("unit {} already exists", row.id)));
                     }
+                    let chain = if let Some(old) = &fixes {
+                        rows.iter()
+                            .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == *old))
+                            .map(|u| u.id.clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                     rows.push(row.clone());
-                    save_units(store, &rows)
+                    if let Some(old) = &fixes {
+                        supersede_rows(store, &mut rows, old, &row.id)?;
+                        let mut fix_units = Vec::new();
+                        for unit in &chain {
+                            if fixed_unit(store, unit)?.is_some() {
+                                fix_units.push(unit.as_str());
+                            }
+                        }
+                        if fix_units.len() >= 2 {
+                            return Err(Failure::new("fix_rounds", format!(
+                                "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
+                                fix_units.join(", ")
+                            )));
+                        }
+                        // Validate existing evidence before either write.
+                        crate::orch::evidence(store, &row.id)?;
+                        // The add response computes readiness; reject existing invalid data
+                        // before changing either the units or evidence files.
+                        crate::orch::ready_units(store)?;
+                        crate::orch::waiting_units(store)?;
+                        let original_units = std::fs::read(store.join("units.tsv")).map_err(io)?;
+                        save_units(store, &rows)?;
+                        let appended = crate::orch::append_evidence_locked(
+                            store,
+                            &row.id,
+                            &crate::orch::Evidence {
+                                kind: crate::orch::FIXES_KIND.into(),
+                                command: old.clone(),
+                                exit_code: 0,
+                                commit: String::new(),
+                                ts: base::now_iso(),
+                            },
+                        );
+                        if let Err(error) = appended {
+                            base::atomic_write(&store.join("units.tsv"), &original_units)
+                                .map_err(io)?;
+                            return Err(error);
+                        }
+                        Ok(())
+                    } else {
+                        save_units(store, &rows)
+                    }
                 })?;
                 let next = crate::orch::next_step_for(store, &row.id)?;
                 let mut value = serde_json::to_value(&row).unwrap();
                 value["next"] = serde_json::json!(next);
+                if let Some(old) = fixes {
+                    value["fixes"] = serde_json::json!(old);
+                }
                 Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
             }
             ("unit", "set") => {
