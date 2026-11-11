@@ -2,6 +2,8 @@
 
 ## 2.0.1
 
+- `AXIOM_CODEX_MAX_PARALLEL` defaults to 48 shared Codex turns across Chronos processes, using crash-safe OS slots with cancellable waits; wishes export it, Settings persists it, and the quota strip and doctor show occupancy. 全機 Codex 並行預設 48，跨程序共用並支援等待取消、桌面設定及使用量顯示。
+
 - Configurable advanced research budgets in the environment, CLI and persisted desktop Settings, with shared validation and effective-cap notices. The council stays off by default; dollar/token defaults remain $5, 200k, 400k.
 - Three phases: ordered Astra/Fable planning, exactly one Argon review, and ordered replies only to objections. Each dialogue phase has a configurable positive round cap (default 3); phase/turn provenance, open disputes and degraded accounting survive for the core.
 - The New wish dialog shows budgets and a Settings link when research is enabled. Inline errors prevent invalid advanced wishes.

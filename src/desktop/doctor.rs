@@ -24,6 +24,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const T: Table = &[
+    ("Codex parallel limit", "Codex 並行上限"),
+    ("Codex parallel limit must be a positive whole number.", "Codex 並行上限須為正整數。"),
+    ("Invalid limit: {} = {}. {}", "上限無效：{} = {}。{}"),
     ("Advanced research budgets", "進階研究預算"),
     ("Fable dollars", "Fable 金額（美元）"),
     ("Astra tokens", "Astra token 上限"),
@@ -221,6 +224,7 @@ pub struct DoctorView {
     data_folder: PathBuf,
     recheck: Option<Recheck>,
     budget_inputs: [Entity<InputState>;4],
+    codex_limit: Entity<InputState>,
 }
 
 impl DoctorView {
@@ -247,7 +251,20 @@ impl DoctorView {
                 }
             }).detach();
         }
-        Self { state, data_folder: base::axiom_home(), recheck: None, budget_inputs }
+        let value = Store::current(cx).codex_max_parallel.clone();
+        let codex_limit = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(value, window, cx);
+            input
+        });
+        cx.subscribe(&codex_limit, |_, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = input.read(cx).value().to_string();
+                Store::edit(cx, |s| s.codex_max_parallel = value);
+                cx.notify();
+            }
+        }).detach();
+        Self { state, data_folder: base::axiom_home(), recheck: None, budget_inputs, codex_limit }
     }
 
     fn start_recheck(&mut self, cx: &mut Context<Self>) {
@@ -362,6 +379,7 @@ impl DoctorView {
         let t = cx.tokens();
         let d = theme::density(cx);
         let prefs = Store::current(cx);
+        let limit_error = prefs.codex_limit().err().map(|e| fill(tr(cx, T, "Invalid limit: {} = {}. {}"), &[e.variable, &format!("{:?}", e.value), tr(cx, T, e.reason)]));
         let languages = [("lang-system", tr(cx, T, "System"), LanguageChoice::System), ("lang-zh", tr(cx, T, "繁體中文"), LanguageChoice::ZhTw), ("lang-en", tr(cx, T, "English"), LanguageChoice::English)];
         let themes = [("theme-system", tr(cx, T, "System"), ThemeChoice::System), ("theme-light", tr(cx, T, "Light"), ThemeChoice::Light), ("theme-dark", tr(cx, T, "Dark"), ThemeChoice::Dark)];
         let boards = [("board-luna", tr(cx, T, "luna"), BoardChoice::Luna), ("board-haiku", tr(cx, T, "Haiku"), BoardChoice::Haiku), ("board-off", tr(cx, T, "Off"), BoardChoice::Off)];
@@ -369,6 +387,9 @@ impl DoctorView {
         let folder: SharedString = self.data_folder.display().to_string().into();
         let error = Store::last_error(cx).map(|error| fill(tr(cx, T, "Settings could not be saved: {}"), &[&error]));
         card(&t, tr(cx, T, "Preferences"), None, d)
+            .child(preference_row(&t, d, tr(cx, T, "Codex parallel limit"), None,
+                Input::new(&self.codex_limit).id("codex-parallel-limit").small().w_full()))
+            .when_some(limit_error, |this, error| this.child(div().id("codex-parallel-error").text_size(theme::font(d, TypeSize::Caption)).text_color(t.fail).child(error.clone().test_text(error)).test_support()))
             .child(preference_row(&t, d, tr(cx, T, "Language"), None,
                 ButtonGroup::new("language").small().outline().children(languages.map(|(id, label, choice)| {
                     let state = self.state.clone();

@@ -246,5 +246,6 @@ for line in sys.stdin:
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)
         if turn:
+            time.sleep(float(option('interrupt-delay', '0')))
             complete(*turn, 'interrupted')
     time.sleep(0)

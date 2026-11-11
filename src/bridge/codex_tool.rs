@@ -298,6 +298,8 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         if let Some(error) = finished.pack_error {
             result["pack_error"] = json!(error);
         }
+        result["slot_wait_ms"] = report["slot_wait_ms"].clone();
+        result["slot_wait"] = report["slot_wait"].clone();
         if !built {
             result["verify_tail"] = json!(finished.verify_tail);
         }

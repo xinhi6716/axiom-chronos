@@ -370,6 +370,7 @@ pub struct WishRequest {
     /// real money, so it is on only when the user turned it on for this wish.
     pub advanced_research: bool,
     pub council_budgets: Option<crate::council::Budgets>,
+    pub codex_max_parallel: Option<u64>,
 }
 
 /// What the app was doing when something went wrong.
@@ -474,6 +475,7 @@ pub struct AppState {
     pub feeds: Feeds,
     pub undo: UndoStack,
     pub quota: crate::usage::quota::Quotas,
+    pub codex_slots: Option<u64>,
     pub board: HashMap<SharedString, BoardEntry>,
     pub evolve: EvolveState,
     pub view: Screen,

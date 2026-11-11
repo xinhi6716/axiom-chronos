@@ -1,4 +1,4 @@
-use super::{AppServer, SANDBOXES};
+use super::{slots, AppServer, SANDBOXES};
 use crate::{
     base::{self, Failure, Res},
     codegraph,
@@ -6,6 +6,7 @@ use crate::{
 use serde_json::{json, Map, Value};
 use std::{
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -29,6 +30,14 @@ impl AppServer {
     }
     /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
     pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
+        self.run_cancellable(req, token_cap, None)
+    }
+    pub fn run_cancellable(
+        &self,
+        req: &RunRequest,
+        token_cap: Option<u64>,
+        stop: Option<&AtomicBool>,
+    ) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
             || req.brief.trim().is_empty()
@@ -39,6 +48,46 @@ impl AppServer {
                 "invalid sandbox, empty brief, or empty model",
             ));
         }
+        let limit = slots::from_env()?;
+        let cancellation = self.cancellation.load(Ordering::Acquire);
+        let cancelled = || {
+            self.cancellation.load(Ordering::Acquire) != cancellation
+                || stop.is_some_and(|s| s.load(Ordering::Acquire))
+        };
+        let deadline = Instant::now().checked_add(Duration::from_secs(req.timeout_s));
+        let mut wait = slots::Wait::default();
+        let stopped = || {
+            if cancelled() {
+                Err(Failure::new(
+                    "interrupted",
+                    "cancelled while waiting for a Codex slot",
+                ))
+            } else if deadline.is_some_and(|d| Instant::now() >= d) {
+                Err(Failure::new(
+                    "timeout",
+                    "timed out waiting for a Codex slot",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let slot = slots::acquire(&self.slots_home, limit, &mut wait, || stopped());
+        let _slot = match slot {
+            Ok(slot) => slot,
+            Err(e) if matches!(e.kind.as_str(), "interrupted" | "timeout") => {
+                let mut report =
+                    report_error(req, "", "", Value::Null, &e.kind, &e.kind, &e.message);
+                slot_wait(&mut report, &wait, limit);
+                return Ok(report);
+            }
+            Err(e) => return Err(e),
+        };
+        let with_wait = |mut e: Failure| {
+            if let Some(note) = wait.note(limit) {
+                e.message.push_str(&format!("; {note}"));
+            }
+            e
+        };
         let mut thread = json!({"model":req.model,"ephemeral":true,"sandbox":req.sandbox,"approvalPolicy":"never","cwd":req.cwd});
         if let Some(s) = req
             .developer_instructions
@@ -49,7 +98,9 @@ impl AppServer {
         }
         let graph = codegraph::enabled(Path::new(&req.cwd));
         let disabled = if req.lean {
-            let installed = self.request("plugin/installed", json!({"cwds":[req.cwd]}))?;
+            let installed = self
+                .request("plugin/installed", json!({"cwds":[req.cwd]}))
+                .map_err(&with_wait)?;
             let mut plugins: Vec<String> = installed["marketplaces"]
                 .as_array()
                 .into_iter()
@@ -61,7 +112,9 @@ impl AppServer {
                 .map(str::to_owned)
                 .collect();
             plugins.sort();
-            let config = self.request("config/read", json!({"cwd":req.cwd}))?;
+            let config = self
+                .request("config/read", json!({"cwd":req.cwd}))
+                .map_err(&with_wait)?;
             let mut servers: Vec<String> = config["config"]["mcp_servers"]
                 .as_object()
                 .into_iter()
@@ -91,11 +144,16 @@ impl AppServer {
         if graph {
             thread["config"]["mcp_servers"][codegraph::NAME] = codegraph::codex_server(&req.cwd);
         }
-        let started = self.request("thread/start", thread)?;
+        if let Err(e) = stopped() {
+            let mut report = report_error(req, "", "", disabled, &e.kind, &e.kind, &e.message);
+            slot_wait(&mut report, &wait, limit);
+            return Ok(report);
+        }
+        let started = self.request("thread/start", thread).map_err(&with_wait)?;
         let thread_id = started
             .pointer("/thread/id")
             .and_then(Value::as_str)
-            .ok_or_else(|| self.protocol_failure("thread/start: missing thread id"))?
+            .ok_or_else(|| with_wait(self.protocol_failure("thread/start: missing thread id")))?
             .to_owned();
         let events = self.subscribe(&thread_id);
         let mut turn = json!({"threadId":thread_id,"input":[{"type":"text","text":req.brief}]});
@@ -108,13 +166,21 @@ impl AppServer {
         if !disabled.is_null() {
             turn["disabledPluginIds"] = disabled["plugins"].clone();
         }
-        let result = self.request("turn/start", turn);
+        if let Err(e) = stopped() {
+            self.unsubscribe(&thread_id);
+            let mut report =
+                report_error(req, &thread_id, "", disabled, &e.kind, &e.kind, &e.message);
+            slot_wait(&mut report, &wait, limit);
+            return Ok(report);
+        }
+        let result = self.request("turn/start", turn).map_err(&with_wait);
         let started = match result {
             Ok(v) => v,
             Err(e) => {
                 self.unsubscribe(&thread_id);
+                self.close();
                 return if e.kind == "codex_exited" {
-                    Ok(report_error(
+                    let mut report = report_error(
                         req,
                         &thread_id,
                         "",
@@ -122,7 +188,9 @@ impl AppServer {
                         "bridge_error",
                         &e.kind,
                         &e.message,
-                    ))
+                    );
+                    slot_wait(&mut report, &wait, limit);
+                    Ok(report)
                 } else {
                     Err(e)
                 };
@@ -130,24 +198,42 @@ impl AppServer {
         };
         let Some(turn_id) = started.pointer("/turn/id").and_then(Value::as_str) else {
             self.unsubscribe(&thread_id);
-            return Err(self.protocol_failure("turn/start: missing turn id"));
+            self.close();
+            return Err(with_wait(
+                self.protocol_failure("turn/start: missing turn id"),
+            ));
         };
         self.register_turn(&thread_id, turn_id);
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
-        let deadline = Instant::now().checked_add(Duration::from_secs(req.timeout_s));
+        slot_wait(&mut report, &wait, limit);
+        let mut ending: Option<Instant> = None;
         loop {
             let remaining = deadline
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::MAX);
-            if remaining.is_zero() {
+            if ending.is_none() && (remaining.is_zero() || cancelled()) {
                 self.interrupt(&thread_id, turn_id);
-                report["status"] = json!("timeout");
-                let message = format!("turn exceeded {}s and was interrupted", req.timeout_s);
+                let status = if cancelled() {
+                    "interrupted"
+                } else {
+                    "timeout"
+                };
+                report["status"] = json!(status);
+                let message = if cancelled() {
+                    "turn was cancelled".into()
+                } else {
+                    format!("turn exceeded {}s and was interrupted", req.timeout_s)
+                };
                 report["error"] =
-                    json!({"kind":"timeout","message":self.note_untested_version(&message)});
+                    json!({"kind":status,"message":self.note_untested_version(&message)});
+                ending = Some(Instant::now());
+            }
+            // Keep the slot until completion; an unresponsive interrupted server must die first.
+            if ending.is_some_and(|at| at.elapsed() >= Duration::from_secs(30)) {
+                self.close();
                 break;
             }
-            let event = match events.recv_timeout(remaining) {
+            let event = match events.recv_timeout(Duration::from_millis(100)) {
                 Ok(event) => event,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -192,11 +278,11 @@ impl AppServer {
                 "thread/tokenUsage/updated" => {
                     report["usage"] = params["tokenUsage"]["total"].clone();
                     let total = report["usage"]["totalTokens"].as_u64().unwrap_or(0);
-                    if token_cap.is_some_and(|cap| total >= cap) {
+                    if ending.is_none() && token_cap.is_some_and(|cap| total >= cap) {
                         self.interrupt(&thread_id, turn_id);
                         report["status"] = json!("token_cap");
                         report["error"] = json!({"kind":"token_cap","message":format!("turn reached {total} tokens and was interrupted")});
-                        break;
+                        ending = Some(Instant::now());
                     }
                 }
                 "item/completed" => record_item(&mut report, &params["item"]),
@@ -204,6 +290,9 @@ impl AppServer {
                     report["error"] = turn_error(&params["error"])
                 }
                 "turn/completed" if params["turn"]["id"] == turn_id => {
+                    if ending.is_some() {
+                        break;
+                    }
                     report["status"] = params["turn"]["status"].clone();
                     if !params["turn"]["error"].is_null() {
                         report["error"] = turn_error(&params["turn"]["error"]);
@@ -260,6 +349,11 @@ impl AppServer {
         self.unsubscribe(&thread_id);
         Ok(report)
     }
+}
+
+fn slot_wait(report: &mut Value, wait: &slots::Wait, limit: u64) {
+    report["slot_wait_ms"] = json!(wait.elapsed.as_millis().min(u64::MAX as u128) as u64);
+    report["slot_wait"] = json!(wait.note(limit));
 }
 
 fn report_error(

@@ -48,6 +48,12 @@ fn codex_cli() -> Check {
     }
 }
 
+fn codex_parallel() -> Check {
+    let result = codex::slots::from_env().and_then(|cap| codex::slots::in_use(&codex::slots::home()).map(|used| format!("{used} / {cap} slots in use")));
+    let (ok, detail) = match result { Ok(s) => (true, s), Err(e) => (false, e.message) };
+    Check { label: "codex parallel", ok, required: true, detail }
+}
+
 fn tool(
     label: &'static str,
     env: &str,
@@ -300,6 +306,7 @@ pub(crate) fn checks() -> Vec<Check> {
             "Install Claude Code and sign in with `claude`.",
         ),
         codex_cli(),
+        codex_parallel(),
         sqlite(),
         state(),
         graph(),

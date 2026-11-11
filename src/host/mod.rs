@@ -21,6 +21,7 @@ pub struct Options {
     /// The council of Astra, Fable 5.2 and Argon. Costs real money, so it is off unless asked for.
     pub advanced_research: bool,
     pub council_budgets: Option<crate::council::Budgets>,
+    pub codex_max_parallel: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +157,7 @@ impl Wish {
         let launch = session::Launch {
             advanced_research: options.advanced_research,
             council_budgets: options.council_budgets,
+            codex_max_parallel: options.codex_max_parallel,
         };
         let spawned = session::spawn_with(
             &config,

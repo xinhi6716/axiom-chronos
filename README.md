@@ -81,6 +81,8 @@ Every wish starts with Astra: Astra plans the change, `chronos:critic` reviews t
 
 The architect splits the work into modules with contracts and acceptance tests. The dispatcher sends each unit to a Codex `terra` worker; `sol` steps in only when the full suite fails after several units changed files.
 
+`AXIOM_CODEX_MAX_PARALLEL` caps Chronos Codex turns across processes sharing the data home (default 48); full pools wait and remain cancellable. Settings saves the cap for app wishes, and the quota strip and `axiom doctor` show slots in use. Codex runs you start yourself are excluded.
+
 Claude (`chronos:reviewer`, `chronos:critic`) reviews the Codex work; a Haiku narrator writes the final report from the engine digest and the core's rulings.
 
 The binary enforces the gates: no write without a claimed unit, no verified unit without a passing review of the exact files, no finished goal without a current full test.

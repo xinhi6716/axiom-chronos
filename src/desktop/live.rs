@@ -94,6 +94,7 @@ enum Update {
     Corrected { id: i64, prior: MemoryPrior },
     Feed { kind: FeedKind, error: Option<String> },
     Quota(Quotas),
+    CodexSlots(Option<u64>),
     Checks(Vec<Check>),
     Failed { action: Action, session: Option<String>, message: String },
 }
@@ -350,6 +351,7 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
                 state.quota = quotas;
                 state.feeds.quota.loaded = true;
             },
+            Update::CodexSlots(used) => state.codex_slots = used,
             Update::Corrected { id, prior } => state.record_undo(Undoable::Memory { id, prior }),
             Update::Feed { kind, error } => {
                 let feed = state.feeds.get_mut(kind);
@@ -781,6 +783,7 @@ impl Engine {
             .any(|run| matches!(run.status, RunStatus::Active | RunStatus::LimitWait)));
         let generation = self.rate_source.generation();
         if !force && !quota::due(now, self.quota_started, self.quota_last, generation, self.runs_revision, active) { return; }
+        self.inbox.push(Update::CodexSlots(crate::codex::slots::in_use(&self.home).ok()));
         self.quota_busy = true;
         self.quota_last = Some((now, generation, self.runs_revision));
         let source = self.rate_source.clone();
@@ -851,7 +854,7 @@ impl Engine {
         self.open = Some(key.clone());
         // Starting a process takes a moment; the run should appear before it does.
         self.publish();
-        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research, council_budgets:request.council_budgets };
+        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research, council_budgets:request.council_budgets, codex_max_parallel: request.codex_max_parallel };
         match host::Wish::start((self.config)(), &request.cwd, &request.wish, &options) {
             Ok(wish) => {
                 if let Some(entry) = self.hosted.get_mut(&key) {
@@ -2481,7 +2484,7 @@ mod tests {
 
         backend.start_wish(WishRequest {
             cwd: PathBuf::from("project"), wish: "wish".into(), creative: false,
-            max_turns: None, advanced_research: false, council_budgets:None,
+            max_turns: None, advanced_research: false, council_budgets:None, codex_max_parallel:None,
         }).unwrap();
         backend.refresh().unwrap();
         backend.follow("session").unwrap();
@@ -3104,6 +3107,36 @@ mod tests {
     }
 
     #[test]
+    fn slots_refresh_only_when_the_existing_quota_read_is_due() {
+        let mut rig = rig();
+        let (_source, _events) = fake_source(&mut rig, vec![Err(Failure::new("test", "offline")), Err(Failure::new("test", "offline")), Err(Failure::new("test", "offline"))]);
+        let folder = rig.engine.home.join("codex-slots");
+        fs::create_dir_all(&folder).unwrap();
+        let f = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(folder.join("0.lock")).unwrap();
+        f.lock().unwrap();
+        rig.engine.schedule_quota(false);
+        assert!(!rig.updates().iter().any(|u| matches!(u, Update::CodexSlots(_))));
+        rig.engine.schedule_quota(true);
+        receive_quota_command(&mut rig);
+        let mut state = state_with(vec![]);
+        apply(&mut state, rig.updates());
+        assert_eq!(state.codex_slots, Some(1));
+        drop(f);
+        rig.engine.schedule_quota(false);
+        assert!(!rig.updates().iter().any(|u| matches!(u, Update::CodexSlots(_))));
+        rig.engine.schedule_quota(true);
+        receive_quota_command(&mut rig);
+        apply(&mut state, rig.updates());
+        assert_eq!(state.codex_slots, Some(0));
+        fs::remove_file(folder.join("0.lock")).unwrap(); fs::remove_dir(&folder).unwrap(); fs::write(&folder, "file").unwrap();
+        rig.engine.schedule_quota(true);
+        receive_quota_command(&mut rig);
+        apply(&mut state, rig.updates());
+        assert_eq!(state.codex_slots, None);
+        rig.engine.shutdown();
+    }
+
+    #[test]
     fn claude_merge_does_not_clear_codex_error_or_dedupe() {
         let mut rig = rig();
         let mut state = state_with(vec![]);
@@ -3406,7 +3439,7 @@ mod tests {
             wish: "x".into(),
             creative: false,
             max_turns: None,
-            advanced_research: false, council_budgets:None,
+            advanced_research: false, council_budgets:None, codex_max_parallel:None,
         }));
         let updates = rig.updates();
         let provisional = updates.iter().find_map(|u| match u {
@@ -3431,7 +3464,7 @@ mod tests {
             wish: wish.into(),
             creative: false,
             max_turns: None,
-            advanced_research: false, council_budgets:None,
+            advanced_research: false, council_budgets:None, codex_max_parallel:None,
         }));
         let message = rig
             .updates()

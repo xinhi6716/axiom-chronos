@@ -305,6 +305,7 @@ pub fn state_at(now: i64) -> AppState {
     let mut state = AppState {
         feeds: Feeds::default(),
         undo: UndoStack::default(),
+        codex_slots: None,
         quota: Quotas {
             claude: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.62), weekly: window(WindowKind::Weekly, 0.41) },
             codex: ProviderQuota { five_hour: window(WindowKind::FiveHour, 0.15), weekly: None },

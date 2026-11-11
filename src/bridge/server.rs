@@ -74,7 +74,7 @@ impl Bridge {
     pub fn codex(&self) -> Res<Arc<AppServer>> {
         let mut lock = self.codex.lock().unwrap_or_else(|e| e.into_inner());
         if lock.is_none() {
-            *lock = Some(Arc::new(AppServer::new(self.config.codex.clone()?)));
+            *lock = Some(Arc::new(AppServer::new(self.config.codex.clone()?).with_slots_home(self.config.data_home.clone().unwrap_or_else(crate::codex::slots::home))));
         }
         Ok(lock.as_ref().unwrap().clone())
     }

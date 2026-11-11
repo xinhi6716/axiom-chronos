@@ -159,3 +159,16 @@ fn settings_budget_input_updates_the_store_and_shows_inline_validation(cx: &mut 
     let text=cx.update_window(window,|_,window,_|gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ")).unwrap();
     assert!(text.contains("Invalid budget") && text.contains("AXIOM_FABLE_CAP_USD") && text.contains("NaN"),"{text}");
 }
+
+#[gpui_kit::test]
+fn settings_codex_limit_validates_inline(cx: &mut TestAppContext) {
+    let (window, _)=open_with(cx,|s|s.view=Screen::Doctor);
+    cx.update_window(window,|_,window,cx|window.click("codex-parallel-limit",cx)).unwrap();frame(cx,window);
+    press(cx,window,"ctrl-a");type_text(cx,window,"0");
+    let text=cx.update_window(window,|_,window,_|gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ")).unwrap();
+    assert!(text.contains("AXIOM_CODEX_MAX_PARALLEL") && text.contains("positive whole number"),"{text}");
+    press(cx,window,"ctrl-a");type_text(cx,window,"3");
+    assert!(!shown(cx,window,"codex-parallel-error"));
+    let saved=cx.update(|cx|Store::current(cx).to_json());
+    assert!(saved.contains("\"codex_max_parallel\": \"3\""), "{saved}");
+}

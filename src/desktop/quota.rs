@@ -9,6 +9,7 @@ use gpui_kit::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const T: Table = &[
+    ("Codex parallel {} / {}", "Codex 並行 {} / {}"),
     ("5 hours", "5 小時"), ("weekly", "每週"),
     ("{}% left", "剩 {}%"),
     ("{} min", "{} 分"), ("{} h", "{} 小時"), ("{} d", "{} 天"),
@@ -162,13 +163,30 @@ fn strip_layout(state: &AppState, cx: &App, compact: bool) -> AnyElement {
         .border_t_1().border_color(t.border).bg(t.surface).text_size(theme::font(d, TypeSize::Caption))
         .child(provider("Claude", &state.quota.claude, "quota-claude", "quota-claude-five-hour", "quota-claude-weekly"))
         .child(provider("Codex", &state.quota.codex, "quota-codex", "quota-codex-five-hour", "quota-codex-weekly"))
+        .when(!compact, |row| {
+            let value = parallel_text(state.codex_slots, super::settings::Store::current(cx).codex_limit().ok(), lang);
+            row.child(div().id("codex-parallel").flex_none().text_color(t.muted).child(value.clone().test_text(value)).test_support())
+        })
         .test_support().into_any_element()
+}
+
+fn parallel_text(used: Option<u64>, cap: Option<u64>, lang: Lang) -> String {
+    let word = |n: Option<u64>| n.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
+    fill(lang, "Codex parallel {} / {}", &[&word(used), &word(cap)])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn parallel_readout_has_both_languages_and_unknown_counts() {
+        assert_eq!(parallel_text(Some(7), Some(48), Lang::ZhTw), "Codex 並行 7 / 48");
+        assert_eq!(parallel_text(Some(2), Some(3), Lang::En), "Codex parallel 2 / 3");
+        assert_eq!(parallel_text(None, Some(48), Lang::En), "Codex parallel — / 48");
+        assert_eq!(parallel_text(None, None, Lang::ZhTw), "Codex 並行 — / —");
+    }
 
     const NOW: i64 = 1_704_067_200;
     fn window(kind: WindowKind, used: f32, reset: Option<i64>, observed: i64) -> Window {

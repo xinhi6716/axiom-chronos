@@ -197,6 +197,7 @@ pub struct Settings {
     pub board: BoardChoice,
     pub board_tokens: BoardTokens,
     pub council_budgets: BudgetInputs,
+    pub codex_max_parallel: String,
 }
 
 impl Default for Settings {
@@ -218,6 +219,7 @@ impl Default for Settings {
             board: BoardChoice::default(),
             board_tokens: BoardTokens::default(),
             council_budgets: BudgetInputs::default(),
+            codex_max_parallel: crate::codex::slots::DEFAULT.to_string(),
         }
     }
 }
@@ -262,6 +264,7 @@ impl Settings {
                 Some((key.clone(), memory))
             }).collect()).unwrap_or_default(),
             council_budgets: BudgetInputs::parse(root.get("council_budgets")),
+            codex_max_parallel: root.get("codex_max_parallel").map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_else(|| crate::codex::slots::DEFAULT.to_string()),
             board: match word("board") { Some("haiku") => BoardChoice::Haiku, Some("off") => BoardChoice::Off, _ => BoardChoice::Luna },
             board_tokens: BoardTokens {
                 input: root.pointer("/board_tokens/input").and_then(Value::as_u64).unwrap_or(0),
@@ -281,6 +284,7 @@ impl Settings {
             "filter": v.filter, "sort": v.sort, "scroll": v.scroll, "selected": v.selected,
         }))).collect();
         let body = json!({
+            "codex_max_parallel": self.codex_max_parallel,
             "council_budgets":self.council_budgets,
             "language": key_of(&LANGUAGE_KEYS, self.language),
             "theme": key_of(&THEME_KEYS, self.theme),
@@ -299,6 +303,9 @@ impl Settings {
             "board_tokens": { "input": self.board_tokens.input, "output": self.board_tokens.output, "unreported": self.board_tokens.unreported },
         });
         serde_json::to_string_pretty(&body).unwrap_or_default()
+    }
+    pub fn codex_limit(&self) -> Result<u64, crate::council::budgets::BudgetError> {
+        crate::codex::slots::parse(Some(self.codex_max_parallel.clone()))
     }
 }
 
@@ -621,6 +628,17 @@ pub fn opening_bounds(settings: &Settings, default: Size<Pixels>, min: Size<Pixe
 #[cfg(test)]
 mod tests {
     #[test]
+    fn codex_limit_drafts_persist_and_default_to_48() {
+        for value in ["2", "0", "bad", ""] {
+            let settings = super::Settings::parse(&serde_json::json!({"codex_max_parallel":value}).to_string());
+            let saved: serde_json::Value = serde_json::from_str(&settings.to_json()).unwrap();
+            assert_eq!(saved["codex_max_parallel"], value);
+            assert_eq!(settings.codex_limit().is_ok(), value == "2");
+        }
+        let saved: serde_json::Value = serde_json::from_str(&super::Settings::default().to_json()).unwrap();
+        assert_eq!(saved["codex_max_parallel"], "48");
+    }
+    #[test]
     fn council_inputs_round_trip_including_invalid_drafts() {
         for fable in ["20", "NaN", "201", ""] {
             let budgets = serde_json::json!({"fable":fable,"astra":"600000","argon":"400000","rounds":"3"});
@@ -651,6 +669,7 @@ mod tests {
             views: BTreeMap::from([("run".into(), ViewMemory { filter: Some("open".into()), sort: Some("new".into()), scroll: 42.0, selected: Some("item".into()) })]),
             board: BoardChoice::Haiku,
             board_tokens: BoardTokens { input: 123, output: 45, unreported: 2 },
+            codex_max_parallel: "48".into(),
             council_budgets: BudgetInputs::default(),
         }
     }

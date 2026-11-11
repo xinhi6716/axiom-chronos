@@ -29,6 +29,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 const T: Table = &[
+    ("Fix the Codex parallel limit in Settings.", "請到設定修正 Codex 並行上限。"),
     ("Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase", "Fable ${} · Astra {} · Argon {} tokens · 每階段 {} 輪"),
     ("Change budgets in Settings", "到設定調整預算"),
     ("Fix advanced research budgets in Settings.", "請到設定修正進階研究預算。"),
@@ -156,6 +157,7 @@ pub(super) enum Blocked {
     NoWish,
     BadTurns,
     BadBudgets,
+    BadCodexLimit,
 }
 
 impl Blocked {
@@ -166,6 +168,7 @@ impl Blocked {
             Self::Checking => "Checking the folder first…",
             Self::NoWish => "Write your wish to start.",
             Self::BadBudgets => "Fix advanced research budgets in Settings.",
+            Self::BadCodexLimit => "Fix the Codex parallel limit in Settings.",
             Self::BadTurns => "Maximum turns must be a whole number above 0.",
         }
     }
@@ -214,7 +217,7 @@ pub(super) fn asks_before_discarding(wish: &str) -> bool {
 
 /// The request Start sends. The council is on only when the switch was turned on in this dialog.
 pub(super) fn request(cwd: PathBuf, ready: Ready, creative: bool, research: &Activation, budgets: crate::council::Budgets) -> WishRequest {
-    WishRequest { cwd, wish: ready.wish, creative, max_turns: ready.max_turns, advanced_research: research.is_on(), council_budgets:research.is_on().then_some(budgets) }
+    WishRequest { cwd, wish: ready.wish, creative, max_turns: ready.max_turns, advanced_research: research.is_on(), council_budgets:research.is_on().then_some(budgets), codex_max_parallel:None }
 }
 
 /// Reads `git status --porcelain=v2 --branch`.
@@ -917,6 +920,7 @@ impl Composer {
     }
 
     fn verdict(&self, cx: &App) -> Result<Ready, Blocked> {
+        if super::settings::Store::current(cx).codex_limit().is_err() { return Err(Blocked::BadCodexLimit); }
         if self.research.is_on() && super::settings::Store::current(cx).council_budgets.validate().is_err() { return Err(Blocked::BadBudgets); }
         validate(self.folder.is_some(), &self.check, &self.wish.read(cx).value(), &self.turns.read(cx).value())
     }
@@ -930,7 +934,8 @@ impl Composer {
             return;
         }
         let budgets=super::settings::Store::current(cx).council_budgets.validate().unwrap_or_default();
-        let request = request(cwd, ready, self.creative, &self.research, budgets);
+        let mut request = request(cwd, ready, self.creative, &self.research, budgets);
+        request.codex_max_parallel = super::settings::Store::current(cx).codex_limit().ok();
         self.state.update(cx, |s, cx| {
             s.set_view(Screen::Run, cx);
             s.start_wish(request, cx);
@@ -1931,7 +1936,7 @@ mod tests {
             assert!(known, "missing translation: {}", &capture[1]);
         }
         assert!(found > 20);
-        for key in ["Change budgets in Settings","Fix advanced research budgets in Settings.","Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase"] {
+        for key in ["Fix the Codex parallel limit in Settings.","Change budgets in Settings","Fix advanced research budgets in Settings.","Fable ${} · Astra {} · Argon {} tokens · {} rounds/phase"] {
             assert_ne!(super::super::i18n::translate(super::super::i18n::Lang::ZhTw,T,key),key);
             assert_eq!(super::super::i18n::translate(super::super::i18n::Lang::En,T,key),key);
         }

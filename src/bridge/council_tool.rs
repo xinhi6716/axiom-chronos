@@ -63,7 +63,7 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         keep_plugins: vec![],
         web_search: false,
     };
-    let report = match server.run_capped(&run, Some(request.token_cap)) {
+    let report = match server.run_cancellable(&run, Some(request.token_cap), Some(b.council_flags().1)) {
         Ok(report) => report,
         Err(e) => return failed(e),
     };
@@ -84,7 +84,8 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         output: (status == Status::Ok).then(|| report["structured_output"].clone()),
         tokens: report["usage"]["totalTokens"].as_u64().unwrap_or(0),
         model: Some(model),
-        detail: (status != Status::Ok).then(|| report["error"]["message"].to_string()),
+        detail: if status == Status::Ok { report["slot_wait"].as_str().map(str::to_owned) }
+            else { Some(format!("{}{}", report["error"]["message"], report["slot_wait"].as_str().map(|s| format!("; {s}")).unwrap_or_default())) },
     }
 }
 

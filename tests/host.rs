@@ -231,6 +231,18 @@ fn argv_of(record: &Value) -> Vec<String> {
 }
 
 #[test]
+fn desktop_launch_options_export_the_codex_cap() {
+    let setup = Setup::new("ok");
+    let options = Options { codex_max_parallel: Some(7), ..Options::default() };
+    let wish = Wish::start(setup.config(), setup.project(), "test", &options).unwrap();
+    assert_eq!(wish.wait().unwrap(), 0);
+    assert_eq!(setup.record()["env"]["AXIOM_CODEX_MAX_PARALLEL"], "7");
+    let options = Options { codex_max_parallel: Some(0), ..Options::default() };
+    let err = Wish::start(setup.config(), setup.project(), "test", &options).err().unwrap();
+    assert!(err.message.contains("AXIOM_CODEX_MAX_PARALLEL") && err.message.contains("\"0\""));
+}
+
+#[test]
 fn advanced_research_reaches_the_launch_and_stays_with_the_session() {
     let setup = Setup::new("ok");
     let options = Options {

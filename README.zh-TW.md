@@ -84,6 +84,8 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 
 architect 把工作切成模組，每個模組有介面規格與驗收測試。調度代理把每個單元交給 Codex `terra` 實作；只有多個單元改檔後完整測試失敗時，才由 `sol` 整合。
 
+`AXIOM_CODEX_MAX_PARALLEL` 限制共用資料目錄的 Chronos 程序之 Codex 並行回合，預設 48；滿額時等待且仍可取消。設定可儲存桌面許願的上限，額度列與 `axiom doctor` 顯示使用槽數；不計入你自行啟動的 Codex。
+
 審查由 Claude（`chronos:reviewer`、`chronos:critic`）負責審 Codex 的成果；Haiku 敘述員依引擎摘要與核心裁決撰寫最終報告。
 
 關卡由執行檔強制：沒有占用單元不能寫檔、審查沒通過那份檔案的單元不算驗收、沒有最新的完整測試不能結案。

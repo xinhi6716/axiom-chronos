@@ -189,6 +189,7 @@ fn a_major_finding_fails_a_pass_verdict() {
         files: vec![],
         omitted: vec![],
         fallback: None,
+        slot_wait: None,
     };
     assert!(!r.pass());
 }

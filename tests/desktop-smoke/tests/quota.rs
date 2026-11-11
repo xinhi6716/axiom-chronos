@@ -89,6 +89,10 @@ fn check(cx: &mut TestAppContext, handle: AnyWindowHandle, mini: bool, zh: bool)
 fn main_quota_meters(cx: &mut TestAppContext) {
     let (main, _) = open(cx);
     check(cx, main, false, false);
+    cx.update_window(main, |_, window, _| {
+        let text = gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("Codex parallel — / 48"), "{text}");
+    }).unwrap();
     cx.update(|cx| { i18n::set(i18n::Lang::ZhTw, cx); theme::set_density(theme::Density::Dense, cx); });
     frame(cx, main);
     check(cx, main, false, true);
