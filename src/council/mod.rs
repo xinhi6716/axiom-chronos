@@ -5,6 +5,7 @@ pub mod budgets;
 pub use budgets::Budgets;
 mod converge;
 mod member;
+pub mod running;
 pub use converge::{digest, stage_note, DIGEST_MAX_CHARS};
 
 use crate::base::{self, Failure, Res};

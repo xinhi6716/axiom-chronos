@@ -56,7 +56,7 @@ Inside Claude Code, use `/chronos:wish` with the same text.
 
 ## Desktop app
 
-The Windows-only desktop app lets you make a wish, watch it and steer it without a terminal. Start it with `chronos` or the Start menu shortcut. Builds with the `app` feature also accept `axiom app`. To build the desktop program yourself, run `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --features app --bin chronos`.
+The Windows-only desktop app lets you make a wish, watch it and steer it without a terminal. Start it with `chronos` or the Start menu shortcut. Builds with the `app` feature also accept `axiom app`. To build the desktop program yourself, run `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --features app --bin chronos`. The bottom strip hides quota windows absent from fresh plan snapshots and shows live per-model concurrency with celestial vector glyphs; Mini falls back to the parallel total when space is short.
 
 The main screens are **Run** (a checklist of goals, modules and units, a live graph of the run, and the brief, report, verify output and review of each unit), **Wishes** (past and running wishes, and which one needs you), **Memory** (what Chronos remembers; correct or delete an entry), **Usage** (tokens and cost per run) and **Settings** (language, theme, health check). Ctrl+N makes a new wish and Ctrl+K searches everything. A wish started in a terminal shows up there too, view only.
 

@@ -230,8 +230,8 @@ fn demo_data_and_scenes() {
     for kind in KINDS { assert_eq!(panel_state(initial.feeds.get(kind), false), PanelState::Ready); }
     close(initial.quota.claude.five_hour.as_ref().unwrap().left(), 0.62);
     close(initial.quota.claude.weekly.as_ref().unwrap().left(), 0.41);
-    close(initial.quota.codex.five_hour.as_ref().unwrap().left(), 0.15);
-    assert!(initial.quota.codex.weekly.is_none());
+    assert!(initial.quota.codex.five_hour.is_none());
+    close(initial.quota.codex.weekly.as_ref().unwrap().left(), 0.58);
     assert!(initial.undo.is_empty());
     assert_eq!(initial.board.len(), board_runs(&initial).len());
     for i in board_runs(&initial) {

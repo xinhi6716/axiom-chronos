@@ -193,6 +193,7 @@ fn run_process(
     stdin: Option<String>,
     timeout: Duration,
     stop: &AtomicBool,
+    member: &str,
     on_line: &mut dyn FnMut(&[u8]) -> bool,
 ) -> std::io::Result<Finished> {
     command
@@ -204,6 +205,8 @@ fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    // Reporting failure must not abort a paid call or invent an occupancy.
+    let _running = super::running::Member::start(&crate::codex::slots::home(), member).ok();
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         std::thread::spawn(move || {
             let _ = pipe.write_all(text.as_bytes());
@@ -416,6 +419,7 @@ pub(super) fn ask_fable(
         Some(ask.prompt),
         ask.timeout,
         ask.stop,
+        "fable",
         &mut |line| {
             let Ok(event) = serde_json::from_slice::<Value>(line) else {
                 return true;
@@ -560,7 +564,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
     child.env_remove(super::ENV);
     // A margin past --print-timeout, so agy can report its own timeout first.
     let limit = ask.timeout + Duration::from_secs(30);
-    let finished = match run_process(child, None, limit, ask.stop, &mut |_| true) {
+    let finished = match run_process(child, None, limit, ask.stop, "argon", &mut |_| true) {
         Ok(f) => f,
         Err(e) => return spawn_failure(e),
     };

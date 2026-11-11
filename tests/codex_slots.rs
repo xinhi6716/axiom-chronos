@@ -206,6 +206,12 @@ fn concurrent_processes_share_the_pool_and_reuse_released_slots() {
     let mut b = child(home, "b", "2", "active");
     until(|| turns(home, "a") == 1 && turns(home, "b") == 1);
     assert_eq!(axiom::codex::slots::in_use(home).unwrap(), 2);
+    for index in 0..2 {
+        let path = home.join(format!("codex-slots/{index}.json"));
+        let record: Value = serde_json::from_slice(&fs::read(&path).expect("occupied slot records its model")).unwrap();
+        assert_eq!(record["model"], "gpt-6.1-terra");
+    }
+
     let mut c = child(home, "c", "2", "run");
     until(|| home.join("c.ready").exists());
     std::thread::sleep(Duration::from_millis(200));
@@ -249,4 +255,22 @@ fn counting_uses_locks_and_propagates_unreadable_folders() {
     assert!(axiom::codex::slots::in_use(&bad).is_err());
     assert_eq!(axiom::codex::slots::parse(None).unwrap(), 48);
     assert_eq!(axiom::codex::slots::parse(Some("50".into())).unwrap(), 50);
+}
+
+#[test]
+fn model_occupancy_ignores_released_slots_and_hides_failed_model_reads() {
+    let t=common::temp(); let home=t.path();
+    let first=axiom::codex::slots::acquire(home,2,&mut Default::default(),||Ok(())).unwrap();
+    first.model("gpt-6.1-terra").unwrap();
+    let second=axiom::codex::slots::acquire(home,2,&mut Default::default(),||Ok(())).unwrap();
+    second.model("unknown-full-model-id").unwrap();
+    let reading=axiom::codex::slots::occupancy(home).unwrap();
+    assert_eq!(reading.total,2);
+    assert_eq!(reading.models.unwrap().into_iter().collect::<Vec<_>>(),vec![("gpt-6.1-terra".into(),1),("unknown-full-model-id".into(),1)]);
+    drop(second);
+    assert_eq!(axiom::codex::slots::occupancy(home).unwrap().models.unwrap().len(),1);
+    fs::write(home.join("codex-slots/0.json"),"bad").unwrap();
+    let reading=axiom::codex::slots::occupancy(home).unwrap();
+    assert_eq!(reading.total,1); assert!(reading.models.is_none());
+    drop(first); assert_eq!(axiom::codex::slots::occupancy(home).unwrap().total,0);
 }

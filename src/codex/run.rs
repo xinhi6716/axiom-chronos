@@ -82,6 +82,7 @@ impl AppServer {
             }
             Err(e) => return Err(e),
         };
+        _slot.model(&req.model)?;
         let with_wait = |mut e: Failure| {
             if let Some(note) = wait.note(limit) {
                 e.message.push_str(&format!("; {note}"));

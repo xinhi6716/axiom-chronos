@@ -470,12 +470,24 @@ pub struct Address {
     pub text: SharedString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ModelProvider { Codex, Claude, Gemini }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningModel {
+    pub provider: ModelProvider,
+    pub model: String,
+    pub count: u64,
+}
+
 /// The single shared model. Screens read it and call its command methods.
 pub struct AppState {
     pub feeds: Feeds,
     pub undo: UndoStack,
     pub quota: crate::usage::quota::Quotas,
     pub codex_slots: Option<u64>,
+    pub codex_models: Vec<RunningModel>,
+    pub live_models: Vec<RunningModel>,
     pub board: HashMap<SharedString, BoardEntry>,
     pub evolve: EvolveState,
     pub view: Screen,

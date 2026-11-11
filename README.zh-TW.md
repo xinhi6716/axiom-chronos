@@ -57,7 +57,7 @@ axiom wish 在 cli.py 加一個 --stats 參數，印出 已完成/總數
 
 ## 桌面應用程式
 
-桌面應用程式僅支援 Windows，不用開終端機就能許願、觀看並調整進行中的工作。用 `chronos` 或開始功能表捷徑啟動。啟用 `app` feature 的建置也能執行 `axiom app`。想自行建置桌面程式，可執行 `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --features app --bin chronos`。
+桌面應用程式僅支援 Windows，不用開終端機就能許願、觀看並調整進行中的工作。用 `chronos` 或開始功能表捷徑啟動。啟用 `app` feature 的建置也能執行 `axiom app`。想自行建置桌面程式，可執行 `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --features app --bin chronos`。 底欄隱藏新鮮方案快照未提供的額度視窗，並以天體向量圖符顯示各模型即時並行數；迷你視窗空間不足時只顯示並行總數。
 
 主要畫面：**Run**（目標、模組、單元的待辦清單，即時的執行圖，以及每個單元的 brief、報告、驗證輸出與審查）、**Wishes**（過去與進行中的願望，哪一個需要你處理）、**Memory**（Chronos 記得什麼，可更正或刪除條目）、**Usage**（每次執行的 token 與費用）、**Settings**（語言、主題、健康檢查）。Ctrl+N 新增願望、Ctrl+K 搜尋全部。在終端機啟動的願望也會出現在這裡，但只能檢視。
 

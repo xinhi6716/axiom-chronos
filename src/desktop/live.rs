@@ -95,6 +95,8 @@ enum Update {
     Feed { kind: FeedKind, error: Option<String> },
     Quota(Quotas),
     CodexSlots(Option<u64>),
+    CodexModels(Vec<RunningModel>),
+    LiveModels(Vec<RunningModel>),
     Checks(Vec<Check>),
     Failed { action: Action, session: Option<String>, message: String },
 }
@@ -352,6 +354,8 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
                 state.feeds.quota.loaded = true;
             },
             Update::CodexSlots(used) => state.codex_slots = used,
+            Update::CodexModels(models) => state.codex_models = models,
+            Update::LiveModels(models) => state.live_models = models,
             Update::Corrected { id, prior } => state.record_undo(Undoable::Memory { id, prior }),
             Update::Feed { kind, error } => {
                 let feed = state.feeds.get_mut(kind);
@@ -502,6 +506,7 @@ struct Engine {
     reported: HashSet<String>,
     feed_sent: Vec<(FeedKind, Option<String>)>,
     sent: Option<Vec<Run>>,
+    live_models: Vec<RunningModel>,
     renamed: Vec<(String, String)>,
     open: Option<String>,
     provisional_count: u64,
@@ -558,6 +563,7 @@ impl Engine {
             reported: HashSet::new(),
             feed_sent: vec![],
             sent: None,
+            live_models: vec![],
             renamed: vec![],
             open: None,
             provisional_count: 0,
@@ -773,6 +779,14 @@ impl Engine {
         for quota in quotas { self.merge_quota(Provider::Claude, quota); }
     }
 
+    fn refresh_codex_models(&self) {
+        let reading = crate::codex::slots::occupancy(&self.home).ok();
+        self.inbox.push(Update::CodexSlots(reading.as_ref().map(|r|r.total)));
+        let models = reading.and_then(|r|r.models).unwrap_or_default().into_iter()
+            .map(|(model,count)| RunningModel { provider:ModelProvider::Codex,model,count }).collect();
+        self.inbox.push(Update::CodexModels(models));
+    }
+
     fn schedule_quota(&mut self, force: bool) {
         if self.quota_busy {
             if force { self.quota_reload_pending = true; }
@@ -783,7 +797,7 @@ impl Engine {
             .any(|run| matches!(run.status, RunStatus::Active | RunStatus::LimitWait)));
         let generation = self.rate_source.generation();
         if !force && !quota::due(now, self.quota_started, self.quota_last, generation, self.runs_revision, active) { return; }
-        self.inbox.push(Update::CodexSlots(crate::codex::slots::in_use(&self.home).ok()));
+        self.refresh_codex_models();
         self.quota_busy = true;
         self.quota_last = Some((now, generation, self.runs_revision));
         let source = self.rate_source.clone();
@@ -1257,7 +1271,18 @@ impl Engine {
     /// Sends the runs if anything about them changed.
     fn publish(&mut self) {
         let runs = self.compose();
+        let mut live = self.snapshot.as_ref().map(|snapshot| snapshot_models(snapshot,&runs)).unwrap_or_default();
+        if let Ok(models) = crate::council::running::models(&self.home) {
+            live.extend(models.into_iter().map(|(model,count)| RunningModel {
+                provider:if model==crate::council::ARGON_MODEL { ModelProvider::Gemini } else { ModelProvider::Claude },model,count
+            }));
+        }
+        if self.live_models != live {
+            self.live_models = live.clone();
+            self.inbox.push(Update::LiveModels(live));
+        }
         let changed = self.sent.as_ref() != Some(&runs);
+        if changed { self.refresh_codex_models(); }
         if !changed && self.renamed.is_empty() && self.open.is_none() {
             return;
         }
@@ -1387,6 +1412,21 @@ impl Engine {
         }
     }
 
+}
+
+fn snapshot_models(snapshot: &Snapshot, runs: &[Run]) -> Vec<RunningModel> {
+    let mut counts = std::collections::BTreeMap::<String,u64>::new();
+    for wish in &snapshot.wishes {
+        if !runs.iter().any(|r| r.session.as_ref()==wish.session && r.status==RunStatus::Active) { continue; }
+        let Some(log) = wish.runs.iter().max_by_key(|r|r.modified_unix) else { continue };
+        if log.summary.is_some() || snapshot.warnings.iter().any(|w|w.contains(&log.log.to_string_lossy().to_string())) { continue; }
+        let Some(scan)=log.scan.as_ref().filter(|s|s.complete) else { continue };
+        if let Some(model)=scan.model.as_ref().filter(|m|!m.is_empty()) { *counts.entry(model.clone()).or_default()+=1; }
+        for agent in scan.agents.iter().filter(|a|a.id!="main" && a.open) {
+            if let Some(model)=agent.model.as_ref().filter(|m|!m.is_empty()) { *counts.entry(model.clone()).or_default()+=1; }
+        }
+    }
+    counts.into_iter().map(|(model,count)|RunningModel { provider:ModelProvider::Claude,model,count }).collect()
 }
 
 fn board_revision(run: &Run, epoch: u64, generation: u64) -> u64 {
@@ -3044,7 +3084,7 @@ mod tests {
     }
 
     fn event_quota(used: f32, at: i64) -> ProviderQuota {
-        ProviderQuota { five_hour: Some(quota_window(crate::usage::quota::WindowKind::FiveHour, used, at)), weekly: None }
+        ProviderQuota { present: [false; 2], observed_at: None, five_hour: Some(quota_window(crate::usage::quota::WindowKind::FiveHour, used, at)), weekly: None }
     }
 
     #[test]
@@ -3104,6 +3144,45 @@ mod tests {
     fn receive_quota_command(rig: &mut Rig) {
         let command = rig._receiver.recv_timeout(Duration::from_secs(5)).expect("quota helper did not answer");
         rig.engine.handle(command);
+    }
+
+    #[test]
+    fn reported_live_sessions_and_open_agents_are_counted_without_completed_or_missing_models() {
+        let dir=tempfile::tempdir().unwrap(); let home=dir.path();
+        goal_file(home,"s1",json!({"wish":"x","status":"active","amendments":[]}));
+        let path=home.join("logs/20261110-120000-wish-1.jsonl");
+        let events=[
+            json!({"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5"}),
+            json!({"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"tool-a","name":"Agent","input":{}}]}}),
+            json!({"type":"assistant","agent_id":"agent-a","parent_tool_use_id":"tool-a","message":{"model":"claude-sonnet-5-5","content":[]}}),
+        ];
+        write(&path,&events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"));
+        let mut poller=Poller::new(home); let snapshot=poller.poll();
+        let mut run=super::super::demo::sample_run(); run.session="s1".into(); run.status=RunStatus::Active;
+        let counts=snapshot_models(&snapshot,&[run.clone()]);
+        assert_eq!(counts.iter().map(|m|(m.model.as_str(),m.count)).collect::<Vec<_>>(),vec![("claude-opus-5",1),("claude-sonnet-5-5",1)]);
+        run.status=RunStatus::Interrupted; assert!(snapshot_models(&snapshot,&[run.clone()]).is_empty());
+        run.status=RunStatus::Active;
+        let end=json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-a","content":"done"}]}});
+        write(&path,&format!("{}\n{end}\n",events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")));
+        let snapshot=poller.poll();
+        assert_eq!(snapshot_models(&snapshot,&[run.clone()]).len(),1);
+        write(&path,&format!("{}\n{}\n",events[0],json!({"type":"result","is_error":false})));
+        assert!(snapshot_models(&poller.poll(),&[run]).is_empty());
+    }
+
+    #[test]
+    fn live_counts_publish_only_when_observations_change() {
+        let mut rig=rig();
+        let member=crate::council::running::Member::start(&rig.engine.home,"argon").unwrap();
+        rig.engine.publish();
+        assert!(rig.updates().iter().any(|u|matches!(u,Update::LiveModels(m) if m.len()==1 && m[0].provider==ModelProvider::Gemini && m[0].count==1)));
+        rig.engine.publish();
+        assert!(!rig.updates().iter().any(|u|matches!(u,Update::LiveModels(_))));
+        drop(member); rig.engine.publish();
+        assert!(rig.updates().iter().any(|u|matches!(u,Update::LiveModels(m) if m.is_empty())));
+        rig.engine.publish();
+        assert!(!rig.updates().iter().any(|u|matches!(u,Update::LiveModels(_))));
     }
 
     #[test]

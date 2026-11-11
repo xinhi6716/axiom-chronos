@@ -8,6 +8,43 @@ use gpui_kit::*;
 use std::borrow::Cow;
 use std::f32::consts::TAU;
 
+/// Caption ornaments use paths rather than platform fonts. Order follows the model table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Celestial { Sun, Moon, Earth, Star, Jupiter, Saturn, Venus, Mercury, Gemini, Dot }
+
+fn celestial_arc(x:f32,y:f32,r:f32,from:f32,to:f32,steps:usize) -> Vec<(f32,f32)> {
+    arc(x,y,r,from,to,steps).into_iter().map(|p|(f32::from(p.x),f32::from(p.y))).collect()
+}
+
+pub fn celestial_paths(glyph: Celestial, side: f32) -> Vec<Vec<(f32, f32)>> {
+    use Celestial::*;
+    let circle = |x, y, r| celestial_arc(x, y, r, 0., 360., 32);
+    let paths = match glyph {
+        Sun => vec![circle(6.,6.,4.3),circle(6.,6.,0.65)],
+        Moon => vec![celestial_arc(6.5,6.,4.6,60.,300.,28),celestial_arc(8.8,6.,4.05,90.,270.,24)],
+        Earth => vec![circle(6.,7.6,3.1),vec![(6.,0.8),(6.,4.5)],vec![(3.9,2.5),(8.1,2.5)]],
+        Star => vec![vec![(6.,0.6),(7.5,4.5),(11.4,6.),(7.5,7.5),(6.,11.4),(4.5,7.5),(0.6,6.),(4.5,4.5),(6.,0.6)]],
+        Jupiter => vec![vec![(2.,2.),(4.,1.4),(5.,2.3),(4.7,4.),(2.,7.),(10.,7.)],vec![(8.,1.),(8.,11.)]],
+        Saturn => vec![vec![(4.,0.8),(4.,10.7)],vec![(1.7,3.),(6.5,3.)],vec![(4.,6.),(6.,4.8),(8.,5.2),(8.7,6.8),(7.5,9.8),(8.5,11.),(10.,10.6)]],
+        Venus => vec![circle(6.,3.8,2.9),vec![(6.,6.7),(6.,11.2)],vec![(3.6,9.),(8.4,9.)]],
+        Mercury => vec![circle(6.,5.,2.6),celestial_arc(6.,0.8,2.6,0.,180.,16),vec![(6.,7.6),(6.,11.4)],vec![(3.6,9.5),(8.4,9.5)]],
+        Gemini => vec![vec![(3.7,2.),(3.7,10.)],vec![(8.3,2.),(8.3,10.)],vec![(1.,1.),(3.5,2.),(8.5,2.),(11.,1.)],vec![(1.,11.),(3.5,10.),(8.5,10.),(11.,11.)]],
+        Dot => vec![circle(6.,6.,1.1)],
+    };
+    paths.into_iter().map(|p| p.into_iter().map(|(x,y)| (x*side/12.,y*side/12.)).collect()).collect()
+}
+
+pub fn celestial(t: &Tokens, glyph: Celestial, side: f32) -> impl IntoElement {
+    let ink = if glyph == Celestial::Dot { t.muted } else { t.gold };
+    canvas(|_,_,_| (), move |bounds,_,window,_| {
+        let b = Box2::of(bounds);
+        for path in celestial_paths(glyph, side) {
+            let path: Vec<_> = path.into_iter().map(|(x,y)| point(px(b.x+x),px(b.y+y))).collect();
+            stroke(window, &path, false, 1.15, ink);
+        }
+    }).flex_none().size(px(side))
+}
+
 /// The asset path of the portrait. Served by [`Assets`] from the PNG inside `assets/chronos.ico`.
 pub const PORTRAIT: &str = "chronos/portrait.png";
 static ICON: &[u8] = include_bytes!("../../assets/chronos.ico");
@@ -962,5 +999,21 @@ mod tests {
         let per_megapixel = large.len() as f32 / (1200.0 * 900.0) * 1_000_000.0;
         assert!((40.0..=140.0).contains(&per_megapixel), "{per_megapixel} stars per megapixel");
         assert!(star_field(0.0, 500.0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod celestial_tests {
+    use super::*;
+    use std::prelude::v1::test;
+    #[test]
+    fn caption_glyphs_have_distinct_bounded_vector_paths() {
+        use Celestial::*;
+        let glyphs = [Sun,Moon,Earth,Star,Jupiter,Saturn,Venus,Mercury,Gemini,Dot];
+        let paths: Vec<_> = glyphs.iter().map(|g|celestial_paths(*g,12.)).collect();
+        for (i,path) in paths.iter().enumerate() {
+            assert!(path.iter().flatten().all(|(x,y)| (0.5..=11.5).contains(x) && (0.5..=11.5).contains(y)), "{:?}",glyphs[i]);
+            for other in &paths[..i] { assert_ne!(path,other); }
+        }
     }
 }

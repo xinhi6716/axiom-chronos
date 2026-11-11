@@ -49,6 +49,7 @@ pub struct ModelUsage {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Scan {
+    pub model: Option<String>,
     pub scanned: u64,
     pub complete: bool,
     pub events: u64,
@@ -71,6 +72,7 @@ pub struct Tokens {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentView {
+    pub model: Option<String>,
     pub id: String,
     pub kind: Option<String>,
     pub description: Option<String>,
@@ -101,6 +103,7 @@ struct Head {
 }
 #[derive(Default)]
 struct Agent {
+    model: Option<String>,
     kind: Option<String>,
     description: Option<String>,
     call: Option<String>,
@@ -120,6 +123,7 @@ struct Task {
 }
 #[derive(Default)]
 struct ScanState {
+    model: Option<String>,
     offset: u64,
     partial: Vec<u8>,
     complete: bool,
@@ -310,6 +314,7 @@ impl ScanState {
                     }
                 }
             }
+            "system" if v["subtype"] == "init" => { self.model = s(&v["model"]); }
             "system" if v["subtype"] == "task_started" => {
                 if let Some(id) = s(&v["task_id"]) {
                     self.tasks.insert(
@@ -336,6 +341,10 @@ impl ScanState {
         let parent = s(&v["parent_tool_use_id"]);
         let agent = self.agents.entry(id.clone()).or_default();
         agent.messages += 1;
+        if let Some(model) = s(&v["message"]["model"]) {
+            if id == "main" { self.model = Some(model.clone()); }
+            agent.model = Some(model);
+        }
         if let Some(u) = v["message"]["usage"].as_object() {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let context =
@@ -469,6 +478,7 @@ impl ScanState {
         };
         let agent = |(id, a): (&String, &Agent)| AgentView {
             id: id.clone(),
+            model: a.model.clone(),
             kind: a.kind.clone(),
             description: a.description.clone(),
             peak_context: a.peak,
@@ -484,6 +494,7 @@ impl ScanState {
             .collect();
         agents.extend(self.agents.iter().filter(|(id, _)| *id != "main").map(agent));
         Scan {
+            model: self.model.clone(),
             scanned: self.offset,
             complete: self.complete,
             events: self.events,

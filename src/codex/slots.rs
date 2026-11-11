@@ -56,7 +56,50 @@ fn try_lock(file: &File) -> Res<bool> {
 /// replacing a locked inode would let another process take the same slot on Unix.
 pub struct Slot {
     _file: File,
+    record: PathBuf,
 }
+impl Slot {
+    /// Written while holding the slot, before its turn starts. Readers only trust locked slots.
+    pub fn model(&self, model: &str) -> Res<()> {
+        base::atomic_write(&self.record, serde_json::json!({"model":model}).to_string().as_bytes()).map_err(failure)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Occupancy {
+    pub total: u64,
+    /// A missing or unreadable model record hides model counts, without guessing a model.
+    pub models: Option<std::collections::BTreeMap<String, u64>>,
+}
+
+pub fn occupancy(home: &Path) -> Res<Occupancy> {
+    let folder = home.join("codex-slots");
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Occupancy { total: 0, models: Some(Default::default()) }),
+        Err(e) => return Err(failure(e)),
+    };
+    let mut result = Occupancy { total: 0, models: Some(Default::default()) };
+    for entry in entries {
+        let entry = entry.map_err(failure)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(index) = name.strip_suffix(".lock").filter(|n| n.parse::<u64>().is_ok()) else { continue };
+        let file = OpenOptions::new().read(true).write(true).open(entry.path()).map_err(failure)?;
+        if try_lock(&file)? { continue; }
+        result.total += 1;
+        let model = fs::read(folder.join(format!("{index}.json"))).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|v| v["model"].as_str().filter(|s| !s.is_empty()).map(str::to_owned));
+        match (result.models.as_mut(), model) {
+            (Some(models), Some(model)) => *models.entry(model).or_default() += 1,
+            (_, None) => result.models = None,
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Default)]
 pub struct Wait {
     pub elapsed: Duration,
@@ -92,7 +135,9 @@ pub fn acquire(
             stopped()?;
             let file = open(&folder.join(format!("{index}.lock"))).map_err(failure)?;
             if try_lock(&file)? {
-                return Ok(Slot { _file: file });
+                let record = folder.join(format!("{index}.json"));
+                base::atomic_write(&record, b"{}").map_err(failure)?;
+                return Ok(Slot { _file: file, record });
             }
         }
         wait.full = true;
@@ -108,30 +153,5 @@ pub fn acquire(
 
 /// Probe existing locks only; no Codex process, stale-file heuristics or background timer.
 pub fn in_use(home: &Path) -> Res<u64> {
-    let entries = match fs::read_dir(home.join("codex-slots")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(failure(e)),
-    };
-    let mut used = 0;
-    for entry in entries {
-        let entry = entry.map_err(failure)?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name
-            .strip_suffix(".lock")
-            .is_some_and(|n| n.parse::<u64>().is_ok())
-        {
-            continue;
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(entry.path())
-            .map_err(failure)?;
-        if !try_lock(&file)? {
-            used += 1;
-        }
-    }
-    Ok(used)
+    occupancy(home).map(|reading| reading.total)
 }

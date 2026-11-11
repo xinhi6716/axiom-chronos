@@ -1,6 +1,7 @@
 //! The Chronos desktop app. Screens draw `model::AppState`; `live` fills it from disk and the session host.
 mod composer;
 mod control;
+mod concurrency;
 mod detail;
 pub mod demo;
 mod doctor;
@@ -56,6 +57,21 @@ pub struct Options {
 fn parse_size(text: &str) -> Option<Size<Pixels>> {
     let (width, height) = text.split_once('x')?;
     Some(size(px(width.parse().ok()?), px(height.parse().ok()?)))
+}
+
+fn initial_state(options: &Options) -> model::AppState {
+    let mut state = demo::state();
+    if !options.demo || options.empty {
+        state.codex_slots = None;
+        state.codex_models.clear();
+        state.live_models.clear();
+        state.runs.clear();
+        state.current = None;
+        state.memory.clear();
+        state.checks.clear();
+    }
+    if !options.demo { state.quota = Default::default(); }
+    state
 }
 
 pub fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -159,15 +175,9 @@ pub fn run(options: Options) -> i32 {
         if let Some(on) = prefs.reduce_motion {
             cx.set_reduce_motion(on);
         }
-        let mut initial = demo::state();
+        let mut initial = initial_state(&options);
         initial.scene = state_scene(&options);
         initial.reduce_motion = cx.reduce_motion();
-        if !options.demo || options.empty {
-            initial.runs.clear();
-            initial.current = None;
-            initial.memory.clear();
-            initial.checks.clear();
-        }
         if options.demo {
             if let Some(scene) = options.scene.as_deref() {
                 demo::apply_data_scene(&mut initial, scene);
@@ -223,4 +233,20 @@ pub fn run(options: Options) -> i32 {
         }
     });
     0
+}
+
+#[cfg(test)]
+mod strip_startup_tests {
+    use super::*;
+    use std::prelude::v1::test;
+    #[test]
+    fn real_and_empty_starts_have_no_demo_running_counts() {
+        let real=initial_state(&Options::default());
+        assert_eq!(real.quota,crate::usage::quota::Quotas::default());
+        assert!(real.codex_slots.is_none() && real.codex_models.is_empty() && real.live_models.is_empty());
+        let empty=initial_state(&Options {demo:true,empty:true,..Default::default()});
+        assert!(empty.codex_slots.is_none() && empty.codex_models.is_empty() && empty.live_models.is_empty());
+        let demo=initial_state(&Options {demo:true,..Default::default()});
+        assert_eq!(demo.codex_slots,Some(15)); assert!(!demo.live_models.is_empty());
+    }
 }

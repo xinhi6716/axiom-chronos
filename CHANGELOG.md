@@ -2,6 +2,8 @@
 
 ## 2.0.1
 
+- The desktop strip hides quota windows absent from fresh plan snapshots and draws live per-model concurrency as celestial vectors, including Mini and dense layouts. 桌面底欄隱藏新鮮方案快照未提供的額度視窗，並以天體向量圖符顯示各模型即時並行數，支援迷你與密集模式。
+
 - `AXIOM_CODEX_MAX_PARALLEL` defaults to 48 shared Codex turns across Chronos processes, using crash-safe OS slots with cancellable waits; wishes export it, Settings persists it, and the quota strip and doctor show occupancy. 全機 Codex 並行預設 48，跨程序共用並支援等待取消、桌面設定及使用量顯示。
 
 - Configurable advanced research budgets in the environment, CLI and persisted desktop Settings, with shared validation and effective-cap notices. The council stays off by default; dollar/token defaults remain $5, 200k, 400k.

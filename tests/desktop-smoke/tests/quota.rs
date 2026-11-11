@@ -16,8 +16,9 @@ fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<axiom::desktop::mod
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let sample = |kind, used| Some(Window { kind, used, resets_at: if used == 1.0 { Some(now + 1200) } else { None }, observed_at: now, status: None });
     let mut initial = demo::state();
-    initial.quota.claude = ProviderQuota { five_hour: sample(WindowKind::FiveHour, 0.25), weekly: sample(WindowKind::Weekly, 0.5) };
-    initial.quota.codex = ProviderQuota { five_hour: sample(WindowKind::FiveHour, 1.0), weekly: sample(WindowKind::Weekly, 0.0) };
+    initial.codex_slots = None; initial.codex_models.clear(); initial.live_models.clear();
+    initial.quota.claude = ProviderQuota { present: [false; 2], observed_at: None, five_hour: sample(WindowKind::FiveHour, 0.25), weekly: sample(WindowKind::Weekly, 0.5) };
+    initial.quota.codex = ProviderQuota { present: [false; 2], observed_at: None, five_hour: sample(WindowKind::FiveHour, 1.0), weekly: sample(WindowKind::Weekly, 0.0) };
     let state = cx.new(|_| initial);
     let bounds = Bounds { origin: Point::default(), size: size(px(1440.), px(900.)) };
     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
@@ -54,6 +55,11 @@ fn check(cx: &mut TestAppContext, handle: AnyWindowHandle, mini: bool, zh: bool)
         assert!(!strip_texts.is_empty());
         let top = strip_texts[0].bounds().origin.y;
         assert!(strip_texts.iter().all(|t| !t.text().contains(['\n', '\r']) && t.bounds().origin.y == top), "strip text must occupy one line without line breaks");
+        if mini && !strip_texts.iter().any(|t|t.text()=="Claude") {
+            assert!(strip_texts.iter().any(|t|t.text().contains(if zh {"並行"}else{"parallel"})));
+            for text in strip_texts { assert!(text.bounds().right()<=viewport.width); }
+            return;
+        }
         let exhausted = match (mini, zh) {
             (true, true) => "0% ↻20分", (true, false) => "0% ↻20m",
             (false, true) => "0% · 20 分後重置", (false, false) => "0% · resets in 20 min",
@@ -99,6 +105,60 @@ fn main_quota_meters(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn plan_windows_and_running_models_are_painted_in_strip_order(cx: &mut TestAppContext) {
+    let (main, state) = open(cx);
+    cx.update(|cx| state.update(cx, |state, _| {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        state.quota.codex = ProviderQuota { present: [false; 2], observed_at: None, five_hour: None, weekly: Some(Window { kind: WindowKind::Weekly, used: 0.42, resets_at: None, observed_at: now, status: None }) };
+        state.codex_slots = Some(15);
+        let demo=demo::state(); state.codex_models=demo.codex_models; state.live_models=demo.live_models;
+    }));
+    frame(cx, main);
+    cx.update_window(main, |_, window, _| {
+        let strip: ElementId = "quota-strip".into();
+        let texts: Vec<_> = gpui_kit::base::test_support::texts(window).iter()
+            .filter(|t| t.path().contains(&strip) && t.visible()).map(|t| t.text().to_string()).collect();
+        let codex = texts.iter().position(|t| t == "Codex").unwrap();
+        assert!(!texts[codex..].iter().any(|t| t == "5 hours"), "{texts:?}");
+        let models: ElementId = "running-models".into();
+        let all = gpui_kit::base::test_support::texts(window);
+        let first = all.iter().find(|t| t.path().contains(&models) && t.visible()).expect("demo has running model glyph counts");
+        assert!(first.bounds().origin.x > window.find("quota-codex").bounds().right());
+        assert!(first.bounds().origin.x < window.find("codex-parallel").bounds().origin.x);
+        let painted: Vec<_>=all.iter().filter(|t|t.path().contains(&models)&&t.visible()).map(|t|t.text()).collect();
+        assert_eq!(painted,vec!["2","12","1","·","1","4","2","·","1"]);
+        assert!(all.iter().filter(|t|t.path().contains(&strip)&&t.visible()).all(|t|t.bounds().right()<=window.viewport_size().width));
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+fn fresh_absence_unseen_and_stale_windows_for_both_providers(cx: &mut TestAppContext) {
+    let (main,state)=open(cx);
+    for (five,weekly,stale,expected) in [(false,true,false,[false,true]),(true,false,false,[true,false]),
+        (false,false,false,[true,true]),(false,true,true,[true,true])] {
+        cx.update(|cx|state.update(cx,|state,_| {
+            let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let sample=|kind|Some(Window { kind,used:0.42,resets_at:None,observed_at:if stale {now-2400}else{now},status:None });
+            for provider in [&mut state.quota.codex,&mut state.quota.claude] {
+                *provider=ProviderQuota { present: [false; 2], observed_at:None,five_hour:if five {sample(WindowKind::FiveHour)}else{None},weekly:if weekly {sample(WindowKind::Weekly)}else{None} };
+            }
+        }));
+        frame(cx,main);
+        cx.update_window(main,|_,window,_| {
+            let texts=gpui_kit::base::test_support::texts(window);
+            for prefix in ["quota-codex","quota-claude"] {
+                for (suffix,visible) in [("five-hour",expected[0]),("weekly",expected[1])] {
+                    let id:ElementId=format!("{prefix}-{suffix}").into();
+                    let painted:Vec<_>=texts.iter().filter(|t|t.path().contains(&id)&&t.visible()).collect();
+                    assert_eq!(!painted.is_empty(),visible,"{prefix}-{suffix}");
+                    if visible && (stale || (!five&&!weekly)) { assert!(painted.iter().any(|t|t.text()=="—")); }
+                }
+            }
+        }).unwrap();
+    }
+}
+
+#[gpui_kit::test]
 fn mini_quota_meters(cx: &mut TestAppContext) {
     let (main, state) = open(cx);
     // Match walk.rs: the locked test platform cannot minimize the main window.
@@ -138,10 +198,37 @@ fn mini_quota_meters(cx: &mut TestAppContext) {
         cx.update(|cx| { i18n::set(lang, cx); theme::set_density(density, cx); });
         frame(cx, mini);
         cx.update_window(mini, |_, window, _| {
+            let texts=gpui_kit::base::test_support::texts(window);
+            let strip:ElementId="quota-strip".into();
+            if !texts.iter().any(|t|t.path().contains(&strip)&&t.text()=="Claude") {
+                assert!(texts.iter().filter(|t|t.path().contains(&strip)&&t.visible()).all(|t|t.bounds().right()<=window.viewport_size().width));
+                return;
+            }
             for id in ["quota-claude-five-hour", "quota-claude-weekly", "quota-codex-five-hour", "quota-codex-weekly"] {
                 let b = window.find(id).bounds();
                 assert!(b.origin.x >= px(0.) && b.origin.x + b.size.width <= window.viewport_size().width, "{id} exhausted countdown exceeds Mini: {b:?}");
             }
         }).unwrap();
     }
+    for (kind,show) in [("one",true),("overflow",false),("zero",false)] {
+        cx.update(|cx|state.update(cx,|state,_| {
+            let demo=demo::state(); state.codex_models=demo.codex_models; state.live_models=demo.live_models;
+            state.codex_slots=Some(15);
+            match kind {
+                "one"=>{state.codex_models.truncate(1);state.live_models.clear();},
+                "overflow"=>for model in state.codex_models.iter_mut().chain(&mut state.live_models) {model.count=u64::MAX;},
+                _=>for model in state.codex_models.iter_mut().chain(&mut state.live_models) {model.count=0;},
+            }
+        }));
+        frame(cx,mini);
+        cx.update_window(mini,|_,window,_| {
+            let texts=gpui_kit::base::test_support::texts(window);
+            let group:ElementId="running-models".into(); let strip:ElementId="quota-strip".into();
+            assert_eq!(texts.iter().any(|t|t.path().contains(&group)&&t.visible()),show,"{kind}");
+            let painted:Vec<_>=texts.iter().filter(|t|t.path().contains(&strip)&&t.visible()).collect();
+            assert!(painted.iter().all(|t|t.bounds().right()<=window.viewport_size().width));
+            if kind=="overflow" {assert_eq!(painted.len(),1,"only parallel total fits");}
+        }).unwrap();
+    }
+
 }

@@ -31,6 +31,10 @@ impl Window {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ProviderQuota {
+    /// Latest valid snapshot; older retained windows are last-known data only.
+    pub observed_at: Option<i64>,
+    /// [five-hour, weekly] membership, independent of retained last-known windows.
+    pub present: [bool; 2],
     pub five_hour: Option<Window>,
     pub weekly: Option<Window>,
 }
@@ -57,9 +61,13 @@ impl Quotas {
             Provider::Claude => &mut self.claude,
             Provider::Codex => &mut self.codex,
         };
+        let observed_changed = update.observed_at.is_some_and(|at|
+            current.observed_at.is_none_or(|old| at >= old)
+                && (current.observed_at != Some(at) || current.present != update.present));
+        if observed_changed { current.observed_at = update.observed_at; current.present = update.present; }
         let five_changed = merge_window(&mut current.five_hour, update.five_hour);
         let weekly_changed = merge_window(&mut current.weekly, update.weekly);
-        five_changed || weekly_changed
+        observed_changed || five_changed || weekly_changed
     }
 }
 
@@ -81,14 +89,19 @@ pub fn parse_claude_event(v: &Value, observed_at: i64) -> Option<ProviderQuota> 
         })
     }
     let windows = &v["rate_limit_info"]["unifiedWindows"];
-    Some(ProviderQuota {
+    let mut quota = ProviderQuota {
+        present: [false; 2],
+        observed_at: windows.is_object().then_some(observed_at),
         five_hour: window(&windows["five_hour"], WindowKind::FiveHour, observed_at),
         weekly: window(&windows["seven_day"], WindowKind::Weekly, observed_at),
-    })
+    };
+    quota.present = [quota.five_hour.is_some(), quota.weekly.is_some()];
+    quota.observed_at = quota.present.iter().any(|present|*present).then_some(observed_at);
+    Some(quota)
 }
 
 fn codex_snapshot(snapshot: &Value, observed_at: i64) -> ProviderQuota {
-    let mut quota = ProviderQuota::default();
+    let mut quota = ProviderQuota { observed_at: snapshot.is_object().then_some(observed_at), ..Default::default() };
     for name in ["primary", "secondary"] {
         let v = &snapshot[name];
         let (kind, slot) = match v["windowDurationMins"].as_i64() {
@@ -107,6 +120,8 @@ fn codex_snapshot(snapshot: &Value, observed_at: i64) -> ProviderQuota {
             status: None,
         });
     }
+    quota.present = [quota.five_hour.is_some(), quota.weekly.is_some()];
+    quota.observed_at = quota.present.iter().any(|present|*present).then_some(observed_at);
     quota
 }
 
