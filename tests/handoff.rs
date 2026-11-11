@@ -496,6 +496,9 @@ fn the_goal_cannot_close_blocked_while_a_handoff_waits() {
 
 #[test]
 fn whole_wish_handoff_reaches_a_module_dispatcher_and_is_taken() {
+    // stalled_out reads the process-wide stall limit that other tests change.
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("3");
     for prompt in [
         "Module: m1. Consume the whole-wish handoff.",
         "Wish mentions m1 and m2. Consume the whole-wish handoff.",
@@ -514,6 +517,9 @@ fn whole_wish_handoff_reaches_a_module_dispatcher_and_is_taken() {
 
 #[test]
 fn blocked_is_legal_after_an_offer_but_records_every_pending_handoff() {
+    // stalled_out reads the process-wide stall limit that other tests change.
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("3");
     let r = run();
     handoff(&r, "m1", "fix a1");
     handoff(&r, "m2", "start b1");
@@ -538,6 +544,9 @@ fn blocked_is_legal_after_an_offer_but_records_every_pending_handoff() {
 
 #[test]
 fn replacement_handoffs_need_their_own_offer() {
+    // stalled_out reads the process-wide stall limit that other tests change.
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    stalls("3");
     let r = run();
     handoff(&r, "m1", "fix a1");
     call(&r, &start_with(&r, "Dispatch m1", "Module m1")).unwrap();
