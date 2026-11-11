@@ -3,6 +3,9 @@ use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
+#[path = "common/captures.rs"]
+mod captures;
+
 // Preserve byte offsets and newlines so that matches still point into the original source.
 fn blank(bytes: &mut [u8], start: usize, end: usize) {
     for byte in &mut bytes[start..end] {
@@ -226,7 +229,7 @@ fn capture_files(doc: &str) -> Vec<String> {
         let cells: Vec<_> = line.split('|').map(str::trim).collect();
         assert!(cells.len() == 4 && cells[0].is_empty() && cells[3].is_empty(), "invalid capture row: {line}");
         let path = Path::new(cells[2]);
-        assert!(path.is_absolute() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")), "invalid capture path: {line}");
+        assert!((path.is_absolute() || cells[2].starts_with("~/") || cells[2].as_bytes().get(1..3) == Some(b":/")) && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")), "invalid capture path: {line}");
         assert_eq!(path.file_name().unwrap().to_str().unwrap(), cells[1], "capture name mismatch: {line}");
         cells[2].to_owned()
     }).collect();
@@ -275,15 +278,19 @@ fn w4_and_w10_verdicts_are_rewritten_and_reference_captures() {
 
 #[test]
 fn after_captures_are_newer_than_all_before_captures() {
-    let before = Path::new("C:/Users/gppup/.axiom/orchestrate/r6-app/captures/before/");
-    let newest_before = fs::read_dir(before).expect("cannot read before captures")
+    let files = capture_files(&ui_after_doc());
+    assert!(!newer_than(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)));
+    let before = captures::expand("~/.axiom/orchestrate/r6-app/captures/before/");
+    let mut folders = vec![before.clone()];
+    folders.extend(files.iter().map(|file| captures::expand(file).and_then(|p| p.parent().map(Path::to_path_buf))));
+    if !captures::folders_exist(&folders) { return; }
+    let newest_before = fs::read_dir(before.unwrap()).expect("cannot read before captures")
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")))
         .map(|path| fs::metadata(path).unwrap().modified().unwrap())
         .max().expect("no before PNG captures");
-    assert!(!newer_than(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)));
-    for file in capture_files(&ui_after_doc()) {
-        let modified = fs::metadata(&file).unwrap_or_else(|err| panic!("cannot read {file}: {err}"))
+    for file in files {
+        let modified = fs::metadata(captures::expand(&file).unwrap()).unwrap_or_else(|err| panic!("cannot read {file}: {err}"))
             .modified().unwrap();
         assert!(newer_than(modified, newest_before), "capture is not newer than all before captures: {file}");
     }

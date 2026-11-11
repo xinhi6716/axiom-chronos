@@ -324,7 +324,7 @@ pub fn state_at(now: i64) -> AppState {
             Check { name: "claude".into(), status: CheckStatus::Ok, detail: "2.1.317 (Claude Code)".into() },
             Check { name: "codex".into(), status: CheckStatus::Ok, detail: "codex-cli 0.159.3".into() },
             Check { name: "sqlite fts5".into(), status: CheckStatus::Ok, detail: "SQLite 3.46.0 with trigram".into() },
-            Check { name: "state".into(), status: CheckStatus::Ok, detail: "C:\\Users\\gppup\\.axiom".into() },
+            Check { name: "state".into(), status: CheckStatus::Ok, detail: "C:\\Users\\someone\\.axiom".into() },
             Check { name: "codegraph".into(), status: CheckStatus::Warn, detail: "Not installed (optional)".into() },
         ],
         reduce_motion: false,

@@ -397,7 +397,7 @@ fn classify_stop_interrupts_inflight_codex() {
         invoke(
             &worker,
             "codex_run",
-            json!({"cwd":cwd,"role":"terra","sandbox":"read-only","brief":"SLOW"}),
+            json!({"cwd":cwd,"role":"terra","sandbox":"read-only","brief":"WAIT_FOR_INTERRUPT"}),
         )
     });
     let deadline = Instant::now() + Duration::from_secs(5);

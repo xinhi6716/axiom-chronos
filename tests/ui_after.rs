@@ -2,6 +2,9 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
 
+#[path = "common/captures.rs"]
+mod captures;
+
 fn validate(baseline: &str, doc: &str) -> Result<(), String> {
     let weaknesses = baseline
         .split_once("## Weaknesses\n").ok_or("missing weaknesses")?.1
@@ -47,7 +50,7 @@ fn validate(baseline: &str, doc: &str) -> Result<(), String> {
     for line in lines {
         let row = line.strip_prefix('|').and_then(|s| s.strip_suffix('|')).ok_or("invalid capture row")?;
         let cells: Vec<_> = row.split('|').map(str::trim).collect();
-        if cells.len() != 2 || cells[1] != format!("C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/after/{}", cells[0])
+        if cells.len() != 2 || cells[1] != format!("~/.axiom/orchestrate/r6-ui2/captures/after/{}", cells[0])
             || !files.insert(cells[0].to_owned()) {
             return Err("invalid or duplicate capture".into());
         }
@@ -88,7 +91,15 @@ fn document(name: &str) -> String {
 
 #[test]
 fn after_is_valid() {
-    validate(&document("ui-baseline.md"), &document("ui-after.md")).unwrap();
+    let doc = document("ui-after.md");
+    validate(&document("ui-baseline.md"), &doc).unwrap();
+    let folder = captures::expand("~/.axiom/orchestrate/r6-ui2/captures/after/");
+    if !captures::folders_exist(&[folder]) { return; }
+    let table = doc.split_once("## Captures\n").unwrap().1.split_once("## Verdicts\n").unwrap().0;
+    for line in table.lines().filter(|line| line.contains("~/.axiom/")) {
+        let file = line.split('|').nth(2).unwrap().trim();
+        assert!(captures::expand(file).unwrap().is_file(), "capture missing: {file}");
+    }
 }
 
 #[test]

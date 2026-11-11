@@ -181,6 +181,14 @@ for line in sys.stdin:
                     complete(tid, turn, 'failed', {'message': 'barrier timeout'})
             threading.Thread(target=finish_barrier, daemon=True).start()
             continue
+        if 'WAIT_FOR_INTERRUPT' in text:
+            pending_turns[turn_id] = (thread_id, turn_id)
+            def expire_wait(tid=thread_id, turn=turn_id):
+                time.sleep(60)
+                if pending_turns.pop(turn, None):
+                    complete(tid, turn, 'failed', {'message': 'interrupt timeout'})
+            threading.Thread(target=expire_wait, daemon=True).start()
+            continue
         if 'SLOW' in text:
             pending_turns[turn_id] = (thread_id, turn_id)
             def finish_slow(tid=thread_id, turn=turn_id):

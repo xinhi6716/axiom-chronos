@@ -2,26 +2,26 @@
 
 | view | theme | size | file |
 | --- | --- | --- | --- |
-| run | dark | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/run-dark-1100x700.png |
-| run | dark | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/run-dark-1920x1080.png |
-| run | light | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/run-light-1100x700.png |
-| run | light | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/run-light-1920x1080.png |
-| wishes | dark | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/wishes-dark-1100x700.png |
-| wishes | dark | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/wishes-dark-1920x1080.png |
-| wishes | light | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/wishes-light-1100x700.png |
-| wishes | light | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/wishes-light-1920x1080.png |
-| memory | dark | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/memory-dark-1100x700.png |
-| memory | dark | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/memory-dark-1920x1080.png |
-| memory | light | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/memory-light-1100x700.png |
-| memory | light | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/memory-light-1920x1080.png |
-| usage | dark | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/usage-dark-1100x700.png |
-| usage | dark | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/usage-dark-1920x1080.png |
-| usage | light | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/usage-light-1100x700.png |
-| usage | light | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/usage-light-1920x1080.png |
-| settings | dark | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/settings-dark-1100x700.png |
-| settings | dark | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/settings-dark-1920x1080.png |
-| settings | light | 1100x700 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/settings-light-1100x700.png |
-| settings | light | 1920x1080 | C:/Users/gppup/.axiom/orchestrate/r6-ui2/captures/before/settings-light-1920x1080.png |
+| run | dark | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/run-dark-1100x700.png |
+| run | dark | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/run-dark-1920x1080.png |
+| run | light | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/run-light-1100x700.png |
+| run | light | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/run-light-1920x1080.png |
+| wishes | dark | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/wishes-dark-1100x700.png |
+| wishes | dark | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/wishes-dark-1920x1080.png |
+| wishes | light | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/wishes-light-1100x700.png |
+| wishes | light | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/wishes-light-1920x1080.png |
+| memory | dark | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/memory-dark-1100x700.png |
+| memory | dark | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/memory-dark-1920x1080.png |
+| memory | light | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/memory-light-1100x700.png |
+| memory | light | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/memory-light-1920x1080.png |
+| usage | dark | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/usage-dark-1100x700.png |
+| usage | dark | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/usage-dark-1920x1080.png |
+| usage | light | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/usage-light-1100x700.png |
+| usage | light | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/usage-light-1920x1080.png |
+| settings | dark | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/settings-dark-1100x700.png |
+| settings | dark | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/settings-dark-1920x1080.png |
+| settings | light | 1100x700 | ~/.axiom/orchestrate/r6-ui2/captures/before/settings-light-1100x700.png |
+| settings | light | 1920x1080 | ~/.axiom/orchestrate/r6-ui2/captures/before/settings-light-1920x1080.png |
 
 Capture sizes denote the requested app size; PrintWindow includes the Windows frame, yielding 1116x708 and 1936x1088 PNGs respectively at 96 DPI. The demo Run is running, not blocked, so the needs-you state needs a separate blocked-state check.
 

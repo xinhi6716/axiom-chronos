@@ -2,6 +2,9 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+#[path = "common/captures.rs"]
+mod captures;
+
 fn validate(doc: &str) -> Result<(), String> {
     let headings: Vec<_> = doc.lines().filter(|line| line.starts_with("## ")).collect();
     if headings != ["## Captures", "## Weaknesses", "## Inspiration"] {
@@ -40,7 +43,7 @@ fn validate(doc: &str) -> Result<(), String> {
         }
         let file = cells[3];
         let expected = format!("{}-{}-{}.png", cells[0], cells[1], cells[2]);
-        if file.contains('\\') || !(file.starts_with('/') || file.as_bytes().get(1) == Some(&b':'))
+        if file.contains('\\') || !(file.starts_with('/') || file.starts_with("~/") || file.as_bytes().get(1..3) == Some(b":/"))
             || file.rsplit('/').next() != Some(expected.as_str()) {
             return Err("capture path or name invalid".into());
         }
@@ -76,14 +79,16 @@ fn document() -> String {
 fn baseline_is_valid() {
     let doc = document();
     validate(&doc).unwrap();
-    for line in doc.lines().filter(|line| line.starts_with("| ") && line.ends_with(" |")) {
-        let cells: Vec<_> = line[1..line.len()-1].split('|').map(str::trim).collect();
-        if cells.len() == 4 && ["run", "wishes", "memory", "usage", "settings"].contains(&cells[0]) {
-            let file = cells[3];
-            if !file.split('/').any(|part| part == ".axiom-tmp") {
-                assert!(Path::new(file).is_file(), "capture missing: {file}");
-            }
-        }
+    let files: Vec<_> = doc.lines().filter(|line| line.starts_with("| ") && line.ends_with(" |"))
+        .filter_map(|line| {
+            let cells: Vec<_> = line[1..line.len()-1].split('|').map(str::trim).collect();
+            (cells.len() == 4 && ["run", "wishes", "memory", "usage", "settings"].contains(&cells[0]))
+                .then(|| cells[3])
+        }).filter(|file| !file.split('/').any(|part| part == ".axiom-tmp")).collect();
+    let folders: Vec<_> = files.iter().map(|file| captures::expand(file).and_then(|p| p.parent().map(Path::to_path_buf))).collect();
+    if !captures::folders_exist(&folders) { return; }
+    for file in files {
+        assert!(captures::expand(file).unwrap().is_file(), "capture missing: {file}");
     }
 }
 

@@ -958,7 +958,7 @@ fn real_working_directories_map_to_their_transcript_directories() {
     for (cwd, dir) in [
         (r"E:\codex\ML_HfO2", "E--codex-ML-HfO2"),
         (r"E:\codex\OPEN_DESIGN\axiom", "E--codex-OPEN-DESIGN-axiom"),
-        (r"C:\Users\gppup", "C--Users-gppup"),
+        (r"C:\Users\someone", "C--Users-someone"),
         (r"E:\codex\OPEN_DESIGN\TW\TaiwanStockRadar", "E--codex-OPEN-DESIGN-TW-TaiwanStockRadar"),
         (r"E:\codex\ML_SIC\OPEN_SOURCE_SKILLS", "E--codex-ML-SIC-OPEN-SOURCE-SKILLS"),
         (
@@ -966,8 +966,8 @@ fn real_working_directories_map_to_their_transcript_directories() {
             "E--codex-OPEN-DESIGN-axiom-experiments-bench-ledger-r3",
         ),
         (
-            r"C:\Users\gppup\AppData\Local\Temp\claude\E--codex-OPEN-DESIGN-axiom\51327f98-867e-4182-ad6c-b4efb141f64a\scratchpad\toy-rust",
-            "C--Users-gppup-AppData-Local-Temp-claude-E--codex-OPEN-DESIGN-axiom-51327f98-867e-4182-ad6c-b4efb141f64a-scratchpad-toy-rust",
+            r"C:\Users\someone\AppData\Local\Temp\claude\E--codex-OPEN-DESIGN-axiom\51327f98-867e-4182-ad6c-b4efb141f64a\scratchpad\toy-rust",
+            "C--Users-someone-AppData-Local-Temp-claude-E--codex-OPEN-DESIGN-axiom-51327f98-867e-4182-ad6c-b4efb141f64a-scratchpad-toy-rust",
         ),
     ] {
         assert_eq!(transcript_dir_name(cwd), dir);
