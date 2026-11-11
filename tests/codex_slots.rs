@@ -12,6 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+// On Unix a child spawned by one test briefly holds a duplicate of another test's slot lock
+// (flock follows the open file description until exec), so tests that assert an immediate
+// release must not overlap with tests that spawn. Production only sees a momentary overcount.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn until(mut condition: impl FnMut() -> bool) {
     let end = Instant::now() + Duration::from_secs(10);
     while !condition() {
@@ -61,6 +66,7 @@ fn turns(home: &Path, id: &str) -> usize {
 
 #[test]
 fn slot_child() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(home) = std::env::var_os("SLOT_TEST_HOME") else {
         return;
     };
@@ -117,6 +123,7 @@ fn slot_child() {
 
 #[test]
 fn another_process_waits_then_reports_its_wait() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t = common::temp();
     let home = t.path();
     let lock = locked(home);
@@ -137,6 +144,7 @@ fn another_process_waits_then_reports_its_wait() {
 
 #[test]
 fn queued_calls_honour_cancel_and_close_without_starting_codex() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     for action in ["cancel", "close", "stop"] {
         let t = common::temp();
         let home = t.path();
@@ -154,6 +162,7 @@ fn queued_calls_honour_cancel_and_close_without_starting_codex() {
 
 #[test]
 fn waiting_obeys_the_call_timeout() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t = common::temp();
     let home = t.path();
     let _lock = locked(home);
@@ -165,6 +174,7 @@ fn waiting_obeys_the_call_timeout() {
 
 #[test]
 fn crash_releases_os_lock_and_stale_files_are_free() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t = common::temp();
     let home = t.path();
     let mut holder = child(home, "holder", "1", "holder");
@@ -184,6 +194,7 @@ fn crash_releases_os_lock_and_stale_files_are_free() {
 
 #[test]
 fn invalid_caps_name_the_variable_and_value() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     for value in ["", "0", "-1", "1.5", "NaN", "text", "18446744073709551616"] {
         let t = common::temp();
         let mut c = child(t.path(), "invalid", value, "run");
@@ -200,6 +211,7 @@ fn invalid_caps_name_the_variable_and_value() {
 
 #[test]
 fn concurrent_processes_share_the_pool_and_reuse_released_slots() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t = common::temp();
     let home = t.path();
     let mut a = child(home, "a", "2", "active");
@@ -242,6 +254,7 @@ fn concurrent_processes_share_the_pool_and_reuse_released_slots() {
 
 #[test]
 fn counting_uses_locks_and_propagates_unreadable_folders() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t = common::temp();
     assert_eq!(axiom::codex::slots::in_use(t.path()).unwrap(), 0);
     let f = locked(t.path());
@@ -259,6 +272,7 @@ fn counting_uses_locks_and_propagates_unreadable_folders() {
 
 #[test]
 fn model_occupancy_ignores_released_slots_and_hides_failed_model_reads() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let t=common::temp(); let home=t.path();
     let first=axiom::codex::slots::acquire(home,2,&mut Default::default(),||Ok(())).unwrap();
     first.model("gpt-6.1-terra").unwrap();
