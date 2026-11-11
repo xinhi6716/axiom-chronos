@@ -344,6 +344,13 @@ pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
 /// Where a run's forwarder returns a line it read but could not deliver because the run is over.
 pub type HandBack = Box<dyn FnOnce(String) + Send>;
 
+/// A write failed because the reading process is closing or gone: Unix EPIPE, Windows
+/// ERROR_BROKEN_PIPE (109) or ERROR_NO_DATA (232, "The pipe is being closed").
+fn pipe_closed(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::BrokenPipe
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(109) | Some(232)))
+}
+
 pub fn send(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
     stdin
         .write_all(user_message(text).as_bytes())
@@ -747,8 +754,13 @@ fn drive_once(
                                 if let Some(stdin) = guard.as_mut() {
                                     if let Err(e) = send(stdin, &format!("{CONTINUE_TAG} {reason}"))
                                     {
-                                        base::proc::kill_tree(&mut child);
-                                        break Err(failure(e));
+                                        if !pipe_closed(&e) {
+                                            base::proc::kill_tree(&mut child);
+                                            break Err(failure(e));
+                                        }
+                                        // claude is already exiting; its end is handled below
+                                        // when its output closes, as if the message had been read.
+                                        guard.take();
                                     }
                                 }
                                 continue;
@@ -826,4 +838,23 @@ fn drive_once(
     }
     let _ = out.flush();
     result.map(|code| Outcome { code, limit })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pipe_closed;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn a_closing_reader_is_not_a_failure_but_other_errors_are() {
+        assert!(pipe_closed(&Error::from(ErrorKind::BrokenPipe)));
+        assert!(!pipe_closed(&Error::from(ErrorKind::PermissionDenied)));
+        assert!(!pipe_closed(&Error::other("disk full")));
+        #[cfg(windows)]
+        {
+            assert!(pipe_closed(&Error::from_raw_os_error(232)));
+            assert!(pipe_closed(&Error::from_raw_os_error(109)));
+            assert!(!pipe_closed(&Error::from_raw_os_error(5)));
+        }
+    }
 }
