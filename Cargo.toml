@@ -1,7 +1,8 @@
 [package]
 name = "axiom-chronos"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
+default-run = "axiom"
 
 [lib]
 name = "axiom"
@@ -11,7 +12,16 @@ path = "src/lib.rs"
 name = "axiom"
 path = "src/main.rs"
 
+[[bin]]
+name = "chronos"
+path = "src/bin/chronos.rs"
+required-features = ["app"]
+
+[features]
+app = ["dep:gpui-kit", "dep:embed-resource"]
+
 [dependencies]
+gpui-kit = { version = "=0.9.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -22,7 +32,10 @@ regex = "1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Time"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Time", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects"] }
+
+[build-dependencies]
+embed-resource = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

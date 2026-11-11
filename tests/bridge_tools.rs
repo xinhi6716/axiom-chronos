@@ -56,10 +56,11 @@ fn tool_contract_and_rewrite_evidence() {
     let description = list.iter().find(|t| t["name"] == "codex_run").unwrap()["description"]
         .as_str()
         .unwrap();
-    let phrase = "Unit mode: pass exactly `project`, `unit`, `role` (terra or sol) and `cwd`; the bridge reads the registered brief, runs its VERIFY (cmd on Windows, sh on Linux) and, when every unit of the module has passed VERIFY, runs the module ACCEPT and returns it as `accept`. Brief mode is for role astra: pass `brief`, `cwd`, `project` and `save_to`.";
+    let phrase = "Unit mode: pass exactly `project`, `unit`, `role` (terra or sol) and `cwd`, plus `track` and `brief_file` (the brief's path in the store) to register a new unit in the same call; the bridge reads the registered brief, runs its VERIFY (cmd on Windows, sh on Linux) and, when every unit of the module has passed VERIFY, runs the module ACCEPT and returns it as `accept`. Brief mode is for role astra: pass `brief`, `cwd`, `project` and `save_to`.";
     assert!(description.contains(phrase));
     let stripped = description.replace(phrase, "");
     assert!(!stripped.contains(phrase));
+    assert!(description.contains("A registered brief can set EFFORT and TIER; unit mode takes no argument for them."));
     let clean = |text: &str| {
         let lower = text.to_lowercase();
         !lower.contains("gemini") && !lower.contains("rewrite")

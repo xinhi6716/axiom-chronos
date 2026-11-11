@@ -3,11 +3,11 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 pub mod proc;
 pub mod schema;
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Failure {
     pub kind: String,
     pub message: String,
@@ -44,6 +44,14 @@ pub fn resolve_command(env_name: &str, executable: &str) -> Res<Vec<String>> {
                 )
             });
     }
+    on_path(executable).map(|path| vec![path]).ok_or_else(|| {
+        Failure::new(
+            "not_installed",
+            format!("{executable} is not on PATH; install it or set {env_name}"),
+        )
+    })
+}
+pub fn on_path(executable: &str) -> Option<String> {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&paths) {
         #[cfg(unix)]
@@ -80,14 +88,11 @@ pub fn resolve_command(env_name: &str, executable: &str) -> Res<Vec<String>> {
                         continue;
                     }
                 }
-                return Ok(vec![path.to_string_lossy().into_owned()]);
+                return Some(path.to_string_lossy().into_owned());
             }
         }
     }
-    Err(Failure::new(
-        "not_installed",
-        format!("{executable} is not on PATH; install it or set {env_name}"),
-    ))
+    None
 }
 pub fn axiom_home() -> PathBuf {
     std::env::var_os("AXIOM_HOME")
@@ -199,12 +204,28 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             .open(&temp)?;
         f.write_all(contents)?;
         drop(f);
-        std::fs::rename(&temp, path)
+        replace(&temp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+/// On Windows a file open elsewhere refuses replacement until it is closed.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;

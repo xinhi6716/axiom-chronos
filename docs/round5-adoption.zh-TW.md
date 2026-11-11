@@ -130,7 +130,7 @@ Gemini 已於第五輪收尾移除。
 - 維護成本：R5-04。前：bridge 有 review_code、agy 審查實作、second_review 與 fallback；後：這些程式與測試已刪除，舊 stage 資料仍可讀。
 
 ## 量測
-第四輪來源：C:/Users/gppup/.axiom/logs/20261102-193323-wish.jsonl；第五輪來源：C:/Users/gppup/.axiom/logs/20261103-004231-wish.jsonl，撰寫本單元時最新的 *-wish.jsonl，截至 2026-11-02T17:51:35Z，日誌未結束且執行仍在進行。
+第四輪來源：C:/Users/someone/.axiom/logs/20261102-193323-wish.jsonl；第五輪來源：C:/Users/someone/.axiom/logs/20261103-004231-wish.jsonl，撰寫本單元時最新的 *-wish.jsonl，截至 2026-11-02T17:51:35Z，日誌未結束且執行仍在進行。
 這些數字均是已讀日誌的開發證據，不是獨立驗收集；14/167 是人工分類的開發估計，不是已實現的節省。論文的 30% 與 96k→12k 不宣稱適用於 Chronos。
 口徑：is_error 以 tool_result 的 is_error 為真計數（含取消）；review_code 以該工具呼叫去重後計數，狀態取回覆的 status；Read 以名為 Read 的工具呼叫計數，memory-keeper Read 以其父 Agent 的 subagent_type 為 chronos:memory-keeper 者計數；時長為日誌第一與最後時間戳之差；費用取 result 事件的 total_cost_usd。
 時長｜第四輪：4.13 h｜第五輪：1.15 h（截至 2026-11-02T17:51:35Z，進行中）

@@ -2,7 +2,7 @@
 mod common;
 use axiom::{
     goal,
-    session::{run, Config},
+    session::{run, Clock, Config},
 };
 use serde_json::Value;
 use std::{
@@ -25,6 +25,8 @@ impl EnvRestore {
                 "FAKE_CLAUDE_PIDS",
                 "AXIOM_PYTHON",
                 "AXIOM_HEADLESS",
+                "CLAUDE_CODE_PROMPT_CACHE_TTL",
+                "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
             ]
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
@@ -72,6 +74,8 @@ fn execute(
     std::env::remove_var("FAKE_CLAUDE_SESSION");
     std::env::set_var("AXIOM_PYTHON", "/x");
     std::env::set_var("AXIOM_HEADLESS", "0");
+    std::env::set_var("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m");
+    std::env::set_var("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "5m");
     if active {
         goal::open(&home, "12345678-1234-1234-1234-123456789abc", "目標", None).unwrap();
     }
@@ -87,6 +91,7 @@ fn execute(
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     let mut output = Vec::new();
     let code = run(
@@ -117,7 +122,10 @@ fn execute(
     assert_eq!(record["env"]["AXIOM_DATA_HOME"], home.to_str().unwrap());
     assert_eq!(record["env"]["AXIOM_HEADLESS"], "1");
     assert_eq!(record["env"]["AXIOM_BIN"], config.bin.to_str().unwrap());
+    assert_eq!(record["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
     assert!(record["env"]["AXIOM_PYTHON"].is_null());
+    assert_eq!(record["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h");
+    assert_eq!(record["env"]["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"], "1h");
     assert_eq!(
         record["messages"][0]["message"]["content"][0]["text"],
         "/chronos:wish 幫 todo 加統計功能"
@@ -180,8 +188,68 @@ fn launch_progress_and_log() {
         Path::new(argv[flag("--plugin-dir") + 1].as_str().unwrap()),
         Path::new(record["home"].as_str().unwrap())
             .join("engine")
-            .join(env!("CARGO_PKG_VERSION"))
+            .join(format!(
+                "{}-{}",
+                env!("CARGO_PKG_VERSION"),
+                axiom::engine::build_id()
+            ))
     );
+}
+#[test]
+fn provenance_leads_the_log_and_closes_the_output() {
+    let (code, out, record, lines) = execute("ok", empty(), false);
+    assert_eq!(code, 0);
+    let first: Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(first["type"], "provenance");
+    let block = &first["provenance"];
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(block["binary_version"], version);
+    assert_eq!(block["binary_build"], "unknown");
+    assert_eq!(block["engine_build"], axiom::engine::build_id());
+    assert_eq!(block["plugin_version"], version);
+    assert_eq!(block["plugin_rules"], "match");
+    assert_eq!(block["claude_version"], "2.1.281");
+    assert_eq!(block["git_commit"], "unknown");
+    assert_eq!(block["git_tree"], "unknown");
+    for line in &lines {
+        serde_json::from_str::<Value>(line).unwrap();
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| serde_json::from_str::<Value>(l).unwrap()["type"] == "provenance")
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&lines[1]).unwrap()["subtype"],
+        "init"
+    );
+    let handed: Value = serde_json::from_str(record["provenance_env"].as_str().unwrap()).unwrap();
+    assert_eq!(&handed, block);
+    let shown = out
+        .lines()
+        .find_map(|l| l.strip_prefix("provenance: "))
+        .unwrap();
+    for part in [
+        format!(
+            "axiom {version} (build unknown, engine {})",
+            block["engine_build"].as_str().unwrap()
+        ),
+        format!("plugin {version} (rules match)"),
+        "claude 2.1.281".to_owned(),
+        "git unknown (unknown)".to_owned(),
+    ] {
+        assert!(shown.contains(&part), "{shown}");
+    }
+}
+#[test]
+fn crashed_run_still_reports_what_produced_it() {
+    let (code, out, _, lines) = execute("crash", empty(), false);
+    assert_eq!(code, 3);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("\"type\":\"provenance\""));
+    assert!(out.lines().any(|l| l.starts_with("provenance: axiom ")));
 }
 #[test]
 fn error_exit() {
@@ -269,6 +337,7 @@ fn existing_log_is_not_overwritten() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     std::fs::create_dir_all(home.join("logs")).unwrap();
     let now = std::time::SystemTime::now()
@@ -345,6 +414,7 @@ fn interrupt_kills_process_tree() {
         claude: Ok(common::fake("fake_claude")),
         home: temp.path().join("home"),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     goal::open(&config.home, SESSION, "test", None).unwrap();
     let mut out = Vec::new();
@@ -422,6 +492,7 @@ fn interrupted_and_resume() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     for scenario in ["limit", "crash"] {
         goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
@@ -461,7 +532,15 @@ fn interrupted_and_resume() {
     std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
     let mut resume_output = Vec::new();
     assert_eq!(
-        axiom::session::resume(&config, SESSION, Some(17), empty(), &mut resume_output).unwrap(),
+        axiom::session::resume(
+            &config,
+            SESSION,
+            Some(17),
+            None,
+            empty(),
+            &mut resume_output
+        )
+        .unwrap(),
         0
     );
     let output = String::from_utf8(resume_output).unwrap();
@@ -500,11 +579,244 @@ fn interrupted_and_resume() {
     assert_eq!(g.amendments, ["amendment"]);
     std::fs::write(home.join("goals").join(format!("{SESSION}.json")), "{").unwrap();
     assert_eq!(
-        axiom::session::resume(&config, SESSION, None, empty(), &mut Vec::new())
+        axiom::session::resume(&config, SESSION, None, None, empty(), &mut Vec::new())
             .unwrap_err()
             .kind,
         "invalid_json"
     );
+}
+
+#[test]
+fn resume_message_is_the_first_turn() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let record = temp.path().join("record");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "resume");
+    std::env::remove_var("FAKE_CLAUDE_SESSION");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+        clock: Clock::system(),
+    };
+    goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
+    goal::interrupt(&home, SESSION, "claude exited 1 without a result").unwrap();
+    let mut out = Vec::new();
+    let message = "the binary is fixed; the denied action is now allowed";
+    assert_eq!(
+        axiom::session::resume(&config, SESSION, None, Some(message), empty(), &mut out).unwrap(),
+        0
+    );
+    let record: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    let messages = record["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    let prompt = messages[0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(prompt, message);
+    let g = goal::load(&home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "done");
+    assert_eq!(g.reason, None);
+    goal::open(&home, "other", "original", None).unwrap();
+    axiom::hook::handle(
+        &serde_json::json!({"hook_event_name":"UserPromptSubmit", "session_id":"other", "prompt":prompt}),
+        Some(&home),
+        true,
+    )
+    .unwrap();
+    let g = goal::load(&home, "other").unwrap().unwrap();
+    assert_eq!(g.amendments, [message]);
+    assert_eq!(g.interjection.unwrap().prompt, message);
+}
+
+fn fake_clock(
+    start: i64,
+    on_sleep: impl Fn() + Send + Sync + 'static,
+) -> (Clock, std::sync::Arc<Mutex<(i64, u32)>>) {
+    let state = std::sync::Arc::new(Mutex::new((start, 0u32)));
+    let (now_state, sleep_state) = (state.clone(), state.clone());
+    let clock = Clock {
+        now: Box::new(move || now_state.lock().unwrap().0),
+        sleep: Box::new(move |d| {
+            let mut s = sleep_state.lock().unwrap();
+            s.0 += d.as_secs() as i64;
+            s.1 += 1;
+            on_sleep();
+        }),
+    };
+    (clock, state)
+}
+fn local_two_am() -> (i64, i32) {
+    let real = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let offset = axiom::session::local_offset_secs(real);
+    let day = (real + i64::from(offset)).div_euclid(86400) * 86400;
+    (day + 2 * 3600 - i64::from(offset), offset)
+}
+fn limit_run(clock: Clock) -> (i32, String, Value, tempfile::TempDir) {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp();
+    let home = temp.path().join("home");
+    let record = temp.path().join("record");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "limit-reset");
+    std::env::remove_var("FAKE_CLAUDE_SESSION");
+    let config = Config {
+        claude: Ok(common::fake("fake_claude")),
+        home: home.clone(),
+        bin: temp.path().join("axiom"),
+        clock,
+    };
+    goal::open(&home, SESSION, "original", temp.path().to_str()).unwrap();
+    let mut out = Vec::new();
+    let code = run(
+        &config,
+        "wish",
+        "original",
+        temp.path(),
+        None,
+        empty(),
+        &mut out,
+    )
+    .unwrap();
+    let record: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+    (code, String::from_utf8(out).unwrap(), record, temp)
+}
+#[test]
+fn usage_limit_waits_for_the_reset_and_resumes() {
+    let (start, offset) = local_two_am();
+    let (clock, state) = fake_clock(start, || ());
+    let (code, out, record, temp) = limit_run(clock);
+    let home = temp.path().join("home");
+    assert_eq!(code, 0, "{out}");
+    let expected = 2 * 3600 + 40 * 60 + axiom::session::LIMIT_MARGIN_SECS;
+    let (now, sleeps) = *state.lock().unwrap();
+    assert_eq!(now - start, expected);
+    assert_eq!(sleeps, expected as u32);
+    assert!(
+        out.lines()
+            .any(|l| l == "usage limit: continuing at 04:42 (in 2h42m); Ctrl-C to stop"),
+        "{out}"
+    );
+    assert!(out.lines().any(|l| l.starts_with(
+        "goal blocked: claude reported an error: You've hit your session limit · resets 4:40am"
+    )));
+    assert!(!out.contains("resume: axiom wish --resume"), "{out}");
+    assert_eq!(out.matches("\nlog: ").count(), 2);
+    let argv = record["argv"].as_array().unwrap();
+    let i = argv.iter().position(|v| v == "--resume").unwrap();
+    assert_eq!(argv[i + 1], SESSION);
+    let prompt = record["messages"][0]["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.starts_with(axiom::session::CONTINUE_TAG));
+    assert_eq!(goal::load(&home, SESSION).unwrap().unwrap().status, "done");
+    let stamp = axiom::session::log_stamp(start + expected, offset);
+    assert!(home
+        .join("logs")
+        .join(format!("{stamp}-wish.jsonl"))
+        .is_file());
+}
+#[test]
+fn usage_limit_already_past_waits_only_the_margin() {
+    let (two_am, _) = local_two_am();
+    let start = two_am + 2 * 3600 + 50 * 60;
+    let (clock, state) = fake_clock(start, || ());
+    let (code, out, record, _temp) = limit_run(clock);
+    assert_eq!(code, 0, "{out}");
+    let (now, sleeps) = *state.lock().unwrap();
+    assert_eq!(now - start, axiom::session::LIMIT_MARGIN_SECS);
+    assert_eq!(i64::from(sleeps), axiom::session::LIMIT_MARGIN_SECS);
+    assert!(
+        out.contains("usage limit: continuing at 04:52 (in 0h02m)"),
+        "{out}"
+    );
+    assert!(record["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "--resume"));
+}
+#[test]
+fn usage_limit_wait_stops_on_interrupt() {
+    let (start, _) = local_two_am();
+    let (clock, state) = fake_clock(start, axiom::session::trigger_interrupt);
+    let (code, out, record, temp) = limit_run(clock);
+    let home = temp.path().join("home");
+    assert_eq!(code, 130, "{out}");
+    assert_eq!(state.lock().unwrap().1, 1);
+    assert!(out
+        .lines()
+        .any(|l| l == format!("interrupted; resume: axiom wish --resume {SESSION}")));
+    assert!(!record["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "--resume"));
+    let g = goal::load(&home, SESSION).unwrap().unwrap();
+    assert_eq!(g.status, "blocked");
+    assert!(g
+        .note
+        .unwrap()
+        .starts_with("claude reported an error: You've hit your session limit"));
+    assert_eq!(std::fs::read_dir(home.join("logs")).unwrap().count(), 1);
+}
+#[test]
+fn limit_reset_parsing() {
+    use axiom::session::limit_reset;
+    let offset: i32 = 8 * 3600;
+    let day = 1_793_232_000; // 2026-10-29 00:00 UTC
+    let local = |h: i64, m: i64| day + h * 3600 + m * 60 - i64::from(offset);
+    let taipei = "You've hit your session limit · resets 4:40am (Asia/Taipei)";
+    assert_eq!(limit_reset(taipei, local(2, 0), offset), Some(local(4, 40)));
+    assert_eq!(
+        limit_reset(taipei, local(4, 50), offset),
+        Some(local(4, 40))
+    );
+    assert_eq!(
+        limit_reset(taipei, local(5, 0), offset),
+        Some(local(28, 40))
+    );
+    assert_eq!(
+        limit_reset("limit reached, resets 12:30pm", local(1, 0), offset),
+        Some(local(12, 30))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 12am", local(1, 0), offset),
+        Some(local(24, 0))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 3pm", local(1, 0), offset),
+        Some(local(15, 0))
+    );
+    assert_eq!(
+        limit_reset("limit · resets at 16:05", local(1, 0), offset),
+        Some(local(16, 5))
+    );
+    assert_eq!(
+        limit_reset("limit · resets 23:59", day, 0),
+        Some(day + 23 * 3600 + 59 * 60)
+    );
+    for message in [
+        "You've hit your usage limit",
+        "limit · resets 25:00",
+        "limit · resets 13pm",
+        "limit · resets 0am",
+        "limit · resets 4:60am",
+        "weekly limit · resets Nov 12, 4am",
+        "the timer resets 4:40am",
+    ] {
+        assert_eq!(limit_reset(message, local(1, 0), offset), None, "{message}");
+    }
 }
 
 #[test]
@@ -515,9 +827,10 @@ fn resume_rejects_missing_done_and_missing_cwd() {
         claude: Ok(common::fake("fake_claude")),
         home: home.clone(),
         bin: temp.path().join("axiom"),
+        clock: Clock::system(),
     };
     let attempt =
-        |id| axiom::session::resume(&config, id, None, empty(), &mut Vec::new()).unwrap_err();
+        |id| axiom::session::resume(&config, id, None, None, empty(), &mut Vec::new()).unwrap_err();
     assert_eq!(attempt("missing").kind, "not_found");
     goal::open(&home, "done", "wish", None).unwrap();
     goal::set_status(&home, "done", "done", None).unwrap();

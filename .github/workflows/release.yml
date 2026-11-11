@@ -30,6 +30,31 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
+      - name: Build the desktop app (Windows only)
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked --features app --bin chronos
+      - name: Name the desktop app asset
+        if: runner.os == 'Windows'
+        run: cp target/release/chronos.exe chronos.exe
+        shell: bash
+      - name: Upload the desktop app
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronos.exe
+          path: chronos.exe
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python tools/package_release.py --version "${GITHUB_REF_NAME#v}" --out-dir dist --windows-axiom target/release/axiom.exe --windows-chronos target/release/chronos.exe
+      - name: Package Linux installer
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python tools/package_release.py --version "${GITHUB_REF_NAME#v}" --out-dir dist --linux-axiom target/release/axiom
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: dist/axiom-chronos-*
   publish:
     needs: build
     runs-on: ubuntu-latest
@@ -39,7 +64,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: (cd dist && sha256sum * > SHA256SUMS)
+      - name: Checksum every release payload
+        run: (cd dist && sha256sum * > ../SHA256SUMS && mv ../SHA256SUMS .)
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}

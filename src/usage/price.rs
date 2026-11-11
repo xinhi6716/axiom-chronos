@@ -1,0 +1,313 @@
+//! Claude API list prices in USD per million tokens, keyed by model family.
+//!
+//! Source: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-09;
+//! the Fable 5.2 row was read there on 2026-11-10.
+//! Claude Code's own cost-state records agree with these rates to the cent for Opus 5.5
+//! (5-minute and 1-hour cache writes) and Haiku 5.5 (both prompt-length tiers).
+//!
+//! Codex source: https://developers.openai.com/api/docs/pricing, read 2026-11-10.
+
+pub const PRICES_AS_OF: &str = "2026-11-09";
+pub const PRICES_SOURCE: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
+
+pub const CODEX_PRICES_SOURCE: &str = "https://developers.openai.com/api/docs/pricing";
+pub const CODEX_PRICES_AS_OF: &str = "2026-11-10";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CodexUsage {
+    /// Total input tokens, including cached input.
+    pub input: u64,
+    pub cached_input: u64,
+    /// Total output tokens, including reasoning tokens.
+    pub output: u64,
+}
+
+// USD per million tokens: model, input, cached input, output.
+#[rustfmt::skip]
+const CODEX_RATES: &[(&str, f64, f64, f64)] = &[
+    ("gpt-6-astra",   10.0,  1.0,   50.0), // gpt-6-astra
+    ("gpt-6.1-sol",    2.0,  0.1,   10.0), // gpt-6.1-sol
+    ("gpt-6.1-terra",  1.0,  0.05,   5.0), // gpt-6.1-terra
+    ("gpt-6-luna",     0.1,  0.01,   0.5), // gpt-6-luna
+    ("gpt-6-sol",      2.0,  0.2,   10.0), // gpt-6-sol
+    ("gpt-5.6-sol",    4.0,  0.4,   20.0), // gpt-5.6-sol
+    ("gpt-5.6-terra",  2.0,  0.2,   12.0), // gpt-5.6-terra
+    ("gpt-5.6-luna",   0.2,  0.02,   1.2), // gpt-5.6-luna
+    ("gpt-5.4-mini",  0.75,  0.075,  4.5), // gpt-5.4-mini
+    ("gpt-5.4-nano",   0.2,  0.02,  1.25), // gpt-5.4-nano
+    ("gpt-5.2",       1.75,  0.175, 14.0), // gpt-5.2
+    ("gpt-5.1",       1.25,  0.125, 10.0), // gpt-5.1
+    ("gpt-5",         1.25,  0.125, 10.0), // gpt-5
+    ("gpt-5-mini",    0.25,  0.025,  2.0), // gpt-5-mini
+    ("gpt-5-nano",    0.05,  0.005,  0.4), // gpt-5-nano
+    ("gpt-4.1",        2.0,  0.5,    8.0), // gpt-4.1
+    ("gpt-4.1-mini",   0.4,  0.1,    1.6), // gpt-4.1-mini
+    ("gpt-4o",         2.5,  1.25,  10.0), // gpt-4o
+    ("gpt-4o-mini",   0.15,  0.075,  0.6), // gpt-4o-mini
+    ("o3",             2.0,  0.5,    8.0), // o3
+];
+
+pub fn codex_usd(model: &str, usage: &CodexUsage) -> Option<f64> {
+    let &(_, input_rate, cached_rate, output_rate) = CODEX_RATES
+        .iter()
+        .find(|(id, _, _, _)| *id == without_date(model))?;
+    let cached = usage.cached_input.min(usage.input);
+    Some(
+        ((usage.input - cached) as f64 * input_rate
+            + cached as f64 * cached_rate
+            + usage.output as f64 * output_rate)
+            / 1e6,
+    )
+}
+
+const LONG_PROMPT_TOKENS: u64 = 100_000;
+const FAST_MULTIPLIER: f64 = 2.0;
+const US_ONLY_MULTIPLIER: f64 = 1.1;
+const WEB_SEARCH_USD: f64 = 0.01;
+
+#[derive(Clone, Copy)]
+struct Rates {
+    input: f64,
+    write_5m: f64,
+    write_1h: f64,
+    read: f64,
+    output: f64,
+}
+
+struct Family {
+    id: &'static str,
+    rates: Rates,
+    over_100k: Option<Rates>,
+    fast: bool,
+}
+
+const fn rates(input: f64, write_5m: f64, write_1h: f64, read: f64, output: f64) -> Rates {
+    Rates {
+        input,
+        write_5m,
+        write_1h,
+        read,
+        output,
+    }
+}
+const fn family(
+    id: &'static str,
+    input: f64,
+    write_5m: f64,
+    write_1h: f64,
+    read: f64,
+    output: f64,
+) -> Family {
+    Family {
+        id,
+        rates: rates(input, write_5m, write_1h, read, output),
+        over_100k: None,
+        fast: false,
+    }
+}
+impl Family {
+    const fn with_fast_mode(mut self) -> Self {
+        self.fast = true;
+        self
+    }
+    const fn over_100k(mut self, rates: Rates) -> Self {
+        self.over_100k = Some(rates);
+        self
+    }
+}
+
+#[rustfmt::skip]
+const FAMILIES: &[Family] = &[
+    //     family               input  5m write  1h write  read   output
+    family("claude-fable-5-2",   8.0,  10.0,     16.0,     0.20,  40.0).with_fast_mode(),
+    family("claude-fable-5-1",  10.0,  12.5,     20.0,     0.25,  50.0),
+    family("claude-mythos-5-1", 10.0,  12.5,     20.0,     0.25,  50.0),
+    family("claude-fable-5",    10.0,  12.5,     20.0,     1.0,   50.0),
+    family("claude-mythos-5",   10.0,  12.5,     20.0,     1.0,   50.0),
+    family("claude-opus-5-5",    4.0,   5.0,      8.0,     0.20,  20.0).with_fast_mode(),
+    family("claude-opus-5",      5.0,   6.25,    10.0,     0.50,  25.0).with_fast_mode(),
+    family("claude-opus-4-8",    5.0,   6.25,    10.0,     0.50,  25.0).with_fast_mode(),
+    family("claude-opus-4-7",    5.0,   6.25,    10.0,     0.50,  25.0),
+    family("claude-opus-4-6",    5.0,   6.25,    10.0,     0.50,  25.0),
+    family("claude-opus-4-5",    5.0,   6.25,    10.0,     0.50,  25.0),
+    family("claude-opus-4-1",   15.0,  18.75,    30.0,     1.50,  75.0),
+    family("claude-opus-4",     15.0,  18.75,    30.0,     1.50,  75.0),
+    family("claude-sonnet-5-5",  2.0,   2.50,     4.0,     0.10,  10.0),
+    family("claude-sonnet-5",    2.0,   2.50,     4.0,     0.20,  10.0),
+    family("claude-sonnet-4-6",  3.0,   3.75,     6.0,     0.30,  15.0),
+    family("claude-sonnet-4-5",  3.0,   3.75,     6.0,     0.30,  15.0),
+    family("claude-sonnet-4",    3.0,   3.75,     6.0,     0.30,  15.0),
+    family("claude-haiku-5-5",   0.10,  0.125,    0.20,    0.01,  0.50)
+        .over_100k(rates(        0.50,  0.625,    1.0,     0.05,  2.50)),
+    family("claude-haiku-4-5",   1.0,   1.25,     2.0,     0.10,  5.0),
+];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CallUsage {
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_write_1h: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub web_searches: u64,
+    pub fast: bool,
+    pub us_only: bool,
+    pub non_standard_tier: bool,
+}
+impl CallUsage {
+    pub fn cache_write_5m(&self) -> u64 {
+        self.cache_write.saturating_sub(self.cache_write_1h)
+    }
+    pub fn context(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+    pub fn is_zero(&self) -> bool {
+        self.input == 0 && self.cache_read == 0 && self.cache_write == 0 && self.output == 0
+    }
+    pub fn merge(&mut self, other: &CallUsage) {
+        self.input = self.input.max(other.input);
+        self.cache_write = self.cache_write.max(other.cache_write);
+        self.cache_write_1h = self.cache_write_1h.max(other.cache_write_1h);
+        self.cache_read = self.cache_read.max(other.cache_read);
+        self.output = self.output.max(other.output);
+        self.web_searches = self.web_searches.max(other.web_searches);
+        self.fast |= other.fast;
+        self.us_only |= other.us_only;
+        self.non_standard_tier |= other.non_standard_tier;
+    }
+}
+
+impl Rates {
+    fn scaled(self, k: f64) -> Self {
+        rates(
+            self.input * k,
+            self.write_5m * k,
+            self.write_1h * k,
+            self.read * k,
+            self.output * k,
+        )
+    }
+    fn write_cost(&self, u: &CallUsage) -> f64 {
+        (u.cache_write_5m() as f64 * self.write_5m + u.cache_write_1h as f64 * self.write_1h) / 1e6
+    }
+    fn cost(&self, u: &CallUsage) -> f64 {
+        (u.input as f64 * self.input
+            + u.cache_read as f64 * self.read
+            + u.output as f64 * self.output)
+            / 1e6
+            + self.write_cost(u)
+    }
+}
+
+fn without_date(model: &str) -> &str {
+    match model.rsplit_once('-') {
+        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => model,
+    }
+}
+
+fn family_of(model: &str) -> Option<&'static Family> {
+    FAMILIES.iter().find(|f| f.id == without_date(model))
+}
+
+fn rates_for(model: &str, u: &CallUsage) -> Option<Rates> {
+    let family = family_of(model)?;
+    if u.non_standard_tier || (u.fast && !family.fast) {
+        return None;
+    }
+    let mut rates = match family.over_100k {
+        Some(long) if u.context() > LONG_PROMPT_TOKENS => long,
+        _ => family.rates,
+    };
+    if u.fast {
+        rates = rates.scaled(FAST_MULTIPLIER);
+    }
+    if u.us_only {
+        rates = rates.scaled(US_ONLY_MULTIPLIER);
+    }
+    Some(rates)
+}
+
+pub fn usd(model: &str, usage: &CallUsage) -> Option<f64> {
+    let rates = rates_for(model, usage)?;
+    Some(rates.cost(usage) + usage.web_searches as f64 * WEB_SEARCH_USD)
+}
+
+pub fn cache_write_usd(model: &str, usage: &CallUsage) -> Option<f64> {
+    Some(rates_for(model, usage)?.write_cost(usage))
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    #[test]
+    fn computes_cost_from_literal_rates() {
+        let terra = CodexUsage {
+            input: 1_000_000,
+            cached_input: 400_000,
+            output: 200_000,
+        };
+        let expected_terra = (600_000.0 * 1.0 + 400_000.0 * 0.05 + 200_000.0 * 5.0) / 1e6;
+        assert!((codex_usd("gpt-6.1-terra", &terra).unwrap() - expected_terra).abs() < 1e-12);
+
+        let astra = CodexUsage {
+            input: 500_000,
+            cached_input: 0,
+            output: 100_000,
+        };
+        let expected_astra = (500_000.0 * 10.0 + 100_000.0 * 50.0) / 1e6;
+        assert!((codex_usd("gpt-6-astra", &astra).unwrap() - expected_astra).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cached_input_saturates_at_total_input() {
+        let usage = CodexUsage {
+            input: 1_000_000,
+            cached_input: 2_000_000,
+            output: 0,
+        };
+        assert!((codex_usd("gpt-6.1-terra", &usage).unwrap() - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn model_lookup_is_exact_except_for_date_suffix() {
+        let usage = CodexUsage {
+            input: 1_000_000,
+            cached_input: 0,
+            output: 0,
+        };
+        assert_eq!(codex_usd("gpt-9-unknown", &usage), None);
+        assert_eq!(codex_usd("gpt-5.1-codex", &usage), None);
+        assert_eq!(codex_usd("gpt-5", &usage), Some(1.25));
+        assert_eq!(codex_usd("gpt-5-mini", &usage), Some(0.25));
+        assert_eq!(
+            codex_usd("gpt-6.1-terra-20260101", &usage),
+            codex_usd("gpt-6.1-terra", &usage)
+        );
+    }
+
+    #[test]
+    fn source_and_date_are_documented() {
+        assert_eq!(
+            CODEX_PRICES_SOURCE,
+            "https://developers.openai.com/api/docs/pricing"
+        );
+        let parts: Vec<_> = CODEX_PRICES_AS_OF.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!((parts[0].len(), parts[1].len(), parts[2].len()), (4, 2, 2));
+        assert!(parts
+            .iter()
+            .all(|part| part.bytes().all(|b| b.is_ascii_digit())));
+        let month: u32 = parts[1].parse().unwrap();
+        let day: u32 = parts[2].parse().unwrap();
+        assert!((1..=12).contains(&month));
+        assert!((1..=31).contains(&day));
+        let docs = include_str!("price.rs")
+            .split_once("pub const PRICES_AS_OF")
+            .unwrap()
+            .0;
+        assert!(docs.contains(CODEX_PRICES_SOURCE));
+        assert!(docs.contains(CODEX_PRICES_AS_OF));
+    }
+}

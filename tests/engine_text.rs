@@ -10,26 +10,52 @@ fn contains(text: &str, phrase: &str) -> bool {
 
 #[test]
 fn contract_sentences_are_embedded() {
-    let unit_mode = "Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`; never add `brief` or `save_to`. Brief mode is for Astra only.";
+    let unit_mode = "Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
     let cases = [
         ("DISPATCH.md", "SCOPE lists paths only; notes such as \"(new)\" go in CONTEXT."),
         ("DISPATCH.md", "VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME."),
         ("DISPATCH.md", unit_mode),
+        ("DISPATCH.md", "Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit."),
+        ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
+        ("agents/dispatcher.md", "Before dispatching a fix, register it separately with `orch` `[\"unit\", \"add\", <new>, \"--track\", <module>, \"--brief\", <path>, \"--fixes\", <old>]`."),
+        ("agents/dispatcher.md", "For other takeovers by a later unit of the same module, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`"),
+        ("agents/dispatcher.md", "If the reply is `fix_rounds`, report it to the core."),
+        ("agents/dispatcher.md", "Take the pack path from the VERIFY reply: `codex_run` `pack`, or `orch verify` `pack=`."),
+        ("agents/dispatcher.md", "Call `orch` `[\"review-pack\", <unit>, \"--repo\", <dir>]` only to rebuild a pack."),
+        ("agents/dispatcher.md", "the reviewer writes its verdict file, not you."),
+        ("agents/dispatcher.md", "Call `orch` `[\"review\", <unit>, \"--repo\", <dir>, \"--reviewer\", \"chronos:reviewer\"]` for each unit."),
+        ("agents/dispatcher.md", "Skip step 7 when you are named one module"),
+        ("agents/dispatcher.md", "A `stale review` error means files in the unit's SCOPE changed after its VERIFY ran: call `orch` `[\"verify\", <unit>, \"--repo\", <dir>]`, follow the ACCEPT reply rule, then review again."),
+        ("DISPATCH.md", "`EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model."),
+        ("DISPATCH.md", "The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them."),
+        ("agents/dispatcher.md", "put `EFFORT` and `TIER` in its brief as DISPATCH.md describes; never pass them to `codex_run`."),
         ("agents/dispatcher.md", "Before writing any brief, call `memory_search`"),
         ("agents/dispatcher.md", "`memory_get`"),
         ("agents/dispatcher.md", unit_mode),
+        ("agents/dispatcher.md", "A unit that is ready to run is registered by its own `codex_run` call: add `track` (the module id, or \"build\") and `brief_file` (the brief path) to the dispatch, in the same message as the Write."),
         ("agents/dispatcher.md", "Register every unit, fix units included, under its module id as track; with a map, only a `sol` unit may use another track."),
         ("agents/dispatcher.md", "A unit's `codex_run` reply carries `accept`. When `accept.ran` is true, ACCEPT already ran for the module; do not call it again. When `accept.reason` is `units_pending` or `claimed`, a later unit of the module will run it. For any other reason, call `orch` `[\"accept\", <module>, \"--repo\", <dir>]` yourself."),
         ("agents/dispatcher.md", "Give `chronos:reviewer` one whole unit per call: the unit id, every file of the unit including tests, and the module CONTRACT."),
         ("agents/dispatcher.md", "The `orch` `[\"review\", ...]` reply lists the ready and waiting units; use it instead of a separate `[\"ready\"]` call."),
         ("agents/reviewer.md", "You review one whole unit per call: the unit id, every file in it, tests included, and its contract."),
-        ("agents/reviewer.md", "{\"unit\": \"<unit id>\", \"verdict\": \"pass\" | \"fail\", \"findings\": ["),
-        ("agents/reviewer.md", "Write the unit id you were given into `unit`."),
+        ("agents/reviewer.md", "{\"unit\": \"<unit id>\", \"tree\": \"<tree id>\", \"verdict\": \"pass\" | \"fail\", \"findings\": ["),
+        ("agents/reviewer.md", "Write the unit id you were given into `unit`, and the pack's `Tree reviewed` value into `tree`."),
+        ("agents/reviewer.md", "For a pack with `Fixes unit:`, check only the listed findings and the changed lines."),
+        ("agents/reviewer.md", "For a pack with `Earlier review at:`, check the earlier findings and the diff shown."),
+        ("agents/reviewer.md", "A `blocker` prevents the goal's essential operation or causes severe harm."),
+        ("agents/reviewer.md", "A `major` materially violates the contract or leaves important behaviour untested."),
+        ("agents/reviewer.md", "A `minor` is a limited issue that does not prevent the essential operation or materially violate the contract."),
+        ("agents/reviewer.md", "The optional `needs` field is `\"smoke\"` or `\"manual\"`, only for an `untested` finding that a lib test cannot reach."),
+        ("agents/reviewer.md", "Write verdict JSON to `<unit>.verdict.json` in the directory of the review pack (`<store>/reports/`)"),
+        ("agents/reviewer.md", "Each finding has `check`, `severity`, `location`, `evidence` and `fix`; quote evidence from the code."),
+        ("agents/reviewer.md", "Return exactly one line: `<unit> <tree> <verdict> blocker=<n> major=<n> minor=<n>`."),
+        ("agents/dispatcher.md", "`orch` refuses a verdict whose `tree` is not the tree of the unit's last VERIFY"),
         ("agents/critic.md", "Gives the second ruling on an Astra or research plan."),
         ("agents/critic.md", "In the second review"),
         ("skills/research/SKILL.md", "`chronos:critic` reviews it for overreach"),
         ("agents/memory-keeper.md", FIRST),
         ("agents/memory-keeper.md", SECOND),
+        ("agents/memory-keeper.md", "`memory_record` refuses a quote its file does not contain"),
     ];
     for (path, phrase) in cases {
         let text = asset(path);
@@ -70,7 +96,10 @@ fn reviewer_and_critic_use_claude() {
     let reviewer = asset("agents/reviewer.md");
     let frontmatter = reviewer.strip_prefix("---\n").or_else(|| reviewer.strip_prefix("---\r\n")).unwrap().split_once("\n---").unwrap().0;
     let tools: Vec<_> = frontmatter.lines().filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:")).collect();
-    assert_eq!(tools, [" Read, Glob, Grep"]);
+    assert_eq!(tools, [" Read, Glob, Grep, Write, mcp__codegraph__codegraph_explore"]);
+    for line in ["name: reviewer", "model: sonnet", "autoCompactWindow: 200000"] {
+        assert!(frontmatter.lines().any(|actual| actual.trim_end_matches('\r') == line));
+    }
     assert!(!reviewer.contains("Gemini"));
     let critic_description = asset("agents/critic.md").lines().find(|line| line.starts_with("description:")).unwrap();
     assert!(!critic_description.contains("Gemini"));

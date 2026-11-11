@@ -42,7 +42,11 @@ fn embedded_files_match_disk_and_install_idempotently() {
     let dir = engine::plugin_dir(temp.path()).unwrap();
     assert_eq!(
         dir,
-        temp.path().join("engine").join(env!("CARGO_PKG_VERSION"))
+        temp.path().join("engine").join(format!(
+            "{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            engine::build_id()
+        ))
     );
     for (path, text) in engine::FILES {
         assert_eq!(fs::read(dir.join(path)).unwrap(), text.as_bytes());
@@ -165,19 +169,20 @@ fn models_and_binary_configuration() {
         );
     }
     let plugin = json_asset(".claude-plugin/plugin.json");
-    assert_eq!(plugin["version"], "1.0.0");
+    assert_eq!(plugin["version"], "2.0.0");
     assert_eq!(
         plugin["mcpServers"]["bridge"],
         json!({"command":"${AXIOM_BIN:-axiom}","args":["bridge"]})
     );
     let hooks = json_asset("hooks/hooks.json");
-    for event in ["UserPromptSubmit", "Stop", "PreToolUse"] {
+    assert_eq!(hooks["hooks"]["SessionStart"][0]["matcher"], "compact");
+    for event in ["UserPromptSubmit", "SessionStart", "Stop", "PreToolUse"] {
         assert_eq!(
             hooks["hooks"][event][0]["hooks"][0]["command"],
             "\"${AXIOM_BIN:-axiom}\" hook"
         );
     }
-    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Write|Edit|NotebookEdit|Bash|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run");
+    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "*");
     let marketplace: Value = serde_json::from_str(
         &fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude-plugin/marketplace.json"),
@@ -186,10 +191,141 @@ fn models_and_binary_configuration() {
     )
     .unwrap();
     assert_eq!(marketplace["plugins"][0]["source"], "./engine");
-    assert_eq!(marketplace["plugins"][0]["version"], "1.0.0");
+    assert_eq!(marketplace["plugins"][0]["version"], "2.0.0");
     for (path, text) in engine::FILES {
         for forbidden in ["AXIOM_PYTHON", "bun", "vendor", "orch.ts"] {
             assert!(!text.contains(forbidden), "{path}: {forbidden}");
         }
     }
+}
+
+#[test]
+fn builds_with_one_version_never_share_or_clean_an_engine_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let older = temp.path().join("engine/1.0.0/agents/old.md");
+    fs::create_dir_all(older.parent().unwrap()).unwrap();
+    fs::write(&older, "a running older build still reads this").unwrap();
+    let sibling = temp.path().join("engine/1.0.0-000000000000/rules.md");
+    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    fs::write(&sibling, "another build's rules").unwrap();
+
+    let a = engine::install(temp.path(), "1.0.0", &[("rules.md", "build a")]).unwrap();
+    let b = engine::install(temp.path(), "1.0.0", &[("rules.md", "build b")]).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(fs::read_to_string(a.join("rules.md")).unwrap(), "build a");
+    assert_eq!(fs::read_to_string(b.join("rules.md")).unwrap(), "build b");
+    assert_eq!(
+        engine::install(temp.path(), "1.0.0", &[("rules.md", "build a")]).unwrap(),
+        a
+    );
+    assert_eq!(fs::read_to_string(a.join("rules.md")).unwrap(), "build a");
+    assert_eq!(
+        fs::read_to_string(&older).unwrap(),
+        "a running older build still reads this"
+    );
+    assert_eq!(
+        fs::read_to_string(&sibling).unwrap(),
+        "another build's rules"
+    );
+    let name = a.file_name().unwrap().to_str().unwrap();
+    assert!(
+        Regex::new(r"^1\.0\.0-[0-9a-f]{12}$")
+            .unwrap()
+            .is_match(name),
+        "{name}"
+    );
+}
+
+#[test]
+fn content_id_follows_every_path_and_byte() {
+    let id = engine::content_id;
+    assert_eq!(id(&[("a", "b")]), id(&[("a", "b")]));
+    assert_ne!(id(&[("a", "b")]), id(&[("a", "c")]));
+    assert_ne!(id(&[("a", "b")]), id(&[("c", "b")]));
+    assert_ne!(id(&[("ab", "c")]), id(&[("a", "bc")]));
+    assert_ne!(id(&[("a", "b"), ("c", "d")]), id(&[("a", "bcd")]));
+    assert_eq!(engine::build_id(), id(engine::FILES));
+}
+
+#[test]
+fn every_release_manifest_carries_the_crate_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(json_asset(".claude-plugin/plugin.json")["version"], version);
+    let marketplace: Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude-plugin/marketplace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marketplace["plugins"][0]["version"], version);
+}
+
+fn with_plugin_version(root: &Path, version: &str) {
+    let file = root.join(".claude-plugin/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    manifest["version"] = json!(version);
+    fs::write(file, manifest.to_string()).unwrap();
+}
+
+#[test]
+fn plugin_of_another_version_is_refused_naming_both_and_the_fix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = engine::plugin_dir(temp.path()).unwrap();
+    assert_eq!(
+        engine::check_plugin(&root).unwrap(),
+        engine::PluginCheck {
+            version: env!("CARGO_PKG_VERSION").into(),
+            differing: vec![],
+        }
+    );
+    with_plugin_version(&root, "0.3.0-codex");
+    let reason = engine::check_plugin(&root).unwrap_err();
+    for part in [
+        "0.3.0-codex",
+        env!("CARGO_PKG_VERSION"),
+        "claude plugin update chronos@axiom-chronos",
+        "AXIOM_BIN",
+        "axiom doctor",
+    ] {
+        assert!(reason.contains(part), "{reason}");
+    }
+}
+
+#[test]
+fn plugin_without_a_readable_version_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    let reason = engine::check_plugin(&root).unwrap_err();
+    assert!(reason.contains("cannot read"), "{reason}");
+    assert!(reason.contains(env!("CARGO_PKG_VERSION")), "{reason}");
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    for (manifest, part) in [("{", "not valid JSON"), ("{}", "declares no version")] {
+        fs::write(root.join(".claude-plugin/plugin.json"), manifest).unwrap();
+        let reason = engine::check_plugin(&root).unwrap_err();
+        assert!(reason.contains(part), "{reason}");
+    }
+}
+
+#[test]
+fn plugin_files_are_compared_by_content_but_not_line_endings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = engine::plugin_dir(temp.path()).unwrap();
+    for line_ending in ["\n", "\r\n"] {
+        for (path, text) in engine::FILES {
+            let copy = text.replace("\r\n", "\n").replace('\n', line_ending);
+            fs::write(root.join(path), copy).unwrap();
+        }
+        assert_eq!(
+            engine::check_plugin(&root).unwrap().differing,
+            Vec::<&str>::new(),
+            "{line_ending:?}"
+        );
+    }
+    fs::write(root.join("DISPATCH.md"), "other rules").unwrap();
+    fs::remove_file(root.join("agents/critic.md")).unwrap();
+    assert_eq!(
+        engine::check_plugin(&root).unwrap().differing,
+        ["DISPATCH.md", "agents/critic.md"]
+    );
 }

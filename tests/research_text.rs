@@ -17,6 +17,7 @@ fn research_instructions_are_embedded_and_checked() {
             "the baseline, separation of development and acceptance data, and a threshold fixed before running in `design`",
             "the counterexample that would refute the claim in `falsification`",
             "Literature questions are exempt from experiments",
+            "Back each hard claim in the plan with a quote line",
             "data leakage between development and acceptance data",
             "thresholds changed after results",
         ]),

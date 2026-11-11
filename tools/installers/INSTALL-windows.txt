@@ -1,0 +1,21 @@
+Axiom Chronos @VERSION@ - Windows x64
+
+Extract the ZIP, open PowerShell in that folder, then run:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+
+Default folder: %LOCALAPPDATA%\Programs\Axiom Chronos
+Options: -Prefix "D:\Apps\Axiom Chronos" -NoPath -NoShortcut -NoPlugin
+The installer upgrades both programs in place; close them before upgrading.
+It adds the user PATH and an Axiom Chronos Start menu shortcut by default.
+When claude is on PATH, it adds/refreshes the xinhi6716/axiom-chronos
+marketplace and installs/updates chronos@axiom-chronos at user scope.
+-NoPlugin skips that step. Restart Claude Code after a plugin update.
+The final axiom doctor output reports setup problems without failing installation.
+A plugin setup failure returns an error, even though the programs are installed.
+
+Start: chronos (desktop) or axiom wish <your wish> (command line).
+Claude Code and Codex CLI must already be installed and signed in.
+Uninstall (the script is also copied to the installation folder):
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
+Use the same -Prefix if you chose a custom folder. Uninstall also accepts
+-NoPath and -NoShortcut. It leaves ~/.axiom and the Claude plugin alone.

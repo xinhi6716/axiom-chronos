@@ -13,12 +13,114 @@ fn brief_fields_and_crlf() {
     assert_eq!(b.verify, "cargo test");
     assert_eq!(b.context.as_deref(), Some("背景"));
     assert_eq!(b.text, text);
-    assert!(parse_brief("GOAL x\nSCOPE x\n")
-        .unwrap_err()
-        .contains("VERIFY"));
-    assert!(parse_brief("GOAL x\nSCOPE ,,,\nVERIFY x\n")
-        .unwrap_err()
-        .contains("SCOPE"));
+    assert_eq!((b.effort, b.tier), (None, None));
+    assert_eq!(
+        parse_brief("GOAL x\nSCOPE x\n").unwrap_err(),
+        "is missing VERIFY"
+    );
+    assert_eq!(
+        parse_brief("GOAL x\nSCOPE ,,,\nVERIFY x\n").unwrap_err(),
+        "is missing SCOPE"
+    );
+}
+
+#[test]
+fn brief_settings_are_read_and_kept_from_the_worker() {
+    let text =
+        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
+    let b = parse_brief(text).unwrap();
+    assert_eq!(b.effort.as_deref(), Some("low"));
+    assert_eq!(b.tier.as_deref(), Some("luna"));
+    assert_eq!(
+        b.text,
+        "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n"
+    );
+    assert_eq!((b.goal.as_str(), b.verify.as_str()), ("g", "v"));
+    assert_eq!(b.scope, ["a"]);
+    for effort in ["low", "medium", "high"] {
+        let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nEFFORT {effort}")).unwrap();
+        assert_eq!(b.effort.as_deref(), Some(effort));
+        assert_eq!(b.tier, None);
+        assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
+    }
+}
+
+#[test]
+fn brief_settings_outside_the_allowed_set_are_refused() {
+    let efforts = "low, medium, high";
+    for (line, field, value, allowed) in [
+        ("EFFORT xhigh", "EFFORT", "xhigh", efforts),
+        ("EFFORT Low", "EFFORT", "Low", efforts),
+        ("EFFORT low please", "EFFORT", "low please", efforts),
+        ("EFFORT", "EFFORT", "", efforts),
+        (
+            "EFFORT low
+EFFORT high",
+            "EFFORT",
+            "high",
+            efforts,
+        ),
+        ("TIER terra", "TIER", "terra", "luna"),
+        ("TIER sol", "TIER", "sol", "luna"),
+        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", "luna"),
+        ("TIER", "TIER", "", "luna"),
+    ] {
+        let err = parse_brief(&format!(
+            "GOAL g
+SCOPE a
+VERIFY v
+{line}
+"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            format!("has invalid {field} {value:?}: give it once, as one of {allowed}"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn old_briefs_cannot_trip_the_settings() {
+    for text in [
+        "EFFORT was spent here\nTIER 1 sources\nGOAL g\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\nTIER sol\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT low\n  TIER luna\n",
+        "GOAL g\n  EFFORT low\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nEFFORTS low\nTIERED luna\nSCOPE a\nVERIFY v\n",
+    ] {
+        let b = parse_brief(text).unwrap();
+        assert_eq!((b.effort, b.tier), (None, None), "{text}");
+        assert_eq!(b.text, text);
+    }
+}
+
+#[test]
+fn misplaced_settings_are_refused_instead_of_ignored() {
+    for (text, line) in [
+        ("EFFORT low\nGOAL g\nSCOPE a\nVERIFY v\n", "EFFORT low"),
+        (
+            "TIER luna\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\n",
+            "TIER luna",
+        ),
+        (
+            "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT c\nEFFORT high\n",
+            "EFFORT high",
+        ),
+        (
+            "GOAL g\nCONTEXT c\nTIER luna\nSCOPE a\nVERIFY v\n",
+            "TIER luna",
+        ),
+    ] {
+        assert_eq!(
+            parse_brief(text).unwrap_err(),
+            format!("has \"{line}\" outside the lines between GOAL and CONTEXT"),
+            "{text}"
+        );
+    }
+    let placed = "GOAL g\nEFFORT high\nTIER luna\nSCOPE a\nVERIFY v\nCONTEXT c\n";
+    assert_eq!(parse_brief(placed).unwrap().effort.as_deref(), Some("high"));
 }
 
 #[test]
@@ -97,4 +199,78 @@ fn path_coverage_and_overlap() {
     assert!(overlaps(&paths, &[r"src\a\nested\".into()]));
     assert!(overlaps(&["./tests/a.rs".into()], &[r"tests\a.rs".into()]));
     assert!(!overlaps(&paths, &["src/b/".into()]));
+}
+
+fn serving(ids: &str) -> String {
+    format!("{}SERVES {ids}\n", section("m", "src/m/", "none", "m, test"))
+}
+const PLAN_TEXT: &str = "### A1 First\n### A2: Second\n### A3 - Third\n## Coverage\n### read\n";
+
+#[test]
+fn plan_items_come_from_id_headings_only() {
+    use axiom::orch::parse_plan;
+    let items = parse_plan("### A1 First\n### A1 Again\n### two words\n### B2:\n## H Skip\n### B3: Third thing\n## Coverage\n### Read\n## After\n### C4 Last\n");
+    assert_eq!(
+        items.iter().map(|i| (i.id.as_str(), i.title.as_str())).collect::<Vec<_>>(),
+        [("A1", "First"), ("two", "words"), ("B2", ""), ("B3", "Third thing"), ("C4", "Last")]
+    );
+    assert!(parse_plan("prose only\n").is_empty());
+}
+
+#[test]
+fn serves_and_out_of_scope_are_parsed_and_validated() {
+    let map = parse_map(&format!("{}OUT OF SCOPE A3 too big\nFULL TEST `x`\n", serving("A1, A2"))).unwrap();
+    assert_eq!(map.modules[0].serves, ["A1", "A2"]);
+    assert_eq!((map.out_of_scope[0].id.as_str(), map.out_of_scope[0].reason.as_str()), ("A3", "too big"));
+    // old format: no SERVES
+    let old = parse_map(&section("m", "src/m/", "none", "m, test")).unwrap();
+    assert!(old.modules[0].serves.is_empty() && old.out_of_scope.is_empty());
+    for (input, reason) in [
+        (format!("{}OUT OF SCOPE A1 x\n", serving("A1")), "module m: SERVES A1, which is also OUT OF SCOPE"),
+        ("OUT OF SCOPE A1\n".to_string(), "OUT OF SCOPE needs a plan item id and a reason, got \"OUT OF SCOPE A1\""),
+        ("OUT OF SCOPE A1 x\nOUT OF SCOPE A1 y\n".to_string(), "OUT OF SCOPE A1: duplicate"),
+        (format!("{}SERVES\n", section("m", "src/m/", "none", "m, test")), "module m: empty SERVES; omit the field instead"),
+    ] {
+        assert_eq!(parse_map(&input).unwrap_err(), reason);
+    }
+}
+
+#[test]
+fn goal_check_refuses_unknown_and_unserved_plan_items() {
+    use axiom::orch::{check_goals, parse_plan};
+    let plan = parse_plan(PLAN_TEXT);
+    let full = parse_map(&format!("{}OUT OF SCOPE A3 later\n", serving("A1, A2"))).unwrap();
+    check_goals(&full, &plan).unwrap();
+    let dropped = parse_map(&serving("A1, A2")).unwrap();
+    assert_eq!(
+        check_goals(&dropped, &plan).unwrap_err(),
+        "plan item A3 (Third) is not served by any module and not listed as OUT OF SCOPE"
+    );
+    let unknown = parse_map(&format!("{}OUT OF SCOPE A3 later\n", serving("A1, A2, Z9"))).unwrap();
+    assert_eq!(check_goals(&unknown, &plan).unwrap_err(), "module m: SERVES unknown plan item Z9");
+    let unknown_out = parse_map(&format!("{}OUT OF SCOPE Z9 x\n", serving("A1, A2, A3"))).unwrap();
+    assert_eq!(check_goals(&unknown_out, &plan).unwrap_err(), "OUT OF SCOPE names unknown plan item Z9");
+    // old map against a plan without items passes
+    check_goals(&parse_map(&section("m", "src/m/", "none", "m, test")).unwrap(), &[]).unwrap();
+}
+
+#[test]
+fn plan_ids_need_no_digit_and_coverage_headings_are_not_items() {
+    use axiom::orch::{check_goals, parse_plan};
+    let audit = axiom::engine::FILES.iter().find(|(p, _)| *p == "research/audit.schema.json").unwrap().1;
+    let audit: serde_json::Value = serde_json::from_str(audit).unwrap();
+    let id = &audit["properties"]["changes"]["items"]["properties"]["id"];
+    assert!(id["description"].as_str().unwrap().starts_with("One word without spaces or commas"));
+    let plan = parse_plan("# Plan\n### cache 清除快取\n### R4-01: Progress\n### 清除 Drop it\n## Coverage\n### read\n- src\n### not_read\n- docs\n");
+    assert_eq!(
+        plan.iter().map(|i| (i.id.as_str(), i.title.as_str())).collect::<Vec<_>>(),
+        [("cache", "清除快取"), ("R4-01", "Progress"), ("清除", "Drop it")]
+    );
+    let map = parse_map(&format!("{}OUT OF SCOPE 清除 later\n", serving("cache, R4-01"))).unwrap();
+    assert_eq!(map.modules[0].serves, ["cache", "R4-01"]);
+    check_goals(&map, &plan).unwrap();
+    assert_eq!(
+        check_goals(&parse_map(&serving("R4-01")).unwrap(), &plan).unwrap_err(),
+        "plan item cache (清除快取) is not served by any module and not listed as OUT OF SCOPE"
+    );
 }

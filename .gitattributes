@@ -1,1 +1,2 @@
 tests/fixtures/orch/stores/old-crlf/** -text
+tools/installers/install.sh text eol=lf

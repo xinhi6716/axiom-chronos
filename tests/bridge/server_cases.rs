@@ -167,6 +167,11 @@ fn bridge_status_and_missing_command() {
         ok["structuredContent"]["codex"]["version"],
         json!(["codex-cli fake"])
     );
+    assert_eq!(ok["structuredContent"]["codex"]["exit_code"], 0);
+    assert_eq!(
+        ok["structuredContent"]["codex"]["version_check"]["verdict"],
+        "fail"
+    );
     assert_eq!(ok["structuredContent"]["codex_app_server_running"], false);
     assert!(ok["structuredContent"].get("agy").is_none());
     let mut c = config(temp.path());
@@ -177,6 +182,45 @@ fn bridge_status_and_missing_command() {
     assert_eq!(
         missing["structuredContent"]["codex"]["error"]["kind"],
         "missing"
+    );
+    let mut c = config(temp.path());
+    c.codex = Ok(vec![temp
+        .path()
+        .join("no-such-codex")
+        .to_string_lossy()
+        .into_owned()]);
+    let unstartable = invoke(&Bridge::new(c), "bridge_status", json!({}));
+    check(&unstartable, "completed");
+    assert_eq!(
+        unstartable["structuredContent"]["codex"]["error"]["kind"],
+        "probe_failed"
+    );
+}
+#[test]
+fn codex_run_failure_from_a_protocol_change_names_both_versions() {
+    let temp = common::temp();
+    let mut c = config(temp.path());
+    c.codex = Ok(common::fake_codex(&[
+        "--fake-version=codex-cli 999.1.2",
+        "--fake-break=initialize:-32600:Invalid request: missing field `clientInfo`",
+    ]));
+    let result = invoke(
+        &Bridge::new(c),
+        "codex_run",
+        json!({"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}),
+    );
+    check(&result, "bridge_error");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["kind"], "codex_protocol");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("installed codex-cli 999.1.2"), "{message}");
+    assert!(
+        message.contains(&axiom::codex::TESTED_CODEX.last_tested.to_string()),
+        "{message}"
+    );
+    assert!(
+        message.starts_with("Codex app-server protocol mismatch"),
+        "{message}"
     );
 }
 #[test]
@@ -212,6 +256,104 @@ fn goal_operations_and_mode_lock() {
     );
     check(&status, "completed");
     assert_eq!(status["structuredContent"]["goal"]["status"], "blocked");
+}
+#[test]
+fn goal_tool_takes_the_batch_a_waiting_goal_depends_on() {
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    let progress = temp.path().join("progress.json");
+    let marker = temp.path().join("done.flag");
+    let (progress, marker) = (progress.to_str().unwrap(), marker.to_str().unwrap());
+    for (args, expected) in [
+        (json!({"pid":12}), "go together"),
+        (
+            json!({"progress_file":progress,"marker_file":marker}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":"12"}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":4294967296u64}),
+            "go together",
+        ),
+        (
+            json!({"progress_file":progress,"marker_file":marker,"pid":0}),
+            "pid",
+        ),
+        (
+            json!({"progress_file":"p.json","marker_file":marker,"pid":12}),
+            "absolute",
+        ),
+    ] {
+        let mut full = json!({"session":"s","status":"waiting","note":"n"});
+        full.as_object_mut()
+            .unwrap()
+            .extend(args.as_object().unwrap().clone());
+        let bad = invoke(&b, "goal", full);
+        check(&bad, "bridge_error");
+        let error = &bad["structuredContent"]["error"];
+        assert_eq!(error["kind"], "invalid_argument", "{args}");
+        assert!(
+            error["message"].as_str().unwrap().contains(expected),
+            "{error}"
+        );
+        assert_eq!(
+            axiom::goal::load(temp.path(), "s").unwrap().unwrap().status,
+            "active"
+        );
+    }
+    let done = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"blocked","note":"n","progress_file":progress,"marker_file":marker,"pid":12}),
+    );
+    check(&done, "bridge_error");
+    let waiting = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"waiting","note":"n","progress_file":progress,"marker_file":marker,"pid":12}),
+    );
+    check(&waiting, "completed");
+    assert_eq!(
+        waiting["structuredContent"]["goal"]["batch"],
+        json!({"progress_file":progress,"marker_file":marker,"pid":12})
+    );
+    assert_eq!(
+        axiom::goal::load(temp.path(), "s").unwrap().unwrap().batch,
+        Some(axiom::goal::Batch {
+            progress_file: progress.into(),
+            marker_file: marker.into(),
+            pid: 12
+        })
+    );
+    let note_only = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"waiting","note":"n"}),
+    );
+    check(&note_only, "completed");
+    assert!(note_only["structuredContent"]["goal"]
+        .get("batch")
+        .is_none());
+    let descriptors = tools();
+    let goal = descriptors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "goal")
+        .unwrap();
+    let properties = &goal["inputSchema"]["properties"];
+    assert_eq!(properties["progress_file"]["type"], "string");
+    assert_eq!(properties["marker_file"]["type"], "string");
+    assert_eq!(properties["pid"]["type"], "integer");
+    assert_eq!(goal["inputSchema"]["required"], json!(["session"]));
+    assert!(goal["description"]
+        .as_str()
+        .unwrap()
+        .contains("status waiting"));
 }
 #[test]
 fn failed_tools_are_errors() {
@@ -255,7 +397,7 @@ fn classify_stop_interrupts_inflight_codex() {
         invoke(
             &worker,
             "codex_run",
-            json!({"cwd":cwd,"role":"terra","sandbox":"read-only","brief":"SLOW"}),
+            json!({"cwd":cwd,"role":"terra","sandbox":"read-only","brief":"WAIT_FOR_INTERRUPT"}),
         )
     });
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -278,10 +420,12 @@ fn serve_dispatches_tool_calls() {
     let temp = common::temp();
     let out = Sink(Arc::new(Mutex::new(vec![])));
     let capture = out.0.clone();
-    let requests = format!("{}\n{}\n{}\n",
+    let requests = format!(
+        "{}\n{}\n{}\n",
         json!({"id":1,"method":"tools/call","params":{"name":"codex_run","arguments":{"cwd":temp.path(),"role":"terra","sandbox":"read-only","brief":"hello"}}}),
         json!({"id":2,"method":"tools/call","params":{"name":"unknown","arguments":{}}}),
-        json!({"method":"tools/call","params":{"name":"bridge_status"}}));
+        json!({"method":"tools/call","params":{"name":"bridge_status"}})
+    );
     assert_eq!(serve(config(temp.path()), Cursor::new(requests), out), 0);
     let output = capture.lock().unwrap();
     let lines: Vec<Value> = std::str::from_utf8(&output)
@@ -325,8 +469,6 @@ fn descriptors_expose_codex_unit_inputs() {
         assert!(!stripped.contains(phrase));
     }
 }
-
-
 
 #[test]
 fn ping_precedes_slow_call_reply() {
@@ -401,16 +543,32 @@ fn goal_classify_amend_and_answer() {
         axiom::goal::interject(temp.path(), kind, "new words").unwrap();
         let result = invoke(&b, "goal", json!({"session":kind,"classify":kind}));
         check(&result, "completed");
-        assert_eq!(result["structuredContent"]["goal"]["wish"], "wish");
-        if kind == "amend" {
-            assert_eq!(
-                result["structuredContent"]["goal"]["amendments"][0],
-                "new words"
-            );
-        } else {
-            assert_eq!(result["structuredContent"]["goal"]["status"], "active");
+        assert_eq!(result["structuredContent"]["goal"]["status"], "active");
+        let stored = axiom::goal::load(temp.path(), kind).unwrap().unwrap();
+        assert_eq!(stored.amendments.len(), usize::from(kind == "amend"));
+        assert_eq!(stored.wish, "wish");
+    }
+}
+#[test]
+fn goal_reply_does_not_echo_the_wish() {
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    axiom::goal::open(temp.path(), "s", "the long wish text", None).unwrap();
+    axiom::goal::interject(temp.path(), "s", "the amendment text").unwrap();
+    let classified = invoke(&b, "goal", json!({"session":"s","classify":"amend"}));
+    let blocked = invoke(
+        &b,
+        "goal",
+        json!({"session":"s","status":"blocked","note":"the note text"}),
+    );
+    for reply in [&classified, &blocked] {
+        check(reply, "completed");
+        let text = reply["structuredContent"].to_string();
+        for echoed in ["the long wish text", "the amendment text", "the note text"] {
+            assert!(!text.contains(echoed), "{text}");
         }
     }
+    assert_eq!(blocked["structuredContent"]["goal"]["status"], "blocked");
 }
 #[test]
 fn panic_in_tool_body_is_bridge_error() {
@@ -419,4 +577,130 @@ fn panic_in_tool_body_is_bridge_error() {
     let bad = axiom::bridge::call_body(|| panic!("test tool panic"));
     check(&bad, "bridge_error");
     assert_eq!(bad["structuredContent"]["error"]["kind"], "panic");
+}
+
+fn goal_call(b: &Bridge, mode: &str) -> Value {
+    let result = invoke(b, "goal", json!({"session":"s","mode":mode}));
+    check(&result, "completed");
+    result["structuredContent"]["goal"].clone()
+}
+fn claude_client(b: &Bridge, version: &str) {
+    b.note_client(&json!({"clientInfo":{"name":"claude-code","version":version}}));
+}
+fn unlock(home: &std::path::Path) {
+    let file = home.join("goals/s.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("mode_locked");
+    fs::write(file, stored.to_string()).unwrap();
+}
+
+#[test]
+fn first_goal_call_records_the_run_once_with_the_handshake_version() {
+    std::env::remove_var(axiom::provenance::ENV);
+    // The bridge reads the plugin from CLAUDE_PLUGIN_ROOT, so a value set by the shell would leak in.
+    std::env::remove_var("CLAUDE_PLUGIN_ROOT");
+    let temp = common::temp();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    axiom::goal::open(temp.path(), "s", "wish", project.to_str()).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    claude_client(&b, "2.1.311");
+    let goal = goal_call(&b, "change");
+    let entries = goal["provenance"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let block = &entries[0];
+    assert_eq!(block["binary_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(block["engine_build"], axiom::engine::build_id());
+    assert_eq!(block["claude_version"], "2.1.311");
+    assert_eq!(block["codex_version"], "codex-cli fake");
+    assert_eq!(block["plugin_version"], "unknown");
+    assert_eq!(block["plugin_rules"], "unknown");
+    assert_eq!(block["git_commit"], "unknown");
+    assert_eq!(block["git_tree"], "unknown");
+    assert_eq!(block["binary_build"].as_str().unwrap().len(), 12);
+    unlock(temp.path());
+    assert_eq!(
+        goal_call(&b, "review")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn only_claude_codes_handshake_is_believed_and_absence_stays_unknown() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let b = Bridge::new(config(temp.path()));
+    b.note_client(&json!({"clientInfo":{"name":"another-host","version":"9.9.9"}}));
+    assert_eq!(
+        goal_call(&b, "change")["provenance"][0]["claude_version"],
+        "unknown"
+    );
+}
+
+#[test]
+fn a_new_run_on_a_goal_adds_a_record_only_when_it_differs() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    axiom::goal::open(temp.path(), "s", "wish", None).unwrap();
+    let first = Bridge::new(config(temp.path()));
+    claude_client(&first, "2.1.311");
+    goal_call(&first, "change");
+    unlock(temp.path());
+    let resumed_same = Bridge::new(config(temp.path()));
+    claude_client(&resumed_same, "2.1.311");
+    assert_eq!(
+        goal_call(&resumed_same, "change")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    unlock(temp.path());
+    let resumed_newer = Bridge::new(config(temp.path()));
+    claude_client(&resumed_newer, "2.1.320");
+    let goal = goal_call(&resumed_newer, "change");
+    let entries = goal["provenance"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["claude_version"], "2.1.311");
+    assert_eq!(entries[1]["claude_version"], "2.1.320");
+}
+
+#[test]
+fn a_second_wish_in_one_session_gets_its_own_record() {
+    std::env::remove_var(axiom::provenance::ENV);
+    let temp = common::temp();
+    let b = Bridge::new(config(temp.path()));
+    claude_client(&b, "2.1.311");
+    axiom::goal::open(temp.path(), "s", "first", None).unwrap();
+    goal_call(&b, "change");
+    axiom::goal::open(temp.path(), "s", "second", None).unwrap();
+    assert_eq!(
+        goal_call(&b, "change")["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn goal_files_without_provenance_stay_readable_and_keep_their_shape() {
+    let temp = common::temp();
+    let goals = temp.path().join("goals");
+    fs::create_dir_all(&goals).unwrap();
+    fs::write(
+        goals.join("s.json"),
+        r#"{"wish":"old","status":"active","custom":1}"#,
+    )
+    .unwrap();
+    let loaded = axiom::goal::load(temp.path(), "s").unwrap().unwrap();
+    assert!(loaded.provenance.is_empty());
+    axiom::goal::mark_asked(temp.path(), "s").unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(goals.join("s.json")).unwrap()).unwrap();
+    assert!(saved.get("provenance").is_none());
+    assert_eq!(saved["custom"], 1);
 }

@@ -5,10 +5,13 @@ use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
+    time::{Duration, Instant},
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
     pub id: String,
@@ -18,6 +21,41 @@ pub struct Unit {
     pub pr: String,
     pub sha: String,
     pub brief: String,
+}
+impl Unit {
+    pub fn superseded_by(&self) -> Option<&str> {
+        self.state.strip_prefix(SUPERSEDED)?.strip_prefix(':')
+    }
+    fn state_name(&self) -> &str {
+        if self.superseded_by().is_some() {
+            SUPERSEDED
+        } else {
+            &self.state
+        }
+    }
+    pub(crate) fn refuse_superseded(&self) -> Res<()> {
+        match self.superseded_by() {
+            Some(by) => Err(Failure::new(
+                "superseded",
+                format!(
+                    "unit {} was superseded by {by}; work on {by} instead",
+                    self.id
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+}
+/// The unit whose result counts for `unit`: itself, or the end of its replacement chain. `None` when that chain is broken.
+pub fn standing_unit<'a>(units: &'a [Unit], unit: &'a Unit) -> Option<&'a Unit> {
+    let mut current = unit;
+    for _ in 0..=units.len() {
+        let Some(by) = current.superseded_by() else {
+            return Some(current);
+        };
+        current = units.iter().find(|u| u.id == by)?;
+    }
+    None
 }
 #[derive(Debug, Clone)]
 pub struct Output {
@@ -113,26 +151,147 @@ pub fn unit_brief(store: &Path, unit: &str) -> Res<Brief> {
         .into_iter()
         .find(|u| u.id == unit)
         .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    brief_for_row(&row)
+}
+fn brief_for_row(row: &Unit) -> Res<Brief> {
     if row.brief.is_empty() {
         return Err(Failure::new(
             "no_brief",
-            format!("unit {unit} has no brief"),
+            format!("unit {} has no brief", row.id),
         ));
     }
     let text = std::fs::read_to_string(&row.brief).map_err(io)?;
-    parse_brief(&text).map_err(|field| fail(format!("brief {} is missing {field}", row.brief)))
+    parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))
 }
-static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
+fn validate_add_brief(store: &Path, row: &Unit) -> Res<()> {
+    if !row.brief.is_empty() {
+        let text = std::fs::read_to_string(&row.brief).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                fail(format!(
+                    "brief {} does not exist; write the brief file, then add the unit",
+                    row.brief
+                ))
+            } else {
+                io(e)
+            }
+        })?;
+        let b = parse_brief(&text).map_err(|why| fail(format!("brief {} {why}", row.brief)))?;
+        let path = store.join("modules.md");
+        if path.exists() {
+            let map = crate::orch::parse_map(&std::fs::read_to_string(path).map_err(io)?)
+                .map_err(fail)?;
+            if let Some(module) = map.modules.iter().find(|m| m.id == row.track) {
+                for path in &b.scope {
+                    if !crate::orch::covers(&module.paths, path) {
+                        return Err(fail(format!(
+                            "{path} is outside module {}; its PATHS are {}",
+                            module.id,
+                            module.paths.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+pub fn fixed_unit(store: &Path, unit: &str) -> Res<Option<String>> {
+    Ok(crate::orch::evidence(store, unit)?
+        .into_iter()
+        .find(|row| row.kind == crate::orch::FIXES_KIND)
+        .map(|row| row.command))
+}
+static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+struct LockFile {
+    path: PathBuf,
+    pid: String,
+}
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+/// Holds the lock of a store until dropped; the file goes before the next thread may enter.
+pub struct StoreLock {
+    _file: LockFile,
+    _threads: MutexGuard<'static, ()>,
+}
+/// True when `holder` is a pid and no process runs under it.
+fn dead(holder: &str) -> bool {
+    holder
+        .parse::<u32>()
+        .ok()
+        .filter(|p| *p > 0 && p.to_string() == holder)
+        .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p))
+}
+/// A claimant writes its pid right after creating its marker; an empty marker older than this was abandoned.
+const EMPTY_MARKER_GRACE: Duration = Duration::from_secs(5);
+/// Dead reclaimers in a row after which a waiter gives up rather than claim yet another level.
+const MAX_RECLAIM_LEVELS: usize = 8;
+/// The claimant of a reclaim marker that will never finish: it died, left the marker empty, or is
+/// this process, whose threads take the store's lock one at a time.
+fn abandoned(marker: &Path) -> Option<String> {
+    let claimant = std::fs::read_to_string(marker).ok()?;
+    let claimant = claimant.trim();
+    if claimant.is_empty() {
+        let age = std::fs::metadata(marker).ok()?.modified().ok()?.elapsed().ok()?;
+        return (age > EMPTY_MARKER_GRACE).then(|| "unknown".to_string());
+    }
+    (dead(claimant) || claimant == std::process::id().to_string()).then(|| claimant.to_string())
+}
+/// Only the process that creates the marker may delete a dead holder's lock, so two that
+/// saw the same dead holder cannot delete the fresh lock one of them has just taken. A marker
+/// whose claimant died is passed over by claiming one named after that claimant, which is just
+/// as exclusive, so a crash mid-reclaim never keeps the lock from being reclaimed.
+fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
+    let mut name = format!("lock.{holder}.stale");
+    let mut markers = Vec::new();
+    loop {
+        let marker = path.with_extension(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{}", std::process::id());
+                markers.push(marker);
+                break;
+            }
+            Err(_) if force => {
+                markers.push(marker);
+                break;
+            }
+            Err(_) => {
+                let Some(claimant) =
+                    abandoned(&marker).filter(|_| markers.len() < MAX_RECLAIM_LEVELS)
+                else {
+                    return false;
+                };
+                markers.push(marker);
+                name = format!("{name}.{claimant}.stale");
+            }
+        }
+    }
+    let cleared = std::fs::read_to_string(path).is_ok_and(|s| s.trim() == holder)
+        && std::fs::remove_file(path).is_ok();
+    for marker in &markers {
+        let _ = std::fs::remove_file(marker);
+    }
+    cleared
+}
+fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let m = LOCKS
+    let threads: &'static Mutex<()> = *LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
+    let threads = threads.lock().unwrap_or_else(|e| e.into_inner());
     let path = store.join(".orch.lock");
     let pid = std::process::id().to_string();
     let create = || -> std::io::Result<()> {
@@ -142,9 +301,18 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
             .open(&path)?;
         writeln!(file, "{pid}")
     };
-    if let Err(e) = create() {
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(io(e));
+    let deadline = Instant::now() + wait;
+    let mut pause = 1;
+    loop {
+        match create() {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            // Windows answers access denied while the previous lock file is still being deleted.
+            Err(e)
+                if cfg!(windows)
+                    && e.kind() == std::io::ErrorKind::PermissionDenied
+                    && Instant::now() < deadline => {}
+            Err(e) => return Err(io(e)),
         }
         let holder = std::fs::read_to_string(&path).unwrap_or_default();
         let holder = if holder.trim().is_empty() {
@@ -152,39 +320,39 @@ fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> R
         } else {
             holder.trim()
         };
-        let dead = holder
-            .parse::<u32>()
-            .ok()
-            .filter(|p| *p > 0 && p.to_string() == holder)
-            .is_some_and(|p| p > i32::MAX as u32 || !base::proc::pid_alive(p));
-        if dead {
+        let dead = dead(holder);
+        if dead && clear_dead_lock(&path, holder, force) {
             note.push_str(&format!(
-                "replacing stale store lock (pid {holder} is dead)\n"
+                "replacing stale store lock (pid {holder} is dead)
+"
             ));
-        } else if force {
-            note.push_str(&format!("stealing store lock held by pid {holder}\n"));
-        } else {
+            continue;
+        }
+        if !dead && force && std::fs::remove_file(&path).is_ok() {
+            note.push_str(&format!("stealing store lock held by pid {holder}
+"));
+            continue;
+        }
+        if holder == pid || Instant::now() >= deadline {
             return Err(fail(format!("store lock held by pid {holder}")));
         }
-        std::fs::remove_file(&path).map_err(io)?;
-        create().map_err(io)?;
+        std::thread::sleep(Duration::from_millis(pause));
+        pause = (pause * 2).min(50);
     }
-    struct Guard {
-        path: PathBuf,
-        pid: String,
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
-    }
-    let _file_guard = Guard { path, pid };
+    Ok(StoreLock {
+        _file: LockFile { path, pid },
+        _threads: threads,
+    })
+}
+fn locked<T>(store: &Path, force: bool, note: &mut String, f: impl FnOnce() -> Res<T>) -> Res<T> {
+    let _lock = acquire(store, force, note, LOCK_WAIT)?;
     f()
 }
 pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Res<T> {
     locked(store, force, &mut String::new(), f)
+}
+pub fn lock_store(store: &Path) -> Res<StoreLock> {
+    acquire(store, false, &mut String::new(), LOCK_WAIT)
 }
 #[derive(Clone)]
 pub(crate) struct DiskClaim {
@@ -233,15 +401,99 @@ pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
     write(store, "claims.tsv", &text)
 }
 pub fn set_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
-    with_lock(store, false, || {
-        let mut rows = read_units(store)?;
-        let row = rows
-            .iter_mut()
-            .find(|u| u.id == unit)
-            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
-        row.state = required(state, "state")?;
-        save_units(store, &rows)
-    })
+    with_lock(store, false, || save_unit_state(store, unit, state))
+}
+/// The caller holds the store lock.
+pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> {
+    let mut rows = read_units(store)?;
+    let row = rows
+        .iter_mut()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    if row.superseded_by().is_some() {
+        return Ok(());
+    }
+    row.state = required(state, "state")?;
+    save_units(store, &rows)
+}
+fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
+    let mut rows = read_units(store)?;
+    let out = supersede_rows(store, &mut rows, id, by)?;
+    save_units(store, &rows)?;
+    Ok(out)
+}
+fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Unit> {
+    let find = |name: &str| {
+        rows.iter()
+            .find(|u| u.id == name)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {name} not found")))
+    };
+    let (old, new) = (find(id)?, find(by)?);
+    if id == by {
+        return Err(fail(format!("unit {id} cannot supersede itself")));
+    }
+    if let Some(current) = old.superseded_by() {
+        return Err(fail(format!(
+            "unit {id} is already superseded by {current}"
+        )));
+    }
+    if new.superseded_by().is_some() {
+        return Err(fail(match standing_unit(rows, new) {
+            Some(end) if end.id == id => format!("superseding {id} by {by} would form a cycle"),
+            Some(end) => format!("unit {by} is already superseded; name {} instead", end.id),
+            None => format!("unit {by} is already superseded and its replacement chain is broken"),
+        }));
+    }
+    if read_claims(store)?.iter().any(|c| c.unit == id) {
+        return Err(Failure::new(
+            "busy",
+            format!("unit {id} has a running claim; wait for its result or release it, then supersede it"),
+        ));
+    }
+    let derived = crate::orch::derive_state(
+        &crate::orch::evidence(store, id)?,
+        crate::orch::needs_accept(store, id)?,
+    );
+    if old.state == "verified" || derived == "verified" {
+        return Err(fail(format!(
+            "unit {id} is verified and cannot be superseded; if its files changed, run orch accept <module> --repo <dir> first"
+        )));
+    }
+    if old.track != new.track {
+        return Err(fail(format!(
+            "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
+            new.track, old.track
+        )));
+    }
+    // The replacement inherits the completion of `id` and of every unit that already stands on it.
+    let mut scope: Vec<String> = vec![];
+    for u in rows
+        .iter()
+        .filter(|u| standing_unit(rows, u).is_some_and(|end| end.id == id))
+    {
+        match brief_for_row(u) {
+            Ok(brief) => scope.extend(brief.scope),
+            Err(e) if e.kind == "no_brief" => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let replacement = brief_for_row(new)?.scope;
+    let mut missing: Vec<&str> = scope
+        .iter()
+        .filter(|path| !crate::orch::covers(&replacement, path))
+        .map(String::as_str)
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if !missing.is_empty() {
+        return Err(fail(format!(
+            "unit {by} does not cover {} of the SCOPE it would take over from {id}; a replacement's SCOPE must cover every file of the units it replaces",
+            missing.join(", ")
+        )));
+    }
+    let row = rows.iter_mut().find(|u| u.id == id).unwrap();
+    row.state = format!("{SUPERSEDED}:{by}");
+    Ok(row.clone())
 }
 fn push(
     store: &Path,
@@ -402,7 +654,35 @@ fn count_line(v: &serde_json::Value) -> String {
         xs.join(", ")
     }
 }
+/// `None` when the pointer has gone. On Windows a file being deleted refuses readers for a moment.
+fn read_pointer(path: &Path) -> Res<Option<String>> {
+    for _ in 0..40 {
+        match std::fs::read_to_string(path) {
+            Ok(text) => return Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            Err(e) => return Err(io(e)),
+        }
+    }
+    std::fs::read_to_string(path).map(Some).map_err(io)
+}
+/// Another process may hold the pointer open for a moment, so a failed delete is retried.
+fn remove_pointer(path: &Path) -> Res<()> {
+    for _ in 0..250 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    std::fs::remove_file(path).map_err(io)
+}
 fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
+    Ok(pointer_files(store)?.into_iter().map(|(_, row)| row).collect())
+}
+fn pointer_files(store: &Path) -> Res<Vec<(PathBuf, serde_json::Value)>> {
     let dir = store.join("inbox");
     let mut files = std::fs::read_dir(&dir)
         .map_err(|e| {
@@ -425,7 +705,9 @@ fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
         {
             continue;
         }
-        let mut raw = std::fs::read_to_string(f.path()).map_err(io)?;
+        let Some(mut raw) = read_pointer(&f.path())? else {
+            continue;
+        };
         if raw.ends_with('\n') {
             raw.pop();
             if raw.ends_with('\r') {
@@ -439,9 +721,10 @@ fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
                 f.file_name().to_string_lossy()
             )));
         }
-        rows.push(
+        rows.push((
+            f.path(),
             serde_json::json!({"ts":c[0],"agent":c[1],"unit":c[2],"status":c[3],"report":c[4]}),
-        );
+        ));
     }
     Ok(rows)
 }
@@ -612,7 +895,7 @@ fn status(store: &Path) -> Res<(serde_json::Value, String)> {
     let ledger = ledger(store)?;
     let frontier = frontier(store)?;
     let gates = gates(store)?;
-    let states = counts(units.iter().map(|r| r.state.clone()));
+    let states = counts(units.iter().map(|r| r.state_name().to_string()));
     let verdicts = counts(ledger.iter().map(|r| cell(r, "verdict")));
     let mut ids: Vec<_> = gates
         .iter()
@@ -820,26 +1103,11 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     .map(|s| required(s, "brief"))
                     .transpose()?
                     .unwrap_or_default();
-                if !brief.is_empty() {
-                    let text = std::fs::read_to_string(&brief).map_err(io)?;
-                    let b = parse_brief(&text)
-                        .map_err(|field| fail(format!("brief {brief} is missing {field}")))?;
-                    let path = store.join("modules.md");
-                    if path.exists() {
-                        let map =
-                            crate::orch::parse_map(&std::fs::read_to_string(path).map_err(io)?)
-                                .map_err(fail)?;
-                        if let Some(module) = map.modules.iter().find(|m| m.id == track) {
-                            for path in &b.scope {
-                                if !crate::orch::covers(&module.paths, path) {
-                                    return Err(fail(format!(
-                                        "{path} is outside module {}",
-                                        module.id
-                                    )));
-                                }
-                            }
-                        }
-                    }
+                let fixes = option(args, "--fixes")?
+                    .map(|s| required(s, "fixes"))
+                    .transpose()?;
+                if fixes.is_some() && brief.is_empty() {
+                    return Err(fail("--fixes requires --brief"));
                 }
                 let row = Unit {
                     id,
@@ -850,19 +1118,81 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     sha: String::new(),
                     brief,
                 };
+                if fixes.is_none() {
+                    validate_add_brief(store, &row)?;
+                }
                 locked(store, force, &mut note, || {
+                    if fixes.is_some() {
+                        validate_add_brief(store, &row)?;
+                    }
                     let mut rows = read_units(store)?;
+                    if let Some(old) = &fixes {
+                        if !rows.iter().any(|u| u.id == *old) {
+                            return Err(Failure::new("not_found", format!("unit {old} not found")));
+                        }
+                    }
                     if rows.iter().any(|u| u.id == row.id) {
                         return Err(fail(format!("unit {} already exists", row.id)));
                     }
+                    let chain = if let Some(old) = &fixes {
+                        rows.iter()
+                            .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == *old))
+                            .map(|u| u.id.clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                     rows.push(row.clone());
-                    save_units(store, &rows)
+                    if let Some(old) = &fixes {
+                        supersede_rows(store, &mut rows, old, &row.id)?;
+                        let mut fix_units = Vec::new();
+                        for unit in &chain {
+                            if fixed_unit(store, unit)?.is_some() {
+                                fix_units.push(unit.as_str());
+                            }
+                        }
+                        if fix_units.len() >= 2 {
+                            return Err(Failure::new("fix_rounds", format!(
+                                "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
+                                fix_units.join(", ")
+                            )));
+                        }
+                        // Validate existing evidence before either write.
+                        crate::orch::evidence(store, &row.id)?;
+                        // The add response computes readiness; reject existing invalid data
+                        // before changing either the units or evidence files.
+                        crate::orch::ready_units(store)?;
+                        crate::orch::waiting_units(store)?;
+                        let original_units = std::fs::read(store.join("units.tsv")).map_err(io)?;
+                        save_units(store, &rows)?;
+                        let appended = crate::orch::append_evidence_locked(
+                            store,
+                            &row.id,
+                            &crate::orch::Evidence {
+                                kind: crate::orch::FIXES_KIND.into(),
+                                command: old.clone(),
+                                exit_code: 0,
+                                commit: String::new(),
+                                ts: base::now_iso(),
+                            },
+                        );
+                        if let Err(error) = appended {
+                            base::atomic_write(&store.join("units.tsv"), &original_units)
+                                .map_err(io)?;
+                            return Err(error);
+                        }
+                        Ok(())
+                    } else {
+                        save_units(store, &rows)
+                    }
                 })?;
-                Ok(emit(
-                    serde_json::to_value(&row).unwrap(),
-                    unit_line(&row),
-                    json,
-                ))
+                let next = crate::orch::next_step_for(store, &row.id)?;
+                let mut value = serde_json::to_value(&row).unwrap();
+                value["next"] = serde_json::json!(next);
+                if let Some(old) = fixes {
+                    value["fixes"] = serde_json::json!(old);
+                }
+                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
             }
             ("unit", "set") => {
                 let id = required(arg(args, 2)?, "unit id")?;
@@ -875,12 +1205,23 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         "state {state} is derived from evidence; it cannot be set"
                     )));
                 }
+                if state.starts_with(SUPERSEDED) {
+                    return Err(fail(
+                        "state superseded is recorded by orch unit supersede <unit> --by <unit>",
+                    ));
+                }
                 let row = locked(store, force, &mut note, || {
                     let mut rows = read_units(store)?;
                     let u = rows
                         .iter_mut()
                         .find(|u| u.id == id)
                         .ok_or_else(|| Failure::new("not_found", format!("unit {id} not found")))?;
+                    u.refuse_superseded()?;
+                    if u.state == "verified" {
+                        return Err(fail(format!(
+                            "unit {id} is verified; its state follows its evidence and cannot be set"
+                        )));
+                    }
                     u.state = state;
                     if let Some(v) = option(args, "--branch")? {
                         u.branch = required(v, "branch")?;
@@ -904,6 +1245,15 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     json,
                 ))
             }
+            ("unit", "supersede") => {
+                let id = required(arg(args, 2)?, "unit id")?;
+                let by = required(&required_option(args, "--by")?, "--by")?;
+                let row = locked(store, force, &mut note, || supersede(store, &id, &by))?;
+                let next = crate::orch::next_step_for(store, &by)?;
+                let mut value = serde_json::to_value(&row).unwrap();
+                value["next"] = serde_json::json!(next);
+                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
+            }
             ("unit", "get") => {
                 let id = required(arg(args, 2)?, "unit id")?;
                 let row = read_units(store)?
@@ -922,7 +1272,8 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 let rows: Vec<_> = read_units(store)?
                     .into_iter()
                     .filter(|u| {
-                        state.is_none_or(|s| u.state == s) && track.is_none_or(|s| u.track == s)
+                        state.is_none_or(|s| u.state == s || u.state_name() == s)
+                            && track.is_none_or(|s| u.track == s)
                     })
                     .collect();
                 let mut lines: Vec<_> = rows.iter().take(4).map(unit_line).collect();
@@ -939,7 +1290,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("unit", "counts") => {
                 let mut counts = std::collections::BTreeMap::<String, usize>::new();
                 for u in read_units(store)? {
-                    *counts.entry(u.state).or_default() += 1;
+                    *counts.entry(u.state_name().to_string()).or_default() += 1;
                 }
                 let compact = if counts.is_empty() {
                     "none".into()
@@ -1038,20 +1389,12 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("inbox", "drain") => {
                 let peek = args.iter().any(|a| a == "--peek");
                 let read = || -> Res<Vec<serde_json::Value>> {
-                    let rows = pointers(store)?;
-                    if !peek {
-                        let dir = store.join("inbox");
-                        let tmp = store.join(format!(
-                            ".inbox-drain-{}-{}",
-                            std::process::id(),
-                            base::unique()
-                        ));
-                        std::fs::rename(&dir, &tmp).map_err(io)?;
-                        if let Err(e) = std::fs::create_dir(&dir) {
-                            let _ = std::fs::rename(&tmp, &dir);
-                            return Err(io(e));
+                    let mut rows = Vec::new();
+                    for (path, row) in pointer_files(store)? {
+                        if !peek {
+                            remove_pointer(&path)?;
                         }
-                        std::fs::remove_dir_all(tmp).map_err(io)?;
+                        rows.push(row);
                     }
                     Ok(rows)
                 };
@@ -1205,6 +1548,18 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             ("map", _) => {
                 let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
                 let map = crate::orch::parse_map(&text).map_err(fail)?;
+                let plan_path = store.join("astra").join("plan-final.md");
+                match std::fs::read_to_string(&plan_path) {
+                    Ok(plan) => crate::orch::check_goals(&map, &crate::orch::parse_plan(&plan))
+                        .map_err(fail)?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(Failure::new(
+                            "io",
+                            format!("cannot read {}: {e}", plan_path.display()),
+                        ))
+                    }
+                }
                 Ok(emit(
                     serde_json::to_value(&map).unwrap(),
                     map.modules
@@ -1222,7 +1577,10 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                     extra_output = Some(out);
                     return Ok(String::new());
                 }
-                Err(fail("a valid command is required"))
+                Err(fail(format!(
+                    "unknown command {}; commands: {COMMANDS}",
+                    args.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+                )))
             }
         }
     })();
@@ -1240,5 +1598,97 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             stdout: String::new(),
             stderr: format!("{note}error: {}\n", e.message),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[test]
+    fn a_holder_that_never_lets_go_ends_the_wait_with_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        let mut holder = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let lock = t.path().join(".orch.lock");
+        std::fs::write(&lock, format!("{}
+", holder.id())).unwrap();
+        let started = Instant::now();
+        let refused = acquire(
+            t.path(),
+            false,
+            &mut String::new(),
+            Duration::from_millis(150),
+        )
+        .err()
+        .expect("a live holder keeps the lock");
+        assert!(refused.message.contains("store lock held"));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap().trim(),
+            holder.id().to_string()
+        );
+        drop(holder.stdin.take());
+        holder.wait().unwrap();
+    }
+
+    fn lock_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".orch.lock"))
+            .collect()
+    }
+
+    #[test]
+    fn a_reclaimer_that_died_mid_reclaim_does_not_keep_a_dead_holders_lock() {
+        let short = Duration::from_millis(300);
+        let t = tempfile::tempdir().unwrap();
+        let lock = t.path().join(".orch.lock");
+        // Pid 4294967295 held the lock and died; pid 4294967294 claimed the reclaim and died too.
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        let marker = t.path().join(".orch.lock.4294967295.stale");
+        std::fs::write(&marker, "4294967294\n").unwrap();
+        let mut note = String::new();
+        let held = acquire(t.path(), false, &mut note, short)
+            .expect("an abandoned reclaim marker is itself reclaimed");
+        assert!(note.contains("replacing stale store lock"), "{note}");
+        drop(held);
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+
+        // A reclaimer that died before writing its pid leaves an empty marker.
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        let empty = std::fs::File::create(&marker).unwrap();
+        empty
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        drop(empty);
+        drop(acquire(t.path(), false, &mut String::new(), short).expect("an old empty marker"));
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+
+        // A live reclaimer keeps its claim, and every level of a dead chain is cleared once it ends.
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        let mut claimant = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(&lock, "4294967295\n").unwrap();
+        std::fs::write(&marker, "4294967294\n").unwrap();
+        let second = t.path().join(".orch.lock.4294967295.stale.4294967294.stale");
+        std::fs::write(&second, format!("{}\n", claimant.id())).unwrap();
+        assert!(acquire(t.path(), false, &mut String::new(), short).is_err());
+        assert_eq!(std::fs::read_to_string(&lock).unwrap().trim(), "4294967295");
+        drop(claimant.stdin.take());
+        claimant.wait().unwrap();
+        drop(acquire(t.path(), false, &mut String::new(), short).expect("the claimant died"));
+        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
     }
 }

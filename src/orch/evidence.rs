@@ -1,6 +1,11 @@
 use crate::base;
 use serde::{Deserialize, Serialize};
 
+pub const WAIVE_KIND: &str = "waive";
+pub const FIXES_KIND: &str = "fixes";
+pub const CARRY_ENV: &str = "AXIOM_REVIEW_CARRY";
+pub const CARRIED_MARK: &str = " carried-by:";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
     pub kind: String,
@@ -8,6 +13,22 @@ pub struct Evidence {
     pub exit_code: i32,
     pub commit: String,
     pub ts: String,
+}
+
+pub fn carried_by(row: &Evidence) -> Option<Vec<String>> {
+    if row.kind != "review" {
+        return None;
+    }
+    let (_, ids) = row.command.split_once(CARRIED_MARK)?;
+    Some(ids.split(',').map(str::to_owned).collect())
+}
+
+fn review_passes(rows: &[Evidence], index: usize) -> bool {
+    let review = &rows[index];
+    review.exit_code == 0
+        || rows[index + 1..]
+            .iter()
+            .any(|r| r.kind == WAIVE_KIND && r.exit_code == 0 && r.commit == review.commit)
 }
 
 pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
@@ -25,43 +46,60 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
     if rest[v].exit_code != 0 {
         return "failed".into();
     }
-    let mut start = v + 1;
+    let mut checks = vec![v];
     if needs_accept {
-        match rest[start..].iter().rposition(|r| r.kind == "accept") {
-            None => return "built".into(),
-            Some(a) => {
-                start += a + 1;
-                if rest[start - 1].exit_code != 0 {
-                    return "accept-failed".into();
-                }
-            }
+        let Some(a) = rest[v + 1..].iter().rposition(|r| r.kind == "accept") else {
+            return "built".into();
+        };
+        let a = v + 1 + a;
+        if rest[a].exit_code != 0 {
+            return "accept-failed".into();
         }
+        checks.push(a);
     }
-    let reviews: Vec<_> = rest[start..]
+    // A review stands until a later VERIFY or ACCEPT saw different files.
+    let reviews: Vec<_> = rest
         .iter()
-        .filter(|r| r.kind == "review")
+        .enumerate()
+        .filter(|&(n, r)| {
+            r.kind == "review" && checks.iter().all(|&c| n > c || rest[c].commit == r.commit)
+        })
+        .map(|(n, r)| (n, r))
         .collect();
-    let Some(last) = reviews.last() else {
+    let Some(&(_, last)) = reviews.last() else {
         return "built".into();
     };
-    let current: Vec<_> = reviews.iter().filter(|r| r.commit == last.commit).collect();
-    if current.iter().any(|r| r.exit_code != 0) {
+    let current: Vec<_> = reviews
+        .iter()
+        .filter(|(_, r)| r.commit == last.commit)
+        .collect();
+    if current.iter().any(|(n, _)| !review_passes(rest, *n)) {
         return "review-failed".into();
     }
-    if last.commit.is_empty() || last.commit != rest[v].commit {
+    let expected = if carried_by(last).is_some() {
+        *checks.iter().max().unwrap()
+    } else {
+        v
+    };
+    if last.commit.is_empty() || last.commit != rest[expected].commit {
         return "built".into();
     }
-    if current
-        .iter()
-        .any(|r| base::family_of(&r.command) == base::family_of(&run.command))
-    {
+    if current.iter().any(|(_, r)| {
+        let command = r
+            .command
+            .split_once(CARRIED_MARK)
+            .map_or(r.command.as_str(), |(command, _)| command);
+        base::family_of(command) == base::family_of(&run.command)
+    }) {
         return "built".into();
     }
     "verified".into()
 }
-use super::{parse_map, read_units, set_unit_state, unit_brief, with_lock};
+use super::{
+    parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief, with_lock,
+};
 use crate::base::{proc::ShellRun, Failure, Res};
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, time::Duration};
 
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts";
 fn io(e: std::io::Error) -> Failure {
@@ -109,59 +147,61 @@ pub fn evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
 }
 /// Append one evidence row under the store lock.
 pub fn append_evidence(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
+    with_lock(store, false, || append_evidence_locked(store, unit, row))
+}
+/// Append a row while the caller holds the store lock.
+pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<()> {
     if !["_full", "_stages"].contains(&unit) {
         base::require_slug("unit", unit)?;
     }
-    with_lock(store, false, || {
-        let mut all = rows(store, unit)?;
-        if unit == "_stages" {
-            let dir = store.join("reports");
-            let path = dir.join("_stages.evidence.tsv");
-            let mut text = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    format!("{HEADER}\n").into_bytes()
-                }
-                Err(e) => return Err(io(e)),
-            };
-            if !text.ends_with(b"\n") {
-                text.push(b'\n');
-            }
-            let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
-            text.extend_from_slice(
-                format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    clean(&row.kind),
-                    clean(&row.command),
-                    row.exit_code,
-                    clean(&row.commit),
-                    clean(&row.ts)
-                )
-                .as_bytes(),
-            );
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            return base::atomic_write(&path, &text).map_err(io);
-        }
-        all.push(row.clone());
-        let mut text = format!("{HEADER}\n");
-        for r in all {
-            let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
-            text.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
-                clean(&r.kind),
-                clean(&r.command),
-                r.exit_code,
-                clean(&r.commit),
-                clean(&r.ts)
-            ));
-        }
+    let mut all = rows(store, unit)?;
+    if unit == "_stages" {
         let dir = store.join("reports");
+        let path = dir.join("_stages.evidence.tsv");
+        let mut text = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                format!("{HEADER}\n").into_bytes()
+            }
+            Err(e) => return Err(io(e)),
+        };
+        if !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+        text.extend_from_slice(
+            format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                clean(&row.kind),
+                clean(&row.command),
+                row.exit_code,
+                clean(&row.commit),
+                clean(&row.ts)
+            )
+            .as_bytes(),
+        );
         std::fs::create_dir_all(&dir).map_err(io)?;
-        base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
-    })
+        return base::atomic_write(&path, &text).map_err(io);
+    }
+    all.push(row.clone());
+    let mut text = format!("{HEADER}\n");
+    for r in all {
+        let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            clean(&r.kind),
+            clean(&r.command),
+            r.exit_code,
+            clean(&r.commit),
+            clean(&r.ts)
+        ));
+    }
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
 }
 fn git(repo: &Path, args: &[&str]) -> String {
-    Command::new("git")
+    base::proc::cmd("git")
         .current_dir(repo)
         .args(args)
         .output()
@@ -170,17 +210,23 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
 }
+/// The tree of the paths in `scope` as they are now. A path that does not exist (deleted, or
+/// not yet created) is left out, since `git add` refuses a pathspec that matches nothing.
 pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     if git(repo, &["rev-parse", "--is-inside-work-tree"]) != "true" {
         return String::new();
     }
+    let (dirs, files): (Vec<&String>, Vec<&String>) = scope
+        .iter()
+        .filter(|path| repo.join(path).exists())
+        .partition(|path| path.ends_with('/') || !repo.join(path).is_file());
     let index = std::env::temp_dir().join(format!(
         "orch-index-{}-{}",
         std::process::id(),
         base::unique()
     ));
     let run = |args: &[&str]| {
-        Command::new("git")
+        base::proc::cmd("git")
             .current_dir(repo)
             .env("GIT_INDEX_FILE", &index)
             .args(args)
@@ -190,9 +236,16 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
         if !run(&["read-tree", "--empty"]).ok()?.status.success() {
             return None;
         }
-        if !scope.is_empty() {
+        if !dirs.is_empty() {
             let mut args = vec!["add", "-A", "--"];
-            args.extend(scope.iter().map(String::as_str));
+            args.extend(dirs.iter().map(|path| path.as_str()));
+            if !run(&args).ok()?.status.success() {
+                return None;
+            }
+        }
+        if !files.is_empty() {
+            let mut args = vec!["--literal-pathspecs", "add", "-A", "--force", "--"];
+            args.extend(files.iter().map(|path| path.as_str()));
             if !run(&args).ok()?.status.success() {
                 return None;
             }
@@ -210,6 +263,10 @@ pub fn snapshot(repo: &Path, scope: &[String]) -> String {
     } else {
         format!("tree:{result}")
     }
+}
+/// The tree of `scope` before a worker runs. Paths the worker has yet to create are left out.
+pub fn base_snapshot(repo: &Path, scope: &[String]) -> String {
+    snapshot(repo, scope)
 }
 fn map(store: &Path) -> Res<super::Map> {
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
@@ -234,10 +291,129 @@ fn row(kind: &str, command: &str, exit_code: i32, commit: String) -> Evidence {
         ts: base::now_iso(),
     }
 }
-fn update(store: &Path, unit: &str) -> Res<String> {
-    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-    set_unit_state(store, unit, &state)?;
-    Ok(state)
+
+// Fail closed on invalid or unavailable trees; -z preserves unusual path names.
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<std::collections::BTreeSet<String>> {
+    let from = from.strip_prefix("tree:").filter(|s| !s.is_empty())?;
+    let to = to.strip_prefix("tree:").filter(|s| !s.is_empty())?;
+    let output = base::proc::cmd("git")
+        .current_dir(repo)
+        .args([
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            from,
+            to,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for path in output.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        paths.insert(std::str::from_utf8(path).ok()?.to_owned());
+    }
+    Some(paths)
+}
+
+/// Append a check and, when its changes are covered by other units, carry the review.
+pub fn append_check(
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+    check: &Evidence,
+) -> Res<Option<Vec<String>>> {
+    if !["accept", "verify"].contains(&check.kind.as_str()) {
+        return Err(invalid("expected an accept or verify row"));
+    }
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        let target = units
+            .iter()
+            .find(|u| u.id == unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        let rs = evidence(store, unit)?;
+        let mut carried = None;
+        if check.exit_code == 0
+            && std::env::var_os(CARRY_ENV).as_deref() != Some(std::ffi::OsStr::new("0"))
+        {
+            if let Some(i) = rs.iter().rposition(|r| r.kind == "review") {
+                let review = &rs[i];
+                if review_passes(&rs, i) && review.commit != check.commit {
+                    if let Some(mut remaining) =
+                        changed_paths(repo, &review.commit, &check.commit).filter(|d| !d.is_empty())
+                    {
+                        let mut ids = carried_by(review).unwrap_or_default();
+                        for other in units
+                            .iter()
+                            .filter(|u| u.id != unit && u.track == target.track)
+                        {
+                            let other_rows = evidence(store, &other.id)?;
+                            let Some(latest) = other_rows
+                                .iter()
+                                .rev()
+                                .find(|r| r.commit.starts_with("tree:"))
+                            else {
+                                continue;
+                            };
+                            let mut contributed = false;
+                            for run in other_rows
+                                .iter()
+                                .filter(|r| r.kind == "run" && r.exit_code == 0 && r.ts > review.ts)
+                            {
+                                if let Some(paths) =
+                                    changed_paths(repo, &run.commit, &latest.commit)
+                                {
+                                    for path in paths {
+                                        contributed |= remaining.remove(&path);
+                                    }
+                                }
+                            }
+                            if contributed && !ids.contains(&other.id) {
+                                ids.push(other.id.clone());
+                            }
+                            if remaining.is_empty() {
+                                break;
+                            }
+                        }
+                        if remaining.is_empty() {
+                            let command = review
+                                .command
+                                .split_once(CARRIED_MARK)
+                                .map_or(review.command.as_str(), |(command, _)| command);
+                            carried = Some((
+                                ids.clone(),
+                                row(
+                                    "review",
+                                    &format!("{command}{CARRIED_MARK}{}", ids.join(",")),
+                                    0,
+                                    check.commit.clone(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        append_evidence_locked(store, unit, check)?;
+        if let Some((_, review)) = &carried {
+            append_evidence_locked(store, unit, review)?;
+        }
+        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+        save_unit_state(store, unit, &state)?;
+        Ok(carried.map(|(ids, _)| ids))
+    })
+}
+/// Derives and saves under one lock, so a state derived from older evidence cannot land last.
+pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
+    with_lock(store, false, || {
+        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+        save_unit_state(store, unit, &state)?;
+        Ok(state)
+    })
 }
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
@@ -247,7 +423,7 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .ok_or_else(|| Failure::new("not_found", format!("module {module} not found")))?;
     let units: Vec<_> = read_units(store)?
         .into_iter()
-        .filter(|u| u.track == module)
+        .filter(|u| u.track == module && u.superseded_by().is_none())
         .collect();
     let scopes = units
         .iter()
@@ -255,9 +431,10 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .collect::<Res<Vec<_>>>()?;
     let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
     for (u, scope) in units.into_iter().zip(scopes) {
-        append_evidence(
+        append_check(
             store,
             &u.id,
+            repo,
             &row(
                 "accept",
                 &m.accept_command,
@@ -265,8 +442,49 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
                 snapshot(repo, &scope),
             ),
         )?;
-        update(store, &u.id)?;
     }
+    Ok(result)
+}
+pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
+    if let Some(u) = read_units(store)?.iter().find(|u| u.id == unit) {
+        u.refuse_superseded()?;
+    }
+    let rows = evidence(store, unit)?;
+    if !rows
+        .iter()
+        .rev()
+        .find(|r| r.kind == "run")
+        .is_some_and(|r| r.exit_code == 0)
+    {
+        return Err(invalid(format!(
+            "unit {unit} has no completed worker run to verify; dispatch it with codex_run"
+        )));
+    }
+    let brief = unit_brief(store, unit)?;
+    let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let tail: String = result
+        .output
+        .chars()
+        .rev()
+        .take(20000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
+    append_check(
+        store,
+        unit,
+        repo,
+        &row(
+            "verify",
+            &brief.verify,
+            result.exit_code,
+            snapshot(repo, &brief.scope),
+        ),
+    )?;
     Ok(result)
 }
 pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<ShellRun> {
@@ -296,6 +514,69 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
     )?;
     Ok(result)
 }
+/// A failure seen outside orch, such as on CI. It is a plain `full` row so the sol and done gates read it as they read a local failure.
+pub fn record_external_full(
+    store: &Path,
+    repo: &Path,
+    label: &str,
+    exit_code: i32,
+    log: &Path,
+) -> Res<ShellRun> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(invalid("external full test label is empty"));
+    }
+    if exit_code == 0 {
+        return Err(invalid(
+            "external full test records failures only; a pass needs a real fulltest run",
+        ));
+    }
+    if !store.is_dir() {
+        return Err(invalid(format!(
+            "store is not initialized at {}; run orch init",
+            store.display()
+        )));
+    }
+    if !repo.is_dir() {
+        return Err(invalid(format!("not a directory: {}", repo.display())));
+    }
+    let bytes = std::fs::read(log)
+        .map_err(|e| Failure::new("io", format!("cannot read {}: {e}", log.display())))?;
+    let text = String::from_utf8_lossy(&bytes).replace('\0', "");
+    if text.trim().is_empty() {
+        return Err(invalid(format!(
+            "external full test log is empty: {}",
+            log.display()
+        )));
+    }
+    let output: String = text
+        .chars()
+        .rev()
+        .take(20000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let dir = store.join("reports");
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let saved = format!("_full.external-{}.txt", base::unique());
+    base::atomic_write(&dir.join(&saved), output.as_bytes()).map_err(io)?;
+    append_evidence(
+        store,
+        "_full",
+        &row(
+            "full",
+            &format!("external:{label} log={saved}"),
+            exit_code,
+            snapshot(repo, &[".".into()]),
+        ),
+    )?;
+    Ok(ShellRun {
+        exit_code,
+        output,
+        timed_out: false,
+    })
+}
 pub fn record_review(
     store: &Path,
     units: &[String],
@@ -307,9 +588,11 @@ pub fn record_review(
     let mut commits = Vec::new();
     let mut stale = Vec::new();
     for unit in units {
-        if !existing.iter().any(|u| u.id == *unit) {
-            return Err(Failure::new("not_found", format!("unit {unit} not found")));
-        }
+        existing
+            .iter()
+            .find(|u| u.id == *unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?
+            .refuse_superseded()?;
         let rs = evidence(store, unit)?;
         if rs
             .iter()
@@ -333,7 +616,10 @@ pub fn record_review(
     if !stale.is_empty() {
         return Err(Failure::new(
             "stale_review",
-            format!("stale review for units: {}", stale.join(", ")),
+            format!(
+                "stale review for units: {}; files in SCOPE changed after VERIFY ran (another unit or a test run wrote there); run orch verify <unit> --repo <dir>, then review again",
+                stale.join(", ")
+            ),
         ));
     }
     let mut result = Vec::new();
@@ -343,7 +629,7 @@ pub fn record_review(
             unit,
             &row("review", reviewer, if pass { 0 } else { 1 }, commit),
         )?;
-        result.push((unit.clone(), update(store, unit)?));
+        result.push((unit.clone(), update_unit_state(store, unit)?));
     }
     Ok(result)
 }
@@ -399,11 +685,18 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
     }
     let unfinished: Vec<_> = units
         .iter()
-        .filter(|u| u.state != "verified")
+        .filter(|u| standing_unit(&units, u).is_none_or(|s| s.state != "verified"))
         .map(|u| format!("{}={}", u.id, u.state))
         .collect();
     if !unfinished.is_empty() {
         return Err(Failure::new("not_done", unfinished.join(", ")));
+    }
+    let running: Vec<_> = read_claims(store)?
+        .into_iter()
+        .map(|c| format!("{} is running attempt {}", c.unit, c.attempt))
+        .collect();
+    if !running.is_empty() {
+        return Err(Failure::new("not_done", running.join(", ")));
     }
     let mut latest = String::new();
     for u in units {

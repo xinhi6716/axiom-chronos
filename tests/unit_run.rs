@@ -105,6 +105,39 @@ impl Fixture {
 }
 
 #[test]
+fn passing_verify_returns_pack_with_verified_tree() {
+    let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
+    let result = f.run("one");
+    let pack = result["pack"].as_str().expect("pack path is missing");
+    let text = fs::read_to_string(pack).expect("pack must exist");
+    let rows = orch::evidence(&f.store, "one").unwrap();
+    let verify = rows.iter().rev().find(|row| row.kind == "verify").unwrap();
+    assert!(verify.commit.starts_with("tree:"));
+    assert!(text.contains(&format!("Tree reviewed: {}\n", verify.commit)));
+}
+
+#[test]
+fn failing_verify_returns_null_pack() {
+    let f = Fixture::new(&[("one", "exit 1")], "echo accepted");
+    let result = f.run("one");
+    assert_eq!(result.get("pack"), Some(&Value::Null));
+    assert!(result.get("pack_error").is_none());
+}
+
+#[test]
+fn pack_failure_does_not_change_unit_result() {
+    let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
+    fs::create_dir_all(orch::pack_path(&f.store, "one")).unwrap();
+    let result = f.run("one");
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["state"], "built", "{result}");
+    assert_eq!(result["accept"]["ran"], true, "{result}");
+    assert!(result["error"].is_null());
+    assert_eq!(result.get("pack"), Some(&Value::Null));
+    assert!(result["pack_error"].as_str().is_some(), "{result}");
+}
+
+#[test]
 fn auto_accept_and_verify_failure() {
     let f = Fixture::new(&[("one", "echo ok")], "echo accepted");
     let result = f.run("one");
@@ -169,6 +202,67 @@ fn mixed_mode_message() {
         .clone();
     assert_eq!(r["error"]["kind"], "invalid_argument");
     assert_eq!(r["error"]["message"], "unit mode takes exactly project, unit, role (terra or sol) and cwd; brief and save_to belong to astra brief mode");
+}
+
+#[test]
+fn registers_the_unit_in_the_dispatch_call() {
+    let f = Fixture::new(&[], "echo accepted");
+    fs::create_dir_all(f.store.join("briefs")).unwrap();
+    let brief = f.store.join("briefs/new.md");
+    fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    let dispatch = |track: &str| {
+        call(
+            &f.bridge,
+            "codex_run",
+            &json!({"project":"demo","unit":"new","role":"terra","cwd":f.repo,"track":track,"brief_file":brief}),
+        )["structuredContent"]
+            .clone()
+    };
+    let first = dispatch("m");
+    assert_eq!(first["status"], "completed", "{first}");
+    assert_eq!(first["registered"], true);
+    assert_eq!(first["accept"]["ran"], true, "{first}");
+    let units = orch::read_units(&f.store).unwrap();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].track, "m");
+    assert_eq!(units[0].brief, brief.to_str().unwrap());
+    let again = dispatch("m");
+    assert_eq!(again["status"], "completed", "{again}");
+    assert_eq!(again["registered"], false);
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let other = dispatch("other");
+    assert_eq!(other["error"]["kind"], "invalid_argument");
+    assert_eq!(
+        other["error"]["message"],
+        "unit new is registered under track m, not other"
+    );
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let half = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","unit":"two","role":"terra","cwd":f.repo,"track":"m"}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(half["error"]["message"], "track and brief_file go together");
+    let astra = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","role":"astra","cwd":f.repo,"brief":"plan","sandbox":"read-only","track":"m","brief_file":brief}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(
+        astra["error"]["message"],
+        "track and brief_file register a unit; they need unit mode"
+    );
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
+    let missing = call(
+        &f.bridge,
+        "codex_run",
+        &json!({"project":"demo","unit":"two","role":"terra","cwd":f.repo,"track":"m","brief_file":f.store.join("briefs/none.md")}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(missing["error"]["kind"], "orch_failed", "{missing}");
+    assert_eq!(orch::read_units(&f.store).unwrap().len(), 1);
 }
 
 #[test]

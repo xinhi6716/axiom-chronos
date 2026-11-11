@@ -12,9 +12,12 @@ sys.stdout.reconfigure(encoding='utf-8')
 if '--version' in sys.argv:
     print('2.1.281 (Claude Code)')
     sys.exit(0)
+if sys.argv[1:4] == ['plugin', 'list', '--json']:
+    print(os.environ.get('FAKE_CLAUDE_PLUGINS', '[]'))
+    sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
-record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN')}, 'messages': []}
+record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')}, 'messages': []}
 
 def save():
     with open(os.environ['FAKE_CLAUDE_RECORD'], 'w', encoding='utf-8') as f:
@@ -22,6 +25,8 @@ def save():
 
 def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
+
+record['provenance_env'] = os.environ.get('AXIOM_PROVENANCE')
 
 incoming = queue.Queue()
 def read_input():
@@ -43,12 +48,29 @@ emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers':
 if scenario == 'limit':
     emit({'type': 'result', 'is_error': True, 'result': "You've hit your usage limit"})
     sys.exit(0)
-if scenario == 'resume':
+if scenario == 'limit-reset' and '--resume' not in sys.argv:
+    emit({'type': 'result', 'is_error': True, 'result': "You've hit your session limit · resets 4:40am (Asia/Taipei)"})
+    sys.exit(0)
+if scenario in ('resume', 'limit-reset'):
     path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
     goal = json.loads(path.read_text(encoding='utf-8'))
     goal['status'] = 'done'
     path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
     emit({'type': 'result', 'is_error': False, 'result': 'done'})
+    sys.exit(0)
+if scenario == 'batch':
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    batches = json.loads(os.environ['FAKE_CLAUDE_BATCHES'])
+    run = goal.get('fake_runs', 0)
+    Path(f"{os.environ['FAKE_CLAUDE_RECORD']}.{run}").write_text(json.dumps(record, ensure_ascii=False), encoding='utf-8')
+    goal['fake_runs'] = run + 1
+    if run < len(batches):
+        goal.update(status='waiting', note='batch running', batch=batches[run])
+    else:
+        goal['status'] = 'done'
+    path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': goal['status']})
     sys.exit(0)
 if scenario == 'crash':
     sys.exit(3)
@@ -91,7 +113,26 @@ if scenario == 'continue':
     while incoming.get() is not None:
         pass
     sys.exit(0)
-emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
+if scenario in ('idle', 'idle-progress', 'idle-refusal'):
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    for turn in range(13):
+        if scenario == 'idle-progress' and turn == 2:
+            store = Path(os.environ['AXIOM_DATA_HOME']) / 'orchestrate' / 'demo'
+            (store / 'units.tsv').write_text('id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm1\tverified\t\t\t\t\n', encoding='utf-8')
+        if scenario == 'idle-refusal':
+            emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'is_error': True, 'content': '拒絕' + '願' * 400}]}})
+        emit({'type': 'result', 'is_error': False, 'result': "I can't close the goal"})
+        if incoming.get(timeout=5) is None:
+            sys.exit(0)
+    # Finite ceiling so a regression cannot hang or start a real model.
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    goal['status'] = 'done'
+    path.write_text(json.dumps(goal), encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': 'fake safety ceiling'})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
+emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})
 emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': scenario == 'error', 'result': '統計功能已完成。', 'duration_ms': 4200, 'total_cost_usd': 0.36, 'modelUsage': {'claude-opus-5-5': {'costUSD': 0.25}}})

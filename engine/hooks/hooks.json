@@ -10,6 +10,17 @@
         ]
       }
     ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${AXIOM_BIN:-axiom}\" hook"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -22,7 +33,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash|AskUserQuestion|Agent|Task|mcp__plugin_chronos_bridge__codex_run",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",

@@ -1,8 +1,13 @@
-use crate::base::{self, Failure, Res};
+use super::Clock;
+use crate::{
+    base::{self, Failure, Res},
+    codegraph,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    io::Write,
+    fs::File,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -28,6 +33,7 @@ pub struct Config {
     pub claude: Res<Vec<String>>,
     pub home: PathBuf,
     pub bin: PathBuf,
+    pub clock: Clock,
 }
 impl Config {
     pub fn from_env() -> Self {
@@ -35,10 +41,16 @@ impl Config {
             claude: base::resolve_command("AXIOM_CLAUDE_CMD", "claude"),
             home: base::axiom_home(),
             bin: std::env::current_exe().unwrap_or_default(),
+            clock: Clock::system(),
         }
     }
 }
-pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Res<Vec<String>> {
+pub fn command(
+    config: &Config,
+    plugin_dir: &Path,
+    max_turns: Option<u32>,
+    graph: bool,
+) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
@@ -49,6 +61,10 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
             e
         }
     })?;
+    let mut tools = TOOLS.join(",");
+    if graph {
+        tools = format!("{tools},{}", codegraph::TOOL);
+    }
     cmd.extend([
         "-p".into(),
         "--input-format".into(),
@@ -63,12 +79,15 @@ pub fn command(config: &Config, plugin_dir: &Path, max_turns: Option<u32>) -> Re
         "--add-dir".into(),
         config.home.to_string_lossy().into_owned(),
         "--allowedTools".into(),
-        TOOLS.join(","),
+        tools,
         "--disallowedTools".into(),
         "PowerShell,ScheduleWakeup,CronCreate".into(),
         "--model".into(),
         "opus".into(),
     ]);
+    if graph {
+        cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);
+    }
     if let Some(n) = max_turns {
         cmd.extend(["--max-turns".into(), n.to_string()]);
     }
@@ -90,7 +109,113 @@ fn line(out: &mut dyn Write, depth: usize, text: &str) {
     let _ = writeln!(out, "{}{text}", "  ".repeat(depth));
     let _ = out.flush();
 }
-fn comma(n: u64) -> String {
+fn agent_name(args: &Value) -> &str {
+    args["subagent_type"].as_str().unwrap_or("agent")
+}
+fn codex_role(args: &Value) -> &str {
+    args["role"]
+        .as_str()
+        .filter(|x| !x.is_empty())
+        .or_else(|| args["model"].as_str())
+        .unwrap_or("None")
+}
+fn brief_file_goal(args: &Value) -> Option<String> {
+    let file = s(&args["brief_file"]);
+    if file.is_empty() {
+        return None;
+    }
+    let path = Path::new(s(&args["cwd"])).join(file);
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(16 << 10)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(rest) = line.strip_prefix("GOAL") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                let goal = rest.trim();
+                return if goal.is_empty() {
+                    lines
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    Some(goal.to_owned())
+                };
+            }
+        }
+    }
+    None
+}
+/// The one-line progress label for a tool call, or None for tools that are not shown.
+pub fn tool_label(name: &str, args: &Value) -> Option<String> {
+    if name == "Agent" {
+        Some(format!(
+            "> {}: {}",
+            agent_name(args),
+            s(&args["description"])
+        ))
+    } else if let Some(tool) = name.strip_prefix(BRIDGE) {
+        if tool == "codex_run" {
+            let brief = s(&args["brief"]);
+            let file_goal = if brief.is_empty() {
+                brief_file_goal(args)
+            } else {
+                None
+            };
+            let label = brief
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("GOAL")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| {
+                    brief
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty() && *l != "GOAL")
+                })
+                .or(file_goal.as_deref())
+                .unwrap_or("(no brief)");
+            Some(format!("- codex {}: {}", codex_role(args), short(label)))
+        } else if tool == "orch" {
+            let args = args["args"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            Some(format!("- orch {}", short(&args)))
+        } else {
+            Some(format!("- {tool}"))
+        }
+    } else if name == "Bash" {
+        Some(format!("- $ {}", short(s(&args["command"]))))
+    } else {
+        None
+    }
+}
+/// The text of a tool_result content field, which is a string or a list of text blocks.
+pub fn content_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        Some(text.to_string())
+    } else {
+        content.as_array().map(|a| {
+            a.iter()
+                .filter(|x| s(&x["type"]) == "text")
+                .map(|x| s(&x["text"]))
+                .collect::<String>()
+        })
+    }
+}
+pub(crate) fn comma(n: u64) -> String {
     let t = n.to_string();
     let mut x = String::new();
     for (i, c) in t.chars().enumerate() {
@@ -107,6 +232,7 @@ pub struct Renderer {
     agents: BTreeMap<String, String>,
     calls: BTreeMap<String, (String, usize)>,
     usage: BTreeMap<String, (u64, u64, u64)>,
+    missing_usage: usize,
 }
 impl Renderer {
     pub(super) fn is_error(&self) -> bool {
@@ -139,54 +265,12 @@ impl Renderer {
                         let name = s(&b["name"]);
                         let args = &b["input"];
                         let id = s(&b["id"]).to_string();
-                        let text = if name == "Agent" {
-                            let agent = args["subagent_type"].as_str().unwrap_or("agent");
-                            self.agents.insert(id, agent.into());
-                            Some(format!("> {agent}: {}", s(&args["description"])))
-                        } else if let Some(tool) = name.strip_prefix(BRIDGE) {
-                            if tool == "codex_run" {
-                                let role = args["role"]
-                                    .as_str()
-                                    .filter(|x| !x.is_empty())
-                                    .or_else(|| args["model"].as_str())
-                                    .unwrap_or("None");
-                                self.calls.insert(id, (role.into(), depth));
-                                let brief = s(&args["brief"]);
-                                let label = brief
-                                    .lines()
-                                    .find_map(|l| {
-                                        l.strip_prefix("GOAL")
-                                            .map(str::trim)
-                                            .filter(|s| !s.is_empty())
-                                    })
-                                    .or_else(|| {
-                                        brief
-                                            .lines()
-                                            .map(str::trim)
-                                            .find(|l| !l.is_empty() && *l != "GOAL")
-                                    })
-                                    .unwrap_or("(no brief)");
-                                Some(format!("- codex {role}: {}", short(label)))
-                            } else if tool == "orch" {
-                                let args = args["args"]
-                                    .as_array()
-                                    .map(|a| {
-                                        a.iter()
-                                            .filter_map(Value::as_str)
-                                            .collect::<Vec<_>>()
-                                            .join(" ")
-                                    })
-                                    .unwrap_or_default();
-                                Some(format!("- orch {}", short(&args)))
-                            } else {
-                                Some(format!("- {tool}"))
-                            }
-                        } else if name == "Bash" {
-                            Some(format!("- $ {}", short(s(&args["command"]))))
-                        } else {
-                            None
-                        };
-                        if let Some(text) = text {
+                        if name == "Agent" {
+                            self.agents.insert(id, agent_name(args).into());
+                        } else if name == format!("{BRIDGE}codex_run") {
+                            self.calls.insert(id, (codex_role(args).into(), depth));
+                        }
+                        if let Some(text) = tool_label(name, args) {
                             line(out, depth, &text);
                         }
                     }
@@ -201,6 +285,12 @@ impl Renderer {
                         let id = s(&b["tool_use_id"]);
                         if let Some(agent) = self.agents.remove(id) {
                             line(out, 0, &format!("< {agent} finished"));
+                            if agent == "chronos:narrator" {
+                                if let Some(text) = content_text(&b["content"]) {
+                                    let _ = write!(out, "\n{text}\n\n");
+                                    let _ = out.flush();
+                                }
+                            }
                         }
                         if let Some((role, depth)) = self.calls.get(id).cloned() {
                             self.codex_result(b, &role, depth, out);
@@ -216,15 +306,7 @@ impl Renderer {
         }
     }
     fn codex_result(&mut self, block: &Value, role: &str, depth: usize, out: &mut dyn Write) {
-        let content = &block["content"];
-        let text = if let Some(s) = content.as_str() {
-            s.to_string()
-        } else if let Some(a) = content.as_array() {
-            a.iter()
-                .filter(|x| s(&x["type"]) == "text")
-                .map(|x| s(&x["text"]))
-                .collect::<String>()
-        } else {
+        let Some(text) = content_text(&block["content"]) else {
             return;
         };
         let Ok(report) = serde_json::from_str::<Value>(&text) else {
@@ -264,6 +346,8 @@ impl Renderer {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             v.2 += u.get("outputTokens").and_then(Value::as_u64).unwrap_or(0);
+        } else {
+            self.missing_usage += 1;
         }
     }
     pub fn summary(&self, out: &mut dyn Write) {
@@ -289,7 +373,7 @@ impl Renderer {
                 }
             );
         }
-        if !self.usage.is_empty() {
+        if !self.usage.is_empty() || self.missing_usage > 0 {
             let totals = self
                 .usage
                 .iter()
@@ -303,7 +387,18 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let _ = writeln!(out, "codex tokens: {totals}");
+            let totals = if totals.is_empty() {
+                "none reported"
+            } else {
+                &totals
+            };
+            let note = if self.missing_usage == 0 {
+                String::new()
+            } else {
+                let plural = if self.missing_usage == 1 { "" } else { "s" };
+                format!(" ({} run{plural} reported no usage)", self.missing_usage)
+            };
+            let _ = writeln!(out, "codex tokens: {totals}{note}");
         }
     }
 }

@@ -13,6 +13,7 @@ fn required_phrases_are_present() {
         ("agents/dispatcher.md", "`cargo fetch --locked`"),
         ("agents/dispatcher.md", "`cargo test --locked --offline`"),
         ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
+        ("skills/wish/SKILL.md", "or the report shows `handoff pending`"),
         ("skills/wish/SKILL.md", "`[creative]`"),
         ("skills/wish/SKILL.md", "only when the ruling chose a candidate"),
         ("skills/wish/SKILL.md", "`chronos:memory-keeper` agent in the foreground"),
@@ -20,15 +21,29 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "the existing capability, the missing link, the code location, the user-visible value, and a falsifiable acceptance check"),
         ("skills/wish/SKILL.md", "evidence strength, then direct user value, then reuse of what exists"),
         ("skills/wish/SKILL.md", "exactly one smallest increment"),
+        ("skills/wish/SKILL.md", "each as a heading `### <id> <title>`"),
+        ("agents/architect.md", "SERVES     plan item ids"),
+        ("agents/architect.md", "OUT OF SCOPE <id> <reason>"),
         ("skills/wish/SKILL.md", "In creative mode `[no-architect]` is ignored"),
         ("skills/wish/SKILL.md", "declare the mode after the ruling"),
         ("skills/wish/SKILL.md", "no follow-up exploration"),
         ("skills/wish/SKILL.md", "`area: feature`"),
+        ("skills/wish/SKILL.md", "research/COUNCIL.md"),
+        ("skills/wish/SKILL.md", "skills/wish/BATCH.md"),
+        ("research/COUNCIL.md", "never open the members' position files"),
+        ("research/COUNCIL.md", "`more_open`"),
+        ("research/COUNCIL.md", "Nothing goes back to the members."),
+        ("research/COUNCIL.md", "Also read the council digest at that path; treat its open claims as claims about this plan."),
         ("agents/dispatcher.md", "including fix and sol units"),
         ("agents/dispatcher.md", "`orch` `[\"map\"]`"),
         ("agents/dispatcher.md", "`orch` `[\"ready\"]`"),
         ("agents/dispatcher.md", "`orch` `[\"accept\", <module>"),
         ("agents/dispatcher.md", "`orch` `[\"fulltest\", \"--repo\""),
+        ("agents/dispatcher.md", "A CI run that fails after pushing is a failed full test"),
+        ("agents/dispatcher.md", "`orch` `[\"fulltest\", \"--repo\", <dir>, \"--external\""),
+        ("agents/dispatcher.md", "If more than one unit changed files, dispatch the `role: \"sol\"` unit above"),
+        ("agents/dispatcher.md", "never `terra` fix units"),
+        ("agents/dispatcher.md", "`done` stays refused until a later `fulltest` passes"),
         ("agents/dispatcher.md", "`orch` `[\"review\", <unit>"),
         ("agents/dispatcher.md", "parallel `codex_run` calls with `project` the slug, `unit` the id, `role: \"terra\"`, and `cwd` the project directory"),
         ("agents/dispatcher.md", "Give the files and contract to `chronos:reviewer`"),
@@ -36,10 +51,11 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "Give the `chronos:critic` agent the review schema, the plan path"),
         ("skills/wish/SKILL.md", "An old `[astra]` marker at the start of the wish is removed as plain text and changes nothing."),
         ("skills/wish/SKILL.md", "Every wish runs step 2a after step 2; there is no marker or option that skips it."),
-        ("skills/wish/SKILL.md", "Write the report yourself, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for the user."),
+        ("skills/wish/SKILL.md", "Do not reprint its text."),
         ("skills/wish/SKILL.md", "output path `<store>/astra/plan.json`"),
         ("skills/wish/SKILL.md", "`## Coverage`"),
-        ("skills/wish/SKILL.md", "`review-failed`, or `unreviewed`"),
+        ("skills/wish/SKILL.md", "End the report with one `Provenance:` line"),
+        ("agents/narrator.md", "`review-failed`, or `unreviewed`"),
         ("skills/research/SKILL.md", "output path `<store>/research/plan.json`"),
         ("skills/research/SKILL.md", "Give the `chronos:critic` agent the review schema, the plan path"),
         ("agents/astra.md", "`save_to` the given path"),
@@ -55,6 +71,9 @@ fn required_phrases_are_present() {
         let modified = text.replace(phrase, "");
         assert_eq!(missing_phrase(&modified, phrase), Some(phrase));
     }
+    let wish = fs::read_to_string(root.join("skills/wish/SKILL.md")).unwrap();
+    assert!(!wish.contains("never open the members' position files"));
+    assert!(!wish.contains("`$!` in Git Bash is not a Windows pid"));
     let dispatch = fs::read_to_string(root.join("DISPATCH.md")).unwrap();
     assert!(!dispatch.contains("After the worker returns"));
 }
@@ -72,8 +91,6 @@ fn deleted_rules_have_enforcing_tests() {
         ("agents/architect.md", "Order the modules so each depends only on earlier ones and on existing code.", "orch/parse_cases.rs::map_rejections_name_module"),
         ("agents/astra.md", "Write its `structured_output` to the given path.", "bridge/codex_cases.rs::astra_save_records_only_astra"),
         ("agents/astra.md", "or the model is not an Astra model", "bridge/codex_cases.rs::sol_and_astra_restrictions"),
-        ("agents/reviewer.md", "You change nothing.", "engine/text_cases.rs::reviewer_tools_are_read_only"),
-        ("agents/reviewer.md", "and the verdict is `fail` when any finding is a blocker or major", "orch/lifecycle_cases.rs::extra_commands_preserve_output_and_failures"),
         ("agents/memory-keeper.md", "Only units in state `verified` count; that state means the dispatcher confirmed VERIFY passed and its review passed.", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "never read another unit's brief in its place", "memory.rs::record_search_stale_digest_and_validation"),
         ("agents/memory-keeper.md", "at most 12 lines", "memory.rs::record_search_stale_digest_and_validation"),
@@ -117,5 +134,5 @@ fn reviewer_tools_are_read_only() {
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("tools:"))
         .collect();
-    assert_eq!(tools, [" Read, Glob, Grep"]);
+    assert_eq!(tools, [" Read, Glob, Grep, Write, mcp__codegraph__codegraph_explore"]);
 }

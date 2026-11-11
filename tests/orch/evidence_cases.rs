@@ -186,6 +186,67 @@ fn records_and_gates() {
 }
 
 #[test]
+fn external_failure_blocks_done_until_a_later_pass() {
+    let p = temp();
+    setup(&p);
+    append_evidence(&p, "u", &row("run", "gpt-worker", 0, "", "2000-01-01")).unwrap();
+    set_unit_state(&p, "u", "verified").unwrap();
+    assert_eq!(record_full(&p, &p, None).unwrap().exit_code, 0);
+    assert!(done_gate(&p, true).is_ok());
+    let log = p.join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    let recorded = record_external_full(&p, &p, "ci-run-7", 2, &log).unwrap();
+    assert_eq!(recorded.exit_code, 2);
+    let error = done_gate(&p, true).unwrap_err();
+    assert_eq!(
+        (error.kind.as_str(), error.message.as_str()),
+        ("not_done", "missing successful, current full test")
+    );
+    assert_eq!(record_full(&p, &p, Some("exit 3")).unwrap().exit_code, 3);
+    assert_eq!(done_gate(&p, true).unwrap_err().kind, "not_done");
+    assert_eq!(record_full(&p, &p, None).unwrap().exit_code, 0);
+    assert!(done_gate(&p, true).is_ok());
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
+fn external_failure_keeps_its_evidence() {
+    let p = temp();
+    setup(&p);
+    let repo = p.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("file.txt"), "one").unwrap();
+    git_repo(&repo);
+    let log = p.join("ci.log");
+    let mut bytes = vec![0xff, 0];
+    bytes.extend(vec![b'x'; 30000]);
+    bytes.extend_from_slice(b"\nEND\n");
+    fs::write(&log, &bytes).unwrap();
+
+    let result = record_external_full(&p, &repo, "  run/9\tattempt 2 ", -1, &log).unwrap();
+    assert_eq!(result.exit_code, -1);
+    assert_eq!(result.output.chars().count(), 20000);
+    assert!(result.output.ends_with("x\nEND\n"));
+    fs::remove_file(&log).unwrap();
+
+    let table = fs::read_to_string(p.join("reports/_full.evidence.tsv")).unwrap();
+    let cells: Vec<_> = table.lines().nth(1).unwrap().split('\t').collect();
+    assert_eq!(cells.len(), 5, "{table}");
+    assert_eq!(cells[0], "full");
+    let (label, saved) = cells[1].split_once(" log=").unwrap();
+    assert_eq!(label, "external:run/9 attempt 2");
+    assert_eq!(cells[2], "-1");
+    assert_eq!(cells[3], snapshot(&repo, &[".".into()]));
+    assert!(cells[3].starts_with("tree:"), "{table}");
+    assert_eq!(
+        fs::read_to_string(p.join("reports").join(saved)).unwrap(),
+        result.output,
+        "the kept copy survives the original log"
+    );
+    fs::remove_dir_all(p).unwrap();
+}
+
+#[test]
 fn review_identity_empty_when_brief_unreadable() {
     let p = temp();
     setup(&p);
@@ -284,4 +345,216 @@ fn identities_are_current_git_trees() {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tree");
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_review_stands_until_later_evidence_saw_other_files() {
+    let same = "tree:reviewed";
+    let other = "tree:changed";
+    let verify = |code, commit| row("verify", "test", code, commit, "2");
+    let accept = |code, commit| row("accept", "test", code, commit, "3");
+    let review = |code, commit| row("review", "claude-review", code, commit, "4");
+    let attempt = |rows: Vec<Evidence>| {
+        let mut all = vec![
+            row("run", "gpt-worker", 0, "", "1"),
+            row("scope", "", 0, "", "1"),
+        ];
+        all.extend(rows);
+        all
+    };
+    let cases: Vec<(&str, Vec<Evidence>, &str)> = vec![
+        (
+            "accept then review",
+            vec![verify(0, same), accept(0, same), review(0, same)],
+            "verified",
+        ),
+        (
+            "another accept on the reviewed files",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, same),
+            ],
+            "verified",
+        ),
+        (
+            "review before the first accept",
+            vec![verify(0, same), review(0, same), accept(0, same)],
+            "verified",
+        ),
+        (
+            "accept saw other files",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, other),
+            ],
+            "built",
+        ),
+        (
+            "accept without a snapshot proves nothing",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(0, ""),
+            ],
+            "built",
+        ),
+        (
+            "a failed accept outranks a standing review",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(1, same),
+            ],
+            "accept-failed",
+        ),
+        (
+            "a review cannot clear a failed accept",
+            vec![verify(0, same), accept(1, same), review(0, same)],
+            "accept-failed",
+        ),
+        (
+            "a failed accept does not consume the review",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(1, same),
+                accept(0, same),
+            ],
+            "verified",
+        ),
+        (
+            "the passing accept after a failure saw other files",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                accept(1, other),
+                accept(0, other),
+            ],
+            "built",
+        ),
+        (
+            "a failed review on the same files is not erased",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(1, same),
+                accept(0, same),
+            ],
+            "review-failed",
+        ),
+        (
+            "a failed review lapses when the files change",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(1, same),
+                accept(0, other),
+            ],
+            "built",
+        ),
+        (
+            "a same-family review still does not count",
+            vec![
+                verify(0, same),
+                row("review", "gpt-review", 0, same, "4"),
+                accept(0, same),
+            ],
+            "built",
+        ),
+        (
+            "an unchanged re-verify needs a new accept",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                verify(0, same),
+            ],
+            "built",
+        ),
+        (
+            "an unchanged re-verify keeps the review",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                verify(0, same),
+                accept(0, same),
+            ],
+            "verified",
+        ),
+        (
+            "a re-verify on other files drops the review",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                verify(0, other),
+                accept(0, other),
+            ],
+            "built",
+        ),
+        (
+            "a failing re-verify wins",
+            vec![
+                verify(0, same),
+                accept(0, same),
+                review(0, same),
+                verify(1, same),
+                accept(0, same),
+            ],
+            "failed",
+        ),
+    ];
+    for (name, rows, expected) in cases {
+        assert_eq!(derive_state(&attempt(rows), true), expected, "{name}");
+    }
+    assert_eq!(
+        derive_state(
+            &attempt(vec![verify(0, same), review(0, same), verify(0, same)]),
+            false
+        ),
+        "verified",
+        "an unchanged re-verify outside a module"
+    );
+    assert_eq!(
+        derive_state(
+            &attempt(vec![verify(0, same), review(0, same), verify(0, other)]),
+            false
+        ),
+        "built",
+        "a re-verify on other files outside a module"
+    );
+    let earlier_attempt = vec![
+        row("run", "gpt-worker", 0, "", "1"),
+        verify(0, same),
+        accept(0, same),
+        review(0, same),
+        row("run", "gpt-worker", 0, "", "5"),
+        verify(0, same),
+        accept(0, same),
+    ];
+    assert_eq!(
+        derive_state(&earlier_attempt, true),
+        "built",
+        "a new worker run starts over even on identical files"
+    );
+    let legacy_accept = vec![
+        row("run", "gpt-worker", 0, "", "1"),
+        row("verify", "test", 0, "bare", "2"),
+        row("accept", "test", 0, "", "3"),
+        row("review", "claude-review", 0, "bare", "4"),
+    ];
+    assert_eq!(
+        derive_state(&legacy_accept, true),
+        "verified",
+        "a review recorded after an accept without a snapshot still reads as before"
+    );
 }

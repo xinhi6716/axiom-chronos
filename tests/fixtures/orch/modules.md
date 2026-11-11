@@ -183,7 +183,7 @@ CONTRACT
   Acceptance cases (tests/orch.rs): round trip of every ported command against expected compact and --json output; tests/fixtures/orch/ old-format stores
     (CRLF rows, empty cells, existing states such as review-failed, an inbox pointer and a resolved gate copied from a real store) read and rewritten unchanged;
     stale-lock replacement and --force; brief missing VERIFY rejected; SCOPE outside the track's module rejected; map with cycle, unknown dep, overlapping PATHS
-    and missing ACCEPT rejected; this very map (C:/Users/gppup/.axiom/orchestrate/chronos-rust/modules.md copied into tests/fixtures/orch/modules.md) parses;
+    and missing ACCEPT rejected; this very map (C:/Users/someone/.axiom/orchestrate/chronos-rust/modules.md copied into tests/fixtures/orch/modules.md) parses;
     unit set verified and built refused; derive_state table (pending, failed, built, accept-failed, review-failed, verified, same-family review not verified,
     newer review commit supersedes an older fail); with a fake worker closure in a temp git repo: two independent units run overlapping in time on two threads,
     a dependent unit gets not_ready until its dependency is verified, overlapping SCOPEs get busy, a write outside SCOPE ends failed, a third dispatch gets fix_limit

@@ -1,7 +1,13 @@
 use super::{AppServer, SANDBOXES};
-use crate::base::{self, Failure, Res};
+use crate::{
+    base::{self, Failure, Res},
+    codegraph,
+};
 use serde_json::{json, Map, Value};
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub struct RunRequest {
     pub brief: String,
@@ -19,6 +25,10 @@ pub struct RunRequest {
 
 impl AppServer {
     pub fn run(&self, req: &RunRequest) -> Res<Value> {
+        self.run_capped(req, None)
+    }
+    /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
+    pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
             || req.brief.trim().is_empty()
@@ -37,6 +47,7 @@ impl AppServer {
         {
             thread["developerInstructions"] = json!(s);
         }
+        let graph = codegraph::enabled(Path::new(&req.cwd));
         let disabled = if req.lean {
             let installed = self.request("plugin/installed", json!({"cwds":[req.cwd]}))?;
             let mut plugins: Vec<String> = installed["marketplaces"]
@@ -55,6 +66,7 @@ impl AppServer {
                 .as_object()
                 .into_iter()
                 .flat_map(|m| m.keys().cloned())
+                .filter(|name| !graph || name != codegraph::NAME)
                 .collect();
             servers.sort();
             let plugin_config: Map<String, Value> = plugins
@@ -76,11 +88,14 @@ impl AppServer {
         } else {
             Value::Null
         };
+        if graph {
+            thread["config"]["mcp_servers"][codegraph::NAME] = codegraph::codex_server(&req.cwd);
+        }
         let started = self.request("thread/start", thread)?;
         let thread_id = started
             .pointer("/thread/id")
             .and_then(Value::as_str)
-            .ok_or_else(|| Failure::new("codex_rpc", "thread/start: missing thread id"))?
+            .ok_or_else(|| self.protocol_failure("thread/start: missing thread id"))?
             .to_owned();
         let events = self.subscribe(&thread_id);
         let mut turn = json!({"threadId":thread_id,"input":[{"type":"text","text":req.brief}]});
@@ -115,7 +130,7 @@ impl AppServer {
         };
         let Some(turn_id) = started.pointer("/turn/id").and_then(Value::as_str) else {
             self.unsubscribe(&thread_id);
-            return Err(Failure::new("codex_rpc", "turn/start: missing turn id"));
+            return Err(self.protocol_failure("turn/start: missing turn id"));
         };
         self.register_turn(&thread_id, turn_id);
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
@@ -127,7 +142,9 @@ impl AppServer {
             if remaining.is_zero() {
                 self.interrupt(&thread_id, turn_id);
                 report["status"] = json!("timeout");
-                report["error"] = json!({"kind":"timeout","message":format!("turn exceeded {}s and was interrupted", req.timeout_s)});
+                let message = format!("turn exceeded {}s and was interrupted", req.timeout_s);
+                report["error"] =
+                    json!({"kind":"timeout","message":self.note_untested_version(&message)});
                 break;
             }
             let event = match events.recv_timeout(remaining) {
@@ -173,7 +190,14 @@ impl AppServer {
             }
             match method {
                 "thread/tokenUsage/updated" => {
-                    report["usage"] = params["tokenUsage"]["total"].clone()
+                    report["usage"] = params["tokenUsage"]["total"].clone();
+                    let total = report["usage"]["totalTokens"].as_u64().unwrap_or(0);
+                    if token_cap.is_some_and(|cap| total >= cap) {
+                        self.interrupt(&thread_id, turn_id);
+                        report["status"] = json!("token_cap");
+                        report["error"] = json!({"kind":"token_cap","message":format!("turn reached {total} tokens and was interrupted")});
+                        break;
+                    }
                 }
                 "item/completed" => record_item(&mut report, &params["item"]),
                 "error" if params["willRetry"] != true => {
@@ -183,6 +207,20 @@ impl AppServer {
                     report["status"] = params["turn"]["status"].clone();
                     if !params["turn"]["error"].is_null() {
                         report["error"] = turn_error(&params["turn"]["error"]);
+                    }
+                    if !matches!(
+                        report["status"].as_str(),
+                        Some("completed" | "failed" | "interrupted")
+                    ) {
+                        let status = report["status"].take();
+                        report["status"] = json!("failed");
+                        if report["error"].is_null() {
+                            report["error"] = self
+                                .protocol_failure(&format!(
+                                    "turn/completed: unexpected status {status}"
+                                ))
+                                .to_json();
+                        }
                     }
                     if report["status"] == "completed" {
                         report["error"] = Value::Null;

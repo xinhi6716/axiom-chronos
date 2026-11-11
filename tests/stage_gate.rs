@@ -74,6 +74,27 @@ fn done_without_rewrite_row() {
 }
 
 #[test]
+fn external_failure_keeps_the_goal_open_until_a_later_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let store = setup(home);
+    goal::open(home, "s", "wish", Some("project")).unwrap();
+    let log = home.join("ci.log");
+    fs::write(&log, "failing job").unwrap();
+    orch::record_external_full(&store, home, "ci-run-1", 1, &log).unwrap();
+    let error = goal::set_status(home, "s", "done", None).unwrap_err();
+    assert_eq!(
+        (error.kind.as_str(), error.message.as_str()),
+        ("not_done", "missing successful, current full test")
+    );
+    orch::record_full(&store, home, Some("echo ok")).unwrap();
+    assert_eq!(
+        goal::set_status(home, "s", "done", None).unwrap()["status"],
+        "completed"
+    );
+}
+
+#[test]
 fn rewrite_stage_is_refused_second_review_kept() {
     let temp = tempfile::tempdir().unwrap();
     let store = setup(temp.path());

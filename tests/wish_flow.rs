@@ -88,18 +88,13 @@ fn report_is_written_in_plain_language() {
     assert!(!text.to_lowercase().contains("rewrite"));
     assert!(!text.contains("stage:"));
     for phrase in [
-        "Write the report yourself, in the wish's language and in plain words: what was done, how it turned out, and which choices were decided for the user.",
-        "the changed files",
-        "the per-module acceptance results if there was a map",
-        "the full test result and whether sol ran",
-        "the choices the dispatcher decided",
-        "what the memory keeper recorded",
-        "Astra's coverage read and not-read lists",
-        "every unit whose state is not `verified` with its state (`failed`, `accept-failed`, `review-failed`, or `unreviewed`)",
-        "never call such a unit done",
+        "Give `chronos:narrator` the `orch` `[\"report\"]` digest",
+        "Do not reprint its text.",
+        "The rulings stay yours; step 7 closes the goal.",
     ] {
         let has = |value: &str| value.contains(phrase);
         assert!(has(text), "missing {phrase}");
+        assert_eq!(text.matches(phrase).count(), 1);
         assert!(!has(&text.replace(phrase, "")));
     }
     let steps: Vec<_> = text
@@ -111,6 +106,49 @@ fn report_is_written_in_plain_language() {
         })
         .collect();
     assert_eq!(steps, [0, 1, 2]);
+}
+
+#[test]
+fn a_long_batch_is_piloted_then_waited_on_without_a_model() {
+    let file = |name: &str| {
+        axiom::engine::FILES
+            .iter()
+            .find(|(path, _)| *path == name)
+            .unwrap()
+            .1
+    };
+    let skill = file("skills/wish/SKILL.md");
+    let step = skill.lines().find(|line| line.starts_with("7. ")).unwrap();
+    assert!(step.contains("skills/wish/BATCH.md"));
+    assert!(!skill.contains("`$!` in Git Bash is not a Windows pid"));
+    let batch = file("skills/wish/BATCH.md");
+    for phrase in [
+        "one pilot unit before any fan-out",
+        "Only after a clean pilot",
+        "`progress_file`",
+        "`marker_file`",
+        "`pid`",
+        "`$!` in Git Bash is not a Windows pid",
+        "No model runs while the goal waits",
+        "`axiom wait <session>`",
+        "A batch that died without its marker is a failure",
+        "Never watch a batch.",
+    ] {
+        let has = |value: &str| value.contains(phrase);
+        assert!(has(batch), "missing {phrase}");
+        assert!(!has(&batch.replace(phrase, "")));
+    }
+    let pilot = batch.find("one pilot unit").unwrap();
+    assert!(pilot < batch.find("launch the full batch").unwrap());
+    assert!(
+        batch.find("launch the full batch").unwrap()
+            < batch.find("Close the goal as `waiting`").unwrap()
+    );
+
+    let dispatcher = file("agents/dispatcher.md");
+    let phrase = "report its progress file, completion marker and pid";
+    assert!(dispatcher.contains(phrase));
+    assert!(!dispatcher.replace(phrase, "").contains(phrase));
 }
 
 #[test]
@@ -127,4 +165,63 @@ fn memory_keeper_denial_names_no_rewrite() {
     let reason = output["permissionDecisionReason"].as_str().unwrap();
     assert!(reason.contains("foreground"));
     assert!(!reason.to_lowercase().contains("rewrite"));
+}
+
+#[test]
+fn the_core_reads_a_digest_not_the_reports_directory() {
+    let text = axiom::engine::FILES
+        .iter()
+        .find(|(path, _)| *path == "skills/wish/SKILL.md")
+        .unwrap()
+        .1;
+    let step = text.lines().find(|l| l.starts_with("5. ")).unwrap();
+    assert!(step.contains(r#"`["report", "--repo", <project directory>]`"#));
+    assert!(step.contains("Never read `<store>/reports/` file by file"));
+    assert!(!text.contains("Read every file in `<store>/reports/`"));
+    let report = text.lines().find(|l| l.starts_with("6. ")).unwrap();
+    assert!(report.contains("chronos:narrator"));
+    let hand_off = text.lines().find(|l| l.starts_with("4. ")).unwrap();
+    assert!(hand_off.contains("Never poll, sleep or watch files while an agent runs"));
+}
+
+#[test]
+fn dispatcher_reports_the_digest_and_reviews_through_the_pack() {
+    let asset = |name: &str| {
+        axiom::engine::FILES
+            .iter()
+            .find(|(path, _)| *path == name)
+            .unwrap()
+            .1
+    };
+    let dispatcher = asset("agents/dispatcher.md");
+    assert!(dispatcher.contains(r#"`orch` `["review-pack", <unit>, "--repo", <dir>]`"#));
+    let report = dispatcher.split("## Report").nth(1).unwrap();
+    assert!(report.contains(r#"`orch` `["report", "--repo", <dir>, "--module", <module>]` unedited"#));
+    assert!(report.contains("at most ten lines"));
+    assert!(!report.contains("each decided choice"));
+    let reviewer = asset("agents/reviewer.md");
+    assert!(reviewer.contains("Read the review pack you were given."));
+    assert!(reviewer.contains("\"tree\": \"<tree id>\""));
+    assert!(reviewer.contains("the pack's `Tree reviewed` value into `tree`"));
+    assert!(dispatcher.contains("the reviewer writes its verdict file, not you"));
+    assert!(dispatcher.contains(r#"`orch` `["review", <unit>, "--repo", <dir>, "--reviewer", "chronos:reviewer"]`"#));
+    assert!(!dispatcher.contains("save its verdict"));
+    assert!(!dispatcher.contains("--verdict-file"));
+    assert!(!dispatcher.contains("When a fix or later unit of the same module takes over"));
+    assert!(reviewer.contains("tests included"));
+    assert!(!reviewer.contains("Read every file you were given"));
+    for check in ["contract_mismatch", "vacuous_check", "untested", "platform"] {
+        assert!(reviewer.contains(check), "{check}");
+    }
+}
+
+#[test]
+fn fix_rounds_are_resolved_by_the_core() {
+    let skill = axiom::engine::FILES.iter()
+        .find(|(path, _)| *path == "skills/wish/SKILL.md")
+        .unwrap().1;
+    let sentence = r#"After a `fix_rounds` report, waive findings with `orch` `["waive", <unit>, <n>, "--reason", <text>]` or close the goal as `blocked`."#;
+    assert!(skill.contains(sentence));
+    assert_eq!(skill.matches(sentence).count(), 1);
+    assert!(!skill.replace(sentence, "").contains(sentence));
 }

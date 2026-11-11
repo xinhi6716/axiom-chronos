@@ -126,21 +126,19 @@ fn stop_reason_pending_only() {
     assert!(hook::stop_reason("s", &goal::load(h, "s").unwrap().unwrap()).contains(sentence));
 }
 #[test]
-fn stop_reason_truncates_long_wish_by_characters() {
-    for len in [120, 121, 300] {
+fn stop_reason_does_not_grow_with_the_wish() {
+    let mut lengths = Vec::new();
+    for len in [1, 121, 3000] {
         let d = tempfile::tempdir().unwrap();
-        let wish = "願".repeat(len);
-        goal::open(d.path(), "s", &wish, None).unwrap();
+        goal::open(d.path(), "s", &"願".repeat(len), None).unwrap();
         let reason = hook::stop_reason("s", &goal::load(d.path(), "s").unwrap().unwrap());
-        assert!(reason.contains("Chronos goal s"));
-        if len == 120 {
-            assert!(reason.contains(&wish));
-            assert!(!reason.contains('…'));
-        } else {
-            assert!(reason.contains(&format!("{}…", "願".repeat(120))));
-            assert!(!reason.contains(&wish));
-        }
+        assert!(reason.contains("Chronos goal s is still active"));
+        assert!(reason.contains("status done"));
+        assert!(reason.contains("status blocked"));
+        assert!(!reason.contains('願'));
+        lengths.push(reason.len());
     }
+    assert!(lengths.iter().all(|n| *n == lengths[0] && *n < 300), "{lengths:?}");
 }
 
 #[test]
@@ -254,6 +252,41 @@ fn mode_restrictions() {
             }
         }
     }
+}
+#[test]
+fn dispatcher_stays_on_its_module() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    open(h);
+    goal::set_mode(h, "s", "change").unwrap();
+    let store = axiom::orch::store_for(h, "demo").unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("modules.md"), "## a\n## b\n").unwrap();
+    let header = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n";
+    std::fs::write(store.join("units.tsv"), header).unwrap();
+    let run = |unit: &str, track: Option<&str>| {
+        let mut input = json!({"project":"demo","unit":unit,"role":"terra","sandbox":"workspace-write"});
+        if let Some(track) = track {
+            input["track"] = json!(track);
+        }
+        sub(tool(CODEX, input))
+    };
+    assert!(call(h, &run("u1", None)).is_none());
+    assert!(!store.join("agents/a").exists());
+    assert!(call(h, &run("u1", Some("a"))).is_none());
+    assert_eq!(std::fs::read_to_string(store.join("agents/a")).unwrap(), "a");
+    assert_eq!(
+        denial(call(h, &run("u2", Some("b")))),
+        "This dispatcher already works on module a; unit u2 belongs to b. Report back: each module gets a fresh dispatcher."
+    );
+    assert!(call(h, &run("u3", Some("a"))).is_none());
+    std::fs::write(
+        store.join("units.tsv"),
+        format!("{header}u4\tb\tpending\t\t\t\tx\n"),
+    )
+    .unwrap();
+    denial(call(h, &run("u4", Some("a"))));
+    denial(call(h, &run("u4", None)));
 }
 #[test]
 fn nested_agents_only_reviewer() {
@@ -445,4 +478,136 @@ fn stdin_invalid_and_unknown_exit_zero() {
             assert!(stdout.is_empty());
         }
     }
+}
+
+fn plugin_at(dir: &Path, version: Option<&str>) -> std::path::PathBuf {
+    let root = axiom::engine::plugin_dir(dir).unwrap();
+    if let Some(version) = version {
+        let file = root.join(".claude-plugin/plugin.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        manifest["version"] = json!(version);
+        std::fs::write(file, manifest.to_string()).unwrap();
+    }
+    root
+}
+fn hook_process(home: &Path, plugin: Option<&Path>, event: &Value) -> Value {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_axiom"));
+    command
+        .arg("hook")
+        .env("AXIOM_DATA_HOME", home)
+        .env_remove("CLAUDE_PLUGIN_ROOT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(plugin) = plugin {
+        command.env("CLAUDE_PLUGIN_ROOT", plugin);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+#[test]
+fn plugin_of_another_version_stops_the_wish_before_a_goal_opens() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let root = plugin_at(d.path(), Some("0.3.0-codex"));
+    let reply = hook::handle_from_plugin(
+        &prompt("/chronos:wish fix it"),
+        Some(&home),
+        false,
+        Some(&root),
+    )
+    .unwrap();
+    assert_eq!(reply["decision"], "block");
+    let reason = reply["reason"].as_str().unwrap();
+    for part in [
+        "Chronos did not start this wish",
+        "0.3.0-codex",
+        env!("CARGO_PKG_VERSION"),
+        "claude plugin update",
+        "AXIOM_BIN",
+    ] {
+        assert!(reason.contains(part), "{reason}");
+    }
+    assert!(goal::load(&home, "s").unwrap().is_none());
+    assert!(reply.get("hookSpecificOutput").is_none());
+}
+#[test]
+fn matching_plugin_opens_the_wish_exactly_as_before() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let root = plugin_at(d.path(), None);
+    let e = prompt("/chronos:wish fix it");
+    let gated = hook::handle_from_plugin(&e, Some(&home), true, Some(&root)).unwrap();
+    assert!(gated.get("decision").is_none());
+    assert_eq!(goal::load(&home, "s").unwrap().unwrap().wish, "fix it");
+    let plain = tempfile::tempdir().unwrap();
+    assert_eq!(gated, hook::handle(&e, Some(plain.path()), true).unwrap());
+}
+#[test]
+fn same_version_with_other_rules_opens_and_tells_the_core() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let root = plugin_at(d.path(), None);
+    std::fs::write(root.join("skills/wish/SKILL.md"), "older rules").unwrap();
+    let reply =
+        hook::handle_from_plugin(&prompt("/chronos:wish x"), Some(&home), false, Some(&root))
+            .unwrap();
+    assert!(reply.get("decision").is_none());
+    let context = reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    for part in ["Warning", "skills/wish/SKILL.md", env!("CARGO_PKG_VERSION")] {
+        assert!(context.contains(part), "{context}");
+    }
+    assert!(goal::load(&home, "s").unwrap().is_some());
+}
+#[test]
+fn only_a_wish_start_is_gated_by_the_plugin() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path().join("home");
+    let root = plugin_at(d.path(), Some("0.3.0-codex"));
+    goal::open(&h, "s", "wish", None).unwrap();
+    for e in [
+        prompt("add this too"),
+        event("Stop"),
+        tool("Bash", json!({"command":"rm x"})),
+    ] {
+        let reply = hook::handle_from_plugin(&e, Some(&h), false, Some(&root));
+        assert_ne!(
+            reply.unwrap()["reason"]
+                .as_str()
+                .map(|r| r.contains("0.3.0-codex")),
+            Some(true)
+        );
+    }
+    assert!(
+        hook::handle_from_plugin(&prompt("hello"), Some(d.path()), false, Some(&root)).is_none()
+    );
+}
+#[test]
+fn hook_process_reads_the_plugin_root_claude_code_exports() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let e = prompt("/chronos:wish x");
+    let mismatched = plugin_at(&d.path().join("a"), Some("0.3.0-codex"));
+    assert_eq!(
+        hook_process(&home, Some(&mismatched), &e)["decision"],
+        "block"
+    );
+    assert!(goal::load(&home, "s").unwrap().is_none());
+    let matching = plugin_at(&d.path().join("b"), None);
+    let reply = hook_process(&home, Some(&matching), &e);
+    assert!(reply["hookSpecificOutput"]["additionalContext"].is_string());
+    assert!(goal::load(&home, "s").unwrap().is_some());
+    std::fs::remove_file(home.join("goals/s.json")).unwrap();
+    let reply = hook_process(&home, None, &e);
+    assert!(reply["hookSpecificOutput"]["additionalContext"].is_string());
 }

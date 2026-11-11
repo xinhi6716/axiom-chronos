@@ -3,6 +3,7 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -13,7 +14,15 @@ jobs:
           python-version: '3.12'
       - run: python tools/render_readme_workflow.py --check
       - run: python -m unittest discover -s tests -p test_readme_workflow_assets.py
+      - run: python -m unittest discover -s tests -p test_package_release.py
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --locked
       - run: cargo test --locked
       - run: cargo run --locked -- --version
+  desktop-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+        working-directory: tests/desktop-smoke

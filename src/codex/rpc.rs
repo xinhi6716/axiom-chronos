@@ -1,3 +1,6 @@
+use super::version::{
+    mismatch_failure, note_untested_version, suggests_mismatch, PROTOCOL_MISMATCH,
+};
 use crate::base::{proc, Failure, Res};
 use serde_json::{json, Value};
 use std::{
@@ -20,12 +23,15 @@ struct Connection {
     alive: AtomicBool,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     events: Mutex<HashMap<String, (Sender<Value>, Option<Receiver<Value>>)>>,
+    account_events: Arc<Mutex<Option<Sender<Value>>>>,
 }
 pub struct AppServer {
     command: Vec<String>,
     connection: Mutex<Option<Arc<Connection>>>,
     start: Mutex<()>,
     ids: AtomicU64,
+    generation: AtomicU64,
+    account_events: Arc<Mutex<Option<Sender<Value>>>>,
     turns: Mutex<HashSet<(String, String)>>,
     request_timeout: Option<Duration>,
 }
@@ -40,6 +46,8 @@ impl AppServer {
             connection: Mutex::new(None),
             start: Mutex::new(()),
             ids: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
+            account_events: Arc::new(Mutex::new(None)),
             turns: Mutex::new(HashSet::new()),
             request_timeout: timeout,
         }
@@ -49,6 +57,17 @@ impl AppServer {
             c.alive.load(Ordering::Acquire)
                 && matches!(c.child.lock().unwrap().try_wait(), Ok(None))
         })
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+    pub fn account_events(&self) -> Receiver<Value> {
+        let (tx, rx) = mpsc::channel();
+        *self.account_events.lock().unwrap() = Some(tx);
+        rx
+    }
+    pub fn read_rate_limits(&self) -> Res<Value> {
+        self.request("account/rateLimits/read", Value::Null)
     }
     pub fn close(&self) {
         if let Some(c) = self.connection.lock().unwrap().take() {
@@ -90,6 +109,7 @@ impl AppServer {
             alive: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
+            account_events: self.account_events.clone(),
         });
         *self.connection.lock().unwrap() = Some(c.clone());
         let reader = c.clone();
@@ -121,7 +141,11 @@ impl AppServer {
                             let _ = entry.0.send(msg.clone());
                         }
                     }
-                    let _ = method;
+                    if method.starts_with("account/") {
+                        if let Some(tx) = reader.account_events.lock().unwrap().as_ref() {
+                            let _ = tx.send(msg.clone());
+                        }
+                    }
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
                     if let Some(thread_id) =
                         msg.pointer("/result/thread/id").and_then(Value::as_str)
@@ -152,7 +176,8 @@ impl AppServer {
                 }
             }
         });
-        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(e); }
+        if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(self.protocol_failure(&format!("handshake: {}", e.message))); }
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(c)
     }
     fn send(c: &Connection, message: Value) -> Res<()> {
@@ -196,25 +221,36 @@ impl AppServer {
             }
         };
         if let Some(error) = msg.get("error") {
-            return Err(Failure::new(
-                "codex_rpc",
-                format!(
-                    "{method}: {}: {}",
-                    error.get("code").unwrap_or(&Value::Null),
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                ),
-            ));
+            let code = error.get("code").unwrap_or(&Value::Null);
+            let text = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            let kind = if suggests_mismatch(code.as_i64(), text) {
+                PROTOCOL_MISMATCH
+            } else {
+                "codex_rpc"
+            };
+            return Err(Failure::new(kind, format!("{method}: {code}: {text}")));
         }
         msg.get("result")
             .cloned()
-            .ok_or_else(|| Failure::new("codex_rpc", format!("{method}: missing result")))
+            .ok_or_else(|| Failure::new(PROTOCOL_MISMATCH, format!("{method}: missing result")))
     }
     pub(crate) fn request(&self, method: &str, params: Value) -> Res<Value> {
         let c = self.ensure_started()?;
         self.request_on(&c, method, params)
+            .map_err(|e| match e.kind.as_str() {
+                PROTOCOL_MISMATCH => self.protocol_failure(&e.message),
+                "timeout" => Failure::new("timeout", self.note_untested_version(&e.message)),
+                _ => e,
+            })
+    }
+    pub(crate) fn protocol_failure(&self, detail: &str) -> Failure {
+        mismatch_failure(&self.command, detail)
+    }
+    pub(crate) fn note_untested_version(&self, message: &str) -> String {
+        note_untested_version(&self.command, message)
     }
     pub(crate) fn subscribe(&self, thread_id: &str) -> Receiver<Value> {
         let Some(c) = self.connection.lock().unwrap().clone() else {
@@ -290,7 +326,7 @@ impl AppServer {
             let data = page
                 .get("data")
                 .and_then(Value::as_array)
-                .ok_or_else(|| Failure::new("codex_rpc", "model/list: missing data"))?;
+                .ok_or_else(|| self.protocol_failure("model/list: missing data"))?;
             for model in data {
                 if let Some(id) = model
                     .get("id")

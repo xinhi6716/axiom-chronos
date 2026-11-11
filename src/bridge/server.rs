@@ -1,10 +1,15 @@
 use crate::base::{self, Failure, Res};
 use crate::codex::AppServer;
+use crate::{council, goal, provenance};
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
 };
 
@@ -27,13 +32,44 @@ impl Config {
 pub struct Bridge {
     pub config: Config,
     codex: Mutex<Option<Arc<AppServer>>>,
+    client_version: OnceLock<String>,
+    recorded: Mutex<HashSet<String>>,
+    council: Option<council::Setup>,
+    council_running: AtomicBool,
+    council_stop: AtomicBool,
 }
 impl Bridge {
     pub fn new(config: Config) -> Self {
         Self {
             config,
             codex: Mutex::new(None),
+            client_version: OnceLock::new(),
+            recorded: Mutex::new(HashSet::new()),
+            council: None,
+            council_running: AtomicBool::new(false),
+            council_stop: AtomicBool::new(false),
         }
+    }
+    /// Offers the `council` tool. Only a session launched with the switch gets here.
+    pub fn with_council(mut self, setup: council::Setup) -> Self {
+        self.council = Some(setup);
+        self
+    }
+    pub fn council_setup(&self) -> Option<&council::Setup> {
+        self.council.as_ref()
+    }
+    pub fn council_flags(&self) -> (&AtomicBool, &AtomicBool) {
+        (&self.council_running, &self.council_stop)
+    }
+    /// The tools this session is served: the fixed list, plus the council when opted in.
+    pub fn tool_list(&self) -> Value {
+        let mut list = tools();
+        if self.council.is_some() {
+            list.as_array_mut()
+                .unwrap()
+                .push(super::council_tool::descriptor());
+        }
+        list
     }
     pub fn codex(&self) -> Res<Arc<AppServer>> {
         let mut lock = self.codex.lock().unwrap_or_else(|e| e.into_inner());
@@ -55,7 +91,47 @@ impl Bridge {
             .as_ref()
             .map_or(false, |c| c.alive())
     }
+    /// The handshake names the Claude Code that started this process; a hook has no such source.
+    pub fn note_client(&self, params: &Value) {
+        if params.pointer("/clientInfo/name").and_then(Value::as_str) == Some("claude-code") {
+            if let Some(version) = params
+                .pointer("/clientInfo/version")
+                .and_then(Value::as_str)
+            {
+                let _ = self.client_version.set(version.to_owned());
+            }
+        }
+    }
+    /// A wish must declare its mode with the goal tool before anything is dispatched, so the
+    /// first goal call of a run sees the project as the workers will find it.
+    pub fn record_provenance(&self, home: &Path, session: &str) -> Res<()> {
+        let mut recorded = self.recorded.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(goal) = goal::load(home, session)? else {
+            return Ok(());
+        };
+        if recorded.contains(session) && !goal.provenance.is_empty() {
+            return Ok(());
+        }
+        let block = provenance::inherited().unwrap_or_else(|| {
+            let plugin = std::env::var_os("CLAUDE_PLUGIN_ROOT")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
+            let binary = std::env::current_exe().ok();
+            provenance::collect(provenance::Sources {
+                binary: binary.as_deref(),
+                plugin: plugin.as_deref(),
+                claude: self.client_version.get().cloned(),
+                codex: self.config.codex.as_deref().ok(),
+                project: goal.cwd.as_deref().map(Path::new),
+            })
+            .to_value()
+        });
+        goal::add_provenance(home, session, block)?;
+        recorded.insert(session.to_owned());
+        Ok(())
+    }
     pub fn cancel(&self) {
+        self.council_stop.store(true, Ordering::SeqCst);
         if let Some(c) = self
             .codex
             .lock()
@@ -84,16 +160,19 @@ pub fn tools() -> Value {
         match tool["name"].as_str().unwrap() {
             "codex_run" => {
                 tool["inputSchema"]["required"] = json!(["cwd"]);
-                for name in ["project", "unit", "save_to", "stage"] {
+                for name in ["project", "unit", "save_to", "stage", "track", "brief_file"] {
                     tool["inputSchema"]["properties"][name] = json!({"type":"string"});
                 }
             }
             "goal" => {
                 tool["description"] = json!(
-                    "Manage a session goal: set status, classify an interjection, or set mode."
+                    "Manage a session goal: set status, classify an interjection, or set mode. With status waiting, pass progress_file, marker_file and pid together so Axiom can wait on the detached batch with no model running and resume this session when it ends."
                 );
                 tool["inputSchema"]["properties"]["classify"] = json!({"type":"string"});
                 tool["inputSchema"]["properties"]["mode"] = json!({"type":"string"});
+                tool["inputSchema"]["properties"]["progress_file"] = json!({"type":"string","description":"Absolute path of the file the batch updates as it advances."});
+                tool["inputSchema"]["properties"]["marker_file"] = json!({"type":"string","description":"Absolute path of a file the batch creates only after all its work has succeeded."});
+                tool["inputSchema"]["properties"]["pid"] = json!({"type":"integer","minimum":1,"description":"Id of the process that lives until the batch ends."});
                 tool["inputSchema"]["required"] = json!(["session"]);
             }
             _ => {}
@@ -101,7 +180,7 @@ pub fn tools() -> Value {
     }
     v
 }
-const DESCRIPTORS: &str = r###"[{"name": "codex_run", "description": "Run one Codex turn in a fresh ephemeral thread and return a structured report. Write `brief` per `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` (GOAL, SCOPE, VERIFY): the worker sees nothing else. Use role terra for modular units, role sol for integration and role astra for research plans and scientific rulings. Status is completed, failed, interrupted, timeout or bridge_error; anything but completed carries `error`. Unit mode: pass exactly `project`, `unit`, `role` (terra or sol) and `cwd`; the bridge reads the registered brief, runs its VERIFY (cmd on Windows, sh on Linux) and, when every unit of the module has passed VERIFY, runs the module ACCEPT and returns it as `accept`. Brief mode is for role astra: pass `brief`, `cwd`, `project` and `save_to`.", "inputSchema": {"type": "object", "properties": {"brief": {"type": "string", "description": "Full worker brief; sent as the only user message."}, "cwd": {"type": "string", "description": "Absolute working directory, ideally the unit's own worktree."}, "role": {"type": "string", "enum": ["terra", "sol", "astra"], "description": "Resolved to a model this Codex account lists; the report names it."}, "model": {"type": "string", "description": "Explicit model id; overrides role."}, "sandbox": {"type": "string", "enum": ["read-only", "workspace-write"], "default": "workspace-write"}, "effort": {"type": "string", "description": "Reasoning effort advertised by the model, e.g. low, medium, high."}, "developer_instructions": {"type": "string", "description": "Role contract layered over the user's Codex AGENTS.md."}, "output_schema": {"type": "object", "description": "JSON Schema for the final message; parsed into structured_output."}, "timeout_s": {"type": "integer", "minimum": 10, "default": 1800}, "lean": {"type": "boolean", "default": true, "description": "For this thread only, disable every Codex plugin, configured MCP server, the apps connector, goals, the skills catalog, the personality section and (unless web_search) the web search tool."}, "web_search": {"type": "boolean", "default": false, "description": "Keep the web search tool in lean mode; costs ~2.5k input tokens per call."}, "keep_plugins": {"type": "array", "items": {"type": "string"}, "description": "Plugin ids such as name@marketplace that stay enabled in lean mode."}}, "required": ["brief", "cwd"]}}, {"name": "orch", "description": "Run Pstack's orch bookkeeping CLI (units, inbox, ledger, gates, standing orders, status) on the store for `project`. The store lives in the plugin data directory and survives plugin updates; its path is returned as `store`.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string", "description": "Lowercase slug naming the program, e.g. todo-stats."}, "args": {"type": "array", "items": {"type": "string"}, "description": "orch arguments, e.g. [\"unit\", \"add\", \"u1\", \"--track\", \"build\"]."}}, "required": ["project", "args"]}}, {"name": "run_on_linux", "description": "Run `python <args>` in the project on Linux through WSL, with ~/.axiom/linux-venv. Windows runs skip or mask POSIX-only tests, so a full suite that passes here can still fail on Linux. Status unavailable means there is no Linux runner, which is not a pass.", "inputSchema": {"type": "object", "properties": {"project_dir": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments to python, e.g. [\".axiom-experiment/check_baseline.py\"]."}, "timeout_s": {"type": "integer", "minimum": 60, "default": 1800}}, "required": ["project_dir", "args"]}}, {"name": "memory_record", "description": "Store one verified unit as long-run memory: what it built, its interface, and what a later worker reusing it must know. Files are hashed so later searches can flag the entry stale once they change.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string", "description": "Program slug, the same one orch uses."}, "project_dir": {"type": "string", "description": "Absolute project directory; files are relative to it."}, "unit": {"type": "string"}, "title": {"type": "string", "description": "The module, function or feature, as a later brief would name it."}, "summary": {"type": "string", "description": "One or two lines: what it does and its interface."}, "body": {"type": "string", "description": "What a reuser needs: signatures, behaviour decisions, verify command, pitfalls met."}, "symbols": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}, "wish": {"type": "string", "description": "The wish verbatim, in the user's words; indexed so searches in their language find the entry."}}, "required": ["project", "project_dir", "unit", "title", "summary", "body", "wish"]}}, {"name": "memory_search", "description": "Find earlier units related to `query` (English words and Chinese both match). Returns titles and summaries only, with `stale` true when a recorded file has changed since; fetch a body with memory_get.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "project": {"type": "string", "description": "Limit to one program; omit to search every project."}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5}}, "required": ["query"]}}, {"name": "memory_get", "description": "Return one memory entry in full, with its files and whether it is stale.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}, {"name": "memory_digest", "description": "Read a project's short history of wishes and outcomes, one line each; pass `add` to append a line first.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "add": {"type": "string", "description": "One line: the wish, the outcome, memory ids."}}, "required": ["project"]}}, {"name": "goal", "description": "Close the wish goal of this Claude session: status done once the wish is carried out and verified, or blocked with a note when it cannot go on without something only the user has. The session id is the one in the goal notice.", "inputSchema": {"type": "object", "properties": {"session": {"type": "string"}, "status": {"type": "string", "enum": ["done", "blocked"]}, "note": {"type": "string"}}, "required": ["session", "status"]}}, {"name": "bridge_status", "description": "Report the Codex executable and app-server status.", "inputSchema": {"type": "object", "properties": {}}}]"###;
+const DESCRIPTORS: &str = r###"[{"name": "codex_run", "description": "Run one Codex turn in a fresh ephemeral thread and return a structured report. Write `brief` per `${CLAUDE_PLUGIN_ROOT}/DISPATCH.md` (GOAL, SCOPE, VERIFY): the worker sees nothing else. Use role terra for modular units, role sol for integration and role astra for research plans and scientific rulings. Status is completed, failed, interrupted, timeout or bridge_error; anything but completed carries `error`. Unit mode: pass exactly `project`, `unit`, `role` (terra or sol) and `cwd`, plus `track` and `brief_file` (the brief's path in the store) to register a new unit in the same call; the bridge reads the registered brief, runs its VERIFY (cmd on Windows, sh on Linux) and, when every unit of the module has passed VERIFY, runs the module ACCEPT and returns it as `accept`. Brief mode is for role astra: pass `brief`, `cwd`, `project` and `save_to`. A registered brief can set EFFORT and TIER; unit mode takes no argument for them.", "inputSchema": {"type": "object", "properties": {"brief": {"type": "string", "description": "Full worker brief; sent as the only user message."}, "cwd": {"type": "string", "description": "Absolute working directory, ideally the unit's own worktree."}, "role": {"type": "string", "enum": ["terra", "sol", "astra"], "description": "Resolved to a model this Codex account lists; the report names it."}, "model": {"type": "string", "description": "Explicit model id; overrides role."}, "sandbox": {"type": "string", "enum": ["read-only", "workspace-write"], "default": "workspace-write"}, "effort": {"type": "string", "description": "Reasoning effort advertised by the model, e.g. low, medium, high. Brief mode only."}, "developer_instructions": {"type": "string", "description": "Role contract layered over the user's Codex AGENTS.md."}, "output_schema": {"type": "object", "description": "JSON Schema for the final message; parsed into structured_output."}, "timeout_s": {"type": "integer", "minimum": 10, "default": 1800}, "lean": {"type": "boolean", "default": true, "description": "For this thread only, disable every Codex plugin, configured MCP server, the apps connector, goals, the skills catalog, the personality section and (unless web_search) the web search tool."}, "web_search": {"type": "boolean", "default": false, "description": "Keep the web search tool in lean mode; costs ~2.5k input tokens per call."}, "keep_plugins": {"type": "array", "items": {"type": "string"}, "description": "Plugin ids such as name@marketplace that stay enabled in lean mode."}}, "required": ["brief", "cwd"]}}, {"name": "orch", "description": "Run Pstack's orch bookkeeping CLI (units, inbox, ledger, gates, standing orders, status) on the store for `project`. The store lives in the plugin data directory and survives plugin updates; its path is returned as `store`.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string", "description": "Lowercase slug naming the program, e.g. todo-stats."}, "args": {"type": "array", "items": {"type": "string"}, "description": "orch arguments, e.g. [\"unit\", \"add\", \"u1\", \"--track\", \"build\"]."}}, "required": ["project", "args"]}}, {"name": "run_on_linux", "description": "Run `python <args>` in the project on Linux through WSL, with ~/.axiom/linux-venv. Windows runs skip or mask POSIX-only tests, so a full suite that passes here can still fail on Linux. Status unavailable means there is no Linux runner, which is not a pass.", "inputSchema": {"type": "object", "properties": {"project_dir": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments to python, e.g. [\".axiom-experiment/check_baseline.py\"]."}, "timeout_s": {"type": "integer", "minimum": 60, "default": 1800}}, "required": ["project_dir", "args"]}}, {"name": "memory_record", "description": "Store one verified unit as long-run memory: what it built, its interface, and what a later worker reusing it must know. Files are hashed so later searches can flag the entry stale once they change.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string", "description": "Program slug, the same one orch uses."}, "project_dir": {"type": "string", "description": "Absolute project directory; files are relative to it."}, "unit": {"type": "string"}, "title": {"type": "string", "description": "The module, function or feature, as a later brief would name it."}, "summary": {"type": "string", "description": "One or two lines: what it does and its interface."}, "body": {"type": "string", "description": "What a reuser needs: signatures, behaviour decisions, verify command, pitfalls met."}, "symbols": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}, "wish": {"type": "string", "description": "The wish verbatim, in the user's words; indexed so searches in their language find the entry."}}, "required": ["project", "project_dir", "unit", "title", "summary", "body", "wish"]}}, {"name": "memory_search", "description": "Find earlier units related to `query` (English words and Chinese both match). Returns titles and summaries only, with `stale` true when a recorded file has changed since; fetch a body with memory_get.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "project": {"type": "string", "description": "Limit to one program; omit to search every project."}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5}}, "required": ["query"]}}, {"name": "memory_get", "description": "Return one memory entry in full, with its files and whether it is stale.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}, {"name": "memory_digest", "description": "Read a project's short history of wishes and outcomes, one line each; pass `add` to append a line first.", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "add": {"type": "string", "description": "One line: the wish, the outcome, memory ids."}}, "required": ["project"]}}, {"name": "goal", "description": "Close the wish goal of this Claude session: status done once the wish is carried out and verified, blocked with a note when it cannot go on without something only the user has, or waiting with a note while a detached batch runs. The session id is the one in the goal notice.", "inputSchema": {"type": "object", "properties": {"session": {"type": "string"}, "status": {"type": "string", "enum": ["done", "blocked", "waiting"]}, "note": {"type": "string"}}, "required": ["session", "status"]}}, {"name": "bridge_status", "description": "Report the Codex executable and app-server status.", "inputSchema": {"type": "object", "properties": {}}}]"###;
 pub fn call(bridge: &Bridge, name: &str, args: &Value) -> Value {
     call_body(|| super::tools::dispatch(bridge, name, args))
 }
@@ -125,7 +204,11 @@ pub fn call_body(body: impl FnOnce() -> Res<Value>) -> Value {
     json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&payload).unwrap()}],"structuredContent":payload,"isError":failed})
 }
 pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
-    let bridge = Arc::new(Bridge::new(config));
+    let mut bridge = Bridge::new(config);
+    if let Some(setup) = council::Setup::from_env() {
+        bridge = bridge.with_council(setup);
+    }
+    let bridge = Arc::new(bridge);
     let out = Arc::new(Mutex::new(output));
     let mut jobs = Vec::new();
     for line in input.lines() {
@@ -173,10 +256,11 @@ pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 's
         }
         let result = match method.as_str() {
             "initialize" => {
+                bridge.note_client(&params);
                 json!({"protocolVersion":params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),"capabilities":{"tools":{}},"serverInfo":{"name":"chronos-bridge","version":env!("CARGO_PKG_VERSION")}})
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools":tools()}),
+            "tools/list" => json!({"tools":bridge.tool_list()}),
             _ => {
                 write_msg(
                     &out,

@@ -1,5 +1,5 @@
-mod doctor;
-use crate::{base, bridge, hook, memory::Memory, orch, session};
+pub(crate) mod doctor;
+use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
 fn usage(message: impl std::fmt::Display) -> i32 {
@@ -20,6 +20,8 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
     let mut turns = (skill == "research").then_some(40);
     let (mut no_architect, mut creative, mut resume, mut project_set) =
         (false, false, None, false);
+    let mut launch = session::Launch::default();
+    const RESUME_USAGE: &str = "--resume takes a session id and an optional message";
     if skill == "wish" && args.iter().any(|a| a == "--resume") {
         let mut j = 0;
         let mut seen = false;
@@ -32,11 +34,13 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
                 "--max-turns" if j + 1 < args.len() => {
                     j += 2;
                 }
-                _ => return usage("--resume takes only a session id"),
+                "--" if seen => break,
+                s if seen && !s.starts_with('-') => break,
+                _ => return usage(RESUME_USAGE),
             }
         }
         if !seen {
-            return usage("--resume takes only a session id");
+            return usage(RESUME_USAGE);
         }
     }
     let mut i = 0;
@@ -58,10 +62,11 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             },
             "--resume" if skill == "wish" => match value(args, &mut i, "--resume") {
                 Ok(v) if resume.is_none() => resume = Some(v),
-                _ => return usage("--resume takes only a session id"),
+                _ => return usage(RESUME_USAGE),
             },
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
+            "--advanced-research" => launch.advanced_research = true,
             "--" => {
                 i += 1;
                 break;
@@ -72,13 +77,15 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         i += 1;
     }
     if let Some(id) = resume {
-        if i != args.len() || project_set || no_architect || creative {
-            return usage("--resume takes only a session id");
+        if project_set || no_architect || creative {
+            return usage(RESUME_USAGE);
         }
+        let message = (i < args.len()).then(|| args[i..].join(" "));
         return match session::resume(
             &session::Config::from_env(),
             &id,
             turns,
+            message.as_deref(),
             Box::new(io::BufReader::new(io::stdin())),
             &mut io::stdout(),
         ) {
@@ -108,28 +115,31 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             project.display()
         ));
     }
-    let text = if creative {
-        format!(
-            "[creative]{}",
-            if i == args.len() {
-                String::new()
-            } else {
-                format!(" {}", args[i..].join(" "))
-            }
-        )
-    } else {
-        format!(
-            "{}{}",
-            if no_architect { "[no-architect] " } else { "" },
-            args[i..].join(" ")
-        )
-    };
-    match session::run(
+    let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
+    if launch.advanced_research {
+        eprintln!("axiom: {}", crate::council::NOTICE);
+    }
+    match session::run_with(
         &session::Config::from_env(),
         skill,
         &text,
         &project,
         turns,
+        Box::new(io::BufReader::new(io::stdin())),
+        &mut io::stdout(),
+        &launch,
+    ) {
+        Ok(code) => code,
+        Err(e) => usage(e.message),
+    }
+}
+fn wait_command(args: &[String]) -> i32 {
+    let [id] = args else {
+        return usage("wait takes only a session id");
+    };
+    match session::wait_and_resume(
+        &session::Config::from_env(),
+        id,
         Box::new(io::BufReader::new(io::stdin())),
         &mut io::stdout(),
     ) {
@@ -226,6 +236,148 @@ fn memory_command(args: &[String]) -> i32 {
         }
     }
 }
+fn lint_command(args: &[String]) -> i32 {
+    let mut project = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => return usage(e),
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" => match value(args, &mut i, "--project") {
+                Ok(v) => project = v.into(),
+                Err(e) => return usage(e),
+            },
+            s => return usage(format!("lint: unrecognized argument: {s}")),
+        }
+        i += 1;
+    }
+    if !project.is_absolute() {
+        project = match std::env::current_dir() {
+            Ok(p) => p.join(project),
+            Err(e) => return usage(e),
+        };
+    }
+    if !project.is_dir() {
+        return usage(format!("--project is not a directory: {}", project.display()));
+    }
+    let slug = base::slug_for_dir(&project);
+    match Memory::open(&base::axiom_home()).and_then(|m| m.lint(&slug, &project)) {
+        Ok(problems) if problems.is_empty() => {
+            println!("axiom lint: no problems ({slug})");
+            0
+        }
+        Ok(problems) => {
+            for p in &problems {
+                println!("{}: {}", p.kind, p.message);
+            }
+            eprintln!("axiom lint: {} problem(s) in {slug}", problems.len());
+            1
+        }
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
+fn usage_command(args: &[String]) -> i32 {
+    let (mut session, mut as_json, mut i) = (None, false, 0);
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session" => match value(args, &mut i, "--session") {
+                Ok(v) => session = Some(v),
+                Err(e) => return usage(e),
+            },
+            "--json" => as_json = true,
+            s => return usage(format!("unrecognized option: {s}")),
+        }
+        i += 1;
+    }
+    match crate::usage::ledger(&crate::usage::Locations::from_env(), session.as_deref()) {
+        Ok(ledger) if as_json => {
+            println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            0
+        }
+        Ok(ledger) => {
+            print!("{}", crate::usage::render(&ledger));
+            0
+        }
+        Err(e) if e.kind == "invalid_argument" => usage(e.message),
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
+fn evolve_command(args: &[String]) -> i32 {
+    let (mut since, mut repo, mut dry_run, mut i) = (evolve::DEFAULT_SINCE_DAYS, None, false, 0);
+    while i < args.len() {
+        match args[i].as_str() {
+            "--since" => match value(args, &mut i, "--since") {
+                Ok(v) => match v.parse::<u32>() {
+                    Ok(days) if (1..=evolve::MAX_SINCE_DAYS).contains(&days) => since = days,
+                    _ => {
+                        return usage(format!(
+                            "--since must be an integer between 1 and {}",
+                            evolve::MAX_SINCE_DAYS
+                        ))
+                    }
+                },
+                Err(e) => return usage(e),
+            },
+            "--repo" => match value(args, &mut i, "--repo") {
+                Ok(v) => repo = Some(PathBuf::from(v)),
+                Err(e) => return usage(e),
+            },
+            "--dry-run" => dry_run = true,
+            s => return usage(format!("evolve: unrecognized argument: {s}")),
+        }
+        i += 1;
+    }
+    let inputs = evolve::Inputs::from_env(since);
+    if dry_run {
+        return match evolve::preview(&inputs) {
+            Ok(preview) => {
+                print!("{}", preview.text);
+                0
+            }
+            Err(e) if e.kind == "invalid_argument" => usage(e.message),
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        };
+    }
+    if let Some(path) = &mut repo {
+        if !path.is_absolute() {
+            *path = match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&*path),
+                Err(e) => {
+                    eprintln!("axiom: {e}");
+                    return 1;
+                }
+            };
+        }
+    }
+    match evolve::start(
+        &inputs,
+        repo.as_deref(),
+        &session::Config::from_env(),
+        Box::new(io::BufReader::new(io::stdin())),
+        &mut io::stdout(),
+    ) {
+        Ok(evolve::StartOutcome::NoOp { reason }) => {
+            println!("{reason}");
+            0
+        }
+        Ok(evolve::StartOutcome::Ran { exit_code, .. }) => exit_code,
+        Err(e) if e.kind == "invalid_argument" => usage(e.message),
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -252,6 +404,14 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        "wait" => wait_command(rest),
+        #[cfg(feature = "app")]
+        "app" => match crate::desktop::parse_options(rest) {
+            Ok(options) => crate::desktop::run(options),
+            Err(message) => usage(message),
+        },
+        #[cfg(not(feature = "app"))]
+        "app" => usage("this build has no desktop app; build with --features app"),
         "doctor" if rest.is_empty() => doctor::doctor(&mut io::stdout()),
         "bridge" if rest.is_empty() => bridge::serve(
             bridge::Config::from_env(),
@@ -261,6 +421,10 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "hook" if rest.is_empty() => hook::main_stdin(),
         "orch" => orch_command(rest),
         "memory" => memory_command(rest),
+        "lint" => lint_command(rest),
+        "usage" => usage_command(rest),
+        "evolve" => evolve_command(rest),
+        "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
 }

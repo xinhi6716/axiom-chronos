@@ -4,11 +4,12 @@ use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
+/// Test scratch space under the project root; the sandbox cannot write to the system temp directory.
+pub const TEMP_DIR: &str = ".axiom-tmp/";
 pub enum Begin {
     Run {
         brief: Brief,
@@ -23,6 +24,8 @@ pub struct Finished {
     pub verify_tail: String,
     pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
+    pub pack: Option<PathBuf>,
+    pub pack_error: Option<String>,
 }
 struct Claim {
     // Units of different projects never block or excuse each other.
@@ -30,6 +33,7 @@ struct Claim {
     scope: Vec<String>,
     dirty: BTreeSet<String>,
     attempt_id: String,
+    base: String,
 }
 static RUNNING: OnceLock<Mutex<HashMap<String, Claim>>> = OnceLock::new();
 fn key(store: &Path, unit: &str) -> String {
@@ -39,7 +43,7 @@ fn claims() -> &'static Mutex<HashMap<String, Claim>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
-    let out = Command::new("git")
+    let out = base::proc::cmd("git")
         .current_dir(repo)
         .args(["status", "--porcelain", "-z", "--untracked-files=all"])
         .output()
@@ -47,6 +51,20 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     if !out.status.success() {
         return Ok(BTreeSet::new());
     }
+    let prefix = super::report::project_prefix(repo)?;
+    let project: Vec<_> = prefix.split('/').filter(|p| !p.is_empty()).collect();
+    let relative = |path: &[u8]| {
+        let path = String::from_utf8_lossy(path).replace('\\', "/");
+        let parts: Vec<_> = path.split('/').collect();
+        let common = project
+            .iter()
+            .zip(&parts)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut result = vec![".."; project.len() - common];
+        result.extend_from_slice(&parts[common..]);
+        result.join("/")
+    };
     let mut parts = out.stdout.split(|b| *b == 0);
     let mut result = BTreeSet::new();
     while let Some(p) = parts.next() {
@@ -54,10 +72,10 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
             continue;
         }
         let status = &p[..2];
-        result.insert(String::from_utf8_lossy(&p[3..]).replace('\\', "/"));
+        result.insert(relative(&p[3..]));
         if status.contains(&b'R') || status.contains(&b'C') {
             if let Some(old) = parts.next() {
-                result.insert(String::from_utf8_lossy(old).replace('\\', "/"));
+                result.insert(relative(old));
             }
         }
     }
@@ -89,19 +107,50 @@ fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
     for dep in deps {
         let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
         if registered.is_empty() {
-            missing.push(format!("{dep} (no units)"));
+            missing.push(format!("{dep} (no units registered)"));
         }
+        let mut seen = BTreeSet::new();
         for other in registered {
-            if derive_state(
-                &evidence(store, &other.id)?,
-                needs_accept(store, &other.id)?,
-            ) != "verified"
-            {
-                missing.push(other.id.clone());
+            let Some(standing) = standing_unit(units, other) else {
+                missing.push(format!(
+                    "{} ({}; replacement chain is broken)",
+                    other.id, other.state
+                ));
+                continue;
+            };
+            if !seen.insert(&standing.id) {
+                continue;
+            }
+            let rows = evidence(store, &standing.id)?;
+            let needs = needs_accept(store, &standing.id)?;
+            let state = derive_state(&rows, needs);
+            if state != "verified" {
+                missing.push(format!(
+                    "{} ({state}; next {})",
+                    standing.id,
+                    next_step(&rows, &state, needs)
+                ));
             }
         }
     }
     Ok(missing)
+}
+fn next_step(rows: &[Evidence], state: &str, needs_accept: bool) -> String {
+    match state {
+        "built" => {
+            let verify = rows.iter().rposition(|r| r.kind == "verify");
+            if needs_accept
+                && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept"))
+            {
+                "accept".into()
+            } else {
+                "review".into()
+            }
+        }
+        "accept-failed" | "review-failed" => "fix".into(),
+        "failed" if rows.iter().filter(|r| r.kind == "run").count() >= 2 => "fix".into(),
+        _ => "run".into(),
+    }
 }
 pub fn begin_unit(
     store: &Path,
@@ -117,6 +166,7 @@ pub fn begin_unit(
             .iter()
             .find(|u| u.id == unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        u.refuse_superseded()?;
         let brief = unit_brief(store, unit)?;
         let rows = evidence(store, unit)?;
         let mut disk = read_claims(store)?;
@@ -147,7 +197,19 @@ pub fn begin_unit(
         }
         let missing = dependencies(store, u, &units)?;
         if !missing.is_empty() {
-            return Err(Failure::new("not_ready", missing.join(", ")));
+            let ready = ready_units(store)?;
+            return Err(Failure::new(
+                "not_ready",
+                format!(
+                    "{unit} waits on {}; {}",
+                    missing.join(", "),
+                    if ready.is_empty() {
+                        "none ready".to_string()
+                    } else {
+                        format!("ready now: {}", ready.join(", "))
+                    }
+                ),
+            ));
         }
         if derive_state(&rows, needs_accept(store, unit)?) == "verified"
             && rows
@@ -185,6 +247,7 @@ pub fn begin_unit(
         let attempt = count as u32 + 1;
         let attempt_id = format!("{}-{}", attempt, base::unique());
         let before = dirty(repo)?;
+        let base = base_snapshot(repo, &brief.scope);
         disk.push(DiskClaim {
             unit: unit.into(),
             attempt: attempt_id.clone(),
@@ -199,6 +262,7 @@ pub fn begin_unit(
                 scope: brief.scope.clone(),
                 dirty: before,
                 attempt_id: attempt_id.clone(),
+                base,
             },
         );
         Ok(Begin::Run {
@@ -250,7 +314,7 @@ pub fn ready_units(store: &Path) -> Res<Vec<String>> {
     let disk = read_claims(store)?;
     let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
     let mut result = vec![];
-    for u in &units {
+    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
         let rows = evidence(store, &u.id)?;
         let state = derive_state(&rows, needs_accept(store, &u.id)?);
         if !known_track(store, u)?
@@ -287,7 +351,7 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
     let units = read_units(store)?;
     let disk = read_claims(store)?;
     let mut waiting = Vec::new();
-    for u in &units {
+    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
         let rows = evidence(store, &u.id)?;
         let needs = needs_accept(store, &u.id)?;
         let state = derive_state(&rows, needs);
@@ -308,19 +372,12 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
             } else {
                 format!("unknown {}", c.attempt)
             }
-        } else if state == "built" {
-            let verify = rows.iter().rposition(|r| r.kind == "verify");
-            if needs && verify.is_some_and(|v| !rows[v + 1..].iter().any(|r| r.kind == "accept")) {
-                "accept".into()
-            } else {
-                "review".into()
-            }
-        } else if state == "accept-failed" || state == "review-failed" {
-            "fix".into()
+        } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
+            next_step(&rows, &state, needs)
         } else {
             let missing = dependencies(store, u, &units)?;
             if !missing.is_empty() {
-                format!("wait {}", missing.join(","))
+                format!("wait {}", missing.join(", "))
             } else if rows.iter().filter(|r| r.kind == "run").count() >= 2
                 || unit_brief(store, &u.id).is_err()
             {
@@ -336,6 +393,16 @@ pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
         });
     }
     Ok(waiting)
+}
+pub fn next_step_for(store: &Path, unit: &str) -> Res<String> {
+    if ready_units(store)?.iter().any(|id| id == unit) {
+        return Ok("ready".into());
+    }
+    Ok(waiting_units(store)?
+        .into_iter()
+        .find(|w| w.unit == unit)
+        .map(|w| w.next)
+        .unwrap_or_else(|| "verified".into()))
 }
 #[derive(Debug)]
 pub enum AutoAccept {
@@ -377,7 +444,10 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         .clone();
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let units = read_units(store)?;
-    let module_units: Vec<_> = units.iter().filter(|u| u.track == trigger.track).collect();
+    let module_units: Vec<_> = units
+        .iter()
+        .filter(|u| u.track == trigger.track && u.superseded_by().is_none())
+        .collect();
     let claims = read_claims(store)?;
     let claimed: Vec<_> = module_units
         .iter()
@@ -441,6 +511,25 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         states,
     })
 }
+/// Project-relative paths of a worker report's `file_changes`.
+pub(crate) fn report_paths(report: &Value, repo: &Path) -> Vec<String> {
+    report
+        .get("file_changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("path").and_then(Value::as_str))
+        .map(|p| {
+            let p = Path::new(p);
+            let p = if p.is_absolute() {
+                p.strip_prefix(repo).unwrap_or(p)
+            } else {
+                p
+            };
+            p.to_string_lossy().replace('\\', "/")
+        })
+        .collect()
+}
 pub fn finish_unit(
     store: &Path,
     unit: &str,
@@ -458,7 +547,7 @@ pub fn finish_unit(
     }
 
     let brief = unit_brief(store, unit)?;
-    let (before, others) = {
+    let (before, others, base_tree) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
@@ -477,6 +566,7 @@ pub fn finish_unit(
                 .filter(|(id, c)| c.store == store && **id != key(store, unit))
                 .flat_map(|(_, c)| c.scope.clone())
                 .collect::<Vec<_>>(),
+            c.base.clone(),
         )
     };
     let _release = Release(store, unit, attempt_id);
@@ -498,7 +588,7 @@ pub fn finish_unit(
             "run",
             model,
             if status == "completed" { 0 } else { 1 },
-            String::new(),
+            base_tree,
         ),
     )?;
     let dir = store.join("reports");
@@ -519,22 +609,10 @@ pub fn finish_unit(
         .map_err(|e| Failure::new("io", e.to_string()))?;
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
     let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
-    if let Some(changes) = report.get("file_changes").and_then(Value::as_array) {
-        for c in changes {
-            if let Some(p) = c.get("path").and_then(Value::as_str) {
-                let p = Path::new(p);
-                let p = if p.is_absolute() {
-                    p.strip_prefix(repo).unwrap_or(p)
-                } else {
-                    p
-                };
-                paths.insert(p.to_string_lossy().replace('\\', "/"));
-            }
-        }
-    }
+    paths.extend(report_paths(report, repo));
     let outside_scope: Vec<_> = paths
         .into_iter()
-        .filter(|p| !covers(&brief.scope, p) && !covers(&others, p))
+        .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))
         .collect();
     append_evidence(
         store,
@@ -550,6 +628,8 @@ pub fn finish_unit(
     let mut verify_exit = None;
     let mut verify_tail = String::new();
     let mut verify_error = None;
+    let mut pack = None;
+    let mut pack_error = None;
     if status == "completed" && outside_scope.is_empty() {
         match base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800)) {
             Ok(result) => {
@@ -576,9 +656,10 @@ pub fn finish_unit(
                     .chars()
                     .rev()
                     .collect();
-                append_evidence(
+                super::evidence::append_check(
                     store,
                     unit,
+                    repo,
                     &mk(
                         "verify",
                         &brief.verify,
@@ -586,10 +667,19 @@ pub fn finish_unit(
                         snapshot(repo, &brief.scope),
                     ),
                 )?;
+                if result.exit_code == 0 {
+                    match super::report::review_pack(store, unit, repo) {
+                        Ok(info) => pack = Some(info.path),
+                        Err(e) => pack_error = Some(e.message),
+                    }
+                }
             }
             Err(e) => verify_error = Some(e.message),
         }
     }
+    let temp = repo.join(TEMP_DIR);
+    let _ = std::fs::remove_dir_all(temp.join(unit));
+    let _ = std::fs::remove_dir(&temp);
     let line = match (&verify_output, verify_exit) {
         (Some(path), Some(code)) => format!("BRIDGE VERIFY exit={code} output={}", path.display()),
         _ if verify_error.is_some() => format!("BRIDGE VERIFY not run: {}", verify_error.unwrap()),
@@ -616,13 +706,14 @@ pub fn finish_unit(
         .as_bytes(),
     )
     .map_err(|e| Failure::new("io", e.to_string()))?;
-    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-    set_unit_state(store, unit, &state)?;
+    let state = update_unit_state(store, unit)?;
     Ok(Finished {
         state,
         verify_exit,
         verify_tail,
         verify_output,
         outside_scope,
+        pack,
+        pack_error,
     })
 }

@@ -14,6 +14,7 @@ You keep what later workers can reuse and drop the rest.
    - `title`: the name a later brief would use for it
    - `summary`: one or two lines on what it does and its interface
    - `body`: the signature or usage, the behaviour decisions the brief fixed, the VERIFY command, and any pitfall in the code itself that the report mentions. Trouble running commands on the worker's host is not a pitfall of the code.
+   - Back a hard claim in `body` with a quote line `> "exact text" - <relative path>`; `memory_record` refuses a quote its file does not contain, so fix the line it names and call again.
    - `symbols`: the names it defines
    - `files`: the unit's changed files that still exist, relative to the project directory; pass at least one
    - `wish`: the wish, verbatim
