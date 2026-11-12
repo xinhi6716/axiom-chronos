@@ -45,7 +45,8 @@ fn tool_contract_and_rewrite_evidence() {
             "memory_digest",
             "graph_explore",
             "goal",
-            "bridge_status"
+            "bridge_status",
+            "approval"
         ]
     );
     assert!(!names.contains(&"review_code"));

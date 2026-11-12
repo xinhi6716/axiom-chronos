@@ -467,6 +467,106 @@ fn graph_command(args: &[String]) -> i32 {
         Err(e) => { eprintln!("axiom: {}", e.message); 1 }
     }
 }
+fn person_command(command: &str, args: &[String]) -> i32 {
+    let (op, id) = match args {
+        [op, id, ..] if !id.is_empty() && !id.starts_with('-') => (op.as_str(), id.as_str()),
+        _ => return usage(format!("{command}: missing operation or id")),
+    };
+    if !matches!(
+        (command, op),
+        ("approval", "approve" | "deny") | ("adjudication", "overturn")
+    ) {
+        return usage(format!("{command}: unknown operation {op}"));
+    }
+    let (mut project, mut digest, mut wish, mut reason) = (None, None, None, None);
+    let mut i = 2;
+    while i < args.len() {
+        let slot = match args[i].as_str() {
+            "--project" => &mut project,
+            "--digest" if command == "approval" => &mut digest,
+            "--wish" if command == "approval" => &mut wish,
+            "--reason" => &mut reason,
+            flag => return usage(format!("{command}: unknown option {flag}")),
+        };
+        if slot.is_some() {
+            return usage(format!("{command}: duplicate option {}", args[i]));
+        }
+        let name = &args[i];
+        i += 1;
+        let Some(v) = args.get(i).filter(|v| !v.is_empty() && !v.starts_with('-')) else {
+            return usage(format!("{name} requires a value"));
+        };
+        *slot = Some(v.as_str());
+        i += 1;
+    }
+    let Some(project) = project else {
+        return usage(format!("{command}: --project is required"));
+    };
+    if command == "approval" && digest.is_none() {
+        return usage("approval: --digest is required");
+    }
+    if (command == "adjudication" || op == "deny") && reason.is_none_or(|r| r.trim().is_empty()) {
+        return usage(format!("{command}: --reason is required"));
+    }
+    let home = match base::data_home() {
+        Ok(home) => home,
+        Err(e) => return usage(e.message),
+    };
+    let store = match wish {
+        Some(wish) => orch::wish_store(&home, project, Some(wish)),
+        None => orch::store_for(&home, project),
+    };
+    let store = match store {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            return 1;
+        }
+    };
+    if command == "adjudication" {
+        return match crate::engine::adjudicator::overturn(&store, id, reason.unwrap()) {
+            Ok(event) => {
+                println!("{}", serde_json::to_string(&event).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        };
+    }
+    let store_wish = orch::wish_of_store(&store);
+    let reply = crate::engine::approvals::reply(
+        &home,
+        &store,
+        id,
+        op == "approve",
+        digest.unwrap(),
+        &store_wish,
+        reason,
+        crate::engine::approvals::Origin::Person,
+    );
+    match reply {
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+        Ok(event) if op == "deny" => {
+            println!("{}", serde_json::to_string(&event).unwrap());
+            0
+        }
+        Ok(_) => match crate::engine::approvals::execute(&store, id) {
+            Ok(executed) => {
+                print!("{}", executed.output_tail);
+                executed.exit_code
+            }
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        },
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -526,6 +626,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "dream" => crate::graph::dream::command(rest),
         "graph" => graph_command(rest),
         "review" => crate::review::command(rest),
+        "stats" => match base::data_home() {
+            Ok(home) => crate::usage::review_stats::command(&home, rest),
+            Err(e) => usage(e.message),
+        },
+        "approval" | "adjudication" => person_command(cmd, rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
 }

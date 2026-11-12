@@ -14,7 +14,10 @@ fn prompt_sizes_stay_within_caps() {
     ];
     let mut total = 0;
     for (path, before) in files {
-        let after = fs::read_to_string(root.join(path)).unwrap().replace("\r\n", "\n").len();
+        let after = fs::read_to_string(root.join(path))
+            .unwrap()
+            .replace("\r\n", "\n")
+            .len();
         println!("{path}: before {before} bytes, after {after} bytes");
         total += after;
     }

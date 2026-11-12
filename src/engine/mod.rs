@@ -3,7 +3,41 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub mod adjudicator;
+pub mod approvals;
+pub mod budgets;
+pub mod calls;
+pub mod dual_core;
+pub mod finding_verification;
+pub mod interjections;
+pub mod kinds;
+pub mod policy;
+
 pub const FILES: &[(&str, &str)] = &[
+    (
+        "agents/pm-qa.md",
+        include_str!("../../engine/agents/pm-qa.md"),
+    ),
+    (
+        "roles/adjudicator.md",
+        include_str!("../../engine/roles/adjudicator.md"),
+    ),
+    (
+        "roles/verifier.md",
+        include_str!("../../engine/roles/verifier.md"),
+    ),
+    (
+        "roles/astra-reviewer.md",
+        include_str!("../../engine/roles/astra-reviewer.md"),
+    ),
+    (
+        "roles/co-core.md",
+        include_str!("../../engine/roles/co-core.md"),
+    ),
+    (
+        "roles/arbiter.md",
+        include_str!("../../engine/roles/arbiter.md"),
+    ),
     (
         ".claude-plugin/plugin.json",
         include_str!("../../engine/.claude-plugin/plugin.json"),
@@ -82,6 +116,32 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../engine/skills/wish/SKILL.md"),
     ),
 ];
+
+pub fn asset(path: &str) -> Option<&'static str> {
+    FILES
+        .iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, contents)| *contents)
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+    #[test]
+    fn lookup_exposes_new_assets_and_rejects_unknown_paths() {
+        for path in [
+            "agents/pm-qa.md",
+            "roles/adjudicator.md",
+            "roles/verifier.md",
+            "roles/astra-reviewer.md",
+            "roles/co-core.md",
+            "roles/arbiter.md",
+        ] {
+            assert!(asset(path).is_some_and(|body| !body.is_empty()), "{path}");
+        }
+        assert_eq!(asset("roles/not-present.md"), None);
+    }
+}
 
 fn short_hash(digest: &[u8]) -> String {
     digest[..6].iter().map(|b| format!("{b:02x}")).collect()

@@ -3,7 +3,13 @@ use crate::orch::summary::{self, Next, Outcome, ReviewItem};
 use crate::{
     base::{self, Failure, Res},
     codex::{self, RunRequest},
+    engine::{
+        budgets,
+        policy::{self, ReviewerMode},
+    },
     goal, graph, orch,
+    review::roles as review_roles,
+    usage::price::{self, CodexUsage},
 };
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -83,6 +89,50 @@ fn register(store: &Path, unit: &str, track: &str, brief_file: &str) -> Res<bool
     }
     Ok(true)
 }
+
+fn ensure_review_requirements(root: &Path, unit: &str) -> Res<()> {
+    let policy = policy::load(root)?;
+    if policy.reviewer == ReviewerMode::Claude && !policy.pm_qa {
+        return Ok(());
+    }
+    let rows = orch::evidence(root, unit)?;
+    let Some(verify) = rows
+        .iter()
+        .rposition(|r| r.kind == "verify" && r.exit_code == 0)
+    else {
+        return Ok(());
+    };
+    let tree = &rows[verify].commit;
+    let mut required = Vec::new();
+    if matches!(policy.reviewer, ReviewerMode::Claude | ReviewerMode::Both) {
+        required.push("chronos:reviewer");
+    }
+    if matches!(policy.reviewer, ReviewerMode::AstraMax | ReviewerMode::Both) {
+        required.push("engine-astra:");
+    }
+    if policy.pm_qa {
+        required.push("chronos:pm-qa");
+    }
+    for reviewer in required {
+        if !rows[verify + 1..]
+            .iter()
+            .any(|r| r.kind == "require" && r.command == reviewer && r.commit == *tree)
+        {
+            orch::append_evidence(
+                root,
+                unit,
+                &orch::Evidence {
+                    kind: "require".into(),
+                    command: reviewer.into(),
+                    exit_code: 0,
+                    commit: tree.clone(),
+                    ts: base::now_iso(),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
 struct UnitGuard(Option<(PathBuf, String, String)>);
 impl Drop for UnitGuard {
     fn drop(&mut self) {
@@ -141,7 +191,7 @@ fn unit_reply(
             }
         }
     }
-    let state = if reused {
+    let mut state = if reused {
         "verified".to_string()
     } else {
         orch::derive_state(
@@ -226,6 +276,8 @@ fn unit_reply(
             String::new()
         };
         let mut review = Vec::new();
+        let mut review_reply = Vec::new();
+        let mut reviewed_primary = false;
         if next == Next::Review || (accept["ran"] == true && accept["exit_code"] == 0) {
             let units = orch::read_units(root)?;
             let track = units
@@ -239,12 +291,39 @@ fn unit_reply(
                         || (accept["ran"] == true && accept["exit_code"] == 0 && u.track == track))
             }) {
                 if summary::next_for(root, &u.id)? == Next::Review {
+                    ensure_review_requirements(root, &u.id)?;
+                    if matches!(
+                        policy::load(root)?.reviewer,
+                        ReviewerMode::AstraMax | ReviewerMode::Both
+                    ) {
+                        review_roles::engine_review(b.codex()?.as_ref(), root, &u.id, repo)?;
+                        reviewed_primary |= u.id == unit;
+                    }
+                    for item in review_roles::review_items(root, &u.id)? {
+                        review_reply.push(
+                            json!({"unit":item.unit,"reviewer":item.reviewer,"pack":item.pack}),
+                        );
+                    }
                     let path = orch::pack_path(root, &u.id);
                     review.push(ReviewItem {
                         unit: u.id.clone(),
                         pack: path.is_file().then_some(path),
                     });
                 }
+            }
+        }
+        if reviewed_primary {
+            state = orch::derive_state(
+                &orch::evidence(root, unit)?,
+                orch::needs_accept(root, unit)?,
+            );
+            let pending_primary = review_reply.iter().any(|item| item["unit"] == unit);
+            if next == Next::Review {
+                next = if pending_primary && (state == "built" || state == "verified") {
+                    Next::Review
+                } else {
+                    summary::next_for(root, unit)?
+                };
             }
         }
         let mut paths = std::collections::BTreeMap::new();
@@ -278,6 +357,24 @@ fn unit_reply(
         for (key, value) in serde_json::to_value(outcome).unwrap().as_object().unwrap() {
             result[key] = value.clone();
         }
+        result["review"] = json!(review_reply);
+    }
+    // Preserve the ignored-scope sample when a cycle reply's additional paths would
+    // otherwise force the shared reply limiter to trim both samples equally.
+    let ignored_len = result["scope_ignored"].as_array().map_or(0, Vec::len);
+    while ignored_len > 0
+        && super::tools::bound_reply(result.clone())["scope_ignored"]
+            .as_array()
+            .map_or(0, Vec::len)
+            < ignored_len
+    {
+        let Some(sample) = result["changed"]["sample"].as_array_mut() else {
+            break;
+        };
+        if sample.pop().is_none() {
+            break;
+        }
+        result["truncated"] = json!(true);
     }
     Ok(result)
 }
@@ -341,6 +438,15 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         return Err(Failure::new("unbound_write", "a writing codex_run needs project and unit; register the unit with orch and dispatch it by id"));
     }
     let store = project.map(|p| orch::store_for(b.home()?, p)).transpose()?;
+    let budget_role = budgets::role_for_codex(role.unwrap_or(""));
+    if let Some(root) = &store {
+        if let Err(e) = budgets::check(root, budget_role, "codex_run") {
+            if e.kind == "budget_exceeded" {
+                return Ok(json!({"status":"refused","error":e.to_json()}));
+            }
+            return Err(e);
+        }
+    }
     let dest = match (save, &store) {
         (Some(s), Some(root)) => Some(destination(root, s)?),
         _ => None,
@@ -513,6 +619,18 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             Some(_) => unreachable!("begin never reuses a verified unit"),
         }
     }
+    if let Ok(home) = b.home() {
+        if let Ok(graph_store) = graph::GraphStore::open(home) {
+            let options = graph::code::SyncOptions {
+                deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+                ..Default::default()
+            };
+            let _ = graph::code::sync(&graph_store, Path::new(cwd), None, &options);
+            if let Some(root) = &store {
+                let _ = graph::ingest::sync_orch(&graph_store, root, Path::new(cwd));
+            }
+        }
+    }
     let mut resolved = explicit.unwrap_or("").to_owned();
     let result = (|| -> Res<(String, Value)> {
         let server = b.codex()?;
@@ -570,6 +688,32 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             return Err(e);
         }
     };
+    if let Some(root) = &store {
+        let usage = &report["usage"];
+        let input = usage["inputTokens"].as_u64();
+        let cached = usage["cachedInputTokens"].as_u64();
+        let output = usage["outputTokens"].as_u64();
+        let usd = match (input, cached, output) {
+            (Some(input), Some(cached_input), Some(output)) => price::codex_usd(
+                &model,
+                &CodexUsage {
+                    input,
+                    cached_input,
+                    output,
+                },
+            ),
+            _ => None,
+        };
+        budgets::record(
+            root,
+            budget_role,
+            &model,
+            usd,
+            input.unwrap_or(0),
+            output.unwrap_or(0),
+            "codex_run",
+        )?;
+    }
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         if let (Some(started_ms), Some(ended_ms), Some(status)) = (
             report["run_started_ms"].as_i64(),

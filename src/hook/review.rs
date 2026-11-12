@@ -1,5 +1,5 @@
-//! PostToolUse on a dispatcher's `Agent` call to `chronos:reviewer`: records the bound unit's verdict
-//! through the unchanged `orch review` command and returns the bounded outcome as added context.
+//! PostToolUse on a dispatcher's reviewer or PM/QA `Agent` call: records the bound unit's verdict
+//! through the review gate and returns the bounded outcome as added context.
 use crate::{
     base, goal,
     orch::{
@@ -34,12 +34,18 @@ fn bound_unit(store: &Path, key: &str) -> Option<String> {
     (!unit.is_empty()).then(|| unit.to_string())
 }
 
-/// The single `<unit>.review.md` path named in the prompt, when some reviewer marker is bound to that unit.
-fn prompt_unit(store: &Path, prompt: &str) -> Option<String> {
+/// The single unit named by a review path in the prompt, when a marker binds that unit.
+fn prompt_unit(store: &Path, prompt: &str, reviewer: &str) -> Option<String> {
     let prefix = store.join("reports").join("");
+    let suffix = if reviewer == "chronos:pm-qa" {
+        r"(?:\.review\.md|\.pm-qa\.verdict\.json)"
+    } else {
+        r"\.review\.md"
+    };
     let pattern = format!(
-        r"{}([a-z0-9][a-z0-9_-]*)\.review\.md",
-        regex::escape(&prefix.to_string_lossy())
+        r"{}([a-z0-9][a-z0-9_-]*){}",
+        regex::escape(&prefix.to_string_lossy()),
+        suffix
     );
     let re = regex::Regex::new(&pattern).ok()?;
     let mut units: Vec<String> = Vec::new();
@@ -85,7 +91,20 @@ fn failure_text(unit: Option<&str>, error: &str) -> String {
     format!("Chronos did not record {what}: {line}. Call orch review yourself after fixing it.")
 }
 
-fn record(store: &Path, unit: &str, repo: &Path) -> Result<String, String> {
+fn record(store: &Path, unit: &str, repo: &Path, reviewer: &str) -> Result<String, String> {
+    if reviewer == "chronos:pm-qa" {
+        let path = orch::review_verdict_path(store, unit, reviewer);
+        let text = std::fs::read_to_string(&path).map_err(|e| failure_text(Some(unit), &e.to_string()))?;
+        let verdict = orch::parse_verdict(&text).map_err(|e| failure_text(Some(unit), &e.message))?;
+        let tree = orch::evidence(store, unit).map_err(|e| failure_text(Some(unit), &e.message))?.into_iter().rev().find(|r| r.kind == "verify").map(|r| r.commit).unwrap_or_default();
+        let pack = std::fs::read_to_string(orch::pack_path(store, unit)).unwrap_or_default();
+        if verdict.unit != unit || tree.is_empty() || verdict.tree != tree || !pack.contains(&tree) {
+            return Err(failure_text(Some(unit), "verdict or review pack does not match the current unit and tree"));
+        }
+        let pass = orch::passes(&verdict, &std::collections::BTreeSet::new());
+        let states = orch::record_review(store, &[unit.into()], reviewer, pass, repo).map_err(|e| failure_text(Some(unit), &e.message))?;
+        return outcome_text(store, unit, states.first().map(|(_, s)| s.clone()).unwrap_or_default(), reviewer);
+    }
     let args: Vec<String> = [
         "review",
         unit,
@@ -111,13 +130,13 @@ fn record(store: &Path, unit: &str, repo: &Path) -> Result<String, String> {
                 .and_then(|r| r[1].as_str().map(str::to_string))
         })
         .unwrap_or_default();
-    outcome_text(store, unit, state)
+    outcome_text(store, unit, state, reviewer)
 }
 
-fn outcome_text(store: &Path, unit: &str, state: String) -> Result<String, String> {
-    let verdict = orch::read_verdict(store, unit)
-        .map_err(|e| failure_text(Some(unit), &e.message))?
-        .ok_or_else(|| failure_text(Some(unit), "verdict file is missing"))?;
+fn outcome_text(store: &Path, unit: &str, state: String, reviewer: &str) -> Result<String, String> {
+    let verdict_path = orch::review_verdict_path(store, unit, reviewer);
+    let text = std::fs::read_to_string(&verdict_path).map_err(|e| failure_text(Some(unit), &e.to_string()))?;
+    let verdict = orch::parse_verdict(&text).map_err(|e| failure_text(Some(unit), &e.message))?;
     let units = orch::read_units(store).map_err(|e| failure_text(Some(unit), &e.message))?;
     let this = units.iter().find(|u| u.id == unit);
     let state = if state.is_empty() {
@@ -137,7 +156,7 @@ fn outcome_text(store: &Path, unit: &str, state: String) -> Result<String, Strin
     let reports = store.join("reports");
     let mut paths: BTreeMap<String, PathBuf> = BTreeMap::new();
     paths.insert("pack".into(), orch::pack_path(store, unit));
-    paths.insert("verdict".into(), orch::verdict_path(store, unit));
+    paths.insert("verdict".into(), verdict_path);
     paths.insert("report".into(), reports.join(format!("{unit}.json")));
     let outcome = Outcome {
         unit: unit.to_string(),
@@ -196,9 +215,11 @@ pub fn after_agent(event: &Value, home: Option<&Path>) -> Option<Value> {
         return None;
     }
     let input = event.get("tool_input")?;
-    if input.get("subagent_type").and_then(Value::as_str) != Some(REVIEWER) {
-        return None;
-    }
+    let reviewer = match input.get("subagent_type").and_then(Value::as_str) {
+        Some(REVIEWER) => REVIEWER,
+        Some("chronos:pm-qa") => "chronos:pm-qa",
+        _ => return None,
+    };
     let home = home?;
     let session = event
         .get("session_id")
@@ -217,6 +238,7 @@ pub fn after_agent(event: &Value, home: Option<&Path>) -> Option<Value> {
         None => prompt_unit(
             &store,
             input.get("prompt").and_then(Value::as_str).unwrap_or(""),
+            reviewer,
         ),
     };
     let Some(unit) = unit else {
@@ -232,7 +254,7 @@ pub fn after_agent(event: &Value, home: Option<&Path>) -> Option<Value> {
     let Some(repo) = repo else {
         return reply(failure_text(Some(&unit), "no project directory is known"));
     };
-    reply(match record(&store, &unit, Path::new(&repo)) {
+    reply(match record(&store, &unit, Path::new(&repo), reviewer) {
         Ok(text) | Err(text) => text,
     })
 }

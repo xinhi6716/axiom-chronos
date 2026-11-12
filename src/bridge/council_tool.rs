@@ -4,7 +4,13 @@ use crate::{
     base::{self, Failure, Res},
     codex::RunRequest,
     council::{self, CrossReply, CrossRequest, Status},
-    orch,
+    engine::{
+        adjudicator::{self, Case, Evidence, Outcome},
+        budgets::{self, Role},
+        dual_core::{self, Decision, Kind},
+        policy,
+    },
+    goal, orch,
 };
 use serde_json::{json, Value};
 use std::{
@@ -301,6 +307,12 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
                 plan_path,
                 schema_path: PathBuf::from(text(a, "schema_path")?),
             };
+            if let Err(e) = budgets::check(&store, Role::CouncilMember, "council") {
+                if e.kind == "budget_exceeded" {
+                    return Ok(json!({"status":"refused","error":e.to_json()}));
+                }
+                return Err(e);
+            }
             let (running, stop) = b.council_flags();
             if running.swap(true, Ordering::SeqCst) {
                 return Err(Failure::new("busy", "a council is already running"));
@@ -366,7 +378,89 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
                     ))
                 })
                 .collect::<Res<Vec<_>>>()?;
-            council::rule(&plan_path, &rulings)
+            let mut result = council::rule(&plan_path, &rulings)?;
+            let policy = policy::load(&store)?;
+            if !policy.dual_core && !policy.adjudicator.enabled {
+                return Ok(result);
+            }
+            let project = text(a, "project")?;
+            let cwd = goal::find_active(b.home()?, project)?
+                .and_then(|(_, g)| g.cwd.map(PathBuf::from))
+                .or_else(|| b.project_cwd(project))
+                .unwrap_or_else(|| store.clone());
+            let codex = b.codex()?;
+            let path = plan_path.parent().unwrap().join("council.json");
+            let council: council::Council = serde_json::from_slice(
+                &std::fs::read(&path).map_err(|e| Failure::new("io", e.to_string()))?,
+            )
+            .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+            if policy.dual_core {
+                let mut verdicts = Vec::new();
+                for (id, choice, reason) in &rulings {
+                    let claim = council
+                        .claims
+                        .iter()
+                        .find(|c| c.id == *id)
+                        .ok_or_else(|| invalid(format!("unknown claim {id}")))?;
+                    let detail = serde_json::to_string(claim)
+                        .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+                    let d = Decision {
+                        kind: Kind::CouncilRuling,
+                        id: id.clone(),
+                        question: format!(
+                            "Council ruling for {id}: {detail}\nCore reason: {reason}"
+                        ),
+                        inputs: vec![],
+                        core_choice: choice.clone(),
+                        core_reasoning: reason.clone(),
+                        irreversible: false,
+                        reserved: adjudicator::is_reserved(&claim.text)
+                            || adjudicator::is_reserved(reason),
+                    };
+                    let verdict = dual_core::judge(codex.as_ref(), &store, &cwd, &d)?;
+                    verdicts.push(json!({"id":id,"verdict":format!("{verdict:?}")}));
+                }
+                result["dual_core"] = json!(verdicts);
+            }
+            if policy.adjudicator.enabled {
+                let mut outcomes = Vec::new();
+                for claim in council
+                    .claims
+                    .iter()
+                    .filter(|c| c.status != council::ClaimStatus::Consensus && c.ruling.is_none())
+                {
+                    let detail = serde_json::to_string(claim)
+                        .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+                    let case = Case::CouncilDispute {
+                        claim: claim.text.clone(),
+                        positions: vec![detail.clone()],
+                    };
+                    let evidence = vec![Evidence {
+                        id: "E1".into(),
+                        path: Some(path.clone()),
+                        text: detail,
+                    }];
+                    let outcome = adjudicator::adjudicate(
+                        codex.as_ref(),
+                        &store,
+                        &cwd,
+                        &case,
+                        evidence,
+                        false,
+                    )?;
+                    match outcome {
+                        Outcome::Ruled(ruling) => {
+                            adjudicator::apply(&store, &case, &ruling)?;
+                            outcomes.push(json!({"id":claim.id,"ruling_id":ruling.id,"decision":ruling.decision,"reason":ruling.reason,"evidence":ruling.evidence,"answer":ruling.answer}));
+                        }
+                        Outcome::Person { reason } => {
+                            outcomes.push(json!({"id":claim.id,"person":reason}))
+                        }
+                    }
+                }
+                result["adjudications"] = json!(outcomes);
+            }
+            Ok(result)
         }
         other => Err(invalid(format!("unknown action {other}"))),
     }

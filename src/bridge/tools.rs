@@ -1,11 +1,60 @@
 use super::server::Bridge;
 use crate::{
     base::{Failure, Res},
+    engine::{
+        adjudicator::{self, Case, Outcome},
+        approvals, dual_core, finding_verification, interjections, policy,
+    },
     goal, graph, linux,
     memory::{Memory, Record},
     orch,
 };
 use serde_json::{json, Value};
+use std::path::Path;
+
+fn dual(
+    b: &Bridge,
+    store: &Path,
+    cwd: &Path,
+    kind: dual_core::Kind,
+    choice: &str,
+    reason: &str,
+) -> Res<Option<Value>> {
+    if !policy::load(store)?.dual_core {
+        return Ok(None);
+    }
+    let decision = dual_core::Decision {
+        kind,
+        id: format!("{}-{}", kind.name(), crate::base::now_iso()),
+        question: reason.into(),
+        inputs: vec![],
+        core_choice: choice.into(),
+        core_reasoning: reason.into(),
+        irreversible: false,
+        reserved: adjudicator::is_reserved(reason),
+    };
+    let verdict = dual_core::judge(b.codex()?.as_ref(), store, cwd, &decision)?;
+    Ok(Some(json!(format!("{verdict:?}"))))
+}
+
+fn adjudicate(b: &Bridge, store: &Path, cwd: &Path, case: &Case) -> Res<Outcome> {
+    let mut evidence = adjudicator::evidence_for(store, cwd, case)?;
+    if let Case::CloseAsk { question } = case {
+        evidence.push(adjudicator::Evidence {
+            id: "E1".into(),
+            path: None,
+            text: question.clone(),
+        });
+    }
+    let result = adjudicator::adjudicate(b.codex()?.as_ref(), store, cwd, case, evidence, false)?;
+    if let Outcome::Ruled(r) = &result {
+        adjudicator::apply(store, case, r)?;
+    }
+    Ok(result)
+}
+fn ruling(r: &adjudicator::Ruling) -> Value {
+    json!({"id":r.id,"decision":r.decision,"reason":r.reason,"evidence":r.evidence,"answer":r.answer})
+}
 fn s<'a>(a: &'a Value, k: &str) -> &'a str {
     a.get(k).and_then(Value::as_str).unwrap_or("")
 }
@@ -205,6 +254,9 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => {
             let result = super::codex_tool::codex_run(b, a);
+            if result["status"] == "completed" {
+                b.note_project_cwd(s(a, "project"), s(a, "cwd"));
+            }
             Ok(if a.get("unit").is_some() {
                 unit_reply(result, b, a)
             } else {
@@ -212,6 +264,52 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             })
         }
         "council" => super::council_tool::council(b, a),
+        "approval" => {
+            let op = s(a, "op");
+            if matches!(op, "approve" | "deny") {
+                return Err(Failure::new(
+                    "person_only",
+                    "only a person may approve or deny",
+                ));
+            }
+            let path = store(b, s(a, "project"))?;
+            match op {
+                "request" => {
+                    let action = &a["action"];
+                    let command = arr(action, "command")?;
+                    let (program, args) = command.split_first().ok_or_else(|| {
+                        Failure::new("invalid_argument", "action command is required")
+                    })?;
+                    let cwd = opt(action, "cwd")
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            Failure::new("invalid_argument", "action cwd is required")
+                        })?;
+                    let result = approvals::request(
+                        &path,
+                        approvals::Action {
+                            command: program.clone(),
+                            args: args.to_vec(),
+                            cwd: cwd.into(),
+                        },
+                        s(a, "reason"),
+                        approvals::Origin::Model,
+                    )?;
+                    Ok(json!({"status":"requested","id":result.id,"digest":result.digest}))
+                }
+                "status" => approvals::status(&path, s(a, "id")),
+                "execute" => {
+                    let result = approvals::execute(&path, s(a, "id"))?;
+                    Ok(
+                        json!({"status":"completed","exit_code":result.exit_code,"output_tail":result.output_tail}),
+                    )
+                }
+                _ => Err(Failure::new(
+                    "invalid_argument",
+                    "invalid approval operation",
+                )),
+            }
+        }
         "orch" => {
             let path = store(b, s(a, "project"))?;
             std::fs::create_dir_all(path.parent().unwrap())
@@ -227,6 +325,82 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             );
             let force = args.iter().any(|x| x == "--force");
             args.retain(|x| x != "--force");
+            if args.first().map(String::as_str) == Some("review") {
+                if let Some(repo) = args
+                    .iter()
+                    .position(|x| x == "--repo")
+                    .and_then(|i| args.get(i + 1))
+                {
+                    b.note_project_cwd(s(a, "project"), repo);
+                }
+            }
+            let active = goal::find_active(b.home()?, s(a, "project"))?;
+            let known_cwd = b.project_cwd(s(a, "project"));
+            let explicit_cwd = args
+                .iter()
+                .position(|x| x == "--repo")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| Path::new(s));
+            let cwd = active
+                .as_ref()
+                .and_then(|(_, g)| g.cwd.as_deref())
+                .map(Path::new)
+                .or(explicit_cwd)
+                .or(known_cwd.as_deref());
+            if args.first().map(String::as_str) == Some("unit")
+                && args.get(1).map(String::as_str) == Some("add")
+            {
+                if let Some(old) = args
+                    .iter()
+                    .position(|x| x == "--fixes")
+                    .and_then(|i| args.get(i + 1))
+                {
+                    let gate_cwd = match active.as_ref() {
+                        Some((_, g)) => g.cwd.as_deref().map(Path::new),
+                        None => cwd,
+                    };
+                    let Some(cwd) = gate_cwd else {
+                        return Ok(
+                            json!({"status":"failed","error":{"kind":"findings_rejected","message":"repository is unavailable for finding verification"}}),
+                        );
+                    };
+                    if let Err(e) = b.codex().and_then(|codex| {
+                        finding_verification::fix_gate(codex.as_ref(), &path, old, cwd)
+                    }) {
+                        return Ok(
+                            json!({"status":"failed","error":{"kind":"findings_rejected","message":e.message}}),
+                        );
+                    }
+                }
+            }
+            let dual_kind = match args.first().map(String::as_str) {
+                Some("map") => Some(dual_core::Kind::ModuleMap),
+                Some("waive") if args.iter().any(|x| x.contains("fix_round")) => {
+                    Some(dual_core::Kind::FixRounds)
+                }
+                Some("waive") => Some(dual_core::Kind::ScopeReduction),
+                _ => None,
+            };
+            if dual_kind.is_some() && cwd.is_none() && policy::load(&path)?.dual_core {
+                return Err(Failure::new(
+                    "invalid_argument",
+                    "repository is unavailable for dual-core judgment",
+                ));
+            }
+            let dual_result = if let (Some(kind), Some(cwd)) = (dual_kind, cwd) {
+                dual(b, &path, cwd, kind, &args.join(" "), &args.join(" "))?
+            } else {
+                None
+            };
+            if dual_result.as_ref().is_some_and(|v| {
+                v.as_str().is_some_and(|s| {
+                    s.starts_with("Overruled") || s.starts_with("ToPerson") || s == "Reserved"
+                })
+            }) {
+                return Ok(
+                    json!({"status":"failed","error":{"kind":"dual_core","message":"decision not upheld"},"dual_core":dual_result}),
+                );
+            }
             let r = orch::run(&path, &args, json_flag, force);
             let schedule_kind = (args.first().map(String::as_str) == Some("schedule"))
                 .then(|| {
@@ -254,7 +428,49 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             } else {
                 json!({"kind":schedule_kind.unwrap_or("orch_failed"),"message":if r.stderr.is_empty(){&r.stdout}else{&r.stderr}.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()})
             };
-            let result = json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err});
+            let mut result = json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err});
+            if let Some(v) = dual_result {
+                result["dual_core"] = v;
+            }
+            if r.exit_code != 0
+                && (r.stderr.contains("fix_rounds") || r.stdout.contains("fix_rounds"))
+            {
+                if let Some(cwd) = cwd {
+                    if let Some(v) = dual(
+                        b,
+                        &path,
+                        cwd,
+                        dual_core::Kind::FixRounds,
+                        "adjudicate",
+                        &r.stderr,
+                    )? {
+                        let rejected = v.as_str().is_some_and(|s| {
+                            s.starts_with("Overruled")
+                                || s.starts_with("ToPerson")
+                                || s == "Reserved"
+                        });
+                        result["dual_core"] = v;
+                        if rejected {
+                            return Ok(result);
+                        }
+                    }
+                }
+                if policy::load(&path)?.adjudicator.enabled {
+                    if let (Some(cwd), Some(unit)) = (
+                        cwd,
+                        args.iter()
+                            .position(|x| x == "--fixes")
+                            .and_then(|i| args.get(i + 1)),
+                    ) {
+                        match adjudicate(b, &path, cwd, &Case::FixRounds { unit: unit.clone() })? {
+                            Outcome::Ruled(r) => result["adjudication"] = ruling(&r),
+                            Outcome::Person { reason } => {
+                                result["person_requests"] = json!([reason])
+                            }
+                        }
+                    }
+                }
+            }
             Ok(if bounded { bound_reply(result) } else { result })
         }
         "run_on_linux" => linux::run(
@@ -313,7 +529,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             graph::query::explore(b.home()?, &req)
         }
         "goal" => {
-            let keys = ["status", "classify", "mode"];
+            let keys = ["status", "classify", "mode", "interjection"];
             if keys
                 .iter()
                 .filter(|k| a.get(**k).is_some_and(|v| !v.is_null()))
@@ -322,24 +538,176 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             {
                 return Err(Failure::new(
                     "invalid_argument",
-                    "exactly one of status, classify, mode is required",
+                    "exactly one of status, classify, mode, interjection is required",
                 ));
             }
             let home = b.home()?;
             let session = s(a, "session");
             b.record_provenance(home, session)?;
+            let mut adjudications = Vec::new();
+            let mut person_requests = Vec::new();
+            let mut dual_result = None;
             let g = if let Some(v) = opt(a, "status") {
-                goal::set_status_with_batch(home, session, v, opt(a, "note"), batch(a)?)?["goal"]
-                    .clone()
+                let current = goal::load(home, session)?
+                    .ok_or_else(|| Failure::new("not_found", "goal not found"))?;
+                let mut status = v.to_owned();
+                let mut note = opt(a, "note").map(str::to_owned);
+                let mut keep_active = false;
+                if matches!(v, "done" | "blocked") && current.project.is_some() {
+                    let path = orch::store_for_goal(home, &current)?;
+                    let cwd = Path::new(current.cwd.as_deref().unwrap_or("."));
+                    dual_result = dual(
+                        b,
+                        &path,
+                        cwd,
+                        dual_core::Kind::GoalClose,
+                        v,
+                        note.as_deref().unwrap_or(v),
+                    )?;
+                    if dual_result.as_ref().is_some_and(|v| {
+                        v.as_str().is_some_and(|s| {
+                            s.starts_with("Overruled")
+                                || s.starts_with("ToPerson")
+                                || s == "Reserved"
+                        })
+                    }) {
+                        status = "blocked".into();
+                        note = Some("dual-core decision requires a person".into());
+                        person_requests.push(json!("dual-core decision requires a person"));
+                    } else if policy::load(&path)?.adjudicator.enabled {
+                        if v == "done" && path.join("units.tsv").exists() {
+                            let units = orch::read_units(&path)?;
+                            let events = orch::events::read_events(&path, 0)?;
+                            for unit in &units {
+                                let Some(verdict) = orch::read_verdict(&path, &unit.id)? else {
+                                    continue;
+                                };
+                                let waived = orch::waivers(&orch::evidence(&path, &unit.id)?);
+                                for finding in verdict.findings.iter().filter(|f| {
+                                    f.needs_check() && !waived.iter().any(|w| w.number == f.number)
+                                }) {
+                                    let subject = format!("{}#{}", unit.id, finding.number);
+                                    if events.iter().any(|e| {
+                                        e.kind == "adjudication"
+                                            && e.data["case"] == "needs_check"
+                                            && e.data["subject"] == subject
+                                            && e.data["decision"] == "pass"
+                                            && !events.iter().any(|later| {
+                                                later.kind == "adjudication_overturned"
+                                                    && later.data["id"] == e.data["id"]
+                                            })
+                                    }) {
+                                        continue;
+                                    }
+                                    let case = Case::NeedsCheck {
+                                        unit: unit.id.clone(),
+                                        finding: finding.number,
+                                        needs: format!("{:?}", finding.needs),
+                                    };
+                                    match adjudicate(b, &path, cwd, &case)? {
+                                        Outcome::Ruled(r) => {
+                                            if r.decision == "block" {
+                                                person_requests.push(json!(format!(
+                                                    "{subject}: {}",
+                                                    r.reason
+                                                )));
+                                            }
+                                            adjudications.push(ruling(&r));
+                                        }
+                                        Outcome::Person { reason } => person_requests
+                                            .push(json!(format!("{subject}: {reason}"))),
+                                    }
+                                }
+                            }
+                            if !person_requests.is_empty() {
+                                status = "blocked".into();
+                                note = Some(format!(
+                                    "Needs person: {}",
+                                    person_requests
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                ));
+                            }
+                        } else if v == "blocked"
+                            && current.status != "waiting"
+                            && !note.as_deref().unwrap_or("").trim().is_empty()
+                        {
+                            let case = Case::CloseAsk {
+                                question: note.clone().unwrap_or_default(),
+                            };
+                            match adjudicate(b, &path, cwd, &case)? {
+                                Outcome::Ruled(r) => {
+                                    keep_active = r.decision == "answer"
+                                        && r.answer
+                                            .as_deref()
+                                            .is_some_and(|s| !s.trim().is_empty());
+                                    adjudications.push(ruling(&r));
+                                }
+                                Outcome::Person { reason } => person_requests.push(json!(reason)),
+                            }
+                        }
+                    }
+                }
+                if keep_active {
+                    if current.status == "active" {
+                        json!(current)
+                    } else {
+                        json!(goal::reopen(home, session)?)
+                    }
+                } else {
+                    goal::set_status_with_batch(home, session, &status, note.as_deref(), batch(a)?)?
+                        ["goal"]
+                        .clone()
+                }
             } else if let Some(v) = opt(a, "mode") {
                 json!(goal::set_mode(home, session, v)?)
             } else if let Some(v) = opt(a, "classify") {
                 crate::laya::router::observe_interjection(home, session, v); // laya-shadow
-                let g = goal::classify(home, session, v)?;
+                let g = if goal::load(home, session)?.is_some_and(|g| g.project.is_some()) {
+                    interjections::classify(home, session, v)?
+                } else {
+                    goal::classify(home, session, v)?
+                };
                 if v == "stop" {
                     b.cancel();
                 }
                 json!(g)
+            } else if let Some(v) = a.get("interjection").filter(|v| v.is_object()) {
+                let applied = v.get("applied").filter(|x| !x.is_null());
+                let declined = v.get("declined").filter(|x| !x.is_null());
+                if applied.is_some() == declined.is_some() || s(v, "id").is_empty() {
+                    return Err(Failure::new(
+                        "invalid_argument",
+                        "interjection requires id and exactly one of applied or declined",
+                    ));
+                }
+                if let Some(links) = applied {
+                    if !links.is_object() {
+                        return Err(Failure::new(
+                            "invalid_argument",
+                            "applied must be an object",
+                        ));
+                    }
+                    interjections::apply(
+                        home,
+                        session,
+                        s(v, "id"),
+                        interjections::Links {
+                            plan_revision: opt(links, "plan_revision").map(str::to_owned),
+                            units: arr(links, "units")?,
+                            scope: arr(links, "scope")?,
+                        },
+                    )?;
+                } else {
+                    let reason = declined.and_then(Value::as_str).ok_or_else(|| {
+                        Failure::new("invalid_argument", "declined must be a reason")
+                    })?;
+                    interjections::decline(home, session, s(v, "id"), reason)?;
+                }
+                json!(goal::load(home, session)?
+                    .ok_or_else(|| Failure::new("not_found", "goal not found"))?)
             } else {
                 return Err(Failure::new("invalid_argument", "invalid goal operation"));
             };
@@ -349,7 +717,21 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                     reply[key] = g[key].clone();
                 }
             }
-            Ok(json!({"status":"completed","goal":reply}))
+            let mut result = json!({"status":"completed","goal":reply});
+            if !adjudications.is_empty() {
+                result["adjudication"] = if adjudications.len() == 1 {
+                    adjudications.remove(0)
+                } else {
+                    json!(adjudications)
+                };
+            }
+            if !person_requests.is_empty() {
+                result["person_requests"] = json!(person_requests);
+            }
+            if let Some(v) = dual_result {
+                result["dual_core"] = v;
+            }
+            Ok(result)
         }
         "bridge_status" => {
             let mut result = json!({"status":"completed","codex_app_server_running":b.running()});

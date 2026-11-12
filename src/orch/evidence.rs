@@ -23,12 +23,27 @@ pub fn carried_by(row: &Evidence) -> Option<Vec<String>> {
     Some(ids.split(',').map(str::to_owned).collect())
 }
 
-fn review_passes(rows: &[Evidence], index: usize) -> bool {
+pub(crate) fn review_passes(rows: &[Evidence], index: usize) -> bool {
     let review = &rows[index];
+    if !rows.iter().any(|r| r.kind == "require") {
+        return review.exit_code == 0
+            || rows[index + 1..].iter().any(|r| {
+                (r.kind == WAIVE_KIND || r.kind == super::findings::CHECKED_KIND)
+                    && r.exit_code == 0
+                    && r.commit == review.commit
+            });
+    }
+    let end = rows[index + 1..]
+        .iter()
+        .position(|r| r.kind == "review")
+        .map_or(rows.len(), |n| index + 1 + n);
     review.exit_code == 0
-        || rows[index + 1..]
+        || rows[index + 1..end]
             .iter()
             .any(|r| r.kind == WAIVE_KIND && r.exit_code == 0 && r.commit == review.commit)
+        || rows[index + 1..].iter().any(|r| {
+            r.kind == super::findings::CHECKED_KIND && r.exit_code == 0 && r.commit == review.commit
+        })
 }
 
 pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
@@ -89,9 +104,29 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
             .command
             .split_once(CARRIED_MARK)
             .map_or(r.command.as_str(), |(command, _)| command);
-        base::family_of(command) == base::family_of(&run.command)
+        !command.starts_with("engine-astra:")
+            && base::family_of(command) == base::family_of(&run.command)
     }) {
         return "built".into();
+    }
+    for required in rest[v + 1..]
+        .iter()
+        .filter(|r| r.kind == "require" && r.commit == rest[v].commit)
+    {
+        if !current.iter().any(|(n, r)| {
+            r.commit == required.commit
+                && if required.command == "engine-astra:" {
+                    r.command.starts_with("engine-astra:")
+                } else {
+                    r.command
+                        .split_once(CARRIED_MARK)
+                        .map_or(r.command.as_str(), |(s, _)| s)
+                        == required.command
+                }
+                && review_passes(rest, *n)
+        }) {
+            return "built".into();
+        }
     }
     "verified".into()
 }
@@ -329,6 +364,16 @@ pub fn append_check(
     repo: &Path,
     check: &Evidence,
 ) -> Res<Option<Vec<String>>> {
+    append_check_with_requirements(store, unit, repo, check, &[])
+}
+
+fn append_check_with_requirements(
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+    check: &Evidence,
+    required: &[&str],
+) -> Res<Option<Vec<String>>> {
     if !["accept", "verify"].contains(&check.kind.as_str()) {
         return Err(invalid("expected an accept or verify row"));
     }
@@ -402,8 +447,16 @@ pub fn append_check(
             }
         }
         append_evidence_locked(store, unit, check)?;
+        for reviewer in required {
+            append_evidence_locked(
+                store,
+                unit,
+                &row("require", reviewer, 0, check.commit.clone()),
+            )?;
+        }
         if let Some((_, review)) = &carried {
             append_evidence_locked(store, unit, review)?;
+            review_event(store, unit, review, repo, None)?;
         }
         update_unit_state_locked(store, unit)?;
         Ok(carried.map(|(ids, _)| ids))
@@ -524,16 +577,27 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
         result.output.as_bytes(),
     )
     .map_err(io)?;
-    append_check(
+    let policy = crate::engine::policy::load(store)?;
+    let tree = snapshot(repo, &brief.scope);
+    use crate::engine::policy::ReviewerMode;
+    let mut required = Vec::new();
+    if policy.reviewer != ReviewerMode::Claude || policy.pm_qa {
+        if matches!(policy.reviewer, ReviewerMode::Claude | ReviewerMode::Both) {
+            required.push("chronos:reviewer");
+        }
+        if matches!(policy.reviewer, ReviewerMode::AstraMax | ReviewerMode::Both) {
+            required.push("engine-astra:");
+        }
+        if policy.pm_qa {
+            required.push("chronos:pm-qa");
+        }
+    }
+    append_check_with_requirements(
         store,
         unit,
         repo,
-        &row(
-            "verify",
-            &brief.verify,
-            result.exit_code,
-            snapshot(repo, &brief.scope),
-        ),
+        &row("verify", &brief.verify, result.exit_code, tree.clone()),
+        &required,
     )?;
     Ok(result)
 }
@@ -638,6 +702,17 @@ pub fn record_review(
     pass: bool,
     repo: &Path,
 ) -> Res<Vec<(String, String)>> {
+    record_review_with_verdict(store, units, reviewer, pass, repo, None)
+}
+
+pub(crate) fn record_review_with_verdict(
+    store: &Path,
+    units: &[String],
+    reviewer: &str,
+    pass: bool,
+    repo: &Path,
+    verdict: Option<&super::Verdict>,
+) -> Res<Vec<(String, String)>> {
     let existing = read_units(store)?;
     let mut commits = Vec::new();
     let mut stale = Vec::new();
@@ -648,9 +723,10 @@ pub fn record_review(
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?
             .refuse_superseded()?;
         let rs = evidence(store, unit)?;
-        if rs
-            .iter()
-            .any(|r| r.kind == "run" && base::family_of(&r.command) == base::family_of(reviewer))
+        if !reviewer.starts_with("engine-astra:")
+            && rs.iter().any(|r| {
+                r.kind == "run" && base::family_of(&r.command) == base::family_of(reviewer)
+            })
         {
             return Err(Failure::new(
                 "same_family",
@@ -678,14 +754,87 @@ pub fn record_review(
     }
     let mut result = Vec::new();
     for (unit, commit) in units.iter().zip(commits) {
-        append_evidence(
-            store,
-            unit,
-            &row("review", reviewer, if pass { 0 } else { 1 }, commit),
-        )?;
+        let review = row("review", reviewer, if pass { 0 } else { 1 }, commit);
+        with_lock(store, false, || {
+            append_evidence_locked(store, unit, &review)?;
+            review_event(store, unit, &review, repo, verdict)
+        })?;
         result.push((unit.clone(), update_unit_state(store, unit)?));
     }
     Ok(result)
+}
+
+fn review_event(
+    store: &Path,
+    unit: &str,
+    row: &Evidence,
+    repo: &Path,
+    supplied: Option<&super::Verdict>,
+) -> Res<()> {
+    let reviewer = row
+        .command
+        .split_once(CARRIED_MARK)
+        .map_or(row.command.as_str(), |(s, _)| s);
+    let commit = &row.commit;
+    let rs = evidence(store, unit)?;
+    let n = rs.iter().filter(|r| r.kind == "review").count();
+    let loaded = std::fs::read_to_string(super::review_verdict_path(store, unit, reviewer))
+        .ok()
+        .and_then(|s| super::parse_verdict(&s).ok());
+    let verdict = supplied
+        .or(loaded.as_ref())
+        .filter(|v| v.unit == unit && v.tree == *commit);
+    let findings: Vec<_> = verdict.iter().flat_map(|v| &v.findings).map(|f| serde_json::json!({
+            "number": f.number, "severity": match f.severity { super::Severity::Blocker => "blocker", super::Severity::Major => "major", super::Severity::Minor => "minor" }, "location": f.location
+        })).collect();
+    let model = reviewer.strip_prefix("engine-astra:").unwrap_or(reviewer);
+    let family = match base::family_of(model) {
+        base::Family::OpenAi => "openai",
+        base::Family::Anthropic => "anthropic",
+        base::Family::Google => "google",
+        base::Family::Unknown => "unknown",
+    };
+    let role = if reviewer.starts_with("engine-astra:") {
+        "astra-max"
+    } else if reviewer == "chronos:pm-qa" {
+        "pm-qa"
+    } else {
+        "reviewer"
+    };
+    let paths: Vec<String> = unit_brief(store, unit)
+        .map(|b| b.scope)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| {
+            let path = Path::new(&s);
+            let relative = if path.is_absolute() {
+                path.strip_prefix(repo).ok()?
+            } else {
+                path
+            };
+            if relative.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                return None;
+            }
+            Some(relative.to_string_lossy().replace('\\', "/"))
+        })
+        .collect();
+    super::events::append_event(
+        store,
+        crate::engine::kinds::REVIEW_RECORDED,
+        None,
+        Some(unit),
+        serde_json::json!({
+            "review_id": super::review_id(unit, n), "unit": unit, "role": role, "reviewer": reviewer, "model": model, "family": family, "tree": commit, "paths": paths, "findings": findings, "pass": row.exit_code == 0
+        }),
+    )?;
+    Ok(())
 }
 pub fn record_stage(store: &Path, kind: &str, model: &str, ok: bool) -> Res<()> {
     if !["astra", "second_review"].contains(&kind) {

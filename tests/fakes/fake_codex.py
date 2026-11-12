@@ -9,6 +9,7 @@ with exit, silent, not-json, no-result, empty-result or <code>:<message>. Method
 before reading anything, as when the `app-server` command line is rejected.
 --fake-interrupt-gate=<path> acknowledges an interrupt but waits for that file before
 sending turn/completed; other callers keep the existing interrupt-delay behaviour.
+--fake-script=<path> selects replies by prompt substring; --fake-log=<path> logs requests.
 """
 import json
 import os
@@ -37,6 +38,11 @@ if '--version' in sys.argv:
         with open(option('version-holder'), 'w') as f:
             f.write(str(holder.pid))
     sys.exit(int(option('version-exit', '0')))
+script_path = option('script')
+script = []
+if script_path:
+    with open(script_path, encoding='utf-8') as script_file:
+        script = json.load(script_file)
 broken_method, _, breakage = option('break').partition(':')
 if broken_method == 'start':
     sys.exit(2)
@@ -49,7 +55,7 @@ barrier_count = 0
 
 
 def log_record(method, params):
-    path = os.getenv('FAKE_CODEX_LOG')
+    path = option('log') or os.getenv('FAKE_CODEX_LOG')
     if not path:
         return
     with log_lock:
@@ -164,74 +170,76 @@ for line in sys.stdin:
         # extreme-mode end
         thread_id, text = params['threadId'], params['input'][0]['text']
         turn_id = thread_id + '-turn'
-        if 'HANGREQ' in text:
+        script_entry = next((entry for entry in script if entry['match'] in text), None)
+        if script_entry is None and 'HANGREQ' in text:
             continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
-        if 'CRASH' in text:
-            sys.exit(7)
-        if 'HANG' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            continue
-        if 'BARRIER' in text:
-            with barrier:
-                barrier_count += 1
-                barrier.notify_all()
-            def finish_barrier(tid=thread_id, turn=turn_id, extra='EXTRA' in text):
+        if script_entry is None:
+            if 'CRASH' in text:
+                sys.exit(7)
+            if 'HANG' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                continue
+            if 'BARRIER' in text:
                 with barrier:
-                    ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
-                if ready:
-                    if extra:
-                        send({'method': 'test/other-turn', 'params': {'threadId': tid, 'turnId': 'other-turn'}})
-                        send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': tid, 'status': 'starting'}})
-                        send({'method': 'test/extra', 'params': {'threadId': tid, 'turnId': turn}})
-                    item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
-                    complete(tid, turn)
-                else:
-                    complete(tid, turn, 'failed', {'message': 'barrier timeout'})
-            threading.Thread(target=finish_barrier, daemon=True).start()
-            continue
-        if 'WAIT_FOR_INTERRUPT' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            def expire_wait(tid=thread_id, turn=turn_id):
-                time.sleep(60)
-                if pending_turns.pop(turn, None):
-                    complete(tid, turn, 'failed', {'message': 'interrupt timeout'})
-            threading.Thread(target=expire_wait, daemon=True).start()
-            continue
-        if 'SLOW' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            def finish_slow(tid=thread_id, turn=turn_id):
-                time.sleep(2)
-                if pending_turns.pop(turn, None):
-                    item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'slow'})
-                    complete(tid, turn)
-            threading.Thread(target=finish_slow, daemon=True).start()
-            continue
-        if 'APPROVAL' in text:
-            pending_turns['approval'] = (thread_id, turn_id)
-            send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
-            continue
-        if 'ODDSTATUS' in text:
-            complete(thread_id, turn_id, 'succeeded')
-            continue
-        if 'NOSTATUS' in text:
-            complete(thread_id, turn_id, None)
-            continue
-        if 'ODDFAILURE' in text:
-            complete(thread_id, turn_id, 'cancelled', {'message': 'kept', 'codexErrorInfo': 'other'})
-            continue
-        if 'BADMODEL' in text:
-            body = json.dumps({'type': 'error', 'status': 400, 'error': {'type': 'invalid_request_error', 'message': 'not supported', 'code': 'model_not_found'}})
-            complete(thread_id, turn_id, 'failed', {'message': body, 'codexErrorInfo': 'other'})
-            continue
-        if 'AUTH' in text:
-            complete(thread_id, turn_id, 'failed', {'message': 'auth', 'codexErrorInfo': 'AuthError'})
-            continue
-        if 'LIMIT' in text:
-            error = {'message': 'You have hit your usage limit.', 'codexErrorInfo': 'usageLimitExceeded'}
-            send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
-            complete(thread_id, turn_id, 'failed', error)
-            continue
+                    barrier_count += 1
+                    barrier.notify_all()
+                def finish_barrier(tid=thread_id, turn=turn_id, extra='EXTRA' in text):
+                    with barrier:
+                        ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
+                    if ready:
+                        if extra:
+                            send({'method': 'test/other-turn', 'params': {'threadId': tid, 'turnId': 'other-turn'}})
+                            send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': tid, 'status': 'starting'}})
+                            send({'method': 'test/extra', 'params': {'threadId': tid, 'turnId': turn}})
+                        item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
+                        complete(tid, turn)
+                    else:
+                        complete(tid, turn, 'failed', {'message': 'barrier timeout'})
+                threading.Thread(target=finish_barrier, daemon=True).start()
+                continue
+            if 'WAIT_FOR_INTERRUPT' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                def expire_wait(tid=thread_id, turn=turn_id):
+                    time.sleep(60)
+                    if pending_turns.pop(turn, None):
+                        complete(tid, turn, 'failed', {'message': 'interrupt timeout'})
+                threading.Thread(target=expire_wait, daemon=True).start()
+                continue
+            if 'SLOW' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                def finish_slow(tid=thread_id, turn=turn_id):
+                    time.sleep(2)
+                    if pending_turns.pop(turn, None):
+                        item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'slow'})
+                        complete(tid, turn)
+                threading.Thread(target=finish_slow, daemon=True).start()
+                continue
+            if 'APPROVAL' in text:
+                pending_turns['approval'] = (thread_id, turn_id)
+                send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
+                continue
+            if 'ODDSTATUS' in text:
+                complete(thread_id, turn_id, 'succeeded')
+                continue
+            if 'NOSTATUS' in text:
+                complete(thread_id, turn_id, None)
+                continue
+            if 'ODDFAILURE' in text:
+                complete(thread_id, turn_id, 'cancelled', {'message': 'kept', 'codexErrorInfo': 'other'})
+                continue
+            if 'BADMODEL' in text:
+                body = json.dumps({'type': 'error', 'status': 400, 'error': {'type': 'invalid_request_error', 'message': 'not supported', 'code': 'model_not_found'}})
+                complete(thread_id, turn_id, 'failed', {'message': body, 'codexErrorInfo': 'other'})
+                continue
+            if 'AUTH' in text:
+                complete(thread_id, turn_id, 'failed', {'message': 'auth', 'codexErrorInfo': 'AuthError'})
+                continue
+            if 'LIMIT' in text:
+                error = {'message': 'You have hit your usage limit.', 'codexErrorInfo': 'usageLimitExceeded'}
+                send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
+                complete(thread_id, turn_id, 'failed', error)
+                continue
         delay = re.search(r'^FAKE_DELAY_MS[ \t]+(\d+)[ \t]*$', text, flags=re.M)
         delay_ms = int(delay.group(1)) if delay else 0
         gate = re.search(r'^FAKE_GATE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
@@ -239,7 +247,7 @@ for line in sys.stdin:
         # extreme-mode begin
         wait_file = re.search(r'^WAIT_FILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
         # extreme-mode end
-        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file):
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file, script_entry=script_entry):
             # extreme-mode begin
             if wait_file:
                 deadline = time.monotonic() + 30
@@ -323,6 +331,9 @@ for line in sys.stdin:
                 final = 'not json'
             elif params.get('outputSchema') and 'WRONGSHAPE' in text:
                 final = json.dumps({'wrong': 'shape'})
+            if script_entry is not None:
+                reply = script_entry['reply']
+                final = reply if isinstance(reply, str) else json.dumps(reply)
             item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
             complete(thread_id, turn_id)
         if delay_ms or gate_path or wait_file:

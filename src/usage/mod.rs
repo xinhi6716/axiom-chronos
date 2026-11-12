@@ -10,6 +10,7 @@ pub mod price;
 pub mod extensions;
 // r9-p5b end
 pub mod quota;
+pub mod review_stats;
 mod report;
 mod scan;
 
