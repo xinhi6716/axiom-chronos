@@ -17,6 +17,45 @@ use std::{
     time::Duration,
 };
 
+// Preserve the original script bytes, including its single CRLF.
+const RENDER_PAGE_PY: &str = concat!(r##"import hashlib
+import json
+import sys
+
+try:
+    import pypdfium2 as pdfium
+except ImportError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(3)
+
+pdf_path, expected, page_arg, scale_arg, out = sys.argv[1:]
+try:
+    with open(pdf_path, 'rb') as f:
+        hasher = hashlib.sha256()
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            hasher.update(block)
+        digest = hasher.hexdigest()
+except OSError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(4)
+if digest.lower() != expected.lower():
+    sys.exit(5)
+try:
+    pdf = pdfium.PdfDocument(pdf_path)
+    page_number = int(page_arg)
+    if page_number < 1 or page_number > len(pdf):
+        sys.exit(6)
+    page = pdf[page_number - 1]
+    width, height = page.get_size()
+    rotation = page.get_rotation()
+    image = page.render(scale=float(scale_arg)).to_pil()
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(4)"##, "\r\n", r##"image.save(out, format='PNG')
+print(json.dumps(dict(path=out, width_px=image.width, height_px=image.height,
+                      page_width_pt=width, page_height_pt=height, rotation=rotation)))
+"##);
+
 fn io(e: impl std::fmt::Display) -> Failure {
     Failure::new("io", e.to_string())
 }
@@ -257,7 +296,7 @@ impl PageRenderer for PdfiumProcess {
         scale: f32,
         out: &Path,
     ) -> Res<PageImage> {
-        const SCRIPT: &str = include_str!("render_page.py");
+        const SCRIPT: &str = RENDER_PAGE_PY;
         fs::create_dir_all(&self.script_dir).map_err(io)?;
         let hash = crate::seams::sha256_hex(SCRIPT.as_bytes());
         let script = self
@@ -578,7 +617,7 @@ mod tests {
                 .kind,
             "corrupt_pdf"
         );
-        let hash = crate::seams::sha256_hex(include_str!("render_page.py").as_bytes());
+        let hash = crate::seams::sha256_hex(RENDER_PAGE_PY.as_bytes());
         assert!(d
             .path()
             .join("cache")
