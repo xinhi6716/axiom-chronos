@@ -212,14 +212,7 @@ fn disagreement_between_text_and_table_is_located_and_blocking() {
     };
     let report = c.report(&[table]);
     assert!(!report.passed);
-    assert!(
-        report
-            .issues
-            .iter()
-            .any(|i| i.kind == IntegrityKind::Inconsistent
-                && (i.location == "tab:t1/r0c0" || i.location == "abstract")),
-        "{report:?}"
-    );
+    issue(&report, IntegrityKind::Inconsistent, "tab:t1/r0c0");
 }
 
 #[test]
@@ -317,4 +310,201 @@ fn verification_recomputes_mean_and_uses_half_unit_precision() {
         !result.ok,
         "2.54 is beyond half a tenth from 2.4: {result:?}"
     );
+}
+
+fn table_case(c: &mut Case, cells: Vec<Vec<&str>>) -> RenderedTable {
+    c.ms.tables.push(TableSpec {
+        id: "t1".into(),
+        artifact: "data.csv".into(),
+        columns: vec![TableColumn {
+            column: "time".into(),
+            header: "Time".into(),
+            precision: 1,
+        }],
+        caption: Paragraph {
+            id: "tc".into(),
+            text: "Time results".into(),
+            claims: vec![],
+        },
+    });
+    RenderedTable {
+        id: "t1".into(),
+        latex: String::new(),
+        cells: cells
+            .into_iter()
+            .map(|row| row.into_iter().map(str::to_owned).collect())
+            .collect(),
+        headers: vec!["Time".into()],
+        units: vec![Some("s".into())],
+        width_mm: 20.0,
+    }
+}
+
+#[test]
+fn table_cells_are_sourced_only_by_their_data_cell_or_verified_quantity() {
+    let mut c = Case::new();
+    let mut table = table_case(&mut c, vec![vec!["2.4"], vec!["2.6"]]);
+    let report = c.report(&[table.clone()]);
+    assert!(report.passed, "{report:?}");
+    table.cells[0][0] = "2.6".into(); // The other row does not source this cell.
+    table.cells[1][0] = "87.0".into(); // A different data column does not source it either.
+    let report = c.report(&[table]);
+    issue(&report, IntegrityKind::UnsourcedNumber, "tab:t1/r0c0");
+    issue(&report, IntegrityKind::UnsourcedNumber, "tab:t1/r1c0");
+    let mut c = Case::new();
+    let mut table = table_case(&mut c, vec![vec!["2.5"]]);
+    assert!(c.report(&[table.clone()]).passed); // Matches verified mean, not row 0.
+    c.bundle.quantities[0].value = 9.0; // A used but unverified quantity cannot source it.
+    table.cells[0][0] = "9.0".into();
+    issue(
+        &c.report(&[table]),
+        IntegrityKind::UnsourcedNumber,
+        "tab:t1/r0c0",
+    );
+}
+
+#[test]
+fn caption_and_table_cell_literals_are_located() {
+    let mut c = Case::new();
+    let table = table_case(&mut c, vec![vec!["observed 73"]]);
+    c.ms.tables[0].caption.text = "Results from 73 participants".into();
+    let report = c.report(&[table]);
+    issue(&report, IntegrityKind::UnsourcedNumber, "tab:t1/caption");
+    issue(&report, IntegrityKind::UnsourcedNumber, "tab:t1/r0c0");
+}
+
+#[test]
+fn literal_years_heading_numbers_and_prose_ordinals_are_not_exempt() {
+    for text in [
+        "in 2020",
+        "[@unknown]2020",
+        "table 73 participants",
+        "section 73 participants",
+    ] {
+        let mut c = Case::new();
+        c.ms.sections[0].paragraphs[0].text = text.into();
+        issue(
+            &c.report(&[]),
+            IntegrityKind::UnsourcedNumber,
+            "sec:s1/p:p1",
+        );
+    }
+    let mut c = Case::new();
+    c.ms.sections[0].heading = "1 Results for 73 participants".into();
+    issue(
+        &c.report(&[]),
+        IntegrityKind::UnsourcedNumber,
+        "sec:s1/heading",
+    );
+}
+
+#[test]
+fn dangling_tokens_are_reported_at_the_paragraph() {
+    for token in [
+        "{{q:unknown}}",
+        "[@unknown]",
+        "{{fig:unknown}}",
+        "{{tab:unknown}}",
+        "{{sec:unknown}}",
+    ] {
+        let mut c = Case::new();
+        c.ms.sections[0].paragraphs[0].text = token.into();
+        issue(&c.report(&[]), IntegrityKind::Dangling, "sec:s1/p:p1");
+    }
+}
+
+#[test]
+fn missing_n_and_test_propagate_to_check() {
+    let mut c = Case::new();
+    c.bundle.quantities[0].p_value = Some(0.03);
+    let report = c.report(&[]);
+    issue(&report, IntegrityKind::MissingN, "abstract");
+    issue(&report, IntegrityKind::MissingTest, "abstract");
+}
+
+#[test]
+fn ci_level_boundaries_are_invalid_and_percentage_is_rounded() {
+    let c = Case::new();
+    let mut q = c.bundle.quantities[0].clone();
+    for level in [0.0, 1.0] {
+        q.uncertainty = Some(Uncertainty::Ci {
+            level,
+            low: 2.1,
+            high: 2.9,
+        });
+        semantic_issue(
+            &q,
+            "confidence interval {{q:q1}}",
+            IntegrityKind::StatSemantics,
+        );
+    }
+    for (level, expected) in [(0.07, "7\\%"), (0.95, "95\\%")] {
+        q.uncertainty = Some(Uncertainty::Ci {
+            level,
+            low: 2.1,
+            high: 2.9,
+        });
+        assert!(
+            quantities::render(&q).contains(expected),
+            "{}",
+            quantities::render(&q)
+        );
+    }
+}
+
+#[test]
+fn render_rounds_at_each_precision_and_escapes_latex() {
+    let c = Case::new();
+    let mut q = c.bundle.quantities[0].clone();
+    q.value = 2.54;
+    for (precision, expected) in [(0, "3 s"), (1, "2.5 s"), (2, "2.54 s")] {
+        q.precision = precision;
+        assert_eq!(quantities::render(&q), expected);
+    }
+    q.unit = Some("%_&".into());
+    q.test = Some("a%_&b".into());
+    assert_eq!(quantities::render(&q), "2.54 \\%\\_\\& a\\%\\_\\&b");
+}
+
+#[test]
+fn verify_aggregates_rows_and_invalid_data() {
+    let c = Case::new();
+    let mut q = c.bundle.quantities[0].clone();
+    for (aggregate, value) in [
+        (Aggregate::Count, 2.0),
+        (Aggregate::Sum, 5.08),
+        (Aggregate::Min, 2.44),
+        (Aggregate::Max, 2.64),
+        (Aggregate::Median, 2.54),
+        (Aggregate::Sd, (0.02_f64).sqrt()),
+        (Aggregate::Se, 0.1),
+    ] {
+        q.precision = 2;
+        q.value = value;
+        q.locator.aggregate = Some(aggregate);
+        let result = quantities::verify(&c.bundle, c.root(), &q).unwrap();
+        assert!(result.ok, "{result:?}");
+        assert!((result.recomputed.unwrap() - value).abs() < 1e-10);
+    }
+    q.locator.aggregate = None;
+    q.locator.row = Some(1);
+    q.value = 2.64;
+    assert!(quantities::verify(&c.bundle, c.root(), &q).unwrap().ok);
+    q.locator.column = Some("missing".into());
+    let result = quantities::verify(&c.bundle, c.root(), &q).unwrap();
+    assert!(!result.ok && result.recomputed.is_none());
+    let data = b"time [s]\nnot-a-number\n";
+    fs::write(c.root().join("nonnumeric.csv"), data).unwrap();
+    let mut bundle = c.bundle.clone();
+    bundle.artifacts.push(ArtifactRef {
+        path: "nonnumeric.csv".into(),
+        sha256: axiom::seams::sha256_hex(data),
+        kind: ArtifactKind::Dataset,
+        producer: "study".into(),
+    });
+    q.locator.artifact = "nonnumeric.csv".into();
+    q.locator.column = Some("time".into());
+    q.locator.row = Some(0);
+    let result = quantities::verify(&bundle, c.root(), &q).unwrap();
+    assert!(!result.ok && result.recomputed.is_none());
 }
