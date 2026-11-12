@@ -429,10 +429,7 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
     out.sources.push(status("usage", usage_samples));
     let mut dirs = Vec::new();
     let mut goal_samples = 0;
-    for path in paths(&inputs.home.join("goals"), &mut out.gaps, "goal")
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-    {
+    for path in archived_paths(&inputs.home.join("goals"), &[".json"], &mut out.gaps, "goal") {
         goal_samples += 1;
         let loc = path.display().to_string();
         let Some(goal): Option<Goal> = json_file(&path, "goal", &mut out.gaps) else {
@@ -603,11 +600,9 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
         }
         let handoffs = store.join("handoffs");
         let wish = handoffs.join("wish.json");
-        let mut files = if wish.exists() { vec![wish] } else { vec![] };
+        let mut files = if crate::storage::archive::exists(&wish) { vec![wish] } else { vec![] };
         files.extend(
-            paths(&handoffs.join("module"), &mut out.gaps, "handoff")
-                .into_iter()
-                .filter(|p| p.extension().is_some_and(|e| e == "json")),
+            archived_paths(&handoffs.join("module"), &[".json"], &mut out.gaps, "handoff"),
         );
         for path in files {
             handoff_samples += 1;
