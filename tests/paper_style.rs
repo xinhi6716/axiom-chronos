@@ -39,6 +39,7 @@ fn style_accepts_wording_and_existing_literal() {
     let before = manuscript("before");
     assert!(style::check_style_only(&before, &manuscript("wording")).is_ok());
     assert!(style::check_style_only(&before, &manuscript("existing_literal")).is_ok());
+    assert!(style::check_style_only(&before, &manuscript("caption_rewritten")).is_ok());
 }
 
 macro_rules! style_rejection {
@@ -93,6 +94,37 @@ style_rejection!(
     V::StructureChanged
 );
 
+style_rejection!(
+    style_rejects_changed_table_column,
+    "table_column_changed",
+    V::StructureChanged
+);
+
+#[test]
+fn style_rejects_added_paragraph_as_structure_change() {
+    let errors =
+        style::check_style_only(&manuscript("before"), &manuscript("paragraph_added")).unwrap_err();
+    contains_kind(&errors, V::StructureChanged);
+    assert!(!errors.iter().any(|v| v.kind == V::NewClaim));
+}
+
+#[test]
+fn style_rejects_literal_numbers_in_title_and_heading() {
+    for (fixture, location) in [
+        ("title_literal", "title"),
+        ("heading_literal", "sec:results/heading"),
+    ] {
+        let errors =
+            style::check_style_only(&manuscript("before"), &manuscript(fixture)).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|v| v.kind == V::LiteralNumber && v.location == location),
+            "{errors:?}"
+        );
+    }
+}
+
 #[test]
 fn style_collects_violations() {
     let errors = style::check_style_only(&manuscript("before"), &manuscript("two_violations"))
@@ -114,6 +146,18 @@ fn revision_allows_restructure_with_documented_removal() {
     let result = style::check_revision(&before, &after, &bundle(), &[]);
     assert!(result.is_err());
     contains_kind(&result.unwrap_err(), V::ClaimChanged);
+    let reason_only = [Change {
+        location: "results".into(),
+        kind: ChangeKind::Removed,
+        reason: "removed C1 as unsupported".into(),
+    }];
+    assert!(style::check_revision(&before, &after, &bundle(), &reason_only).is_ok());
+    let wrong_kind = [Change {
+        kind: ChangeKind::Edited,
+        ..reason_only[0].clone()
+    }];
+    let errors = style::check_revision(&before, &after, &bundle(), &wrong_kind).unwrap_err();
+    contains_kind(&errors, V::ClaimChanged);
 }
 
 macro_rules! revision_rejection {
@@ -153,6 +197,28 @@ revision_rejection!(
     V::LiteralNumber
 );
 
+revision_rejection!(
+    revision_rejects_removed_hedge,
+    "revision_hedge_removed",
+    V::StrengthenedClaim
+);
+revision_rejection!(
+    revision_rejects_added_booster,
+    "revision_booster_added",
+    V::StrengthenedClaim
+);
+
+#[test]
+fn revision_allows_hedge_moved_between_claim_paragraphs() {
+    assert!(style::check_revision(
+        &manuscript("before"),
+        &manuscript("revision_hedge_moved"),
+        &bundle(),
+        &[]
+    )
+    .is_ok());
+}
+
 fn no_evasion_terms(text: &str) {
     let lower = text.to_lowercase();
     for word in [
@@ -169,15 +235,32 @@ fn no_evasion_terms(text: &str) {
 
 #[test]
 fn instructions_include_audit_humanizer_and_invariants() {
+    let asset = axiom::engine::asset("paper/prompts/style.md").expect("style prompt asset");
+    for phrase in ["kind \"style\"", "{{q:", "[@", "hedge"] {
+        assert!(asset.contains(phrase), "missing {phrase} in style asset");
+    }
+    let lower_asset = asset.to_lowercase();
+    assert!(lower_asset.find("audit").unwrap() < lower_asset.find("rewrite").unwrap());
     let prompt = style::style_instructions();
     let lower = prompt.to_lowercase();
     for word in ["change_log", "style", "claim", "number", "citation"] {
         assert!(lower.contains(word), "missing {word}");
     }
-    assert!(prompt.contains(
-        axiom::engine::asset("paper/academic-humanizer/SKILL.md").expect("humanizer asset")
-    ));
-    no_evasion_terms(&prompt);
+    let skill_text =
+        axiom::engine::asset("paper/academic-humanizer/SKILL.md").expect("humanizer asset");
+    assert!(prompt.contains(skill_text));
+    no_evasion_terms(&prompt.replace(skill_text, ""));
+    for word in [
+        "detector",
+        "evade",
+        "evasion",
+        "undetectable",
+        "bypass",
+        "ai detect",
+        "ai-detect",
+    ] {
+        assert!(!lower.contains(word), "contains {word}");
+    }
     let revise = style::revise_instructions();
     assert!(!revise.trim().is_empty());
     assert_eq!(
@@ -266,6 +349,7 @@ fn policy_catalog_and_lookup() {
         assert!(date.is_match(&policy.fetched_at));
         assert!(hash.is_match(&policy.sha256));
         assert!(!policy.placement.trim().is_empty());
+        assert!(!policy.required_items.is_empty());
         assert_eq!(
             disclosure::policy_for(&format!("  {}  ", policy.publisher.to_uppercase())),
             Some(policy.clone())
@@ -287,6 +371,13 @@ fn disclosure_lists_only_successful_uses_and_policy() {
         Some("never-ran-model"),
         "other",
         Status::Failed,
+    ));
+    records.push(pass(
+        PassId::FableStyle,
+        "timed-out",
+        Some("timed-out-model"),
+        "other",
+        Status::Timeout,
     ));
     let reviewer = ModelUse {
         pass: None,
@@ -340,6 +431,8 @@ fn disclosure_lists_only_successful_uses_and_policy() {
     }
     assert!(!result.text.contains("never-ran-model"));
     assert!(!result.uses.iter().any(|u| u.model == "never-ran-model"));
+    assert!(!result.text.contains("timed-out-model"));
+    assert!(!result.uses.iter().any(|u| u.model == "timed-out-model"));
     let lower = result.text.to_lowercase();
     assert!(lower.contains("author") && lower.contains("review") && lower.contains("responsib"));
 }
@@ -381,6 +474,37 @@ fn disclosure_rejects_unknown_prohibited_and_missing_models() {
             .unwrap_err()
             .kind,
         "missing_model"
+    );
+}
+
+#[test]
+fn disclosure_uses_injected_policy_catalog() {
+    let mut prohibited = disclosure::policies().unwrap().remove(0);
+    prohibited.publisher = "Springer Nature".into();
+    prohibited.policy = PolicyKind::Prohibited;
+    let mut allowed = prohibited.clone();
+    allowed.publisher = "Allowed Publisher".into();
+    allowed.policy = PolicyKind::Allowed;
+    let list = [prohibited, allowed.clone()];
+    assert_eq!(
+        disclosure::generate_with_policies(&list, &passes(), None, &journal(Some("  sPrInGeR  ")))
+            .unwrap_err()
+            .kind,
+        "policy_prohibits"
+    );
+    let result = disclosure::generate_with_policies(
+        &list,
+        &passes(),
+        None,
+        &journal(Some("  ALLOWED PUBLISHER  ")),
+    )
+    .unwrap();
+    assert_eq!(result.policy, allowed);
+    assert_eq!(
+        disclosure::generate_with_policies(&list, &passes(), None, &journal(Some("missing")))
+            .unwrap_err()
+            .kind,
+        "policy_unknown"
     );
 }
 
