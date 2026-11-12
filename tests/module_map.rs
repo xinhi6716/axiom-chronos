@@ -1,4 +1,6 @@
-use axiom::orch::{lint_map, module_context, parse_map, run, MAX_CONTEXT_BYTES};
+use axiom::orch::{
+    lint_map, module_context, parse_map, render_module_context, run, MAX_CONTEXT_BYTES,
+};
 use std::path::Path;
 
 fn section(id: &str, paths: &str, deps: &str, extra: &str, command: &str) -> String {

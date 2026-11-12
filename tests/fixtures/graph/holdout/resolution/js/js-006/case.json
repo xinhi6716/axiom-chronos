@@ -1,0 +1,16 @@
+{
+  "id": "js-006",
+  "language": "js",
+  "feature": "dynamic_call",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 2,
+      "name": "registry",
+      "nth": 1,
+      "expect": {
+        "resolution": "unresolved"
+      }
+    }
+  ]
+}

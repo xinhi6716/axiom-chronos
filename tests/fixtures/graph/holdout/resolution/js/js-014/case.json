@@ -1,0 +1,17 @@
+{
+  "id": "js-014",
+  "language": "js",
+  "feature": "re_export",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 2,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.js#function:measure"
+      }
+    }
+  ]
+}

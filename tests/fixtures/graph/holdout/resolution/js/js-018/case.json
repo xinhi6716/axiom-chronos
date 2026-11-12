@@ -1,0 +1,17 @@
+{
+  "id": "js-018",
+  "language": "js",
+  "feature": "method",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 4,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.js#method:Worker.measure"
+      }
+    }
+  ]
+}

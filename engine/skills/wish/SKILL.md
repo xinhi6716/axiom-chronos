@@ -9,6 +9,8 @@ argument-hint: <wish>
 
 Wish: $ARGUMENTS
 
+Launch context arrives with the goal notice.
+
 Close with the bridge `goal` tool: `done` when carried out and verified, `blocked` only when work needs something only the user has, such as a credential, payment or permission to delete their data.
 
 You rule, verify and report; building goes to `chronos:dispatcher`, Astra plans to `chronos:astra`.

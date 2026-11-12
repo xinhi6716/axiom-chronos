@@ -1,0 +1,41 @@
+{
+  "project": "air-quality",
+  "entries": [
+    {
+      "unit": "air-quality-implementation",
+      "title": "Trace how a sensor offset affects the daily reading.",
+      "summary": "Calibration is applied before aggregation",
+      "body": "Apply the calibration offset. Calibration is applied before aggregation.",
+      "symbols": [
+        "src/air_quality.jsx#function:dailyReading"
+      ],
+      "files": [
+        "src/air_quality.jsx"
+      ],
+      "wish": "Trace how a sensor offset affects the daily reading."
+    }
+  ],
+  "research": [
+    {
+      "path": "research/air-quality.md",
+      "text": "# air-quality study\n\nCalibration is applied before aggregation.\nThe observation is recorded against the implementation for audit.\n",
+      "links": [
+        {
+          "to": "sym:src/air_quality.jsx#function:dailyReading",
+          "quote": "Calibration is applied before aggregation.",
+          "line": 3
+        }
+      ]
+    }
+  ],
+  "constraints": "# Constraints\n\nApply the calibration offset.\n",
+  "aliases": [
+    [
+      "dailyReading",
+      "air quality"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: apply the calibration offset."
+  ]
+}

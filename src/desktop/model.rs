@@ -2,7 +2,7 @@
 use super::i18n::{translate, Lang, Table};
 use crate::base::{Failure, Res};
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,6 +14,8 @@ pub use feed::*;
 pub use undo::*;
 pub use menu::*;
 pub use board::*;
+#[doc(hidden)]
+pub use super::live::smoke_read;
 #[cfg(test)]
 mod accept;
 
@@ -326,6 +328,7 @@ pub struct MemoryEntry {
     pub confirmed: SharedString,
     /// A person rewrote the text, so it is no longer what the engine first wrote.
     pub corrected: bool,
+    pub graph: Option<crate::graph::desktop::GraphRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,6 +495,7 @@ pub struct AppState {
     pub evolve: EvolveState,
     pub view: Screen,
     pub runs: Vec<Run>,
+    pub mesh_graph: BTreeMap<String, crate::graph::desktop::GraphRef>,
     pub current: Option<usize>,
     pub selection: Selection,
     pub memory: Vec<MemoryEntry>,

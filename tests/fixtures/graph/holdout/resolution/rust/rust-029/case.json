@@ -1,0 +1,17 @@
+{
+  "id": "rust-029",
+  "language": "rust",
+  "feature": "glob",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 3,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.rs#function:render"
+      }
+    }
+  ]
+}

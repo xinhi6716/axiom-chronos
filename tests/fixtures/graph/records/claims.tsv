@@ -1,0 +1,3 @@
+unit	attempt	scope	started
+u	attempt-a	src/main.rs	then
+u	attempt-b	future/new.rs src/generated/	later

@@ -1,0 +1,17 @@
+{
+  "id": "ts-015",
+  "language": "ts",
+  "feature": "same_name",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 3,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.ts#function:measure"
+      }
+    }
+  ]
+}

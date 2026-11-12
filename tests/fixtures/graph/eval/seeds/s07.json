@@ -1,0 +1,41 @@
+{
+  "project": "survey",
+  "entries": [
+    {
+      "unit": "survey-implementation",
+      "title": "Trace how unanswered survey items are excluded from scoring.",
+      "summary": "Scoring counts only answered items",
+      "body": "Exclude unanswered items. Scoring counts only answered items.",
+      "symbols": [
+        "src/survey.tsx#function:scoreAnswers"
+      ],
+      "files": [
+        "src/survey.tsx"
+      ],
+      "wish": "Trace how unanswered survey items are excluded from scoring."
+    }
+  ],
+  "research": [
+    {
+      "path": "research/survey.md",
+      "text": "# survey study\n\nScoring counts only answered items.\nThe observation is recorded against the implementation for audit.\n",
+      "links": [
+        {
+          "to": "sym:src/survey.tsx#function:scoreAnswers",
+          "quote": "Scoring counts only answered items.",
+          "line": 3
+        }
+      ]
+    }
+  ],
+  "constraints": "# Constraints\n\nExclude unanswered items.\n",
+  "aliases": [
+    [
+      "scoreAnswers",
+      "survey"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: exclude unanswered items."
+  ]
+}

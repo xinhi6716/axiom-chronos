@@ -1,0 +1,16 @@
+{
+  "id": "python-006",
+  "language": "python",
+  "feature": "dynamic_call",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 2,
+      "name": "registry",
+      "nth": 1,
+      "expect": {
+        "resolution": "unresolved"
+      }
+    }
+  ]
+}

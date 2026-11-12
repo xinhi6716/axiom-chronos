@@ -1,0 +1,16 @@
+{
+  "id": "rust-010",
+  "language": "rust",
+  "feature": "glob_ambiguous",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 5,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "ambiguous"
+      }
+    }
+  ]
+}

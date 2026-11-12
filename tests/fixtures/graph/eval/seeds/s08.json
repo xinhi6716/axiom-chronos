@@ -1,0 +1,29 @@
+{
+  "project": "notifications",
+  "entries": [
+    {
+      "unit": "notifications-implementation",
+      "title": "Find how notification recipients are deduplicated.",
+      "summary": "Recipients are deduplicated before delivery",
+      "body": "Keep first occurrence order. Recipients are deduplicated before delivery.",
+      "symbols": [
+        "src/notifications.jsx#function:uniqueRecipients"
+      ],
+      "files": [
+        "src/notifications.jsx"
+      ],
+      "wish": "Find how notification recipients are deduplicated."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nKeep first occurrence order.\n",
+  "aliases": [
+    [
+      "uniqueRecipients",
+      "notifications"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: keep first occurrence order."
+  ]
+}

@@ -124,6 +124,7 @@ impl Memory {
             [],
         )
         .map_err(err)?;
+        crate::graph::store::migrate(&tx)?;
         tx.commit().map_err(err)
     }
     fn connect(&self) -> Res<Connection> {
@@ -133,6 +134,12 @@ impl Memory {
         Ok(db)
     }
     pub fn record(&self, args: &Record) -> Res<Value> {
+        self.record_impl(args, None)
+    }
+    pub fn record_typed(&self, args: &Record, typed: &crate::graph::TypedWrite) -> Res<Value> {
+        self.record_impl(args, Some(typed))
+    }
+    fn record_impl(&self, args: &Record, typed: Option<&crate::graph::TypedWrite>) -> Res<Value> {
         base::require_slug("project", &args.project)?;
         for (name, value) in [
             ("unit", &args.unit),
@@ -239,16 +246,43 @@ impl Memory {
                 params![now(), id],
             )
             .map_err(err)?;
+            let graph = typed
+                .map(|t| crate::graph::store::apply_typed(&tx, root, id, t))
+                .transpose()?;
+            if graph.is_some() {
+                tx.execute(
+                    "UPDATE g_meta SET revision=revision+1 WHERE singleton=1",
+                    [],
+                )
+                .map_err(err)?;
+            }
             tx.commit().map_err(err)?;
-            return Ok(
-                json!({"status":"completed", "id":id, "files":files, "duplicate":true, "error":null}),
-            );
+            let mut reply = json!({"status":"completed", "id":id, "files":files, "duplicate":true, "error":null});
+            if let Some(g) = graph {
+                reply["graph"] = json!(g);
+            }
+            return Ok(reply);
         }
         let created = now();
         tx.execute("INSERT INTO entries (project, unit, title, summary, body, symbols, wish, files, project_dir, created, confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)", params![args.project, args.unit, args.title.trim(), args.summary.trim(), args.body.trim(), args.symbols.join(" "), args.wish.trim(), serde_json::to_string(&files).map_err(err)?, args.project_dir, created, created]).map_err(err)?;
         let id = tx.last_insert_rowid();
+        let graph = typed
+            .map(|t| crate::graph::store::apply_typed(&tx, root, id, t))
+            .transpose()?;
+        if graph.is_some() {
+            tx.execute(
+                "UPDATE g_meta SET revision=revision+1 WHERE singleton=1",
+                [],
+            )
+            .map_err(err)?;
+        }
         tx.commit().map_err(err)?;
-        Ok(json!({"status":"completed", "id":id, "files":files, "duplicate":false, "error":null}))
+        let mut reply =
+            json!({"status":"completed", "id":id, "files":files, "duplicate":false, "error":null});
+        if let Some(g) = graph {
+            reply["graph"] = json!(g);
+        }
+        Ok(reply)
     }
     pub fn search(&self, query: &str, project: Option<&str>, limit: i64) -> Res<Value> {
         let terms = query_terms(query);
@@ -491,6 +525,11 @@ impl Memory {
                 }
             }
         }
+        problems.extend(crate::graph::lint::check(
+            &crate::graph::GraphStore::open_existing(&self.home)?
+                .ok_or_else(|| err("memory database missing"))?,
+            project_dir,
+        )?);
         Ok(problems)
     }
 }

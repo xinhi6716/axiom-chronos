@@ -89,6 +89,7 @@ fn full_protocol_session() {
             "memory_search",
             "memory_get",
             "memory_digest",
+            "graph_explore",
             "goal",
             "bridge_status"
         ]
@@ -135,6 +136,66 @@ fn memory_verified_round_trip_and_refusal() {
     );
     let absent = invoke(&b, "memory_search", json!({"query":"unmatchedword"}));
     assert_eq!(absent["structuredContent"]["entries"], json!([]));
+}
+#[test]
+fn graph_explore_and_typed_and_source_records() {
+    let temp = common::temp();
+    fixture(temp.path());
+    let b = Bridge::new(config(temp.path()));
+    let descriptor = tools().as_array().unwrap().iter().find(|v| v["name"] == "graph_explore").unwrap().clone();
+    assert_eq!(descriptor["inputSchema"]["required"], json!(["project_dir"]));
+    let args = json!({"project_dir":temp.path(),"query":"slugify","view":"memory","direction":"out","hops":1,"budget":512});
+    let request: axiom::graph::query::ExploreRequest = serde_json::from_value(args.clone()).unwrap();
+    let explored = invoke(&b, "graph_explore", args);
+    assert_eq!(explored["structuredContent"], axiom::graph::query::explore(temp.path(), &request).unwrap());
+    let record = invoke(&b, "memory_record", json!({"project":"demo","project_dir":temp.path(),"unit":"u1","title":"slugify","summary":"summary","body":"body","wish":"wish","files":["file.txt"],"nodes":[{"key":"unit:w/u","kind":"unit","label":"unit","summary":"","attrs":{},"state":"active"}],"links":[{"kind":"records","to":"unit:w/u"}]}));
+    check(&record, "completed");
+    assert_eq!(record["structuredContent"]["graph"], json!({"nodes":1,"links":1}));
+    fs::write(temp.path().join("research.md"), "a research quote").unwrap();
+    let source = invoke(&b, "memory_record", json!({"mode":"source","project_dir":temp.path(),"source":{"artifact":"research.md","links":[{"to":"file:missing.rs","quote":"a research quote"}]}}));
+    check(&source, "completed");
+    assert_eq!(source["structuredContent"]["source"]["nodes_written"], 1);
+    assert_eq!(source["structuredContent"]["source"]["skipped"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn unit_brief_includes_constraints_and_graph_failure_is_nonfatal() {
+    let temp = common::temp();
+    let home = temp.path();
+    let repo = home.join("repo");
+    let store = home.join("orchestrate/demo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::create_dir_all(store.join("inbox")).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+    fs::write(repo.join("tracked.txt"), "fixture").unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/mod.py"), "fixture").unwrap();
+    fs::write(repo.join("CONSTRAINTS.md"), "- keep the boundary\n").unwrap();
+    assert!(std::process::Command::new("git").args(["add", "tracked.txt", "src/mod.py", "CONSTRAINTS.md"]).current_dir(&repo).status().unwrap().success());
+    assert!(std::process::Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"]).current_dir(&repo).status().unwrap().success());
+    let brief = "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n";
+    let brief_path = store.join("unit.brief");
+    fs::write(&brief_path, brief).unwrap();
+    fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm\tpending\t\t\t\t{}\nu2\tm\tpending\t\t\t\t{}\n", brief_path.display(), brief_path.display())).unwrap();
+    fs::write(home.join("memory"), "blocks graph database").unwrap();
+    let log = home.join("codex.log");
+    let wrapper = home.join("logged_codex.py");
+    fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nsys.argv=sys.argv[2:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
+    let mut c = config(home);
+    c.codex = Ok(vec![common::python(), wrapper.to_string_lossy().into_owned(), log.to_string_lossy().into_owned(), common::repo_root().join("tests/fakes/fake_codex.py").to_string_lossy().into_owned()]);
+    let result = invoke(&Bridge::new(c), "codex_run", json!({"project":"demo","unit":"u1","cwd":repo,"role":"terra"}));
+    check(&result, "completed");
+    assert!(result["structuredContent"]["graph_sync"]["error"].is_object(), "{result}");
+    assert_eq!(fs::read_to_string(brief_path).unwrap(), brief);
+    let events: Vec<Value> = fs::read_to_string(log).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let turn = events.iter().find(|event| event["method"] == "turn/start").unwrap();
+    assert_eq!(turn["params"]["input"][0]["text"], format!("CONSTRAINTS\n- keep the boundary\n\n{brief}"));
+    fs::remove_file(home.join("memory")).unwrap();
+    let synced = invoke(&Bridge::new(config(home)), "codex_run", json!({"project":"demo","unit":"u2","cwd":repo,"role":"terra"}));
+    check(&synced, "completed");
+    assert_eq!(synced["structuredContent"]["graph_sync"]["code"]["partial"], false, "{synced}");
+    assert!(synced["structuredContent"]["graph_sync"]["orch"]["nodes_written"].as_u64().unwrap() > 0, "{synced}");
 }
 #[test]
 fn orch_status_and_failure() {

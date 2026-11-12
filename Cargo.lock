@@ -526,11 +526,13 @@ dependencies = [
  "gpui-kit",
  "libc",
  "libloading",
+ "proc-macro2",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
  "tempfile",
  "windows-sys 0.59.0",
 ]

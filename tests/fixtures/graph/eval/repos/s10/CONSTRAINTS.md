@@ -1,0 +1,3 @@
+# Constraints
+
+Trim surrounding whitespace.

@@ -1067,6 +1067,7 @@ mod tests {
             wish: SharedString::default(),
             confirmed: SharedString::default(),
             corrected: false,
+            graph: None,
         }
     }
 

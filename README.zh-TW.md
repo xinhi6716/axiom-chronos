@@ -12,6 +12,8 @@
 
 對你的程式碼許一個願望。Chronos 會先規劃、切成模組、交給 Codex 施工、由 Claude 審查，一直做到修改驗證完成或確定卡住為止。
 
+程式碼索引為原生實作，不需要外部服務。由於 tree-sitter 在離線環境無法取得，Rust 改用 syn，Python、TypeScript 與 JavaScript 則使用手寫詞法分析器。詳見[圖譜 A/B 量測方案](docs/graph-ab.md)。
+
 **每次 commit 前請檢查 diff。**
 
 <a id="begin"></a>

@@ -72,6 +72,18 @@ Measured with `gpt-5.6-terra` at low effort:
 
 </details>
 
+### Native graph and memory
+
+Chronos also has a native code and memory graph, separate from the optional external CodeGraph integration below. The bridge tool `graph_explore` requires `project_dir` and accepts `project`, `query`, `node`, `view` (`code`, `memory`, or `mixed`, default `mixed`), `direction` (`out`, `in`, or `both`, default `both`), `hops` (0–2, default 2), `budget`, and `refresh`. The response budget is a UTF-8 byte upper bound, default 2400 and clamped to 256–4096 bytes; memory bundles have a separate 1200-byte cap. The response reports freshness, revision, omissions and truncation when space permits.
+
+In the default unit mode, `memory_record` can also take typed `nodes` and `links` arrays alongside the usual record. Each node has `key`, `kind`, `label`, `summary`, `attrs`, `state`, and optional `entry_id`; each link has `kind`, `to`, and optional `from`. In `mode: "source"`, `source` specifies an `artifact` and `links` with `to`, `quote`, and optional `line`.
+
+`axiom graph refresh [--dir <absolute-dir>] [--json]` synchronizes the code index and available orchestration data. `axiom graph explore <query> [--dir <absolute-dir>] [--project <slug>] [--view code|memory|mixed] [--budget <bytes>]` prints a graph packet as JSON. `axiom dream` maintains graph memory; its options include `--dry-run`, `--project`, `--dir`, `--max-changes`, `--max-seconds`, and `--json`.
+
+Constraints are read first from the project root's `CONSTRAINTS.md`, then from `<project store>/constraints.md`. Duplicate entries are removed; paragraphs and bullets with their indented continuations are kept as whole entries in order, within a default 1024-byte budget. The resulting block is prepended to unit-mode briefs. `<project store>/aliases.csv`, with header `canonical,alias`, maps aliases to canonical names for graph queries.
+
+The `UserPromptSubmit` hook supplies a bounded launch context packet with the goal notice, including constraints and relevant graph context when available. It is injected once, recorded as `<wish store>/launch.json`; later prompts do not inject it again. See the [A/B protocol](graph-ab.md) for measurement status.
+
 <a id="configuration"></a>
 
 ## III · Configuration

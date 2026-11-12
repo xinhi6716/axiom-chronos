@@ -1,0 +1,17 @@
+{
+  "id": "js-009",
+  "language": "js",
+  "feature": "re_export_star",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 2,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.js#function:compute"
+      }
+    }
+  ]
+}

@@ -12,7 +12,7 @@ use std::{
 };
 
 pub const BRIDGE: &str = "mcp__plugin_chronos_bridge__";
-pub const TOOLS: [&str; 14] = [
+pub const TOOLS: [&str; 15] = [
     "Agent",
     "Read",
     "Glob",
@@ -25,6 +25,7 @@ pub const TOOLS: [&str; 14] = [
     "mcp__plugin_chronos_bridge__memory_record",
     "mcp__plugin_chronos_bridge__memory_search",
     "mcp__plugin_chronos_bridge__memory_get",
+    "mcp__plugin_chronos_bridge__graph_explore",
     "mcp__plugin_chronos_bridge__memory_digest",
     "mcp__plugin_chronos_bridge__goal",
 ];

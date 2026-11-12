@@ -415,6 +415,58 @@ fn evolve_command(args: &[String]) -> i32 {
         }
     }
 }
+fn graph_command(args: &[String]) -> i32 {
+    use crate::graph::{self, query::{ExploreRequest, View}, types::Direction, GraphStore};
+    let Some(command) = args.first().map(String::as_str) else { return usage("graph: missing command") };
+    if !matches!(command, "refresh" | "explore") { return usage("graph: unknown command") }
+    let mut dir = match std::env::current_dir() { Ok(p) => p, Err(e) => { eprintln!("axiom: {e}"); return 1; } };
+    let (mut json, mut project, mut view, mut budget, mut query) = (false, None, View::Mixed, graph::query::DEFAULT_BUDGET, Vec::new());
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => match value(args, &mut i, "--dir") { Ok(v) => dir = v.into(), Err(e) => return usage(e) },
+            "--json" if command == "refresh" => json = true,
+            "--project" if command == "explore" => match value(args, &mut i, "--project") { Ok(v) => project = Some(v), Err(e) => return usage(e) },
+            "--view" if command == "explore" => match value(args, &mut i, "--view").as_deref() { Ok("code") => view = View::Code, Ok("memory") => view = View::Memory, Ok("mixed") => view = View::Mixed, _ => return usage("--view must be code, memory, or mixed") },
+            "--budget" if command == "explore" => match value(args, &mut i, "--budget").ok().and_then(|v| v.parse::<usize>().ok()) { Some(n) if n > 0 => budget = n, _ => return usage("--budget requires a positive integer") },
+            s if s.starts_with('-') => return usage(format!("unrecognized option: {s}")),
+            s if command == "explore" => query.push(s.to_owned()),
+            _ => return usage("graph refresh: unexpected argument"),
+        }
+        i += 1;
+    }
+    if !dir.is_absolute() || !dir.is_dir() { return usage("--dir must be an absolute directory") }
+    if project.as_deref().is_some_and(|s| base::require_slug("project", s).is_err()) { return usage("--project must be a valid slug") }
+    let home = base::axiom_home();
+    if command == "explore" {
+        if query.is_empty() || query.join(" ").trim().is_empty() { return usage("graph explore: missing query") }
+        let req = ExploreRequest { project_dir: dir, worktree: None, project, query: Some(query.join(" ")), node: None, view, direction: Direction::Both, hops: graph::query::MAX_HOPS, budget, refresh: false };
+        return match graph::query::explore(&home, &req) {
+            Ok(payload) => { println!("{}", serde_json::to_string_pretty(&payload).unwrap()); 0 }
+            Err(e) => { eprintln!("axiom: {}", e.message); 1 }
+        };
+    }
+    let result = (|| -> crate::base::Res<_> {
+        let store = GraphStore::open(&home)?;
+        let report = graph::code::sync(&store, &dir, None, &Default::default())?;
+        let wish_store = if let Some(path) = std::env::var_os("ORCH_STORE").filter(|s| !s.is_empty()) {
+            Some(PathBuf::from(path))
+        } else {
+            let slug = base::slug_for_dir(&dir);
+            orch::current_wish(&home, &slug)?.map(|id| orch::wish_store(&home, &slug, Some(&id))).transpose()?.filter(|path| path.is_dir())
+        };
+        let orch_report = wish_store.map(|path| graph::ingest::orch::sync_orch(&store, &path, &dir)).transpose()?;
+        Ok((report, orch_report))
+    })();
+    match result {
+        Ok((report, orch_report)) => {
+            if json { println!("{}", serde_json::json!({"code": report, "orch": orch_report})); }
+            else { println!("graph refreshed: {} files; revision {}", report.files_seen, report.revision); }
+            0
+        }
+        Err(e) => { eprintln!("axiom: {}", e.message); 1 }
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -471,6 +523,8 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "laya" => crate::laya::pipeline::cli(rest),
         // laya: end
         "evolve" => evolve_command(rest),
+        "dream" => crate::graph::dream::command(rest),
+        "graph" => graph_command(rest),
         "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }

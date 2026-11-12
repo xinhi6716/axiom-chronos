@@ -12,6 +12,7 @@ pub mod desktop;
 pub mod engine;
 pub mod evolve;
 pub mod goal;
+pub mod graph;
 pub mod hook;
 pub mod host;
 pub mod laya;

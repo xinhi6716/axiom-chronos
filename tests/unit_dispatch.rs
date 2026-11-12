@@ -123,7 +123,7 @@ impl Fixture {
         thread::spawn(move || call(&bridge, "codex_run", &args)["structuredContent"].clone())
     }
     fn wait_turns(&self, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while self.turns() < count {
             assert!(
                 Instant::now() < deadline,

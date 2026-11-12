@@ -1,6 +1,7 @@
 use crate::{
     base::{Failure, Res},
     goal,
+    graph::conflicts,
     orch::{self, events},
 };
 use serde::Serialize;
@@ -15,6 +16,8 @@ use std::{
 pub struct ModuleWait {
     pub module: String,
     pub on: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
 }
 #[derive(Serialize, Debug, Clone)]
 pub struct Stuck {
@@ -141,6 +144,16 @@ pub fn claim_ready(store: &Path) -> Res<Vec<String>> {
             return Ok(vec![]);
         }
         let state = states(store)?;
+        let mut active = Vec::new();
+        for m in &map.modules {
+            if state
+                .get(&m.id)
+                .is_some_and(|s| s == events::MODULE_CLAIMED)
+                && !module_verified(store, &m.id)?
+            {
+                active.push(m.clone());
+            }
+        }
         let mut out = vec![];
         for m in map.modules {
             if state
@@ -157,7 +170,7 @@ pub fn claim_ready(store: &Path) -> Res<Vec<String>> {
                     break;
                 }
             }
-            if ready {
+            if ready && conflicts::blocking(store, &m, &active)?.is_none() {
                 events::append_event(
                     store,
                     events::MODULE_CLAIMED,
@@ -165,7 +178,8 @@ pub fn claim_ready(store: &Path) -> Res<Vec<String>> {
                     None,
                     json!({"depends":m.depends}),
                 )?;
-                out.push(m.id);
+                out.push(m.id.clone());
+                active.push(m);
             }
         }
         Ok(out)
@@ -207,6 +221,19 @@ pub fn claim(store: &Path, module: &str) -> Res<()> {
             return Err(Failure::new(
                 "not_ready",
                 format!("unverified dependencies: {}", missing.join(", ")),
+            ));
+        }
+        let claimed = claimed_modules(store)?;
+        let active: Vec<_> = map
+            .modules
+            .iter()
+            .filter(|m| claimed.contains(&m.id))
+            .cloned()
+            .collect();
+        if let Some(conflict) = conflicts::blocking(store, m, &active)? {
+            return Err(Failure::new(
+                "conflict",
+                format!("{}: {}", conflict.b, conflict.reason),
             ));
         }
         events::append_event(
@@ -253,6 +280,16 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
         let mut verified = vec![];
         let mut waiting = vec![];
         let mut stuck = vec![];
+        let mut active = Vec::new();
+        for module in &m.modules {
+            if state
+                .get(&module.id)
+                .is_some_and(|s| s == events::MODULE_CLAIMED)
+                && !module_verified(store, &module.id)?
+            {
+                active.push(module.clone());
+            }
+        }
         for module in &m.modules {
             if module_verified(store, &module.id)? {
                 verified.push(module.id.clone());
@@ -275,6 +312,7 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
                 waiting.push(ModuleWait {
                     module: module.id.clone(),
                     on,
+                    conflict: None,
                 });
             } else if state
                 .get(&module.id)
@@ -283,6 +321,12 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
                 stuck.push(Stuck {
                     module: module.id.clone(),
                     reason: "released".into(),
+                });
+            } else if let Some(conflict) = conflicts::blocking(store, module, &active)? {
+                waiting.push(ModuleWait {
+                    module: module.id.clone(),
+                    on: vec![conflict.b],
+                    conflict: Some(conflict.reason),
                 });
             }
         }

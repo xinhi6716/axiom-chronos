@@ -1,0 +1,17 @@
+{
+  "id": "js-008",
+  "language": "js",
+  "feature": "method",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 4,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.js#method:Worker.compute"
+      }
+    }
+  ]
+}

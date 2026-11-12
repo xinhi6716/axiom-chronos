@@ -1,0 +1,41 @@
+{
+  "project": "water-sampling",
+  "entries": [
+    {
+      "unit": "water-sampling-implementation",
+      "title": "Identify the code that converts sample volume to liters.",
+      "summary": "Milliliters are converted to liters",
+      "body": "Keep units explicit. Milliliters are converted to liters.",
+      "symbols": [
+        "src/water_sampling.rs#function:to_liters"
+      ],
+      "files": [
+        "src/water_sampling.rs"
+      ],
+      "wish": "Identify the code that converts sample volume to liters."
+    }
+  ],
+  "research": [
+    {
+      "path": "research/water-sampling.md",
+      "text": "# water-sampling study\n\nMilliliters are converted to liters.\nThe observation is recorded against the implementation for audit.\n",
+      "links": [
+        {
+          "to": "sym:src/water_sampling.rs#function:to_liters",
+          "quote": "Milliliters are converted to liters.",
+          "line": 3
+        }
+      ]
+    }
+  ],
+  "constraints": "# Constraints\n\nKeep units explicit.\n",
+  "aliases": [
+    [
+      "to_liters",
+      "water sampling"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: keep units explicit."
+  ]
+}

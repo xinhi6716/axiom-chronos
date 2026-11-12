@@ -1,0 +1,16 @@
+{
+  "id": "rust-026",
+  "language": "rust",
+  "feature": "dynamic_call",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 2,
+      "name": "callback",
+      "nth": 1,
+      "expect": {
+        "resolution": "unresolved"
+      }
+    }
+  ]
+}
