@@ -199,8 +199,17 @@ impl Case {
         .unwrap();
         state::record(
             &store,
-            Step::Journal,
+            Step::Shortlist,
             BTreeMap::new(),
+            "shortlist-1",
+            true,
+            None,
+        )
+        .unwrap();
+        state::record(
+            &store,
+            Step::Journal,
+            BTreeMap::from([("shortlist".into(), "shortlist-1".into())]),
             "journal-1",
             true,
             None,
@@ -637,11 +646,9 @@ fn fable_cap_is_shared_between_passes() {
     let mut c = Case::new();
     c.cfg.fable_cap_usd = 1.0;
     let m = Members::new();
-    for (i, n) in [(0, 2), (1, 4)] {
-        let mut r = reply(n);
-        r.usd = Some(0.6);
-        m.replace("fable", i, r);
-    }
+    let mut r = reply(2);
+    r.usd = Some(1.0);
+    m.replace("fable", 0, r);
     assert_error(&c, &m, "budget_exceeded");
     assert_eq!(
         m.calls()
@@ -650,6 +657,7 @@ fn fable_cap_is_shared_between_passes() {
             .collect::<Vec<_>>(),
         ["paper-pass-1", "paper-pass-2", "paper-pass-3"]
     );
+    assert_eq!(m.calls().iter().filter(|x| x.member == "fable").count(), 1);
 }
 
 #[test]
