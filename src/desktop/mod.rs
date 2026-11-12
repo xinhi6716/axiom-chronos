@@ -19,7 +19,7 @@ mod palette;
 pub mod plain_text;
 mod quota;
 mod run_view;
-mod settings;
+pub mod settings;
 mod shell;
 mod superswitch;
 mod todo;
@@ -33,12 +33,14 @@ use model::Screen;
 /// Exported so a headless test can install the same global `run` does, with `Store::open(true)`.
 pub use settings::Store;
 pub use shell::Shell;
+pub use live::connect_service;
 use std::time::Duration;
 
 /// How the app starts. Demo options exist so every screen can be seen and captured without a live wish.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub demo: bool,
+    pub confirm_quit: bool,
     pub view: Option<Screen>,
     pub light: bool,
     pub english: bool,
@@ -71,6 +73,7 @@ fn initial_state(options: &Options) -> model::AppState {
         state.checks.clear();
     }
     if !options.demo { state.quota = Default::default(); }
+    state.feeds.quit_requested = options.confirm_quit;
     state
 }
 
@@ -80,6 +83,7 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--demo" => options.demo = true,
+            "--confirm-quit" => options.confirm_quit = true,
             "--light" => options.light = true,
             "--english" => options.english = true,
             "--empty" => options.empty = true,
@@ -214,7 +218,7 @@ pub fn run(options: Options) -> i32 {
         } else {
             launch::Launch::none()
         };
-        if shell::start_mini_only(ephemeral, prefs.mode) {
+        if shell::start_mini_only(ephemeral, prefs.mode, options.confirm_quit) {
                 if let Err(error) = mini::open_mini_at(state.clone(), prefs.mini_on_top, options.offscreen, cx) {
                     eprintln!("{error}");
                     cx.quit();
@@ -248,5 +252,14 @@ mod strip_startup_tests {
         assert!(empty.codex_slots.is_none() && empty.codex_models.is_empty() && empty.live_models.is_empty());
         let demo=initial_state(&Options {demo:true,..Default::default()});
         assert_eq!(demo.codex_slots,Some(15)); assert!(!demo.live_models.is_empty());
+    }
+
+    #[test]
+    fn confirm_quit_option_requests_startup_dialog() {
+        for (args, expected) in [(vec![], false), (vec!["--confirm-quit".into()], true)] {
+            let options = parse_options(&args).unwrap();
+            assert_eq!(options.confirm_quit, expected);
+            assert_eq!(initial_state(&options).feeds.quit_requested, expected);
+        }
     }
 }

@@ -482,7 +482,7 @@ fn stages(
     let (status, detail) = match goal.status.as_str() {
         "done" => (Done, None),
         "blocked" | "waiting" => match goal.reason.as_deref() {
-            Some(r @ ("interrupted" | "user_stop")) => (Failed, Some(r.into())),
+            Some(r @ ("interrupted" | "user_stop" | "disk_space")) => (Failed, Some(r.into())),
             _ => (Done, Some(goal.status.clone())),
         },
         _ if memory_status != NotStarted => (Running, None),

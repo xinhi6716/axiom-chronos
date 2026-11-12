@@ -22,6 +22,7 @@ pub struct Options {
     pub advanced_research: bool,
     pub council_budgets: Option<crate::council::Budgets>,
     pub codex_max_parallel: Option<u64>,
+    pub need_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +49,9 @@ pub enum Event {
     /// and reports `Started` again.
     Waiting {
         until: i64,
+    },
+    DiskPaused {
+        line: String,
     },
     Exited {
         code: i32,
@@ -127,6 +131,11 @@ impl Translator {
             "chronos" if text(&event["subtype"]) == "limit_wait" => emit(Event::Waiting {
                 until: event["until"].as_i64().unwrap_or(0),
             }),
+            "chronos" if text(&event["subtype"]) == crate::storage::preflight::EVENT_DISK_PAUSE => {
+                emit(Event::DiskPaused {
+                    line: text(&event["line"]).into(),
+                });
+            }
             _ => {}
         }
     }
@@ -158,6 +167,8 @@ impl Wish {
             advanced_research: options.advanced_research,
             council_budgets: options.council_budgets,
             codex_max_parallel: options.codex_max_parallel,
+            need_bytes: options.need_bytes,
+            ..session::Launch::default()
         };
         let spawned = session::spawn_with(
             &config,
@@ -272,6 +283,108 @@ mod tests {
     use super::*;
     use crate::usage::quota::{Window, WindowKind};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn fake_claude_tick_scenario_ticks_and_answers() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Child, Stdio};
+        use std::time::{Duration, Instant};
+
+        struct KillOnDrop(Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let python = std::env::var_os("AXIOM_PYTHON")
+            .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_claude.py");
+        let mut child = KillOnDrop(
+            crate::base::proc::cmd(python)
+                .arg(script)
+                .env("FAKE_CLAUDE_SCENARIO", "tick")
+                .env("FAKE_CLAUDE_TICK_MS", "20")
+                .env("FAKE_CLAUDE_RECORD", dir.path().join("record.json"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("spawn fake Claude"),
+        );
+        let mut stdin = child.0.stdin.take().unwrap();
+        let stdout = child.0.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let send = |stdin: &mut std::process::ChildStdin, text: &str| {
+            writeln!(stdin, "{}", serde_json::json!({
+                "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}
+            }))
+            .unwrap();
+            stdin.flush().unwrap();
+        };
+        let wait_for = |expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {expected}"
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let line = rx
+                    .recv_timeout(remaining)
+                    .expect("timed out or fake Claude exited")
+                    .unwrap();
+                let event: Value = serde_json::from_str(&line).expect("invalid fake Claude JSON");
+                if event["type"] == "assistant"
+                    && event["message"]["content"]
+                        .as_array()
+                        .is_some_and(|blocks| {
+                            blocks
+                                .iter()
+                                .any(|block| block["type"] == "text" && block["text"] == expected)
+                        })
+                {
+                    break;
+                }
+            }
+        };
+        send(&mut stdin, "initial prompt");
+        wait_for("tick 1");
+        send(&mut stdin, "ping");
+        wait_for("heard: ping");
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn translator_emits_disk_paused() {
+        let (tx, rx) = mpsc::channel();
+        Translator::default().event(
+            &serde_json::json!({"type":"chronos", "subtype":"disk_pause", "session":"s", "line":"disk full"}),
+            &tx,
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Event::DiskPaused {
+                line: "disk full".into()
+            }
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn options_default_has_no_need_bytes() {
+        assert_eq!(Options::default().need_bytes, None);
+    }
 
     #[test]
     fn translator_emits_claude_rate_limit_at_receipt_time() {

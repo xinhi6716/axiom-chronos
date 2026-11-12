@@ -5,6 +5,8 @@ mod workshop;
 mod extreme;
 pub mod research_budget;
 // p5b-cli end
+mod launch;
+mod storage;
 use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
@@ -74,6 +76,13 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
             "--advanced-research" => launch.advanced_research = true,
+            "--need-space" => match value(args, &mut i, "--need-space").and_then(|s| {
+                crate::storage::preflight::parse_size(&s)
+                    .ok_or_else(|| "--need-space requires a valid size".into())
+            }) {
+                Ok(bytes) => launch.need_bytes = Some(bytes),
+                Err(e) => return usage(e),
+            },
             flag @ ("--fable-cap" | "--astra-cap" | "--council-rounds") => {
                 let key = match flag { "--fable-cap" => crate::council::budgets::FABLE_CAP, "--astra-cap" => crate::council::budgets::ASTRA_CAP, _ => crate::council::budgets::ROUNDS };
                 match value(args, &mut i, flag) { Ok(v) => { caps.insert(key, v); }, Err(e) => return usage(e) }
@@ -115,6 +124,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             &mut io::stdout(),
         ) {
             Ok(code) => code,
+            Err(e) if e.kind == "disk_space" => {
+                println!("{}", e.message);
+                75
+            }
             Err(e) => usage(e.message),
         };
     }
@@ -140,6 +153,47 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             project.display()
         ));
     }
+    // The session preflight currently applies to wish; apply the explicit
+    // space requirement to research as well.
+    if skill == "research" && launch.need_bytes.is_some() {
+        let result = (|| -> crate::base::Res<Option<String>> {
+            let home = base::axiom_home();
+            let policy = crate::storage::Policy::load(&home)?;
+            let probe = crate::storage::preflight::os_probe();
+            let need = crate::storage::preflight::need(
+                &policy,
+                crate::storage::preflight::Kind::Wish,
+                launch.need_bytes,
+                Some(&project),
+                None,
+            )?;
+            for path in [&project, &home] {
+                let check = crate::storage::preflight::check(
+                    &home,
+                    &*probe,
+                    &policy,
+                    path,
+                    crate::storage::preflight::Kind::Wish,
+                    need,
+                )?;
+                if !check.ok {
+                    return Ok(Some(check.line()));
+                }
+            }
+            Ok(None)
+        })();
+        match result {
+            Ok(Some(line)) => {
+                println!("{line}");
+                return 75;
+            }
+            Ok(None) => (),
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                return 1;
+            }
+        }
+    }
     let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
     match session::run_with(
         &session::Config::from_env(),
@@ -152,6 +206,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         &launch,
     ) {
         Ok(code) => code,
+        Err(e) if e.kind == "disk_space" => {
+            println!("{}", e.message);
+            75
+        }
         Err(e) => usage(e.message),
     }
 }
@@ -592,6 +650,9 @@ pub fn main(args: Vec<OsString>) -> i32 {
             println!("axiom-chronos {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        "serve" => crate::service::serve_command(rest),
+        "storage" => storage::command(rest),
+        "launch" => launch::command(rest),
         "wish" | "research" => session_command(cmd, rest),
         "do" => modes::do_command(rest), // 2c modes
         "modes" => modes::modes_command(rest), // 2c modes

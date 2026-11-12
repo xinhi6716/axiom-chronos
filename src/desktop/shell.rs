@@ -1,6 +1,6 @@
 //! The window frame: title bar, navigation rail and the active screen. It also owns what applies
 //! across screens: the window-wide shortcuts (Ctrl+N, Ctrl+K and ?), the command palette's jumps,
-//! Needs you notifications and the question asked before closing.
+//! Needs you notifications and service quit confirmation.
 mod logic;
 use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Lang, Table};
@@ -20,6 +20,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Placement, Selectable as _, StyledExt as _, TitleBar, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_kit::base::TestTextExt as _;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -41,18 +42,10 @@ const T: Table = &[
     ("Finished: {}", "已結束：{}"),
     ("{} of {} units verified", "已驗收 {} / {} 個單元"),
     ("Open", "開啟"),
-    ("A wish is still running", "還有願望在進行"),
-    (
-        "\"{}\" is still running. Closing the window stops it; you can resume it later.",
-        "「{}」還在進行。關閉視窗會停止它，之後可以接續。",
-    ),
-    (
-        "{} wishes are still running. Closing the window stops them; you can resume them later.",
-        "有 {} 個願望還在進行。關閉視窗會停止它們，之後可以接續。",
-    ),
+    ("Quit Chronos?", "要結束 Chronos 嗎？"),
+    ("Running wishes will stop. You can resume them later.", "進行中的願望會停止，之後可以接續。"),
     ("Keep working", "繼續工作"),
-    ("Stop and close", "停止並關閉"),
-    ("Stopping…", "正在停止…"),
+    ("Stop and quit", "停止並結束"),
     ("The wish could not start", "願望無法開始"),
     ("Your message was not delivered", "你的訊息沒有送達"),
     ("The wish was not stopped", "願望沒有停止"),
@@ -85,8 +78,8 @@ const T: Table = &[
     ("The mini window could not open", "無法開啟迷你視窗"),
 ];
 
-pub(super) fn start_mini_only(ephemeral: bool, mode: WindowMode) -> bool {
-    logic::startup_windows(ephemeral, mode) == logic::Startup::MiniOnly
+pub(super) fn start_mini_only(ephemeral: bool, mode: WindowMode, confirm_quit: bool) -> bool {
+    !confirm_quit && logic::startup_windows(ephemeral, mode) == logic::Startup::MiniOnly
 }
 
 pub(super) fn record_change(state: &Entity<AppState>, prior: SettingPrior, now: SettingPrior, cx: &mut App) {
@@ -95,9 +88,7 @@ pub(super) fn record_change(state: &Entity<AppState>, prior: SettingPrior, now: 
     }
 }
 
-/// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
-const STOP_DEADLINE: Duration = Duration::from_secs(10);
-/// How long closing the window waits for the engine to drop its wishes before giving up.
+/// How long closing the window waits for the desktop to detach.
 const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
 const TOAST_MESSAGE_CHARS: usize = 120;
 /// How far a new screen drifts up into place as it crossfades in.
@@ -172,7 +163,7 @@ pub fn blocking_check(checks: &[Check]) -> Option<&Check> {
     checks.iter().find(|check| check.status == CheckStatus::Fail)
 }
 
-/// Wishes this app started that are still working: the ones closing the window would stop.
+/// Hosted wishes that are still working.
 pub fn running_here(runs: &[Run]) -> Vec<&Run> {
     runs.iter().filter(|run| run.hosted && matches!(run.status, RunStatus::Active | RunStatus::LimitWait)).collect()
 }
@@ -226,6 +217,19 @@ fn open_session(state: &Entity<AppState>, session: &str, cx: &mut App) {
     });
 }
 
+fn detach(state: &AppState) {
+    if let Some(backend) = state.backend.as_deref() { backend.shutdown(ENGINE_DEADLINE); }
+}
+
+fn request_service_quit(state: &mut AppState) -> bool {
+    let result = state.backend.as_ref().map(|backend| backend.quit_service(true));
+    match result {
+        Some(Ok(())) => true,
+        Some(Err(error)) => { state.report(super::model::Action::Engine, None, error.message); false }
+        None => { state.report(super::model::Action::Engine, None, "Not connected to the engine."); false }
+    }
+}
+
 struct NeedsYouToast;
 struct SetupToast;
 struct ErrorToast;
@@ -244,8 +248,6 @@ pub struct Shell {
     toasts: HashSet<SharedString>,
     viewing: Option<SharedString>,
     asking_close: bool,
-    stopping: bool,
-    stop_deadline: Option<Task<()>>,
     /// The newest entry of `AppState::errors` already shown.
     errors_shown: u64,
     /// Holds the keyboard when nothing else does, so window-wide keys see a key context; `?`
@@ -334,6 +336,12 @@ impl Shell {
         window.on_window_should_close(cx, move |window, cx| {
             shell.update(cx, |shell, cx| shell.should_close(window, cx)).unwrap_or(true)
         });
+        // Also consume a request already present before the first observation.
+        if state.read(cx).feeds.quit_requested {
+            cx.spawn_in(window, async move |this, cx| {
+                let _ = this.update_in(cx, |this, window, cx| this.show_requested_quit(window, cx));
+            }).detach();
+        }
         let scene = state.read(cx).scene.clone();
         let shown = state.read(cx).view;
         let mut glows = motion::Glows::new(Pace::Glow);
@@ -368,8 +376,6 @@ impl Shell {
             toasts: HashSet::new(),
             viewing: None,
             asking_close: false,
-            stopping: false,
-            stop_deadline: None,
             errors_shown: 0,
             focus,
             launch: Launch::none(),
@@ -390,6 +396,8 @@ impl Shell {
     }
 
     fn apply_wanted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep the confirmation visible until it is dismissed, then apply the saved mode.
+        if self.asking_close || self.state.read(cx).feeds.quit_requested { return; }
         let prefs = settings::Store::current(cx).clone();
         let plan = logic::plan(self.applied_mode, prefs.mode, self.applied_on_top, prefs.mini_on_top, self.mini.is_some());
         if theme::density(cx) != prefs.density { theme::set_density(prefs.density, cx); }
@@ -480,7 +488,7 @@ impl Shell {
             })
             .cloned()
             .collect();
-        let all_stopped = running_here(&state.runs).is_empty();
+        let quit_requested = state.feeds.quit_requested;
         let errors: Vec<AppError> = state.errors.iter().filter(|error| error.id > self.errors_shown).cloned().collect();
 
         self.viewing = viewing;
@@ -494,9 +502,7 @@ impl Shell {
         }
         self.show_alerts(alerts, window, cx);
         self.show_errors(errors, window, cx);
-        if self.stopping && all_stopped {
-            self.finish_close(window, cx);
-        }
+        if quit_requested { self.show_requested_quit(window, cx); }
         cx.notify();
     }
 
@@ -731,104 +737,84 @@ impl Shell {
     }
 
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.stopping {
-            return false;
-        }
-        if running_here(&self.state.read(cx).runs).is_empty() {
-            self.end_engine(cx);
-            settings::remember_window(window.window_bounds(), cx);
-            return true;
-        }
-        self.ask_before_close(window, cx);
-        false
+        self.end_engine(cx);
+        settings::remember_window(window.window_bounds(), cx);
+        true
+    }
+
+    fn show_requested_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let requested = self.state.update(cx, |state, _| std::mem::take(&mut state.feeds.quit_requested));
+        if requested { self.ask_before_close(window, cx); }
     }
 
     fn ask_before_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.asking_close && window.has_active_dialog(cx) {
-            return;
-        }
+        if self.asking_close && window.has_active_dialog(cx) { return; }
+        if self.applied_mode == WindowMode::Mini { window.activate_window(); }
         self.asking_close = true;
         let shell = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, cx| {
-            let Some(view) = shell.upgrade() else { return alert };
             let t = cx.tokens();
-            let this = view.read(cx);
-            let stopping = this.stopping;
-            let state = this.state.read(cx);
-            let running = running_here(&state.runs);
-            let description = match running.as_slice() {
-                [run] => fill(
-                    tr(cx, T, "\"{}\" is still running. Closing the window stops it; you can resume it later."),
-                    &[&clipped(&run.wish, 60)],
-                ),
-                runs => fill(
-                    tr(cx, T, "{} wishes are still running. Closing the window stops them; you can resume them later."),
-                    &[&runs.len().to_string()],
-                ),
-            };
-            let stop_label = if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop and close") };
             let (keep, stop, closed) = (shell.clone(), shell.clone(), shell.clone());
+            let title = tr(cx, T, "Quit Chronos?");
+            let stop_text = tr(cx, T, "Stop and quit");
+            let keep_text = tr(cx, T, "Keep working");
             alert
                 .entrance(motion::DIALOG_ENTRANCE)
                 .icon(Icon::new(IconName::TriangleAlert).size(px(20.)).text_color(t.review))
-                .title(tr(cx, T, "A wish is still running"))
-                .description(description)
+                .title(title.test_text(title))
+                .description(tr(cx, T, "Running wishes will stop. You can resume them later."))
                 .centered()
-                .on_ok(move |_, _, _| !stopping)
-                .on_cancel(move |_, _, _| !stopping)
-                .on_close(move |_, _, cx| {
-                    let _ = closed.update(cx, |shell, _| shell.asking_close = false);
+                .on_close(move |_, window, cx| {
+                    let _ = closed.update(cx, |shell, cx| shell.dismiss_quit(window, cx));
                 })
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new("stop-and-close")
-                                .danger()
-                                .outline()
-                                .label(stop_label)
-                                .loading(stopping)
+                            Button::new("stop-and-quit").danger().outline()
+                                .accessibility_label(stop_text)
+                                .child(stop_text.test_text(stop_text))
                                 .on_click(move |_, window, cx| {
                                     let _ = stop.update(cx, |shell, cx| shell.stop_and_close(window, cx));
                                 }),
                         )
                         .child(
                             theme::gold_leaf(Button::new("keep-working"), &t)
-                                .label(tr(cx, T, "Keep working"))
-                                .disabled(stopping)
+                                .accessibility_label(keep_text)
+                                .child(keep_text.test_text(keep_text))
                                 .on_click(move |_, window, cx| {
-                                    let _ = keep.update(cx, |shell, _| shell.asking_close = false);
                                     window.close_dialog(cx);
+                                    let _ = keep.update(cx, |shell, cx| shell.dismiss_quit(window, cx));
                                 }),
                         ),
                 )
         });
     }
 
-    fn stop_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let running: Vec<SharedString> = running_here(&state.runs).iter().map(|run| run.session.clone()).collect();
-        if running.is_empty() || state.backend.is_none() {
-            self.finish_close(window, cx);
-            return;
-        }
-        self.state.update(cx, |state, _| running.iter().for_each(|session| state.stop(session)));
-        self.stopping = true;
-        self.stop_deadline = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(STOP_DEADLINE).await;
-            let _ = this.update_in(cx, |this, window, cx| this.finish_close(window, cx));
-        }));
-        window.refresh();
+    fn dismiss_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.asking_close = false;
+        let was_mini = self.applied_mode == WindowMode::Mini;
+        self.apply_wanted(window, cx);
+        if was_mini && self.applied_mode == WindowMode::Mini { window.minimize_window(); }
     }
 
-    /// The engine owns every wish started here; ending it is what stops their `claude` processes.
+    fn stop_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let success = self.state.update(cx, |state, cx| {
+            let success = request_service_quit(state);
+            if !success { cx.notify(); }
+            success
+        });
+        if success { self.finish_close(window, cx); }
+    }
+
     fn end_engine(&self, cx: &mut Context<Self>) {
-        if let Some(backend) = self.state.read(cx).backend.as_deref() {
-            backend.shutdown(ENGINE_DEADLINE);
-        }
+        detach(self.state.read(cx));
     }
 
     fn finish_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_engine(cx);
+        if let Some(handle) = self.mini.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
         settings::remember_window(window.window_bounds(), cx);
         window.remove_window();
     }
@@ -877,8 +863,7 @@ impl Shell {
             return;
         }
         match scene {
-            "close-confirm" => self.ask_before_close(window, cx),
-            "close-stop" => self.stop_and_close(window, cx),
+            "close-confirm" | "close-stop" => self.finish_close(window, cx),
             "rail-focus" => window.focus_next(cx),
             "needs-you" => self.state.update(cx, |state, cx| {
                 state.runs[0].status = RunStatus::Blocked;

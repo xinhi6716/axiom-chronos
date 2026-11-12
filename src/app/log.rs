@@ -91,7 +91,7 @@ pub struct OpenCall {
 
 #[derive(Default)]
 pub(crate) struct State {
-    seen: Option<(u64, Option<SystemTime>)>,
+    seen: Option<(u64, Option<SystemTime>, bool)>,
     head: Option<Head>,
     summary: Option<Summary>,
     scan: Option<ScanState>,
@@ -143,7 +143,12 @@ struct ScanState {
 fn s(v: &Value) -> Option<String> {
     v.as_str().filter(|x| !x.is_empty()).map(str::to_owned)
 }
-fn read_range(path: &Path, start: u64, len: u64) -> std::io::Result<Vec<u8>> {
+fn read_range(path: &Path, archived: Option<&[u8]>, start: u64, len: u64) -> std::io::Result<Vec<u8>> {
+    if let Some(bytes) = archived {
+        let start = (start as usize).min(bytes.len());
+        let end = start.saturating_add(len as usize).min(bytes.len());
+        return Ok(bytes[start..end].to_vec());
+    }
     let mut f = std::fs::File::open(path)?;
     f.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::with_capacity(len.min(BUDGET) as usize);
@@ -214,8 +219,8 @@ fn summary(event: &Value) -> Summary {
         models,
     }
 }
-fn head(path: &Path, size: u64, label: &str, warnings: &mut Vec<String>) -> Head {
-    let bytes = match read_range(path, 0, size.min(HEAD)) {
+fn head(path: &Path, archived: Option<&[u8]>, size: u64, label: &str, warnings: &mut Vec<String>) -> Head {
+    let bytes = match read_range(path, archived, 0, size.min(HEAD)) {
         Ok(b) => b,
         Err(e) => {
             warnings.push(format!("{label}: {e}"));
@@ -235,9 +240,9 @@ fn head(path: &Path, size: u64, label: &str, warnings: &mut Vec<String>) -> Head
     }
     Head::default()
 }
-fn tail(path: &Path, size: u64, label: &str, warnings: &mut Vec<String>) -> Option<Summary> {
+fn tail(path: &Path, archived: Option<&[u8]>, size: u64, label: &str, warnings: &mut Vec<String>) -> Option<Summary> {
     let start = size.saturating_sub(TAIL);
-    let bytes = match read_range(path, start, size - start) {
+    let bytes = match read_range(path, archived, start, size - start) {
         Ok(b) => b,
         Err(e) => {
             warnings.push(format!("{label}: {e}"));
@@ -261,9 +266,9 @@ fn tail(path: &Path, size: u64, label: &str, warnings: &mut Vec<String>) -> Opti
     found
 }
 impl ScanState {
-    fn advance(&mut self, path: &Path, size: u64, budget: u64, label: &str, warnings: &mut Vec<String>) {
+    fn advance(&mut self, path: &Path, archived: Option<&[u8]>, size: u64, budget: u64, label: &str, warnings: &mut Vec<String>) {
         let want = size.saturating_sub(self.offset).min(budget);
-        let bytes = match read_range(path, self.offset, want) {
+        let bytes = match read_range(path, archived, self.offset, want) {
             Ok(b) => b,
             Err(e) => {
                 warnings.push(format!("{label}: {e}"));
@@ -525,7 +530,7 @@ pub(crate) fn refresh(
     budget: u64,
     warnings: &mut Vec<String>,
 ) -> Vec<Run> {
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match crate::storage::archive::list(dir, ".jsonl") {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
         Err(e) => {
@@ -535,15 +540,19 @@ pub(crate) fn refresh(
     };
     let mut runs = Vec::new();
     let mut present = HashSet::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
+    for path in entries {
+        let plain = path.is_file();
+        let physical = if plain { path.clone() } else { crate::storage::archive::archived_path(&path) };
+        let Ok(meta) = std::fs::metadata(&physical) else { continue };
+        let archived = if plain { None } else {
+            match crate::storage::archive::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    warnings.push(format!("logs/{}: {e}", path.file_name().unwrap_or_default().to_string_lossy()));
+                    continue;
+                }
+            }
+        };
         present.insert(path.clone());
         let name = path
             .file_name()
@@ -552,12 +561,16 @@ pub(crate) fn refresh(
         let label = format!("logs/{name}");
         let (skill, started) = name_parts(&name);
         let started_unix = started.as_deref().and_then(stamp_unix);
-        let (size, modified) = (meta.len(), meta.modified().ok());
+        let (size, modified) = (archived.as_ref().map_or(meta.len(), |b| b.len() as u64), meta.modified().ok());
+        let fingerprint = (meta.len(), modified, archived.is_some());
         let state = states.entry(path.clone()).or_default();
-        let changed = state.seen != Some((size, modified));
+        let changed = state.seen != Some(fingerprint);
+        if archived.is_some() && changed {
+            *state = State::default();
+        }
         if state.head.is_none() || (changed && state.head.as_ref().is_some_and(|h| h.session.is_none()))
         {
-            state.head = Some(head(&path, size, &label, warnings));
+            state.head = Some(head(&path, archived.as_deref(), size, &label, warnings));
         }
         let session = state.head.as_ref().and_then(|h| h.session.clone());
         if session.as_deref().is_some_and(deep) {
@@ -568,20 +581,20 @@ pub(crate) fn refresh(
             }
             scan.log_start_unix = started_unix;
             if scan.offset < size || !scan.complete {
-                scan.advance(&path, size, budget, &label, warnings);
+                scan.advance(&path, archived.as_deref(), size, if archived.is_some() { size } else { budget }, &label, warnings);
             }
             if scan.summary.is_some() {
                 state.summary = scan.summary.clone();
             }
         } else if changed {
-            state.summary = tail(&path, size, &label, warnings);
+            state.summary = tail(&path, archived.as_deref(), size, &label, warnings);
         }
         if let Some(scan) = &state.scan {
             if scan.malformed > 0 {
                 warnings.push(format!("{label}: {} malformed line(s) skipped", scan.malformed));
             }
         }
-        state.seen = Some((size, modified));
+        state.seen = Some(fingerprint);
         runs.push(Run {
             log: path,
             skill,

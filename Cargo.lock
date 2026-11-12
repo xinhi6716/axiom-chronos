@@ -523,6 +523,7 @@ name = "axiom-chronos"
 version = "2.0.1"
 dependencies = [
  "embed-resource",
+ "flate2",
  "gpui-kit",
  "libc",
  "libloading",

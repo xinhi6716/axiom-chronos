@@ -662,16 +662,49 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             } else {
                 orch::scratch_dir(root, &["astra", &base::unique()])
             };
-            let env =
-                base::proc::scratch_env(&path).map_err(|e| Failure::new("io", e.to_string()))?;
-            let roots = if unit.is_some() {
-                vec![path.clone()]
-            } else {
-                vec![]
-            };
-            let result = server.run_with_scratch(&req, &env, &roots);
+            let (home, owner) = orch::store::storage_context(root);
+            crate::storage::ensure_dir(&home, &path, crate::storage::Class::Scratch, &owner)?;
+            let _ = crate::storage::ensure_dir(
+                &home,
+                &root.join("receipts"),
+                crate::storage::Class::Evidence,
+                &owner,
+            );
+            let lease = crate::storage::Ledger::open(&home)?.lease(&path)?;
+            let result = (|| {
+                let mut env = base::proc::scratch_env(&path)
+                    .map_err(|e| Failure::new("io", e.to_string()))?;
+                let mut roots = if unit.is_some() {
+                    vec![path.clone()]
+                } else {
+                    vec![]
+                };
+                if unit.is_some() {
+                    crate::storage::worktree::register(&home, Path::new(cwd), &owner)?;
+                    let worker_env =
+                        crate::storage::worktree::worker_env(&home, Path::new(cwd), &owner)?;
+                    roots.extend(
+                        worker_env
+                            .iter()
+                            .filter(|(key, _)| key == "CARGO_TARGET_DIR")
+                            .map(|(_, value)| PathBuf::from(value)),
+                    );
+                    env.extend(worker_env);
+                }
+                server.run_with_scratch(&req, &env, &roots)
+            })();
+            drop(lease);
             if unit.is_none() || result.is_err() {
-                let _ = std::fs::remove_dir_all(&path);
+                let cleanup = crate::storage::retention::remove_scratch(
+                    &home,
+                    &path,
+                    &owner,
+                    "unit_ended",
+                    false,
+                );
+                if cleanup.outcome != "done" {
+                    eprintln!("scratch cleanup: {}", cleanup.outcome);
+                }
             }
             result?
         } else {

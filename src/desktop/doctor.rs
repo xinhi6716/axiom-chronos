@@ -418,6 +418,7 @@ impl DoctorView {
                         record(&state, SettingPrior::Density(Store::current(cx).density), SettingPrior::Density(choice), cx, |cx| settings::set_density(choice, cx));
                     })
                 }))))
+            .child(settings::login_start_row(&self.state, cx))
             .child(preference_row(&t, d, tr(cx, T, "Mini window always on top"), Some(tr(cx, T, "Keeps the mini window above other windows.")), {
                 let state = self.state.clone();
                 Switch::new("mini-on-top").checked(prefs.mini_on_top).accessibility_label(tr(cx, T, "Mini window always on top")).on_click(move |on, _, cx| {

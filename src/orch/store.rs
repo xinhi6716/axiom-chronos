@@ -141,6 +141,32 @@ pub fn store_for_goal(home: &Path, goal: &crate::goal::Goal) -> Res<PathBuf> {
         .ok_or_else(|| fail("goal has no project"))?;
     wish_store(home, project, goal.wish_id.as_deref())
 }
+pub(crate) fn storage_context(store: &Path) -> (std::path::PathBuf, crate::storage::Owner) {
+    let name = store
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let wish = is_wish_id(&name).then_some(name);
+    let project_dir = if wish.is_some() {
+        store.parent().unwrap_or(store)
+    } else {
+        store
+    };
+    let project = project_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let home = project_dir
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "orchestrate"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::base::axiom_home);
+    (home, crate::storage::Owner { project, wish })
+}
+
 pub fn wish_of_store(store: &Path) -> String {
     store
         .file_name()
@@ -1220,7 +1246,16 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
         let sub = args.get(1).map(String::as_str).unwrap_or("");
         match (cmd, sub) {
             ("init", _) => {
-                std::fs::create_dir_all(store).map_err(io)?;
+                let (home, owner) = storage_context(store);
+                crate::storage::ensure_dir(&home, store, crate::storage::Class::UnitStore, &owner)?;
+                for name in ["reports", "receipts"] {
+                    crate::storage::ensure_dir(
+                        &home,
+                        &store.join(name),
+                        crate::storage::Class::Evidence,
+                        &owner,
+                    )?;
+                }
                 locked(store, force, &mut note, || {
                     std::fs::create_dir_all(store.join("inbox")).map_err(io)?;
                     for (name, content) in [

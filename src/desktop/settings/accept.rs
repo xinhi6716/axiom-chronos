@@ -341,3 +341,41 @@ fn ephemeral_edits_only_change_memory() {
     assert!(!persistent.edit_memory(|s| { s.set_mode(WindowMode::Mini); }));
     assert!(!dir.path().join(FILE_NAME).exists());
 }
+
+struct LoginBackend {
+    calls: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+    fail: bool,
+}
+impl crate::desktop::model::Backend for LoginBackend {
+    fn start_wish(&self, _: crate::desktop::model::WishRequest) -> crate::base::Res<()> { Ok(()) }
+    fn interject(&self, _: &str, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn stop(&self, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn resume(&self, _: &str, _: Option<&str>) -> crate::base::Res<()> { Ok(()) }
+    fn delete_memory(&self, _: i64) -> crate::base::Res<()> { Ok(()) }
+    fn correct_memory(&self, _: i64, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn refresh(&self) -> crate::base::Res<()> { Ok(()) }
+    fn recheck(&self) -> crate::base::Res<()> { Ok(()) }
+    fn follow(&self, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn set_login_start(&self, on: bool) -> crate::base::Res<()> {
+        self.calls.borrow_mut().push(on);
+        if self.fail { Err(crate::base::Failure::new("test", "login failed")) } else { Ok(()) }
+    }
+}
+
+#[test]
+fn login_start_comes_from_service_and_sends_changes() {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = crate::desktop::demo::state();
+    assert!(!state.feeds.login_start);
+    state.backend = Some(Box::new(LoginBackend { calls: calls.clone(), fail: false }));
+    set_login_start(&mut state, true);
+    assert_eq!(*calls.borrow(), [true]);
+    assert!(!state.feeds.login_start, "only the service snapshot changes the switch state");
+    state.feeds.login_start = true;
+    set_login_start(&mut state, false);
+    assert_eq!(*calls.borrow(), [true, false]);
+    assert!(state.feeds.login_start);
+    state.backend = Some(Box::new(LoginBackend { calls, fail: true }));
+    set_login_start(&mut state, false);
+    assert_eq!(state.errors.last().unwrap().action, crate::desktop::model::Action::Engine);
+}

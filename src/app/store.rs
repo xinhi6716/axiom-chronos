@@ -80,7 +80,7 @@ pub(crate) struct View {
 }
 
 fn read(path: &Path, label: &str, warnings: &mut Vec<String>) -> Option<String> {
-    match std::fs::read(path) {
+    match crate::storage::archive::read(path) {
         Ok(bytes) => Some(String::from_utf8_lossy(&bytes).replace('\r', "")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
@@ -253,7 +253,7 @@ pub(crate) fn view(store: &Path, warnings: &mut Vec<String>) -> Option<View> {
         let needs_accept = map
             .as_ref()
             .is_some_and(|m| m.modules.iter().any(|x| x.id == c[1]));
-        let file = |p: PathBuf| (valid && p.is_file()).then_some(p);
+        let file = |p: PathBuf| (valid && crate::storage::archive::exists(&p)).then_some(p);
         UnitView {
             derived: orch::derive_state(&rows, needs_accept),
             attempts: rows.iter().filter(|r| r.kind == "run").count(),
