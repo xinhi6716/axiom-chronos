@@ -111,11 +111,67 @@ fn fold(s: &str) -> String {
 }
 fn family(name: &str) -> String {
     let s = if let Some((family, _)) = name.split_once(',') {
-        family
+        let words: Vec<_> = family.split_whitespace().collect();
+        let start = words
+            .iter()
+            .position(|word| {
+                !matches!(
+                    *word,
+                    "van"
+                        | "von"
+                        | "der"
+                        | "den"
+                        | "de"
+                        | "la"
+                        | "le"
+                        | "du"
+                        | "da"
+                        | "di"
+                        | "del"
+                        | "della"
+                        | "dos"
+                        | "ter"
+                        | "ten"
+                        | "bin"
+                        | "al"
+                        | "el"
+                )
+            })
+            .unwrap_or(0);
+        return fold(&words[start..].join(" "));
     } else {
         name.split_whitespace().last().unwrap_or("")
     };
     fold(s)
+}
+fn authors_match(a: &str, b: &str) -> bool {
+    let corporate = |s: &str| s.trim().starts_with('{') && s.trim().ends_with('}');
+    if corporate(a) || corporate(b) {
+        fold(a) == fold(b)
+    } else {
+        family(a) == family(b)
+    }
+}
+pub(crate) fn page_dash(c: char) -> bool {
+    matches!(c, '-' | '–' | '—' | '−')
+}
+fn pages_match(a: &str, b: &str) -> bool {
+    fn range(s: &str) -> Option<(&str, &str)> {
+        let (first, last) = s.split_once(page_dash)?;
+        let first = first.trim();
+        let last = last.trim_start_matches(page_dash).trim();
+        if first.is_empty() || last.is_empty() || last.chars().any(page_dash) {
+            return None;
+        }
+        Some((first, last))
+    }
+    match (range(a), range(b)) {
+        (Some((a1, a2)), Some((b1, b2))) => {
+            a1.eq_ignore_ascii_case(b1) && a2.eq_ignore_ascii_case(b2)
+        }
+        (None, None) => a.trim().eq_ignore_ascii_case(b.trim()),
+        _ => false,
+    }
 }
 fn venue_matches(bib: &str, record: &str) -> bool {
     let a = fold(bib);
@@ -227,7 +283,7 @@ pub fn verify_entry(
                                 && e.authors
                                     .iter()
                                     .zip(&w.authors)
-                                    .all(|(a, b)| family(a) == family(b))
+                                    .all(|(a, b)| authors_match(a, b))
                             {
                                 FieldCheck::Verified
                             } else {
@@ -247,7 +303,8 @@ pub fn verify_entry(
                         }
                         "pages" => {
                             let p = e.pages.as_deref().unwrap();
-                            let single = !p.contains('-') && !p.chars().any(char::is_whitespace);
+                            let single =
+                                !p.chars().any(page_dash) && !p.chars().any(char::is_whitespace);
                             if single
                                 && w.article_number
                                     .as_deref()
@@ -264,7 +321,7 @@ pub fn verify_entry(
                                             None
                                         }
                                     }),
-                                    |a, b| a.trim().eq_ignore_ascii_case(b.trim()),
+                                    pages_match,
                                 )
                             }
                         }

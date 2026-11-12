@@ -2,7 +2,7 @@ use crate::{
     base::{Failure, Res},
     paper::{
         cache::{Cache, FetchMode},
-        citations::normalize_doi,
+        citations::{normalize_doi, page_dash},
         http::Transport,
         journals::openalex::{encode_component, WorkMeta},
         model::SourceKind,
@@ -54,15 +54,25 @@ pub fn work(cache: &Cache, t: &dyn Transport, mode: FetchMode, doi: &str) -> Res
                     .filter(|s| !s.trim().is_empty())
                     .collect::<Vec<_>>()
                     .join(" ");
-                    (!name.is_empty()).then_some(name)
+                    if !name.is_empty() {
+                        Some(name)
+                    } else {
+                        v.get("name")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|s| format!("{{{s}}}"))
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
     let page = string("page");
     let (first_page, last_page) = match page {
-        Some(p) => match p.split_once('-') {
-            Some((a, b)) => (Some(a.trim().to_owned()), Some(b.trim().to_owned())),
+        Some(p) => match p.split_once(page_dash) {
+            Some((a, b)) => (
+                Some(a.trim().to_owned()),
+                Some(b.trim_start_matches(page_dash).trim().to_owned()),
+            ),
             None => (Some(p), None),
         },
         None => (None, None),
