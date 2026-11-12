@@ -20,6 +20,7 @@ pub mod linux;
 pub mod memory;
 pub mod modes; // 2c modes
 pub mod orch;
+pub mod paper; // p8
 pub mod provenance;
 pub mod research_program;
 pub mod review;

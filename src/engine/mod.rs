@@ -115,6 +115,19 @@ pub const FILES: &[(&str, &str)] = &[
         "skills/wish/SKILL.md",
         include_str!("../../engine/skills/wish/SKILL.md"),
     ),
+    // BEGIN paper assets
+    ("paper/pass.schema.json", include_str!("../../engine/paper/pass.schema.json")),
+    ("paper/reviewer.schema.json", include_str!("../../engine/paper/reviewer.schema.json")),
+    ("paper/templates/registry.json", include_str!("../../engine/paper/templates/registry.json")),
+    ("paper/presets/journals.json", include_str!("../../engine/paper/presets/journals.json")),
+    ("paper/policies/ai-use.json", include_str!("../../engine/paper/policies/ai-use.json")),
+    ("paper/templates/main.tex", include_str!("../../engine/paper/templates/main.tex")),
+    ("paper/prompts/draft.md", include_str!("../../engine/paper/prompts/draft.md")),
+    ("paper/prompts/critique.md", include_str!("../../engine/paper/prompts/critique.md")),
+    ("paper/prompts/revise.md", include_str!("../../engine/paper/prompts/revise.md")),
+    ("paper/prompts/style.md", include_str!("../../engine/paper/prompts/style.md")),
+    ("paper/prompts/review.md", include_str!("../../engine/paper/prompts/review.md")),
+    // END paper assets
 ];
 
 pub fn asset(path: &str) -> Option<&'static str> {
