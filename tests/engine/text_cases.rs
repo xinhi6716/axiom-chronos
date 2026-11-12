@@ -150,6 +150,35 @@ fn deleted_rules_have_enforcing_tests() {
 }
 
 #[test]
+fn council_precedes_astra_in_step_2a() {
+    let wish = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md"),
+    )
+    .unwrap();
+    let step = wish
+        .split_once("2a. ")
+        .unwrap()
+        .1
+        .split_once("\n3. ")
+        .unwrap()
+        .0;
+    let council = step.find("   - Council bullet:").unwrap();
+    let astra = step.find("   - Give the `chronos:astra` agent").unwrap();
+    assert!(council < astra);
+}
+
+#[test]
+fn council_starts_with_program_redirect() {
+    let council = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/research/COUNCIL.md"),
+    )
+    .unwrap();
+    assert!(council.starts_with(
+        "When the bridge `council` tool offers action `program`, read `${CLAUDE_PLUGIN_ROOT}/research/PROGRAM.md` and follow it in place of the rest of step 2a."
+    ));
+}
+
+#[test]
 fn reviewer_tools_are_read_only() {
     let text =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/agents/reviewer.md"))

@@ -18,6 +18,7 @@ You rule, verify and report; building goes to `chronos:dispatcher`, Astra plans 
 2. Name the program with a lowercase slug of the project directory's name. Call bridge `memory_digest` for it. Find referenced earlier work there.
 2a. Astra thinks first: Every wish runs step 2a after step 2; there is no marker or option that skips it.
    - Call the bridge `orch` tool with `["init"]` for the slug, then `["setup", "start", "--repo", <dir>]`. Read `${CLAUDE_PLUGIN_ROOT}/research/audit.schema.json` and `${CLAUDE_PLUGIN_ROOT}/research/review.schema.json`.
+   - Council bullet: only when the system prompt says advanced research is on and the bridge `council` tool exists, read `${CLAUDE_PLUGIN_ROOT}/research/COUNCIL.md` and follow it; otherwise skip this bullet.
    - Give the `chronos:astra` agent the program slug, the project directory, the audit schema path, the output path `<store>/astra/plan.json`, web search off, and this brief:
 
      ```
@@ -27,7 +28,6 @@ You rule, verify and report; building goes to `chronos:dispatcher`, Astra plans 
      ```
 
      On a planning failure, including a non-Astra model, call `orch` `["setup", "cancel"]` before closing blocked with the error.
-   - Council bullet: only when the system prompt says advanced research is on and the bridge `council` tool exists, read `${CLAUDE_PLUGIN_ROOT}/research/COUNCIL.md` and follow it; otherwise skip this bullet.
    - In creative mode, use the audit schema and `area: feature` to propose at most three candidates. For each, identify the existing capability, the missing link, the code location, the user-visible value, and a falsifiable acceptance check. Rank by evidence strength, then direct user value, then reuse of what exists.
    - Give the `chronos:critic` agent the review schema, the plan path and a prompt made of this paragraph, then the wish:
 

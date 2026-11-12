@@ -1,0 +1,12 @@
+{
+  "assumed": true,
+  "calls": [
+    ["google-colab-cli", "session", "create", "--accelerator", "T4", "--json"],
+    ["google-colab-cli", "files", "upload", "--session", "fake-session", "--src", "data/a", "--dst", "data/a"],
+    ["google-colab-cli", "files", "upload", "--session", "fake-session", "--src", "data/b", "--dst", "data/b"],
+    ["google-colab-cli", "exec", "--session", "fake-session", "--json", "--", "python", "task.py", "hello world", "$(literal)"],
+    ["google-colab-cli", "session", "usage", "--session", "fake-session", "--json"],
+    ["google-colab-cli", "files", "download", "--session", "fake-session", "--src", "result file", "--dst", "result file"],
+    ["google-colab-cli", "session", "close", "--session", "fake-session"]
+  ]
+}

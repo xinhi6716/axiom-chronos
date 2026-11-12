@@ -1,3 +1,5 @@
+When the bridge `council` tool offers action `program`, read `${CLAUDE_PLUGIN_ROOT}/research/PROGRAM.md` and follow it in place of the rest of step 2a. Otherwise return to the Astra bullet and follow the instructions below at the indicated points.
+
 # Council
 
 The council is opt-in and remains off by default. The engine conducts three phases:

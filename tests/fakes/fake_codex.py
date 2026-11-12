@@ -155,6 +155,13 @@ for line in sys.stdin:
         if (config.get('features') or {}).get('apps') is not False:
             send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': thread_id, 'name': 'codex_apps', 'status': 'ready'}})
     elif method == 'turn/start':
+        # extreme-mode begin
+        if params.get('serviceTier') and option('tier') == 'reject':
+            send({'id': message['id'], 'error': {'code': -32602, 'message': 'unsupported serviceTier: fast'}})
+            continue
+        if params.get('serviceTier') and option('tier') == 'not-advertised':
+            print('warning: service_tier "fast" is not advertised for this model; ignoring', file=sys.stderr, flush=True)
+        # extreme-mode end
         thread_id, text = params['threadId'], params['input'][0]['text']
         turn_id = thread_id + '-turn'
         if 'HANGREQ' in text:
@@ -229,7 +236,19 @@ for line in sys.stdin:
         delay_ms = int(delay.group(1)) if delay else 0
         gate = re.search(r'^FAKE_GATE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
         gate_path = gate.group(1).strip() if gate else None
-        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path):
+        # extreme-mode begin
+        wait_file = re.search(r'^WAIT_FILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
+        # extreme-mode end
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file):
+            # extreme-mode begin
+            if wait_file:
+                deadline = time.monotonic() + 30
+                while not os.path.exists(wait_file.group(1).strip()):
+                    if time.monotonic() >= deadline:
+                        complete(thread_id, turn_id, 'failed', {'message': 'WAIT_FILE timeout'})
+                        return
+                    time.sleep(0.01)
+            # extreme-mode end
             if delay_ms:
                 time.sleep(delay_ms / 1000)
             if gate_path:
@@ -306,7 +325,7 @@ for line in sys.stdin:
                 final = json.dumps({'wrong': 'shape'})
             item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
             complete(thread_id, turn_id)
-        if delay_ms or gate_path:
+        if delay_ms or gate_path or wait_file:
             threading.Thread(target=finish_normal, daemon=True).start()
         else:
             finish_normal()

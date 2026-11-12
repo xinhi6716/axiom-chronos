@@ -6,6 +6,9 @@
 
 pub mod laya;
 pub mod price;
+// r9-p5b begin
+pub mod extensions;
+// r9-p5b end
 pub mod quota;
 mod report;
 mod scan;

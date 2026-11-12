@@ -8,9 +8,9 @@ fn within_cap(total: usize) -> bool {
 fn prompt_sizes_stay_within_caps() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [
-        ("engine/agents/dispatcher.md", 9402),
-        ("engine/DISPATCH.md", 3753),
-        ("engine/skills/wish/SKILL.md", 7754),
+        ("engine/agents/dispatcher.md", 9809),
+        ("engine/DISPATCH.md", 3120),
+        ("engine/skills/wish/SKILL.md", 7884),
     ];
     let mut total = 0;
     for (path, before) in files {

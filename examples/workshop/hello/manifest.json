@@ -1,0 +1,1 @@
+{"name":"hello","version":"0.1.0","entry":["python","main.py"],"permissions":["files","memory","model:codex:gpt-5.4-mini"],"max_parallel":1,"panel":{"title":"Hello","description":"A synthetic example module for tests and docs."}}
