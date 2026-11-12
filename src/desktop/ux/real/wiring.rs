@@ -55,5 +55,6 @@ pub fn production(home: &Path, slots_home: &Path) -> Seams {
         sessions: None,
         optimizer: None,
         github: None,
+        paper: None, // p8:
     }
 }

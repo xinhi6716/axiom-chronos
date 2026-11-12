@@ -4,6 +4,7 @@ pub mod dual_core;
 pub mod extreme;
 pub mod interjections;
 pub mod modes;
+pub mod paper; // p8:
 pub mod storage;
 pub mod unit_actions;
 pub mod wiring;
@@ -22,6 +23,8 @@ mod foundation_accept;
 mod interjections_accept;
 #[cfg(test)]
 mod modes_accept;
+#[cfg(test)] // p8:
+mod paper_accept; // p8:
 #[cfg(test)]
 mod storage_accept;
 #[cfg(test)]
