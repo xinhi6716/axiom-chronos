@@ -1,4 +1,6 @@
-use axiom::orch::{lint_map, module_context, parse_map, run, MAX_CONTEXT_BYTES};
+use axiom::orch::{
+    lint_map, module_context, parse_map, render_module_context, run, MAX_CONTEXT_BYTES,
+};
 use std::path::Path;
 
 fn section(id: &str, paths: &str, deps: &str, extra: &str, command: &str) -> String {
@@ -453,7 +455,13 @@ fn long_header_that_fits_is_not_charged_for_unused_markers() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path();
     init(p);
-    let purpose = "x".repeat(15800);
+    write(p, "modules.md", &section("m", "p", "none", "", "test"));
+    let baseline = module_context(p, "m", p).unwrap();
+    // Missing-source paths are absolute and JSON-escaped; include their actual byte cost.
+    let base_bytes = render_module_context(&baseline)
+        .len()
+        .max(serde_json::to_string_pretty(&baseline).unwrap().len() + 1);
+    let purpose = "x".repeat(MAX_CONTEXT_BYTES - base_bytes + baseline.purpose.len());
     write(
         p,
         "modules.md",
@@ -463,6 +471,14 @@ fn long_header_that_fits_is_not_charged_for_unused_markers() {
     let c = module_context(p, "m", p).unwrap();
     assert_eq!(c.purpose, purpose);
     assert!(c.incomplete.is_empty());
+    assert_eq!(c.missing, baseline.missing);
+    assert_eq!(c.contract, baseline.contract);
+    assert_eq!(
+        render_module_context(&c)
+            .len()
+            .max(serde_json::to_string_pretty(&c).unwrap().len() + 1),
+        MAX_CONTEXT_BYTES
+    );
 }
 
 #[test]

@@ -23,7 +23,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(brief: &str) -> Self {
-        let temp = common::temp();
+        // Keep reply-size assertions independent of an arbitrarily long inherited TEMP path.
+        let temp = tempfile::tempdir_in(common::repo_root()).unwrap();
         let home = temp.path().to_path_buf();
         let repo = home.join("repo");
         let store = orch::store_for(&home, "demo").unwrap();
@@ -129,6 +130,13 @@ impl Fixture {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+    fn gate(&self, unit: &str) -> PathBuf {
+        let gate = self.home.join(format!("{unit}.gate"));
+        let brief = self.store.join(format!("{unit}.brief"));
+        let text = fs::read_to_string(&brief).unwrap();
+        fs::write(&brief, format!("{text}\nFAKE_GATE {}\n", gate.display())).unwrap();
+        gate
     }
 }
 
@@ -481,20 +489,23 @@ fn scope_records_ignored_paths() {
 
 #[test]
 fn parallel_unit_scope_survives_peer_completion() {
-    let f = Fixture::new(
-        "GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_DELAY_MS 1000\n",
-    );
+    let f = Fixture::new("GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
     f.add(
         "two",
-        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\nFAKE_DELAY_MS 2500\n",
+        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\n",
     );
+    let one_gate = f.gate("one");
+    let two_gate = f.gate("two");
     let one = f.spawn("one", false);
     f.wait_turns(1);
     let two = f.spawn("two", false);
     f.wait_turns(2);
+    // Both baselines and peer scopes exist before either unit can write.
+    fs::write(one_gate, "").unwrap();
     let a = one.join().unwrap();
     assert_eq!(a["state"], "built", "{a}");
     assert!(orch::unit_owner(&f.store, "one").unwrap().is_none());
+    fs::write(two_gate, "").unwrap();
     let b = two.join().unwrap();
     assert_eq!(b["state"], "built", "{b}");
     assert_eq!(b["outside_scope"], json!([]));
@@ -516,17 +527,17 @@ fn parallel_unit_scope_survives_peer_completion() {
 
 #[test]
 fn own_outside_write_is_not_excused_by_peer_scope() {
-    let f = Fixture::new(
-        "GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_DELAY_MS 3000\n",
-    );
+    let f = Fixture::new("GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
     f.add(
         "two",
-        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_DELAY_MS 300\n",
+        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n",
     );
+    let one_gate = f.gate("one");
     let one = f.spawn("one", false);
     f.wait_turns(1);
     let b = f.run("two", false);
     assert_eq!(b["error"]["kind"], "outside_scope", "{b}");
     assert_eq!(b["outside_scope"], json!(["a.txt"]));
+    fs::write(one_gate, "").unwrap();
     assert_eq!(one.join().unwrap()["state"], "built");
 }

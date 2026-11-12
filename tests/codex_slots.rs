@@ -17,12 +17,20 @@ use std::{
 // release must not overlap with tests that spawn. Production only sees a momentary overcount.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[track_caller]
 fn until(mut condition: impl FnMut() -> bool) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + PROGRESS_TIMEOUT;
     while !condition() {
         assert!(Instant::now() < end, "child did not make progress");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+fn queued(home: &Path, id: &str) {
+    // AppServer construction is not evidence that run_cancellable has captured cancellation
+    // or tried the locks. This marker comes from acquire's existing full-pool progress event.
+    until(|| home.join(format!("{id}.queued")).exists());
 }
 fn locked(home: &Path) -> File {
     fs::create_dir_all(home.join("codex-slots")).unwrap();
@@ -53,6 +61,10 @@ fn child(home: &Path, id: &str, cap: &str, action: &str) -> Child {
 }
 fn result(home: &Path, id: &str, c: &mut Child) -> Value {
     until(|| c.try_wait().unwrap().is_some());
+    assert!(
+        c.try_wait().unwrap().unwrap().success(),
+        "slot child {id} failed"
+    );
     serde_json::from_slice(&fs::read(home.join(format!("{id}.json"))).unwrap()).unwrap()
 }
 fn turns(home: &Path, id: &str) -> usize {
@@ -77,13 +89,29 @@ fn slot_child() {
         let _lock = locked(home);
         fs::write(home.join(format!("{id}.ready")), "").unwrap();
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            // The parent deliberately kills this process to test OS lock recovery.
+            std::thread::park();
         }
     }
-    let server = Arc::new(AppServer::new(common::fake_codex(&[
-        "--fake-interrupt-delay=0.4",
-    ])));
-    fs::write(home.join(format!("{id}.ready")), "").unwrap();
+    let active = action == "active";
+    let command = if active {
+        common::fake_codex(&[&format!(
+            "--fake-interrupt-gate={}",
+            home.join(format!("{id}.complete")).display()
+        )])
+    } else {
+        common::fake_codex(&[])
+    };
+    let server = Arc::new(AppServer::new(command));
+    // Only the timeout test intentionally has a short call deadline; other calls must
+    // survive both the 15-second full-pool progress interval and busy-machine startup.
+    let timeout_s = if action == "timeout" { 1 } else { 120 };
+    let waiting = home.join(format!("{id}.queued"));
+    let progress = axiom::base::progress::Progress::new(Value::Null, move |event| {
+        if event["params"]["message"] == "waiting for a Codex slot" {
+            fs::write(&waiting, "").unwrap();
+        }
+    });
     let stop = Arc::new(AtomicBool::new(false));
     if action == "cancel" || action == "close" || action == "active" || action == "stop" {
         let s = server.clone();
@@ -100,7 +128,6 @@ fn slot_child() {
             }
         });
     }
-    let active = std::env::var("SLOT_TEST_ACTION").unwrap() == "active";
     let req = RunRequest {
         brief: if active { "HANG" } else { "ok" }.into(),
         cwd: home.to_string_lossy().into_owned(),
@@ -109,12 +136,14 @@ fn slot_child() {
         effort: None,
         output_schema: None,
         developer_instructions: None,
-        timeout_s: if active { 10 } else { 1 },
+        timeout_s,
         lean: false,
         keep_plugins: vec![],
         web_search: false,
     };
-    let r = match server.run_cancellable(&req, None, Some(&stop)) {
+    let r = match axiom::base::progress::scope(Some(progress), || {
+        server.run_cancellable(&req, None, Some(&stop))
+    }) {
         Ok(v) => v,
         Err(e) => json!({"error":e.to_json()}),
     };
@@ -128,8 +157,7 @@ fn another_process_waits_then_reports_its_wait() {
     let home = t.path();
     let lock = locked(home);
     let mut c = child(home, "wait", "1", "run");
-    until(|| home.join("wait.ready").exists());
-    std::thread::sleep(Duration::from_millis(350));
+    queued(home, "wait");
     let started = turns(home, "wait");
     drop(lock);
     let r = result(home, "wait", &mut c);
@@ -150,8 +178,7 @@ fn queued_calls_honour_cancel_and_close_without_starting_codex() {
         let home = t.path();
         let _lock = locked(home);
         let mut c = child(home, action, "1", action);
-        until(|| home.join(format!("{action}.ready")).exists());
-        std::thread::sleep(Duration::from_millis(200));
+        queued(home, action);
         fs::write(home.join(format!("{action}.signal")), "").unwrap();
         let r = result(home, action, &mut c);
         assert_eq!(turns(home, action), 0, "{r}");
@@ -166,7 +193,7 @@ fn waiting_obeys_the_call_timeout() {
     let t = common::temp();
     let home = t.path();
     let _lock = locked(home);
-    let mut c = child(home, "timeout", "1", "run");
+    let mut c = child(home, "timeout", "1", "timeout");
     let r = result(home, "timeout", &mut c);
     assert_eq!(turns(home, "timeout"), 0, "{r}");
     assert_eq!(r["status"], "timeout", "{r}");
@@ -180,8 +207,7 @@ fn crash_releases_os_lock_and_stale_files_are_free() {
     let mut holder = child(home, "holder", "1", "holder");
     until(|| home.join("holder.ready").exists());
     let mut c = child(home, "crash", "1", "run");
-    until(|| home.join("crash.ready").exists());
-    std::thread::sleep(Duration::from_millis(200));
+    queued(home, "crash");
     let started = turns(home, "crash");
     holder.kill().unwrap();
     holder.wait().unwrap();
@@ -225,24 +251,29 @@ fn concurrent_processes_share_the_pool_and_reuse_released_slots() {
     }
 
     let mut c = child(home, "c", "2", "run");
-    until(|| home.join("c.ready").exists());
-    std::thread::sleep(Duration::from_millis(200));
+    queued(home, "c");
     let started = turns(home, "c");
     fs::write(home.join("a.signal"), "").unwrap();
     until(|| {
         fs::read_to_string(home.join("a.log"))
             .unwrap_or_default()
-            .contains("turn/interrupt")
+            .contains("fake/interrupt-ack")
     });
-    std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
         axiom::codex::slots::in_use(home).unwrap(),
         2,
         "interrupt acknowledgement must retain the slot until turn/completed"
     );
+    assert!(
+        a.try_wait().unwrap().is_none(),
+        "interrupted call returned before completion"
+    );
+    assert_eq!(turns(home, "c"), 0, "queued call started before completion");
+    fs::write(home.join("a.complete"), "").unwrap();
     let ar = result(home, "a", &mut a);
     let cr = result(home, "c", &mut c);
     fs::write(home.join("b.signal"), "").unwrap();
+    fs::write(home.join("b.complete"), "").unwrap();
     let br = result(home, "b", &mut b);
     assert_eq!(started, 0);
     assert_eq!(ar["status"], "interrupted");
