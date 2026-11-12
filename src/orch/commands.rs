@@ -39,6 +39,7 @@ fn cut(text: &str) -> String {
 pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
     if ![
+        "policy",
         "ready",
         "verify",
         "accept",
@@ -73,6 +74,15 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         };
         let has = |name: &str| args.iter().any(|s| s == name);
         match cmd {
+            "policy" => {
+                let policy = match args {
+                    [_, sub] if sub == "show" => crate::engine::policy::load(store)?,
+                    [_, sub, key, value] if sub == "set" => crate::engine::policy::set(store, key, value)?,
+                    _ => return Err(invalid("expected policy show or policy set <key> <value>")),
+                };
+                let value = serde_json::to_value(policy).expect("policy serializes");
+                Ok((0, serde_json::to_string_pretty(&value).unwrap(), value))
+            }
             "schedule" => {
                 use super::lifecycle::scheduler;
                 let sub = args.get(1).map(String::as_str).unwrap_or("");
@@ -443,7 +453,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         ),
                     ));
                 }
-                let rows = record_review(store, &units, reviewer, pass, repo)?;
+                let rows = super::evidence::record_review_with_verdict(store, &units, reviewer, pass, repo, Some(&v))?;
                 if path != default_path {
                     base::atomic_write(&default_path, data.as_bytes())
                         .map_err(|e| Failure::new("io", e.to_string()))?;

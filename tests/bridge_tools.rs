@@ -44,7 +44,8 @@ fn tool_contract_and_rewrite_evidence() {
             "memory_get",
             "memory_digest",
             "goal",
-            "bridge_status"
+            "bridge_status",
+            "approval"
         ]
     );
     assert!(!names.contains(&"review_code"));

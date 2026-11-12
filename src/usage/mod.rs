@@ -6,6 +6,7 @@
 
 pub mod price;
 pub mod quota;
+pub mod review_stats;
 mod report;
 mod scan;
 

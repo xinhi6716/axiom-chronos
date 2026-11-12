@@ -1,4 +1,5 @@
 use super::{command, user_message, Config, Renderer};
+use crate::engine::budgets::{self, Role};
 use crate::{
     base::{self, Failure, Res},
     codegraph, council, engine, goal, hook, orch, provenance, setup,
@@ -340,7 +341,13 @@ pub(super) fn run_observed(
     drive(spawned, config, out, &INTERRUPTED, observe)
 }
 
-pub type Writer = Arc<Mutex<Option<ChildStdin>>>;
+pub type Writer = Arc<Mutex<Option<BudgetStdin>>>;
+
+pub struct BudgetStdin {
+    stdin: ChildStdin,
+    home: PathBuf,
+    session: Arc<Mutex<Option<String>>>,
+}
 
 /// Where a run's forwarder returns a line it read but could not deliver because the run is over.
 pub type HandBack = Box<dyn FnOnce(String) + Send>;
@@ -352,10 +359,15 @@ fn pipe_closed(e: &std::io::Error) -> bool {
         || (cfg!(windows) && matches!(e.raw_os_error(), Some(109) | Some(232)))
 }
 
-pub fn send(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
+pub fn send(stdin: &mut BudgetStdin, text: &str) -> std::io::Result<()> {
+    if let Some(store) = session_store(&stdin.home, &stdin.session) {
+        budgets::check(&store, Role::Core, "session")
+            .map_err(|e| std::io::Error::other(format!("{}: {}", e.kind, e.message)))?;
+    }
     stdin
+        .stdin
         .write_all(user_message(text).as_bytes())
-        .and_then(|_| stdin.flush())
+        .and_then(|_| stdin.stdin.flush())
 }
 
 /// A running claude with its first message sent; `drive` takes it from here.
@@ -371,6 +383,7 @@ pub struct Spawned {
     max_turns: Option<u32>,
     advanced_research: bool,
     codex_max_parallel: u64,
+    session: Arc<Mutex<Option<String>>>,
 }
 
 /// What a launch opts in to. The default is a launch exactly as it has always been.
@@ -411,6 +424,10 @@ pub fn spawn_with(
     launch: &Launch,
 ) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
+    let session = Arc::new(Mutex::new(resume.map(str::to_owned)));
+    if let Some(store) = session_store(&config.home, &session) {
+        budgets::check(&store, Role::Core, "session")?;
+    }
     let codex_max_parallel = match launch.codex_max_parallel {
         Some(n) => crate::codex::slots::parse(Some(n.to_string())).map_err(Failure::from)?,
         None => crate::codex::slots::from_env()?,
@@ -498,17 +515,25 @@ pub fn spawn_with(
     let mut child = child
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
-    let mut stdin = child.stdin.take().unwrap();
-    if let Err(e) = send(
-        &mut stdin,
-        &if resume.is_some() {
-            text.to_owned()
-        } else if text.is_empty() {
-            format!("/chronos:{skill}")
-        } else {
-            format!("/chronos:{skill} {text}")
-        },
-    ) {
+    let mut stdin = BudgetStdin {
+        stdin: child.stdin.take().unwrap(),
+        home: config.home.clone(),
+        session: Arc::clone(&session),
+    };
+    if let Err(e) = stdin
+        .stdin
+        .write_all(
+            user_message(&if resume.is_some() {
+                text.to_owned()
+            } else if text.is_empty() {
+                format!("/chronos:{skill}")
+            } else {
+                format!("/chronos:{skill} {text}")
+            })
+            .as_bytes(),
+        )
+        .and_then(|_| stdin.stdin.flush())
+    {
         base::proc::kill_tree(&mut child);
         return Err(failure(e));
     }
@@ -541,6 +566,7 @@ pub fn spawn_with(
         max_turns,
         advanced_research,
         codex_max_parallel,
+        session,
     })
 }
 
@@ -572,7 +598,10 @@ pub(super) fn forward_input_keeping(
                 let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
                 match guard.as_mut() {
                     Some(stdin) => {
-                        if send(stdin, line).is_err() {
+                        if let Err(e) = send(stdin, line) {
+                            if e.to_string().starts_with("budget_exceeded:") {
+                                eprintln!("{e}");
+                            }
                             return;
                         }
                         break;
@@ -618,7 +647,7 @@ pub fn drive(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
 ) -> Res<i32> {
-    let session = Arc::new(Mutex::new(None::<String>));
+    let session = Arc::clone(&spawned.session);
     let heartbeat = Heartbeats::start(config.home.clone(), Arc::clone(&session));
     let result = drive_inner(spawned, config, out, stop, observe, &session);
     drop(heartbeat);
@@ -679,7 +708,7 @@ fn drive_inner(
     out: &mut dyn Write,
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
-    session: &Arc<Mutex<Option<String>>>,
+    shared_session: &Arc<Mutex<Option<String>>>,
 ) -> Res<i32> {
     let writer = Arc::clone(&spawned.writer);
     let (skill, project, max_turns) = (
@@ -690,7 +719,15 @@ fn drive_inner(
     let codex_max_parallel = spawned.codex_max_parallel;
     let mut spawned = spawned;
     loop {
-        let outcome = drive_once(spawned, config, out, stop, observe, max_turns, session)?;
+        let outcome = drive_once(
+            spawned,
+            config,
+            out,
+            stop,
+            observe,
+            max_turns,
+            shared_session,
+        )?;
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
@@ -725,6 +762,15 @@ fn drive_inner(
             Some(&session),
             &launch,
         )?;
+        next.session = Arc::clone(shared_session);
+        if let Some(stdin) = next
+            .writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            stdin.session = Arc::clone(shared_session);
+        }
         *writer.lock().unwrap_or_else(|e| e.into_inner()) =
             next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
         next.writer = Arc::clone(&writer);
@@ -762,6 +808,8 @@ fn drive_once(
     let mut cause = None;
     let mut reset = None;
     let mut last_refusal = None::<String>;
+    let mut previous_cost = 0.0;
+    let mut model = String::from("unknown");
     let idle_limit = goal::progress::idle_limit();
     let result: Res<i32> = loop {
         if stop.load(Ordering::SeqCst) {
@@ -779,6 +827,9 @@ fn drive_once(
                     continue;
                 };
                 if event["type"] == "system" && event["subtype"] == "init" {
+                    if let Some(name) = event["model"].as_str() {
+                        model = name.to_owned();
+                    }
                     session = event["session_id"].as_str().map(str::to_owned);
                     if session.is_some() {
                         *shared_session.lock().unwrap_or_else(|e| e.into_inner()) = session.clone();
@@ -787,8 +838,10 @@ fn drive_once(
                         council::remember_switch(&config.home, id);
                     }
                 }
-                renderer.event(&event, out);
-                observe(&event);
+                if event["type"] != "result" {
+                    renderer.event(&event, out);
+                    observe(&event);
+                }
                 if event["parent_tool_use_id"].is_null() {
                     if let Some(blocks) = event["message"]["content"].as_array() {
                         for block in blocks {
@@ -813,6 +866,35 @@ fn drive_once(
                 if event["type"] != "result" {
                     continue;
                 }
+                if let Some(total) = event["total_cost_usd"].as_f64() {
+                    let _guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(store) = session_store(&config.home, shared_session) {
+                        let usage = event["modelUsage"].as_object();
+                        let result_model = usage
+                            .and_then(|m| (m.len() == 1).then(|| m.keys().next().unwrap().as_str()))
+                            .unwrap_or(&model);
+                        let tokens = |key: &str, fallback: &str| {
+                            usage
+                                .map(|m| m.values().filter_map(|v| v[key].as_u64()).sum())
+                                .unwrap_or_else(|| event["usage"][fallback].as_u64().unwrap_or(0))
+                        };
+                        if let Err(e) = budgets::record(
+                            &store,
+                            Role::Core,
+                            result_model,
+                            Some(total - previous_cost),
+                            tokens("inputTokens", "input_tokens"),
+                            tokens("outputTokens", "output_tokens"),
+                            "session",
+                        ) {
+                            base::proc::kill_tree(&mut child);
+                            break Err(e);
+                        }
+                    }
+                    previous_cost = total;
+                }
+                renderer.event(&event, out);
+                observe(&event);
                 if max_turns_cut_off {
                     continue;
                 }
@@ -883,6 +965,12 @@ fn drive_once(
                                 if let Some(stdin) = guard.as_mut() {
                                     if let Err(e) = send(stdin, &format!("{CONTINUE_TAG} {reason}"))
                                     {
+                                        if e.to_string().starts_with("budget_exceeded:") {
+                                            let _ = writeln!(out, "{e}");
+                                            guard.take();
+                                            final_result = true;
+                                            continue;
+                                        }
                                         if !pipe_closed(&e) {
                                             base::proc::kill_tree(&mut child);
                                             break Err(failure(e));
@@ -977,8 +1065,131 @@ fn drive_once(
 
 #[cfg(test)]
 mod tests {
-    use super::pipe_closed;
+    use super::*;
+    use crate::engine::{kinds, policy};
     use std::io::{Error, ErrorKind};
+
+    const SESSION: &str = "12345678-1234-1234-1234-123456789abc";
+
+    fn fixture(dir: &tempfile::TempDir) -> (Config, PathBuf, PathBuf) {
+        let home = dir.path().join("home");
+        let record = dir.path().join("record.json");
+        let goal = goal::open(&home, SESSION, "wish", Some(dir.path().to_str().unwrap())).unwrap();
+        let store = orch::store_for_goal(&home, &goal).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        let python = std::env::var("AXIOM_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_string());
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_claude.py");
+        let script = format!(
+            "import os,runpy,sys; os.environ['FAKE_CLAUDE_RECORD']={}; os.environ['FAKE_CLAUDE_SCENARIO']='continue'; os.environ['FAKE_CLAUDE_SESSION']={}; sys.argv=[{}]+sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')",
+            json!(record.to_str().unwrap()), json!(SESSION), json!(fake.to_str().unwrap())
+        );
+        (
+            Config {
+                home,
+                bin: dir.path().join("axiom"),
+                claude: Ok(vec![python, "-I".into(), "-c".into(), script]),
+                clock: Clock::system(),
+            },
+            store,
+            record,
+        )
+    }
+
+    #[test]
+    fn core_budget_blocks_launch_and_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, store, record) = fixture(&dir);
+        policy::set(&store, "budget.core", "0.3").unwrap();
+        budgets::record(&store, Role::Core, "test", Some(0.3), 0, 0, "test").unwrap();
+        let err = match spawn(&config, "wish", "start", dir.path(), None, Some(SESSION)) {
+            Err(err) => err,
+            Ok(_) => panic!("budget must prevent launch"),
+        };
+        assert_eq!(err.kind, kinds::BUDGET_EXCEEDED);
+        assert!(err.message.contains("core budget exceeded"));
+        assert!(!record.exists());
+
+        policy::set(&store, "budget.core", "none").unwrap();
+        let spawned = spawn(&config, "wish", "start", dir.path(), None, Some(SESSION)).unwrap();
+        policy::set(&store, "budget.core", "0.3").unwrap();
+        let err = send(
+            spawned.writer.lock().unwrap().as_mut().unwrap(),
+            "must not send",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("budget_exceeded"));
+        spawned.writer.lock().unwrap().take();
+        let _ = drive(
+            spawned,
+            &config,
+            &mut Vec::new(),
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        let recorded: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+        assert_eq!(recorded["messages"].as_array().unwrap().len(), 1);
+        let events = orch::events::read_events(&store, 0).unwrap();
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.kind == kinds::BUDGET_EXCEEDED)
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn core_result_spend_is_delta_and_no_budget_allows_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, store, record) = fixture(&dir);
+        let spawned = spawn(&config, "wish", "start", dir.path(), None, Some(SESSION)).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(
+            drive(
+                spawned,
+                &config,
+                &mut out,
+                &AtomicBool::new(false),
+                &mut |_| {}
+            )
+            .unwrap(),
+            0
+        );
+        let recorded: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+        assert_eq!(recorded["messages"].as_array().unwrap().len(), 2);
+        let events = orch::events::read_events(&store, 0).unwrap();
+        let spend: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == kinds::ROLE_SPEND)
+            .collect();
+        assert_eq!(spend.len(), 2);
+        assert_eq!(spend[0].data["role"], "core");
+        assert_eq!(spend[0].data["call"], "session");
+        assert!((spend[0].data["usd"].as_f64().unwrap() - 0.3).abs() < 1e-9);
+        assert!((spend[1].data["usd"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!(!events.iter().any(|e| e.kind == kinds::BUDGET_EXCEEDED));
+    }
+
+    #[test]
+    fn core_budget_stops_automatic_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, store, record) = fixture(&dir);
+        policy::set(&store, "budget.core", "0.3").unwrap();
+        let spawned = spawn(&config, "wish", "start", dir.path(), None, Some(SESSION)).unwrap();
+        let mut out = Vec::new();
+        drive(
+            spawned,
+            &config,
+            &mut out,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("budget_exceeded"));
+        let recorded: Value = serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+        assert_eq!(recorded["messages"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn a_closing_reader_is_not_a_failure_but_other_errors_are() {

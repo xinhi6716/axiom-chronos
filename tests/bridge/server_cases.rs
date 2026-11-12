@@ -90,7 +90,8 @@ fn full_protocol_session() {
             "memory_get",
             "memory_digest",
             "goal",
-            "bridge_status"
+            "bridge_status",
+            "approval"
         ]
     );
     assert_eq!(lines[3]["result"], json!({}));

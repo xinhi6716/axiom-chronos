@@ -767,8 +767,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 }
                 context(text)
             } else {
-                goal::interject(home, session, prompt).ok()??;
-                context(format!("This message amends Chronos goal {session}. The user's words take precedence over the plan. Classify it with the bridge goal tool as amend, answer or stop."))
+                let id = match crate::engine::interjections::submit(home, session, prompt) {
+                    Ok(Some((id, _))) => id,
+                    // Older goals can lack a project and therefore have no event store.
+                    Err(_) if goal::load(home, session).ok().flatten().is_some_and(|g| store_of_goal(home, &g).is_none()) => {
+                        let g = goal::interject(home, session, prompt).ok()??;
+                        format!("ij-{}", g.interjection_counter)
+                    }
+                    _ => return None,
+                };
+                context(format!("This message amends Chronos goal {session}. The user's words take precedence over the plan. Classify interjection {id} with the bridge goal tool as amend, answer or stop; other options are replan and pause_batch."))
             }
         }
         "SessionStart" => {
@@ -840,6 +848,20 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
             let subagent = input.get("subagent_type").and_then(Value::as_str);
+            if matches!(tool, "Agent" | "Task") {
+                if let Some((name, role, store)) = subagent.and_then(|name| {
+                    let role = crate::engine::budgets::role_for_agent(name)?;
+                    let home = home?;
+                    let goal = goal::load(home, session).ok()??;
+                    Some((name, role, store_of_goal(home, &goal)?))
+                }) {
+                    if let Err(e) =
+                        crate::engine::budgets::check(&store, role, &format!("agent:{name}"))
+                    {
+                        return deny(&e.message);
+                    }
+                }
+            }
             if matches!(tool, "Agent" | "Task")
                 && matches!(
                     subagent,
@@ -878,11 +900,16 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     ));
                 }
             }
-            if agent
-                && matches!(tool, "Agent" | "Task")
-                && input.get("subagent_type").and_then(Value::as_str) != Some("chronos:reviewer")
-            {
-                return deny("Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent.");
+            if agent && matches!(tool, "Agent" | "Task") {
+                let pm_qa = home.and_then(|h| goal::load(h, session).ok().flatten().and_then(|g| store_of_goal(h, &g))).and_then(|store| crate::engine::policy::load(&store).ok()).is_some_and(|p| p.pm_qa);
+                let subagent = input.get("subagent_type").and_then(Value::as_str);
+                if subagent != Some("chronos:reviewer") && !(pm_qa && subagent == Some("chronos:pm-qa")) {
+                    return deny(if pm_qa {
+                        "Inside an agent only chronos:reviewer or chronos:pm-qa may be started. Call codex_run yourself; never forward work through another agent."
+                    } else {
+                        "Inside an agent only chronos:reviewer may be started. Call codex_run yourself; never forward work through another agent."
+                    });
+                }
             }
             if tool == CODEX && !agent {
                 return deny("codex_run is for the chronos agents. Hand building to chronos:dispatcher and Astra plans to chronos:astra.");
@@ -899,6 +926,9 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 } else {
                     (first, second)
                 };
+                if first_command == Some("policy") && subcommand == Some("set") {
+                    return deny("Only the person and core may change policy.");
+                }
                 if first_command == Some("setup")
                     || (first_command == Some("schedule")
                         && matches!(subcommand, Some("next" | "claim")))
@@ -923,14 +953,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 }
             };
             let reviewer = agent
-                && event.get("agent_type").and_then(Value::as_str) == Some("chronos:reviewer");
+                && matches!(event.get("agent_type").and_then(Value::as_str), Some("chronos:reviewer" | "chronos:pm-qa"));
             let store = reviewer.then(|| store_of_goal(home, &g)).flatten();
             let bound = store
                 .as_deref()
                 .and_then(|store| reviewer_binding(store, event, input, tool));
             if reviewer && matches!(tool, "Write" | "Edit" | "NotebookEdit") {
                 let allowed = store.as_ref().zip(bound.as_ref()).map(|(store, unit)| {
-                    store.join("reports").join(format!("{unit}.verdict.json"))
+                    crate::orch::review_verdict_path(store, unit, event.get("agent_type").and_then(Value::as_str).unwrap_or("chronos:reviewer"))
                 });
                 let path = input
                     .get("file_path")

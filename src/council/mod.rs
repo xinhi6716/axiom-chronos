@@ -5,6 +5,7 @@ pub mod budgets;
 pub use budgets::Budgets;
 mod converge;
 mod member;
+pub use member::{claude_call, MemberUsage};
 pub mod running;
 pub use converge::{digest, stage_note, DIGEST_MAX_CHARS};
 

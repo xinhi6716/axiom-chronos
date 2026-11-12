@@ -3,6 +3,7 @@
 //! installed or has no quota or login left, and it never blocks, so a missing, slow or broken
 //! agy ends in `skipped` with exit 0. The unit gate does not use this; it stays with
 //! `chronos:reviewer`.
+pub mod roles;
 use crate::{
     base::{self, schema, Failure, Family, Res},
     codex::{AppServer, RunRequest},

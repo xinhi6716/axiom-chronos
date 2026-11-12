@@ -10,6 +10,9 @@ pub use batch::{sleep_unless_stopped, wait_for_batch, Batch, BatchEnd, Waited, B
 fn is_false(v: &bool) -> bool {
     !v
 }
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
@@ -44,15 +47,23 @@ pub struct Goal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interjection: Option<Interjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<Interjection>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub interjection_counter: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<Value>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interjection {
+    #[serde(default)]
+    pub id: Option<String>,
     pub prompt: String,
     pub prior_status: String,
     pub prior_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_index: Option<usize>,
 }
 
 fn path(home: &Path, session: &str) -> Res<PathBuf> {
@@ -122,6 +133,8 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         dispatched: false,
         reason: None,
         interjection: None,
+        queued: vec![],
+        interjection_counter: 0,
         provenance: vec![],
         other: Map::new(),
     };
@@ -244,16 +257,28 @@ pub fn interject(home: &Path, session: &str, prompt: &str) -> Res<Option<Goal>> 
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
     };
-    let (prior_status, prior_note) = match goal.interjection.take() {
-        Some(pending) => (pending.prior_status, pending.prior_note),
+    let (prior_status, prior_note) = match &goal.interjection {
+        Some(pending) => {
+            let oldest = goal.queued.first().unwrap_or(pending);
+            (oldest.prior_status.clone(), oldest.prior_note.clone())
+        }
         None => (goal.status.clone(), goal.note.clone()),
     };
     leave_waiting(&mut goal, None);
-    goal.interjection = Some(Interjection {
+    goal.interjection_counter = goal
+        .interjection_counter
+        .checked_add(1)
+        .ok_or_else(|| Failure::new("invalid_argument", "interjection counter overflow"))?;
+    let pending = Interjection {
+        id: Some(format!("ij-{}", goal.interjection_counter)),
         prompt: prompt.into(),
         prior_status,
         prior_note,
-    });
+        amendment_index: Some(goal.amendments.len()),
+    };
+    if let Some(previous) = goal.interjection.replace(pending) {
+        goal.queued.push(previous);
+    }
     goal.amendments.push(prompt.into());
     goal.status = "active".into();
     goal.mode_locked = false;
@@ -269,15 +294,26 @@ pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
         .take()
         .ok_or_else(|| Failure::new("invalid_argument", "no pending interjection"))?;
     match kind {
-        "amend" => (),
+        "amend" | "replan" | "pause_batch" => (),
         "answer" => {
             if pending.prior_status == "waiting" {
                 goal.waited = None;
             }
             goal.status = pending.prior_status;
             goal.note = pending.prior_note;
-            if let Some(i) = goal.amendments.iter().rposition(|a| a == &pending.prompt) {
+            let index = pending
+                .amendment_index
+                .filter(|&i| goal.amendments.get(i) == Some(&pending.prompt))
+                .or_else(|| goal.amendments.iter().rposition(|a| a == &pending.prompt));
+            if let Some(i) = index {
                 goal.amendments.remove(i);
+                for queued in &mut goal.queued {
+                    if let Some(index) = &mut queued.amendment_index {
+                        if *index > i {
+                            *index -= 1;
+                        }
+                    }
+                }
             }
         }
         "stop" => {
@@ -294,6 +330,11 @@ pub fn classify(home: &Path, session: &str, kind: &str) -> Res<Goal> {
     }
     if goal.status != "waiting" {
         goal.batch = None;
+    }
+    if let Some(mut next) = goal.queued.pop() {
+        next.prior_status = goal.status.clone();
+        next.prior_note = goal.note.clone();
+        goal.interjection = Some(next);
     }
     save(home, session, &goal)?;
     Ok(goal)

@@ -2,7 +2,7 @@
 name: memory-keeper
 description: After a wish is done, distills its verified units into long-run memory for later briefs and adds one line to the project's history. Give it the orch store path, the program slug, the project's absolute directory and the wish.
 model: haiku
-tools: Read, Glob, Grep, mcp__plugin_chronos_bridge__memory_record, mcp__plugin_chronos_bridge__memory_digest
+tools: Read, Glob, Grep, mcp__plugin_chronos_bridge__memory_record, mcp__plugin_chronos_bridge__memory_digest, mcp__plugin_chronos_bridge__memory_search, mcp__plugin_chronos_bridge__memory_get
 ---
 
 You keep what later workers can reuse and drop the rest.
@@ -19,6 +19,7 @@ You keep what later workers can reuse and drop the rest.
    - `files`: the unit's changed files that still exist, relative to the project directory; pass at least one
    - `wish`: the wish, verbatim
    A duplicate id is success: use the returned existing id.
-5. Call `memory_digest` with `add`: one line with the wish, the outcome, and the ids you recorded.
+5. Search for `correction: approval <id> denied` memory records and consume any found via `memory_get`. Also read `approval_denied` events in `<store>/events.jsonl`: their data contains the id, action and reason. Record each denial and its reason as a correction in the digest, and in an applicable verified unit memory when relevant. `memory_record` requires a verified unit and scoped files; do not use an approval id as a unit. The event data is the reliable source for the reason because the attempted approval memory record can be refused.
+6. Call `memory_digest` with `add`: one line with the wish, the outcome, the ids you recorded, and denial corrections.
 
 Return one line per unit: the id you recorded, or why you skipped it.

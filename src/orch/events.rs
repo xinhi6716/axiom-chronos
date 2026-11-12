@@ -130,6 +130,72 @@ pub fn append_event(
     let (events, len) = load(store)?;
     append_locked(store, &events, len, kind, module, unit, data)
 }
+pub fn append_if(
+    store: &Path,
+    kind: &str,
+    module: Option<&str>,
+    unit: Option<&str>,
+    data: Value,
+    pred: impl FnOnce(&[Event]) -> Res<()>,
+) -> Res<Event> {
+    let _lock = lock(store)?;
+    let (events, len) = load(store)?;
+    pred(&events)?;
+    append_locked(store, &events, len, kind, module, unit, data)
+}
+
+#[cfg(test)]
+mod compare_append_tests {
+    use super::*;
+    #[test]
+    fn predicate_checks_history_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        append_event(dir.path(), "first", None, None, json!({})).unwrap();
+        let result = append_if(dir.path(), "second", None, None, json!({}), |events| {
+            assert_eq!(events.len(), 1);
+            Err(Failure::new("conflict", "already present"))
+        });
+        assert_eq!(result.unwrap_err().kind, "conflict");
+        assert_eq!(read_events(dir.path(), 0).unwrap().len(), 1);
+        let event = append_if(dir.path(), "second", None, None, json!({}), |events| {
+            assert_eq!(events[0].kind, "first");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(event.seq, 2);
+    }
+    #[test]
+    fn concurrent_predicates_allow_only_one_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    append_if(&path, "once", None, None, json!({}), |events| {
+                        if events.iter().any(|event| event.kind == "once") {
+                            Err(Failure::new("conflict", "already appended"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .filter(|r| r.is_ok())
+                .count(),
+            1
+        );
+        assert_eq!(read_events(dir.path(), 0).unwrap().len(), 1);
+    }
+}
 pub fn read_events(store: &Path, after: u64) -> Res<Vec<Event>> {
     Ok(load(store)?
         .0

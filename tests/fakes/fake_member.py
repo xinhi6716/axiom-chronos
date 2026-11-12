@@ -1,6 +1,7 @@
 """Stand-in for a council member: `claude -p` for Fable (it sees --strict-mcp-config), `agy` for Argon.
 
---fake-log=<path> appends one JSON line per call. --fake-scenario=<a,b,...> scripts the call:
+--fake-log=<path> appends one JSON line per call. --fake-script=<path> selects answers by prompt substring.
+--fake-scenario=<a,b,...> scripts the call:
 quota, crash, garbage, wrong-shape, no-usage, unpriced, r1-near-cap, r1-over-cap, r2-over-cap,
 r2-garbage, r2-quota, result-only, disagree, disagree-bare, hang, shape-top, shape-object, huge, argon-tokens.
 """
@@ -98,6 +99,13 @@ if 'partial-review' in scenario:
     answer['stances'] = []
 if 'wrong-shape' in scenario:
     answer = {'wrong': 'shape'}
+script_path = option('script')
+if script_path:
+    with open(script_path, encoding='utf-8') as script_file:
+        script = json.load(script_file)
+    script_entry = next((entry for entry in script if entry['match'] in prompt), None)
+    if script_entry is not None:
+        answer = script_entry['reply']
 garbage = ('fail-third' in scenario and round_n == 3) or 'garbage' in scenario or (round2 and 'r2-garbage' in scenario)
 out_of_quota = 'quota' in scenario or (round2 and 'r2-quota' in scenario)
 
