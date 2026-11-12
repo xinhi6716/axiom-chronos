@@ -22,6 +22,9 @@ pub mod modes; // 2c modes
 pub mod orch;
 pub mod provenance;
 pub mod research_program;
+// --- research workspace (phase 9) ---
+pub mod research_workspace;
+// --- end research workspace (phase 9) ---
 pub mod review;
 pub mod routines;
 pub mod seams;

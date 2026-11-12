@@ -2,3 +2,6 @@ tests/fixtures/orch/stores/old-crlf/** -text
 tools/installers/install.sh text eol=lf
 *.onnx binary
 tests/fixtures/laya/** -text
+# --- research workspace (phase 9) ---
+tests/fixtures/research/** -text
+# --- end research workspace (phase 9) ---
