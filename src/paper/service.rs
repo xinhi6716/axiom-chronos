@@ -433,6 +433,7 @@ Template:
             }
             Ok(ready)
         })();
+        let result = result.map_err(|e| blocking_error(step, e));
         if let Err(ref e) = result {
             if step >= Step::Figures && step <= Step::Review && checked.get() != Some(step) {
                 emit(&PaperEvent::Check {
@@ -693,6 +694,22 @@ fn write_status(store: &Path, running: bool, error: Option<&Failure>) -> Res<()>
         &json!({"running": running, "last_error": error.map(|e| json!({"kind": e.kind, "reason": e.message}))}),
     )
 }
+fn blocking_error(step: Step, error: Failure) -> Failure {
+    let kind = match step {
+        Step::Figures => Some("figures_blocked"),
+        Step::Citations => Some("citations_blocked"),
+        Step::Numbers => Some("numbers_blocked"),
+        Step::Compile => Some("compile_blocked"),
+        Step::Render => Some("render_blocked"),
+        Step::Disclosure => Some("disclosure_blocked"),
+        _ => None,
+    };
+    match kind {
+        Some(kind) => Failure::new(kind, error.message),
+        None => error,
+    }
+}
+
 fn check(step: Step, ok: bool, detail: &str, event: &dyn Fn(&PaperEvent)) -> Res<()> {
     event(&PaperEvent::Check {
         step,
@@ -736,4 +753,35 @@ fn timestamp(ms: i64) -> String {
         (sec % 3600) / 60,
         sec % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prohibited_disclosure_error_has_blocking_kind() {
+        let policy = super::super::AiPolicy {
+            publisher: "Example".into(),
+            url: "https://example.org".into(),
+            fetched_at: "2025-01-01".into(),
+            sha256: "hash".into(),
+            policy: PolicyKind::Prohibited,
+            placement: String::new(),
+            required_items: vec![],
+        };
+        let journal: super::super::JournalRecord = serde_json::from_value(serde_json::json!({
+            "id":"test", "title":"Test", "issns":[], "issn_l":null,
+            "publisher":{"known":{"value":"Example","source":{"kind":"person","url":null,"fetched_at":"2025-01-01","data_year":null,"raw":"test"}}},
+            "homepage":{"unknown":{"reason":"unknown"}}, "quartiles":[], "sjr":{"unknown":{"reason":"unknown"}},
+            "access":{"unknown":{"reason":"unknown"}}, "apc":{"unknown":{"reason":"unknown"}}, "review_weeks":{"unknown":{"reason":"unknown"}}, "topics":[], "works_count":{"unknown":{"reason":"unknown"}}
+        })).unwrap();
+        // Keep the real generator in the path: prohibited policy is rejected before model-use processing.
+        let error = disclosure::generate_with_policies(&[policy], &[], None, &journal).unwrap_err();
+        assert_eq!(error.kind, "policy_prohibits");
+        assert_eq!(
+            blocking_error(Step::Disclosure, error).kind,
+            "disclosure_blocked"
+        );
+    }
 }

@@ -150,7 +150,8 @@ fn canned(dir: &Path) -> Arc<CannedTransport> {
     )
     .unwrap();
     let mut index: Vec<Value> = vec![];
-    let from_year: i32 = axiom::base::now_iso()[..4].parse::<i32>().unwrap() - 5; // matching::gather currently uses the system year
+    let from_year: i32 = axiom::base::now_iso()[..4].parse::<i32>().unwrap()
+        - axiom::paper::journals::matching::RELATED_FROM_YEARS; // matching::gather uses the system year
     for query in [
         "cancer%20immune%20therapy%20trial",
         "cancer%20biomarker",
@@ -339,7 +340,8 @@ fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 #[test]
 fn status_is_read_only() {
     let c = Case::new();
-    let m = Members::new("ready");
+    assert_eq!(c.session.timeout_s, 1800);
+    assert_eq!(c.session.fable_cap_usd, council::DEFAULT_FABLE_CAP_USD);
     let dir = paper_dir(&c.session.store);
     for part_written in [false, true] {
         if part_written {
@@ -352,7 +354,6 @@ fn status_is_read_only() {
         assert_eq!(files(&dir), before);
         assert_eq!(c.transport.requests(), requests);
         assert!(c.transport.requests().is_empty());
-        assert!(m.calls().is_empty());
     }
 }
 #[test]
@@ -483,10 +484,36 @@ fn pipeline_reaches_ready_and_checks_in_order() {
     if !c.setup_tectonic() {
         return;
     }
-    c.prepare();
+    let shortlist = c.prepare();
     let m = Members::new("ready");
     let e = c.session.estimate().unwrap();
+    let status = c.session.status().unwrap();
+    assert!(status
+        .steps
+        .iter()
+        .any(|(step, ok, _)| *step == Step::Evidence && *ok));
+    assert!(status
+        .steps
+        .iter()
+        .any(|(step, ok, _)| *step == Step::Shortlist && *ok));
+    assert!(status
+        .steps
+        .iter()
+        .any(|(step, ok, _)| *step == Step::Journal && *ok));
+    assert_eq!(
+        status.evidence,
+        Some(evidence::load(&c.session.store).unwrap().unwrap().hash)
+    );
+    assert_eq!(status.requirements, Some(c.requirements()));
+    assert_eq!(status.estimate, Some(e.clone()));
+    let dir = paper_dir(&c.session.store);
+    let saved: SpendEstimate =
+        serde_json::from_slice(&fs::read(dir.join("estimate.json")).unwrap()).unwrap();
+    assert_eq!(saved, e);
     let ready = c.write(&m, &e.digest).unwrap();
+    assert!(fs::read_to_string(dir.join("journal-rules.md"))
+        .unwrap()
+        .contains(&shortlist.ranked[0].journal.title));
     assert_ready(&ready);
     let checks: Vec<_> = m
         .events()
@@ -513,6 +540,10 @@ fn pipeline_reaches_ready_and_checks_in_order() {
     );
     let status = c.session.status().unwrap();
     assert_ready(status.ready.as_ref().unwrap());
+    assert!(status
+        .steps
+        .iter()
+        .any(|(step, ok, _)| *step == Step::Figures && *ok));
     assert!(status.pdf.as_ref().unwrap().is_file());
     assert!(!status.running);
     assert!(status.last_error.is_none());
@@ -549,7 +580,21 @@ fn invalid_pass_and_cancel_stop_and_persist_error() {
     c.stop.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(c.write(&m, &e.digest).unwrap_err().kind, "cancelled");
     assert!(m.calls().is_empty());
-    assert!(!c.session.status().unwrap().running);
+    assert!(m
+        .events()
+        .iter()
+        .any(|e| matches!(e, PaperEvent::Blocked { kind, .. } if kind == "cancelled")));
+    assert!(m
+        .events()
+        .iter()
+        .any(|e| matches!(e, PaperEvent::Cancelled)));
+    let saved: Value =
+        serde_json::from_slice(&fs::read(paper_dir(&c.session.store).join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["last_error"]["kind"], "cancelled");
+    let status = c.session.status().unwrap();
+    assert_eq!(status.last_error.unwrap().0, "cancelled");
+    assert!(!status.running);
 }
 #[test]
 fn revision_is_a_valid_but_not_ready_review() {
@@ -580,23 +625,29 @@ fn edited_final_manuscript_invalidates_readiness() {
     let m = Members::new("ready");
     let e = c.session.estimate().unwrap();
     assert_ready(&c.write(&m, &e.digest).unwrap());
-    let path = readiness::final_manuscript_path(&c.session.store);
-    let mut manuscript: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manuscript["title"] = json!("changed after review");
-    fs::write(path, serde_json::to_vec(&manuscript).unwrap()).unwrap();
-    let before = files(&paper_dir(&c.session.store));
-    let status = c.session.status().unwrap();
-    assert!(!status.ready.unwrap().ready);
-    assert_eq!(
-        files(&paper_dir(&c.session.store)),
-        before,
-        "status must not remove stale readiness"
-    );
-    assert!(
-        !readiness::evaluate(&c.session.store, &c.session.project_root)
-            .unwrap()
-            .ready
-    );
+    let paths = [
+        readiness::final_manuscript_path(&c.session.store),
+        readiness::bibliography_path(&c.session.store),
+    ];
+    for path in paths {
+        let original = fs::read(&path).unwrap();
+        if path.extension().and_then(|x| x.to_str()) == Some("json") {
+            let mut value: Value = serde_json::from_slice(&original).unwrap();
+            value["title"] = json!("changed after review");
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        } else {
+            fs::write(&path, [original.as_slice(), b"\n% changed"].concat()).unwrap();
+        }
+        let before = files(&paper_dir(&c.session.store));
+        assert!(!c.session.status().unwrap().ready.unwrap().ready);
+        assert_eq!(files(&paper_dir(&c.session.store)), before);
+        assert!(
+            !readiness::evaluate(&c.session.store, &c.session.project_root)
+                .unwrap()
+                .ready
+        );
+        fs::write(path, original).unwrap();
+    }
 }
 #[test]
 fn bridge_members_and_tool_surface() {
@@ -775,4 +826,235 @@ fn canned_citations_and_integrity_support_runner_manuscript() {
     assert!(report.blocking.is_empty(), "{:?}", report.blocking);
     let report = integrity::check(&manuscript.manuscript, &bundle, &[], &root).unwrap();
     assert!(report.passed, "{:?}", report.issues);
+}
+
+#[test]
+fn stale_choice_prevents_write_without_calls() {
+    let c = Case::new();
+    let first = c.prepare();
+    let mut req = c.requirements();
+    req.free_text.push("additional constraint".into());
+    let second = c.session.shortlist(&req, None, FetchMode::Online).unwrap();
+    assert_ne!(first.hash, second.hash);
+    let m = Members::new("ready");
+    assert_eq!(
+        c.write(&m, &c.session.estimate().unwrap().digest)
+            .unwrap_err()
+            .kind,
+        "no_journal"
+    );
+    assert!(m.calls().is_empty());
+}
+
+#[test]
+fn running_is_visible_during_callback_and_cleared_afterward() {
+    let c = Case::new();
+    c.prepare();
+    let m = Members::new("ready");
+    m.astra.replies.lock().unwrap()[0].output =
+        Some(serde_json::from_str(include_str!("fixtures/paper/runner/bad_claim.json")).unwrap());
+    let observed = Mutex::new(Vec::new());
+    let _ = c.session.write(
+        &m.refs(),
+        &c.session.estimate().unwrap().digest,
+        &c.stop,
+        &|_| {
+            observed
+                .lock()
+                .unwrap()
+                .push(c.session.status().unwrap().running)
+        },
+    );
+    let observed = observed.lock().unwrap();
+    assert!(!observed.is_empty());
+    assert!(observed.iter().all(|running| *running));
+    assert!(!c.session.status().unwrap().running);
+}
+
+fn mutate_manuscripts(m: &Members, f: impl Fn(&mut Value)) {
+    for fake in [&m.astra, &m.fable, &m.argon] {
+        for reply in fake.replies.lock().unwrap().iter_mut() {
+            f(&mut reply.output.as_mut().unwrap()["manuscript"]);
+        }
+    }
+}
+
+fn assert_blocked(c: &Case, m: &Members, kind: &str, step: Step) {
+    let error = c
+        .write(m, &c.session.estimate().unwrap().digest)
+        .unwrap_err();
+    assert_eq!(error.kind, kind, "{}", error.message);
+    assert!(m.events().iter().any(
+        |e| matches!(e, PaperEvent::Blocked { step: s, kind: k, .. } if *s == step && k == kind)
+    ));
+    assert_eq!(
+        m.events()
+            .iter()
+            .filter_map(|e| match e {
+                PaperEvent::Check { step, .. } => Some(*step),
+                _ => None,
+            })
+            .last(),
+        Some(step)
+    );
+    let status = c.session.status().unwrap();
+    assert_eq!(status.last_error.unwrap().0, kind);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(paper_dir(&c.session.store).join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["last_error"]["kind"], kind);
+}
+
+#[test]
+fn citations_blocked_for_seeded_unverified_reference() {
+    let c = Case::new();
+    c.prepare();
+    let m = Members::new("ready");
+    mutate_manuscripts(&m, |ms| {
+        for text in [&mut ms["abstract"]["text"]] {
+            *text = json!("Time may increase by {{q:q1}} [@w123456789].");
+        }
+        ms["sections"][0]["paragraphs"][0]["text"] = ms["abstract"]["text"].clone();
+    });
+    assert_blocked(&c, &m, "citations_blocked", Step::Citations);
+}
+
+#[test]
+fn numbers_blocked_for_unsourced_literal() {
+    let c = Case::new();
+    c.prepare();
+    let m = Members::new("ready");
+    mutate_manuscripts(&m, |ms| {
+        ms["abstract"]["text"] = json!("Time may increase by 99 [@10-1234-example].");
+        ms["sections"][0]["paragraphs"][0]["text"] = ms["abstract"]["text"].clone();
+    });
+    assert_blocked(&c, &m, "numbers_blocked", Step::Numbers);
+}
+
+#[test]
+fn compile_failure_is_blocked() {
+    let c = Case::new();
+    if !c.setup_tectonic() {
+        return;
+    }
+    let t = tectonic::find_for_tests().unwrap();
+    let mut argv = t.argv;
+    argv.push("--help".into());
+    fs::write(
+        c.session.home.join("paper/settings.json"),
+        serde_json::to_vec(&json!({"tectonic":argv})).unwrap(),
+    )
+    .unwrap();
+    c.prepare();
+    assert_blocked(&c, &Members::new("ready"), "compile_blocked", Step::Compile);
+}
+
+#[test]
+fn render_failure_is_blocked() {
+    let c = Case::new();
+    if !c.setup_tectonic() {
+        return;
+    }
+    c.prepare();
+    let m = Members::new("ready");
+    let error = c
+        .session
+        .write(
+            &m.refs(),
+            &c.session.estimate().unwrap().digest,
+            &c.stop,
+            &|e| {
+                m.trace.lock().unwrap().push(TraceItem::Event(e.clone()));
+                if matches!(
+                    e,
+                    PaperEvent::Check {
+                        step: Step::Compile,
+                        ok: true,
+                        ..
+                    }
+                ) {
+                    fs::write(readiness::pdf_path(&c.session.store), b"broken PDF").unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "render_blocked");
+    assert!(m.events().iter().any(|e| matches!(e, PaperEvent::Blocked { step: Step::Render, kind, .. } if kind == "render_blocked")));
+    assert_eq!(
+        c.session.status().unwrap().last_error.unwrap().0,
+        "render_blocked"
+    );
+    let saved: Value =
+        serde_json::from_slice(&fs::read(paper_dir(&c.session.store).join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["last_error"]["kind"], "render_blocked");
+}
+
+#[test]
+fn figures_blocked_by_layout_failure() {
+    let c = Case::new();
+    c.prepare();
+    let m = Members::new("ready");
+    mutate_manuscripts(&m, |ms| {
+        ms["figures"] = json!([{"id":"fig1","kind":"line","artifact":"data.csv","x":"time","y":["n"],"error":"","preset":"elsevier-single","caption":{"id":"fc","text":"Example","claims":[]}}]);
+    });
+    assert_blocked(&c, &m, "figures_blocked", Step::Figures);
+}
+
+#[test]
+fn figures_blocked_by_table_audit_issue() {
+    let c = Case::new();
+    c.prepare();
+    let m = Members::new("ready");
+    mutate_manuscripts(&m, |ms| {
+        ms["tables"] = json!([{"id":"tab1","artifact":"data.csv","columns":[{"column":"time","header":"Duration [ms]","precision":1}],"caption":{"id":"tc","text":"Example","claims":[]}}]);
+    });
+    assert_blocked(&c, &m, "figures_blocked", Step::Figures);
+    let status = c.session.status().unwrap();
+    assert!(status
+        .steps
+        .iter()
+        .any(|(step, ok, detail)| *step == Step::Figures
+            && !ok
+            && detail.as_ref().is_some_and(|s| s.contains("audit issues"))));
+}
+
+#[test]
+fn review_error_preserves_its_kind_and_emits_blocked() {
+    let c = Case::new();
+    if !c.setup_tectonic() {
+        return;
+    }
+    c.prepare();
+    let m = Members::new("ready");
+    m.reviewer.replies.lock().unwrap()[0].status = Status::Failed;
+    assert_blocked(&c, &m, "member_failed", Step::Review);
+}
+
+#[test]
+fn preparation_status_and_rules_are_persisted_without_tectonic() {
+    let c = Case::new();
+    let shortlist = c.prepare();
+    let estimate = c.session.estimate().unwrap();
+    let status = c.session.status().unwrap();
+    for step in [Step::Evidence, Step::Shortlist, Step::Journal] {
+        assert!(status.steps.iter().any(|(s, ok, _)| *s == step && *ok));
+    }
+    assert_eq!(
+        status.evidence,
+        Some(evidence::load(&c.session.store).unwrap().unwrap().hash)
+    );
+    assert_eq!(status.requirements, Some(c.requirements()));
+    assert_eq!(status.estimate, Some(estimate.clone()));
+    let dir = paper_dir(&c.session.store);
+    let saved: SpendEstimate =
+        serde_json::from_slice(&fs::read(dir.join("estimate.json")).unwrap()).unwrap();
+    assert_eq!(saved, estimate);
+    let m = Members::new("ready");
+    m.astra.replies.lock().unwrap()[0].output =
+        Some(serde_json::from_str(include_str!("fixtures/paper/runner/bad_claim.json")).unwrap());
+    assert_eq!(c.write(&m, &estimate.digest).unwrap_err().kind, "rejected");
+    assert!(fs::read_to_string(dir.join("journal-rules.md"))
+        .unwrap()
+        .contains(&shortlist.ranked[0].journal.title));
 }
