@@ -861,3 +861,53 @@ mod claude_call_tests {
         assert_eq!((usage.input_tokens, usage.output_tokens), (7000, 500));
     }
 }
+
+// p8: BEGIN paper-only Argon stream transport
+pub(super) fn ask_argon_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer {
+    let mut argv = match command {
+        Ok(argv) => argv.clone(),
+        Err(e) => return Answer::bad(Status::Missing, 0, e.message.clone()),
+    };
+    argv.extend([
+        "--model".to_owned(), ARGON_MODEL.to_owned(),
+        "--input-format".to_owned(), "stream-json".to_owned(),
+        "--output-format".to_owned(), "stream-json".to_owned(),
+        "--json-schema".to_owned(), schema_path.to_string_lossy().into_owned(),
+        "--print-timeout".to_owned(), format!("{}s", ask.timeout.as_secs().max(1)),
+        "--sandbox".to_owned(), "--mode".to_owned(), "plan".to_owned(),
+    ]);
+    let input = format!("{}\n", json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":ask.prompt}]}}));
+    let mut child = proc::command(&argv);
+    child.current_dir(ask.cwd);
+    child.env_remove(super::ENV);
+    let finished = match run_process(child, Some(input), ask.timeout, ask.stop, "argon", ask.raw_path, &mut |_| true) {
+        Ok(f) => f,
+        Err(e) => return spawn_failure(e),
+    };
+    let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
+    let raw = (!finished.stdout.is_empty()).then(|| stdout.clone());
+    let mut answer = match finished.end {
+        End::Timeout => Answer::bad(Status::Timeout, 0, "timed out"),
+        End::Stopped | End::Capped => Answer::bad(Status::Failed, 0, "stopped"),
+        End::Exited(Some(0)) => {
+            let result = stdout.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|event| event["type"] == "result").last();
+            if let Some(result) = result {
+                let tokens = token_count(&result).unwrap_or(0);
+                let candidates = envelope_candidates(&result);
+                let valid = candidates.iter().find(|c| schema::validate(ask.schema, c).is_ok()).cloned();
+                checked(valid.or_else(|| candidates.into_iter().last()), ask.schema, tokens, "argon")
+            } else {
+                Answer::bad(Status::Malformed, 0, "argon: no stream result")
+            }
+        }
+        End::Exited(code) => {
+            let text = format!("{}\n{stdout}", finished.stderr);
+            let status = if quota(&text) { Status::Quota } else { Status::Failed };
+            Answer::bad(status, 0, format!("exit {code:?}: {text}"))
+        }
+    };
+    answer.raw = raw;
+    answer
+}
+// p8: END paper-only Argon stream transport

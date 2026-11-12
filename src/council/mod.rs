@@ -1326,3 +1326,4 @@ pub fn rule(plan_path: &Path, rulings: &[(String, String, String)]) -> Res<Value
 pub fn stage_note_at(dir: &Path) -> Option<String> {
     Some(stage_note(&load_council(&dir.join("council.json"))?))
 }
+pub mod paper_member; // p8
