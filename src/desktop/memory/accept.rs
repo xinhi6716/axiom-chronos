@@ -10,7 +10,7 @@ use super::*;
 use std::prelude::v1::test;
 
 fn entry(id: i64, title: &str) -> MemoryEntry {
-    MemoryEntry { id, title: title.into(), body: format!("body {id}").into(), project: "p".into(), wish: "".into(), confirmed: "".into(), corrected: false, stale: false }
+    MemoryEntry { id, title: title.into(), body: format!("body {id}").into(), project: "p".into(), wish: "".into(), confirmed: "".into(), corrected: false, stale: false, graph: None }
 }
 fn prior(body: &str) -> MemoryPrior { MemoryPrior { body: body.into(), summary: "s".into(), corrected: None, confirmed: 0.0 } }
 fn undo(id: i64, prior: &MemoryPrior) -> Undoable { Undoable::Memory { id, prior: prior.clone() } }

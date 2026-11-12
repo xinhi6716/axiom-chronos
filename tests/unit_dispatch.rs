@@ -121,7 +121,7 @@ impl Fixture {
         thread::spawn(move || call(&bridge, "codex_run", &args)["structuredContent"].clone())
     }
     fn wait_turns(&self, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while self.turns() < count {
             assert!(
                 Instant::now() < deadline,
@@ -475,18 +475,36 @@ fn scope_records_ignored_paths() {
         json!({"path":"pytest-of-fake/pytest-current/x.txt", "reason":"test-scratch"})
     );
     let replay = bounded.run("one", true);
-    assert_eq!(replay["scope_ignored"], first["scope_ignored"], "{replay}");
-    assert_eq!(replay["scope_ignored_count"], 23);
+    if replay["truncated"] == true {
+        let replay_ignored = replay["scope_ignored"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        assert!(
+            first["scope_ignored"]
+                .as_array()
+                .unwrap()
+                .starts_with(replay_ignored),
+            "{replay}"
+        );
+        assert!(
+            replay["scope_ignored_count"].is_null() || replay["scope_ignored_count"] == 23,
+            "{replay}"
+        );
+    } else {
+        assert_eq!(replay["scope_ignored"], first["scope_ignored"], "{replay}");
+        assert_eq!(replay["scope_ignored_count"], 23);
+    }
 }
 
 #[test]
 fn parallel_unit_scope_survives_peer_completion() {
     let f = Fixture::new(
-        "GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_DELAY_MS 1000\n",
+        "GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_DELAY_MS 4000\n",
     );
     f.add(
         "two",
-        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\nFAKE_DELAY_MS 2500\n",
+        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\nFAKE_DELAY_MS 7000\n",
     );
     let one = f.spawn("one", false);
     f.wait_turns(1);

@@ -1,0 +1,17 @@
+{
+  "id": "ts-021",
+  "language": "ts",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.tsx",
+      "line": 4,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.tsx#function:run.render"
+      }
+    }
+  ]
+}

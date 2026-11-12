@@ -1,4 +1,6 @@
-use axiom::orch::{lint_map, module_context, parse_map, run, MAX_CONTEXT_BYTES};
+use axiom::orch::{
+    lint_map, module_context, parse_map, render_module_context, run, MAX_CONTEXT_BYTES,
+};
 use std::path::Path;
 
 fn section(id: &str, paths: &str, deps: &str, extra: &str, command: &str) -> String {
@@ -453,16 +455,33 @@ fn long_header_that_fits_is_not_charged_for_unused_markers() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path();
     init(p);
-    let purpose = "x".repeat(15800);
+    let map = section("m", "p", "none", "", "test");
+    write(p, "modules.md", &map);
+    let probe = module_context(p, "m", p).unwrap();
+    // Match context_fits, including the JSON output's trailing newline.
+    let overhead = render_module_context(&probe)
+        .len()
+        .max(serde_json::to_string_pretty(&probe).unwrap().len() + 1)
+        - probe.purpose.len();
+    let purpose = "x".repeat(MAX_CONTEXT_BYTES - overhead - 1);
     write(
         p,
         "modules.md",
-        &section("m", "p", "none", "", "test")
-            .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
+        &map.replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
     );
     let c = module_context(p, "m", p).unwrap();
     assert_eq!(c.purpose, purpose);
     assert!(c.incomplete.is_empty());
+
+    let purpose = "x".repeat(MAX_CONTEXT_BYTES - overhead + 1);
+    write(
+        p,
+        "modules.md",
+        &map.replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
+    );
+    let error = module_context(p, "m", p).unwrap_err();
+    assert_eq!(error.kind, "invalid_argument");
+    assert_eq!(error.message, "module context header exceeds byte limit");
 }
 
 #[test]

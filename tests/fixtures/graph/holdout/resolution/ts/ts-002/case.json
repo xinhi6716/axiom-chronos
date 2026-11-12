@@ -1,0 +1,17 @@
+{
+  "id": "ts-002",
+  "language": "ts",
+  "feature": "alias",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 2,
+      "name": "chosen",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.ts#function:compute"
+      }
+    }
+  ]
+}

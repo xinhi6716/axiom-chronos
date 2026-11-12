@@ -1,0 +1,17 @@
+{
+  "id": "rust-005",
+  "language": "rust",
+  "feature": "same_name",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 3,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.rs#function:compute"
+      }
+    }
+  ]
+}

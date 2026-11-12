@@ -1,0 +1,17 @@
+{
+  "id": "python-028",
+  "language": "python",
+  "feature": "method",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 5,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.py#method:Worker.render"
+      }
+    }
+  ]
+}

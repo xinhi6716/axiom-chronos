@@ -1,0 +1,41 @@
+{
+  "project": "rainfall",
+  "entries": [
+    {
+      "unit": "rainfall-implementation",
+      "title": "Trace how missing rainfall observations affect the rolling mean.",
+      "summary": "The mean excludes missing observations",
+      "body": "Ignore missing observations. The mean excludes missing observations.",
+      "symbols": [
+        "src/rainfall.py#function:rolling_mean"
+      ],
+      "files": [
+        "src/rainfall.py"
+      ],
+      "wish": "Trace how missing rainfall observations affect the rolling mean."
+    }
+  ],
+  "research": [
+    {
+      "path": "research/rainfall.md",
+      "text": "# rainfall study\n\nThe mean excludes missing observations.\nThe observation is recorded against the implementation for audit.\n",
+      "links": [
+        {
+          "to": "sym:src/rainfall.py#function:rolling_mean",
+          "quote": "The mean excludes missing observations.",
+          "line": 3
+        }
+      ]
+    }
+  ],
+  "constraints": "# Constraints\n\nIgnore missing observations.\n",
+  "aliases": [
+    [
+      "rolling_mean",
+      "rainfall"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: ignore missing observations."
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "python-014",
+  "language": "python",
+  "feature": "re_export",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 2,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.py#function:measure"
+      }
+    }
+  ]
+}

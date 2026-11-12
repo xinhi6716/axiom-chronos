@@ -1,0 +1,17 @@
+{
+  "id": "js-021",
+  "language": "js",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.jsx",
+      "line": 4,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.jsx#function:run.render"
+      }
+    }
+  ]
+}

@@ -12,6 +12,8 @@
 
 Make a wish on your codebase. Chronos plans it, splits it into modules, has Codex build them, has Claude review them, and keeps working until the change is verified or blocked.
 
+The code index is native and needs no external service. Since tree-sitter is unavailable offline, it uses syn for Rust and hand-written lexers for Python, TypeScript and JavaScript instead. See the [graph A/B protocol](docs/graph-ab.md).
+
 **Review each diff before committing.**
 
 <a id="begin"></a>

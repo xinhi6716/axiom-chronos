@@ -24,6 +24,7 @@ fn command_and_message() {
         "mcp__plugin_chronos_bridge__memory_record",
         "mcp__plugin_chronos_bridge__memory_search",
         "mcp__plugin_chronos_bridge__memory_get",
+        "mcp__plugin_chronos_bridge__graph_explore",
         "mcp__plugin_chronos_bridge__memory_digest",
         "mcp__plugin_chronos_bridge__goal",
     ];

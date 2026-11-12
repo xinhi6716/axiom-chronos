@@ -31,6 +31,23 @@ pub const DAY_MS: i64 = 86_400_000;
 const MAIN: &str = "main";
 const UNKNOWN_AGENT: &str = "unknown";
 
+fn no_missing<const N: usize>(missing: &[bool; N]) -> bool {
+    !missing.iter().any(|flag| *flag)
+}
+
+fn serialize_unknown<S: serde::Serializer, const N: usize>(missing: &[bool; N], names: [&str; N], serializer: S) -> Result<S::Ok, S::Error> {
+    names.into_iter().zip(missing).filter_map(|(name, missing)| missing.then_some(name)).collect::<Vec<_>>().serialize(serializer)
+}
+
+fn serialize_tally_unknown<S: serde::Serializer>(missing: &[bool; 4], serializer: S) -> Result<S::Ok, S::Error> {
+    // Call reports and existing readers store cache_read before cache_write.
+    serialize_unknown(&[missing[0], missing[2], missing[1], missing[3]], ["input", "cache_write", "cache_read", "output"], serializer)
+}
+
+fn serialize_codex_unknown<S: serde::Serializer>(missing: &[bool; 3], serializer: S) -> Result<S::Ok, S::Error> {
+    serialize_unknown(missing, ["input", "cached_input", "output"], serializer)
+}
+
 #[derive(Serialize, Default, Clone, Debug)]
 pub struct Tally {
     pub calls: u64,
@@ -48,7 +65,7 @@ pub struct Tally {
     pub gap_rewrites: u64,
     pub gap_rewrite_tokens: u64,
     pub gap_rewrite_usd: f64,
-    #[serde(skip)]
+    #[serde(rename = "unknown", skip_serializing_if = "no_missing", serialize_with = "serialize_tally_unknown")]
     pub missing: [bool; 4],
 }
 impl Tally {
@@ -105,7 +122,7 @@ pub struct CodexTokens {
     pub output: u64,
     pub reasoning_output: u64,
     pub total: u64,
-    #[serde(skip)]
+    #[serde(rename = "unknown", skip_serializing_if = "no_missing", serialize_with = "serialize_codex_unknown")]
     pub missing: [bool; 3],
 }
 impl CodexTokens {

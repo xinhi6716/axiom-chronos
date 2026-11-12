@@ -43,6 +43,7 @@ fn tool_contract_and_rewrite_evidence() {
             "memory_search",
             "memory_get",
             "memory_digest",
+            "graph_explore",
             "goal",
             "bridge_status"
         ]

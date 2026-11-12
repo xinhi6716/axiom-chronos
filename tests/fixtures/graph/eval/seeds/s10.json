@@ -1,0 +1,29 @@
+{
+  "project": "catalog",
+  "entries": [
+    {
+      "unit": "catalog-implementation",
+      "title": "Find how catalog titles are normalized for search.",
+      "summary": "Search titles are lowercased",
+      "body": "Trim surrounding whitespace. Search titles are lowercased.",
+      "symbols": [
+        "src/catalog.py#function:normalize_title"
+      ],
+      "files": [
+        "src/catalog.py"
+      ],
+      "wish": "Find how catalog titles are normalized for search."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nTrim surrounding whitespace.\n",
+  "aliases": [
+    [
+      "normalize_title",
+      "catalog"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: trim surrounding whitespace."
+  ]
+}

@@ -3,7 +3,7 @@ use crate::orch::summary::{self, Next, Outcome, ReviewItem};
 use crate::{
     base::{self, Failure, Res},
     codex::{self, RunRequest},
-    goal, orch,
+    goal, graph, orch,
 };
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -502,6 +502,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 attempt = n;
                 attempt_id = id;
                 guard.0 = Some((root.to_path_buf(), u.to_owned(), attempt_id.clone()));
+                brief = graph::constraints::prepend(&brief, &graph::constraints::load(Path::new(cwd), Some(root), graph::constraints::DEFAULT_BUDGET)?);
                 if tier.is_some() && (r != "terra" || explicit.is_some()) {
                     return Err(invalid(
                         "TIER in a brief applies only to a terra unit dispatched without model",
@@ -586,7 +587,16 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             );
         }
         let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
-        return unit_reply(
+        let graph_sync = match graph::GraphStore::open(b.home()?) {
+            Ok(store) => {
+                let options = graph::code::SyncOptions { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)), ..Default::default() };
+                let code = graph::code::sync(&store, Path::new(cwd), None, &options);
+                let orch = graph::ingest::sync_orch(&store, root, Path::new(cwd));
+                json!({"code":match code { Ok(report) => json!({"partial":report.partial,"partial_reason":report.partial_reason,"parse_failures":report.parse_failures}), Err(e) => json!({"error":e.to_json()}) }, "orch":match orch { Ok(report) => json!({"nodes_written":report.nodes_written,"edges_written":report.edges_written,"skipped":report.skipped}), Err(e) => json!({"error":e.to_json()}) }})
+            }
+            Err(e) => json!({"error":e.to_json()}),
+        };
+        let mut reply = unit_reply(
             b,
             project.unwrap(),
             root,
@@ -600,7 +610,9 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             finished,
             cycle,
             false,
-        );
+        )?;
+        reply["graph_sync"] = graph_sync;
+        return Ok(reply);
     }
     if let Some(dest) = dest {
         let valid = report["status"] == "completed" && !report["structured_output"].is_null();

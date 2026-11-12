@@ -754,16 +754,19 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let home = home?;
             let prompt = event.get("prompt").and_then(Value::as_str).unwrap_or("");
             if let Some(wish) = wish_text(prompt) {
-                let g = goal::open(
-                    home,
-                    session,
-                    wish.trim(),
-                    event.get("cwd").and_then(Value::as_str),
-                )
-                .ok()?;
+                let cwd = event.get("cwd").and_then(Value::as_str);
+                let g = match goal::load(home, session).ok()? {
+                    Some(g) if matches!(g.status.as_str(), "active" | "waiting") => g,
+                    _ => goal::open(home, session, wish.trim(), cwd).ok()?,
+                };
                 let mut text = format!("Chronos goal {session} is open for this wish. Program slug: {}. Reply in the language of the wish.", g.project.as_deref().unwrap_or("project"));
                 if headless {
                     text.push_str(" This run is headless: ask the user nothing.");
+                }
+                match crate::graph::launch::inject_once(home, &g) {
+                    Ok(Some(packet)) => { text.push('\n'); text.push_str(&packet.text); }
+                    Ok(None) => {}
+                    Err(e) => { text.push_str("\nlaunch context unavailable: "); text.push_str(&e.message.replace(['\r', '\n'], " ")); }
                 }
                 context(text)
             } else {

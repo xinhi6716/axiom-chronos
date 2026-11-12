@@ -22,7 +22,7 @@ use crate::usage::quota::{Provider, ProviderQuota, Quotas};
 use gpui_kit::{App, Entity, SharedString};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -91,6 +91,7 @@ enum Update {
     EvolveBusy,
     Runs { runs: Vec<Run>, renamed: Vec<(String, String)>, open: Option<String> },
     Memory(Vec<MemoryEntry>),
+    MeshGraph(BTreeMap<String, crate::graph::desktop::GraphRef>),
     Corrected { id: i64, prior: MemoryPrior },
     Feed { kind: FeedKind, error: Option<String> },
     Quota(Quotas),
@@ -328,6 +329,20 @@ fn map_board_settings(choice: super::settings::BoardChoice, lang: super::i18n::L
      match lang { i18n::Lang::En => crate::board::Lang::En, i18n::Lang::ZhTw => crate::board::Lang::ZhTw })
 }
 
+/// Drives the existing reads and update application synchronously for desktop smoke tests.
+#[doc(hidden)]
+pub fn smoke_read(home: &Path, state: &mut AppState) -> Res<()> {
+    let (commands, _receiver) = mpsc::channel();
+    let inbox = Inbox::default();
+    let mut engine = Engine::new(home.to_path_buf(), home.join("projects"), Box::new(Config::from_env), commands, inbox.clone());
+    engine.snapshot = Some(engine.poller.poll());
+    engine.publish();
+    engine.handle(Command::Memory(Ok(read_memory(home)?)));
+    let updates = std::mem::take(&mut inbox.lock().updates);
+    apply(state, updates);
+    Ok(())
+}
+
 fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenUse> {
     let mut spent = Vec::new();
     for update in updates {
@@ -349,6 +364,7 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
             Update::EvolveBusy => state.evolve.error = Some(Failure::new("busy", "an evolve run is already in progress").into()),
             Update::Runs { runs, renamed, open } => state.replace_runs(runs, &renamed, open.as_deref()),
             Update::Memory(memory) => state.memory = memory,
+            Update::MeshGraph(map) => state.mesh_graph = map,
             Update::Quota(quotas) => {
                 state.quota = quotas;
                 state.feeds.quota.loaded = true;
@@ -506,6 +522,7 @@ struct Engine {
     reported: HashSet<String>,
     feed_sent: Vec<(FeedKind, Option<String>)>,
     sent: Option<Vec<Run>>,
+    mesh_graph_sent: BTreeMap<String, crate::graph::desktop::GraphRef>,
     live_models: Vec<RunningModel>,
     renamed: Vec<(String, String)>,
     open: Option<String>,
@@ -563,6 +580,7 @@ impl Engine {
             reported: HashSet::new(),
             feed_sent: vec![],
             sent: None,
+            mesh_graph_sent: BTreeMap::new(),
             live_models: vec![],
             renamed: vec![],
             open: None,
@@ -1282,7 +1300,17 @@ impl Engine {
             self.inbox.push(Update::LiveModels(live));
         }
         let changed = self.sent.as_ref() != Some(&runs);
-        if changed { self.refresh_codex_models(); }
+        if changed {
+            self.refresh_codex_models();
+            let graph = self.snapshot.iter().flat_map(|snapshot| &snapshot.wishes)
+                .filter_map(|wish| wish.store.as_deref())
+                .flat_map(|store| crate::graph::desktop::module_refs(&self.home, store))
+                .collect();
+            if self.mesh_graph_sent != graph {
+                self.mesh_graph_sent = graph;
+                self.inbox.push(Update::MeshGraph(self.mesh_graph_sent.clone()));
+            }
+        }
         if !changed && self.renamed.is_empty() && self.open.is_none() {
             return;
         }
@@ -1461,6 +1489,8 @@ fn read_memory(home: &Path) -> Res<Vec<MemoryEntry>> {
         return Ok(vec![]);
     }
     let listed = Memory::open(home)?.list(None, MEMORY_SHOWN)?;
+    let ids: Vec<_> = listed["entries"].as_array().into_iter().flatten().filter_map(|entry| entry["id"].as_i64()).collect();
+    let graph = crate::graph::desktop::memory_refs(home, &ids);
     let text = |entry: &Value, key: &str| -> SharedString { entry[key].as_str().unwrap_or("").to_owned().into() };
     Ok(listed["entries"]
         .as_array()
@@ -1477,6 +1507,7 @@ fn read_memory(home: &Path) -> Res<Vec<MemoryEntry>> {
                 wish: clean_wish(entry["wish"].as_str().unwrap_or("")).into(),
                 confirmed: entry["confirmed"].as_f64().map(confirmed_text).unwrap_or_default().into(),
                 corrected: entry["corrected"].as_f64().is_some(),
+                graph: graph.get(&entry["id"].as_i64()?).cloned(),
             })
         })
         .collect())

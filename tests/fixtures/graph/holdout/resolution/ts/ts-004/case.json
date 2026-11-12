@@ -1,0 +1,17 @@
+{
+  "id": "ts-004",
+  "language": "ts",
+  "feature": "re_export",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 2,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.ts#function:compute"
+      }
+    }
+  ]
+}

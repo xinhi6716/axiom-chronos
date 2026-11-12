@@ -1,0 +1,17 @@
+{
+  "id": "rust-021",
+  "language": "rust",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 4,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.rs#variable:run.render"
+      }
+    }
+  ]
+}

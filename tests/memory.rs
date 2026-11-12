@@ -180,9 +180,21 @@ fn existing_database_migrates_without_changing_entries() {
     let added: Vec<_> = after
         .iter()
         .filter(|r| !before.iter().any(|b| b.1 == r.1))
+        .filter(|r| !r.1.starts_with("g_") && !r.1.starts_with("sqlite_autoindex_g_"))
         .map(name)
         .collect();
     assert_eq!(added, vec!["entries_ad", "entries_au"]);
+    for table in ["g_meta", "g_nodes", "g_edges"] {
+        assert!(after.iter().any(|r| r.0 == "table" && r.1 == table));
+    }
+    for trigger in [
+        "g_entries_ai",
+        "g_entries_au",
+        "g_entries_ad",
+        "g_entries_bd",
+    ] {
+        assert!(after.iter().any(|r| r.0 == "trigger" && r.1 == trigger));
+    }
 }
 
 #[test]

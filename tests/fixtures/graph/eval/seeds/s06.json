@@ -1,0 +1,29 @@
+{
+  "project": "scheduler",
+  "entries": [
+    {
+      "unit": "scheduler-implementation",
+      "title": "Find where scheduled jobs are ordered by priority.",
+      "summary": "Jobs are sorted by priority",
+      "body": "Preserve order for equal priorities. Jobs are sorted by priority.",
+      "symbols": [
+        "src/scheduler.py#function:order_jobs"
+      ],
+      "files": [
+        "src/scheduler.py"
+      ],
+      "wish": "Find where scheduled jobs are ordered by priority."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nPreserve order for equal priorities.\n",
+  "aliases": [
+    [
+      "order_jobs",
+      "scheduler"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: preserve order for equal priorities."
+  ]
+}

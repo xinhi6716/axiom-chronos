@@ -1,0 +1,29 @@
+{
+  "project": "checkout",
+  "entries": [
+    {
+      "unit": "checkout-implementation",
+      "title": "Explain how checkout rejects expired coupons.",
+      "summary": "Checkout checks expiry before discounting",
+      "body": "Reject coupons past their expiry. Checkout checks expiry before discounting.",
+      "symbols": [
+        "src/checkout.tsx#function:applyCoupon"
+      ],
+      "files": [
+        "src/checkout.tsx"
+      ],
+      "wish": "Explain how checkout rejects expired coupons."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nReject coupons past their expiry.\n",
+  "aliases": [
+    [
+      "applyCoupon",
+      "checkout"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: reject coupons past their expiry."
+  ]
+}

@@ -1,0 +1,291 @@
+{
+  "version": 1,
+  "frozen": "2026-11-12",
+  "design": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "runs_per_arm": 3,
+    "A": "today's brief: the recorded briefs/<id>.a.md",
+    "B": "graph brief: constraints block + graph_explore mixed packet",
+    "fixed": [
+      "model",
+      "prompt",
+      "snapshot",
+      "tool permissions",
+      "cache conditions"
+    ]
+  },
+  "metric": {
+    "claude_processed_input": [
+      "input",
+      "cache_write",
+      "cache_read"
+    ],
+    "aggregate": "median over scenarios of (1 - median(B runs)/median(A runs))"
+  },
+  "thresholds": {
+    "claude_processed_input_median_saving_min": 0.1,
+    "required_evidence_regressions_max": 0,
+    "condition_regressions_max": 0,
+    "major_finding_regressions_max": 0,
+    "wrong_certain_edges_max": 0,
+    "budget_overruns_max": 0,
+    "resolution_recall_min": 0.7
+  },
+  "scenarios": [
+    {
+      "id": "s01",
+      "family": "software",
+      "language": "rust",
+      "repo": "repos/s01",
+      "seed": "seeds/s01.json",
+      "task": "Prevent duplicate reservations when stock is scarce.",
+      "query": "reservation stock",
+      "a_brief": "briefs/s01.a.md",
+      "required_evidence": [
+        "src/inventory.rs#function:reserve",
+        "src/inventory.rs"
+      ],
+      "conditions": [
+        "Reject requests exceeding available stock"
+      ],
+      "major_findings": [
+        "Reservation checks stock before decrementing it"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s02",
+      "family": "research",
+      "language": "python",
+      "repo": "repos/s02",
+      "seed": "seeds/s02.json",
+      "task": "Trace how missing rainfall observations affect the rolling mean.",
+      "query": "降雨",
+      "a_brief": "briefs/s02.a.md",
+      "required_evidence": [
+        "src/rainfall.py#function:rolling_mean",
+        "src/rainfall.py"
+      ],
+      "conditions": [
+        "Ignore missing observations"
+      ],
+      "major_findings": [
+        "The mean excludes missing observations"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s03",
+      "family": "software",
+      "language": "ts",
+      "repo": "repos/s03",
+      "seed": "seeds/s03.json",
+      "task": "Explain how checkout rejects expired coupons.",
+      "query": "coupon expiry",
+      "a_brief": "briefs/s03.a.md",
+      "required_evidence": [
+        "src/checkout.tsx#function:applyCoupon",
+        "src/checkout.tsx"
+      ],
+      "conditions": [
+        "Reject coupons past their expiry"
+      ],
+      "major_findings": [
+        "Checkout checks expiry before discounting"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s04",
+      "family": "research",
+      "language": "js",
+      "repo": "repos/s04",
+      "seed": "seeds/s04.json",
+      "task": "Trace how a sensor offset affects the daily reading.",
+      "query": "空氣",
+      "a_brief": "briefs/s04.a.md",
+      "required_evidence": [
+        "src/air_quality.jsx#function:dailyReading",
+        "src/air_quality.jsx"
+      ],
+      "conditions": [
+        "Apply the calibration offset"
+      ],
+      "major_findings": [
+        "Calibration is applied before aggregation"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s05",
+      "family": "research",
+      "language": "rust",
+      "repo": "repos/s05",
+      "seed": "seeds/s05.json",
+      "task": "Identify the code that converts sample volume to liters.",
+      "query": "sample conversion",
+      "a_brief": "briefs/s05.a.md",
+      "required_evidence": [
+        "src/water_sampling.rs#function:to_liters",
+        "src/water_sampling.rs"
+      ],
+      "conditions": [
+        "Keep units explicit"
+      ],
+      "major_findings": [
+        "Milliliters are converted to liters"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s06",
+      "family": "software",
+      "language": "python",
+      "repo": "repos/s06",
+      "seed": "seeds/s06.json",
+      "task": "Find where scheduled jobs are ordered by priority.",
+      "query": "job priority",
+      "a_brief": "briefs/s06.a.md",
+      "required_evidence": [
+        "src/scheduler.py#function:order_jobs",
+        "src/scheduler.py"
+      ],
+      "conditions": [
+        "Preserve order for equal priorities"
+      ],
+      "major_findings": [
+        "Jobs are sorted by priority"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s07",
+      "family": "research",
+      "language": "ts",
+      "repo": "repos/s07",
+      "seed": "seeds/s07.json",
+      "task": "Trace how unanswered survey items are excluded from scoring.",
+      "query": "survey response score",
+      "a_brief": "briefs/s07.a.md",
+      "required_evidence": [
+        "src/survey.tsx#function:scoreAnswers",
+        "src/survey.tsx"
+      ],
+      "conditions": [
+        "Exclude unanswered items"
+      ],
+      "major_findings": [
+        "Scoring counts only answered items"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s08",
+      "family": "software",
+      "language": "js",
+      "repo": "repos/s08",
+      "seed": "seeds/s08.json",
+      "task": "Find how notification recipients are deduplicated.",
+      "query": "notification recipient",
+      "a_brief": "briefs/s08.a.md",
+      "required_evidence": [
+        "src/notifications.jsx#function:uniqueRecipients",
+        "src/notifications.jsx"
+      ],
+      "conditions": [
+        "Keep first occurrence order"
+      ],
+      "major_findings": [
+        "Recipients are deduplicated before delivery"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s09",
+      "family": "software",
+      "language": "rust",
+      "repo": "repos/s09",
+      "seed": "seeds/s09.json",
+      "task": "Locate the limit applied to request retries.",
+      "query": "retry limit",
+      "a_brief": "briefs/s09.a.md",
+      "required_evidence": [
+        "src/rate_limit.rs#function:retry_allowed",
+        "src/rate_limit.rs"
+      ],
+      "conditions": [
+        "Do not exceed three attempts"
+      ],
+      "major_findings": [
+        "Retry is allowed below three attempts"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s10",
+      "family": "software",
+      "language": "python",
+      "repo": "repos/s10",
+      "seed": "seeds/s10.json",
+      "task": "Find how catalog titles are normalized for search.",
+      "query": "catalog title normalization",
+      "a_brief": "briefs/s10.a.md",
+      "required_evidence": [
+        "src/catalog.py#function:normalize_title",
+        "src/catalog.py"
+      ],
+      "conditions": [
+        "Trim surrounding whitespace"
+      ],
+      "major_findings": [
+        "Search titles are lowercased"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s11",
+      "family": "software",
+      "language": "ts",
+      "repo": "repos/s11",
+      "seed": "seeds/s11.json",
+      "task": "Explain how shipping cost is selected by weight.",
+      "query": "shipping weight cost",
+      "a_brief": "briefs/s11.a.md",
+      "required_evidence": [
+        "src/shipping.tsx#function:shippingCost",
+        "src/shipping.tsx"
+      ],
+      "conditions": [
+        "Use the heavy rate above ten kilograms"
+      ],
+      "major_findings": [
+        "Heavy shipments use a higher rate"
+      ],
+      "budget": 2400
+    },
+    {
+      "id": "s12",
+      "family": "software",
+      "language": "js",
+      "repo": "repos/s12",
+      "seed": "seeds/s12.json",
+      "task": "Locate the check for expired sessions.",
+      "query": "session expiration",
+      "a_brief": "briefs/s12.a.md",
+      "required_evidence": [
+        "src/sessions.jsx#function:isExpired",
+        "src/sessions.jsx"
+      ],
+      "conditions": [
+        "Treat the expiry instant as expired"
+      ],
+      "major_findings": [
+        "Session expiry uses an inclusive comparison"
+      ],
+      "budget": 2400
+    }
+  ]
+}

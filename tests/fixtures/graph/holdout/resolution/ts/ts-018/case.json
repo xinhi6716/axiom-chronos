@@ -1,0 +1,17 @@
+{
+  "id": "ts-018",
+  "language": "ts",
+  "feature": "method",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 4,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.ts#method:Worker.measure"
+      }
+    }
+  ]
+}

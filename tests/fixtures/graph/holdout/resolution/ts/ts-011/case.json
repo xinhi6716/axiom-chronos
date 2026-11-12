@@ -1,0 +1,17 @@
+{
+  "id": "ts-011",
+  "language": "ts",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.tsx",
+      "line": 4,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.tsx#function:run.measure"
+      }
+    }
+  ]
+}

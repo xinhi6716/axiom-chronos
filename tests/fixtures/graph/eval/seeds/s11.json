@@ -1,0 +1,29 @@
+{
+  "project": "shipping",
+  "entries": [
+    {
+      "unit": "shipping-implementation",
+      "title": "Explain how shipping cost is selected by weight.",
+      "summary": "Heavy shipments use a higher rate",
+      "body": "Use the heavy rate above ten kilograms. Heavy shipments use a higher rate.",
+      "symbols": [
+        "src/shipping.tsx#function:shippingCost"
+      ],
+      "files": [
+        "src/shipping.tsx"
+      ],
+      "wish": "Explain how shipping cost is selected by weight."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nUse the heavy rate above ten kilograms.\n",
+  "aliases": [
+    [
+      "shippingCost",
+      "shipping"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: use the heavy rate above ten kilograms."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "project": "rate-limit",
+  "entries": [
+    {
+      "unit": "rate-limit-implementation",
+      "title": "Locate the limit applied to request retries.",
+      "summary": "Retry is allowed below three attempts",
+      "body": "Do not exceed three attempts. Retry is allowed below three attempts.",
+      "symbols": [
+        "src/rate_limit.rs#function:retry_allowed"
+      ],
+      "files": [
+        "src/rate_limit.rs"
+      ],
+      "wish": "Locate the limit applied to request retries."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nDo not exceed three attempts.\n",
+  "aliases": [
+    [
+      "retry_allowed",
+      "rate limit"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: do not exceed three attempts."
+  ]
+}

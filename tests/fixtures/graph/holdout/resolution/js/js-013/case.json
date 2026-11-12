@@ -1,0 +1,17 @@
+{
+  "id": "js-013",
+  "language": "js",
+  "feature": "relative_import",
+  "refs": [
+    {
+      "file": "pkg/main.js",
+      "line": 2,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "pkg/lib.js#function:measure"
+      }
+    }
+  ]
+}

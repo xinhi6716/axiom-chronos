@@ -1,8 +1,8 @@
 # Dispatch policy
 
-For whoever writes `codex_run` briefs. Workers never see this file; they see only the brief.
+Workers see only the `codex_run` brief, not this file.
 
-A brief must leave nothing to infer: open choices let workers diverge.
+Leave nothing to infer: open choices let workers diverge.
 
 ## The brief
 
@@ -20,9 +20,9 @@ Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) 
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
-A registered brief can run cheaper with two optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use only when the wish or plan asks for a cheaper run. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Other values or positions are refused. Without them the unit keeps its role model and default effort. `TIER luna` alone keeps luna's default effort, possibly higher than terra's; set both for the cheapest run.
+For a cheaper registered brief, add optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use only if the wish or plan asks. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Other values or positions are refused. Otherwise the unit keeps its role model and default effort. `TIER luna` alone keeps luna's default effort, possibly above terra's; set both for the cheapest run.
 
-Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)).
+In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer.
 
 ## Before dispatch
 

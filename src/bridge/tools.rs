@@ -1,7 +1,7 @@
 use super::server::Bridge;
 use crate::{
     base::{Failure, Res},
-    goal, linux,
+    goal, graph, linux,
     memory::{Memory, Record},
     orch,
 };
@@ -264,7 +264,19 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             &arr(a, "args")?,
             timeout(a, 1800),
         ),
-        "memory_record" => Memory::open(b.home()?)?.record(&Record {
+        "memory_record" => {
+            if opt(a, "mode").unwrap_or("unit") == "source" {
+                let source = a.get("source").ok_or_else(|| Failure::new("invalid_argument", "source is required"))?;
+                let artifact = source.get("artifact").and_then(Value::as_str).ok_or_else(|| Failure::new("invalid_argument", "source.artifact is required"))?;
+                let links: Vec<graph::ingest::SourceLink> = serde_json::from_value(source.get("links").cloned().unwrap_or(json!([])))
+                    .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+                let report = graph::ingest::import_source(&graph::GraphStore::open(b.home()?)?, std::path::Path::new(s(a, "project_dir")), artifact, &links)?;
+                return Ok(json!({"status":"completed","source":report}));
+            }
+            if opt(a, "mode").unwrap_or("unit") != "unit" {
+                return Err(Failure::new("invalid_argument", "mode must be unit or source"));
+            }
+            let record = Record {
             project: s(a, "project").into(),
             project_dir: s(a, "project_dir").into(),
             unit: s(a, "unit").into(),
@@ -274,7 +286,16 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             symbols: arr(a, "symbols")?,
             files: arr(a, "files")?,
             wish: s(a, "wish").into(),
-        }),
+            };
+            let memory = Memory::open(b.home()?)?;
+            if a.get("nodes").is_some() || a.get("links").is_some() {
+                let typed: graph::TypedWrite = serde_json::from_value(json!({"nodes":a.get("nodes").cloned().unwrap_or(json!([])),"links":a.get("links").cloned().unwrap_or(json!([]))}))
+                    .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+                memory.record_typed(&record, &typed)
+            } else {
+                memory.record(&record)
+            }
+        }
         "memory_search" => Memory::open(b.home()?)?.search(
             s(a, "query"),
             opt(a, "project"),
@@ -286,6 +307,11 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
                 .ok_or_else(|| Failure::new("invalid_argument", "id must be an integer"))?,
         ),
         "memory_digest" => Memory::open(b.home()?)?.digest(s(a, "project"), opt(a, "add")),
+        "graph_explore" => {
+            let req: graph::query::ExploreRequest = serde_json::from_value(a.clone())
+                .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+            graph::query::explore(b.home()?, &req)
+        }
         "goal" => {
             let keys = ["status", "classify", "mode"];
             if keys
