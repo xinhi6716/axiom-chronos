@@ -1,0 +1,37 @@
+{
+  "id": "sample",
+  "width_mm": 90.0,
+  "height_mm": 65.0,
+  "texts": [
+    {
+      "role": "AxisLabel",
+      "text": "time [s]",
+      "x_mm": 5.0,
+      "y_mm": 5.0,
+      "w_mm": 20.0,
+      "h_mm": 4.0,
+      "font_pt": 8.0,
+      "family": "Test Sans"
+    },
+    {
+      "role": "Legend",
+      "text": "series",
+      "x_mm": 40.0,
+      "y_mm": 40.0,
+      "w_mm": 15.0,
+      "h_mm": 4.0,
+      "font_pt": 8.0,
+      "family": "Test Sans"
+    }
+  ],
+  "axes": [
+    {
+      "label": "time [s]",
+      "column": "time",
+      "data_unit": "ms"
+    }
+  ],
+  "series": [],
+  "errors": [],
+  "paths": 0
+}
