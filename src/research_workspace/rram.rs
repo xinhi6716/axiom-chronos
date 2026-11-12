@@ -591,6 +591,211 @@ mod tests {
 #[cfg(test)]
 mod extra_tests {
     use super::*;
+    fn put(root: &Path, path: &str, content: &str) {
+        let p = root.join(path);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+    fn listing(root: &Path) -> Vec<(String, u64)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let m = entry.metadata().unwrap();
+                out.push((
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    if m.is_dir() { 0 } else { m.len() },
+                ));
+                if m.is_dir() {
+                    walk(root, &path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+    #[test]
+    fn manifest_contract_and_no_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        put(
+            root,
+            "research/protocol.yaml",
+            "meta: {project: example}\npaths: {source_root: pdfs}\ncodex: {timeout_s: 123}\n",
+        );
+        let specs = [
+            (
+                "inventory",
+                "inventory",
+                "data/literature_inventory.csv",
+                "csv",
+            ),
+            (
+                "screening",
+                "screening",
+                "research/screening_audit.csv",
+                "csv",
+            ),
+            ("aliases", "aliases", "data/aliases.csv", "csv"),
+            ("evidence", "evidence", "data/evidence.csv", "csv"),
+            (
+                "measurements",
+                "measurements",
+                "data/measurements.csv",
+                "csv",
+            ),
+            (
+                "raw_measurements",
+                "raw_measurements",
+                "data/raw_measurements.csv",
+                "csv",
+            ),
+            (
+                "progress_screen",
+                "progress",
+                "state/progress/screen.json",
+                "json",
+            ),
+            ("driver", "driver", "state/progress/driver.json", "json"),
+            ("completed", "completed", "state/completed.jsonl", "jsonl"),
+            ("pilot", "pilot", "research/pilot_manifest.csv", "csv"),
+            (
+                "acceptance",
+                "acceptance",
+                "research/acceptance_manifest.csv",
+                "csv",
+            ),
+            (
+                "acceptance_sha",
+                "other",
+                "research/acceptance_manifest.sha256",
+                "text",
+            ),
+            ("splits", "splits", "research/split_manifest.csv", "csv"),
+            (
+                "splits_sha",
+                "other",
+                "research/split_manifest.sha256",
+                "text",
+            ),
+            (
+                "validation",
+                "validation",
+                "research/validation_report.json",
+                "json",
+            ),
+            ("effort_lock", "gate", "research/effort_lock.json", "json"),
+            ("recall", "gate", "research/recall_check_final.json", "json"),
+            (
+                "raw_summary",
+                "raw_summary",
+                "research/raw_extract_summary.json",
+                "json",
+            ),
+            ("protocol", "protocol", "research/protocol.yaml", "text"),
+        ];
+        for (_, _, path, _) in specs {
+            if path != "research/protocol.yaml" {
+                put(root, path, "x");
+            }
+        }
+        put(root, "src/hfo2/prompts/screen.md", "prompt");
+        put(root, "pyproject.toml", "requires-python = '>=3.11'\n");
+        put(root, ".git/HEAD", "ref: refs/heads/main\n");
+        put(root, ".git/refs/heads/main", "revision-ref\n");
+        put(root, "state/source_snapshot_20240101.json", "{}");
+        put(root, "state/source_snapshot_20250101.json", "{}");
+        let before = listing(root);
+        let m = manifest(root, &Default::default()).unwrap();
+        assert_eq!(listing(root), before);
+        assert_eq!(m.artifacts.len(), specs.len());
+        for (id, role, path, format) in specs {
+            let a = m.artifacts.iter().find(|a| a.id == id).unwrap();
+            assert_eq!(serde_json::to_value(&a.role).unwrap(), role);
+            assert_eq!(a.path, path);
+            assert_eq!(serde_json::to_value(&a.format).unwrap(), format);
+            let expected = match id {
+                "inventory" => serde_json::json!({"path":"rel_path", "bytes":"size_bytes"}),
+                "screening" => {
+                    serde_json::json!({"sha256":"pdf_sha256", "path":"rel_path", "reason":"scope_reason"})
+                }
+                "evidence" | "measurements" => serde_json::json!({"sha256":"pdf_sha256"}),
+                _ => serde_json::json!({}),
+            };
+            assert_eq!(serde_json::to_value(&a.columns).unwrap(), expected, "{id}");
+            assert_eq!(
+                a.documents_root.as_deref(),
+                if id == "inventory" { Some("pdf") } else { None }
+            );
+        }
+        for (id, input, pin) in [
+            ("acceptance", "acceptance", "acceptance_sha"),
+            ("splits", "splits", "splits_sha"),
+            (
+                "validation",
+                "measurements",
+                "validation#/measurements_sha256",
+            ),
+        ] {
+            let p = &m
+                .artifacts
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .produced
+                .as_ref()
+                .unwrap()
+                .inputs;
+            assert_eq!(p.len(), 1);
+            assert_eq!(p[0].artifact, input);
+            assert_eq!(p[0].sha256_from.as_deref(), Some(pin));
+        }
+        let stages = serde_json::to_value(&m.stages).unwrap();
+        let expected = serde_json::json!([
+            {"id":"inventory","label":"inventory","progress":null,"outputs":["inventory"],"gate":null},
+            {"id":"screen","label":"screen","progress":"progress_screen","outputs":["screening"],"gate":{"artifact":"recall","pointer":"/passed","op":"eq","value":true,"setting":null}},
+            {"id":"pilot","label":"pilot","progress":null,"outputs":["pilot"],"gate":{"artifact":"effort_lock","pointer":"/pilot/accuracy","op":"ge","value":null,"setting":"/pilot/accuracy_threshold"}},
+            {"id":"acceptance","label":"acceptance","progress":null,"outputs":["acceptance"],"gate":{"artifact":"effort_lock","pointer":"/acceptance/accuracy","op":"ge","value":null,"setting":"/acceptance/accuracy_threshold"}},
+            {"id":"extract","label":"extract","progress":null,"outputs":["measurements","evidence"],"gate":{"artifact":"validation","pointer":"/n_errors","op":"eq","value":0,"setting":null}},
+            {"id":"splits","label":"splits","progress":null,"outputs":["splits"],"gate":null}
+        ]);
+        assert_eq!(stages, expected);
+        assert_eq!(
+            serde_json::to_value(&m.links).unwrap(),
+            serde_json::json!([
+                {"from":"evidence","to":"measurements","key":"evidence_id","separator":";"},
+                {"from":"inventory","to":"screening","key":"path","separator":null},
+                {"from":"measurements","to":"splits","key":"paper_id","separator":null}
+            ])
+        );
+        let groups = m.groups.unwrap();
+        assert_eq!(
+            (groups.pilot.as_str(), groups.acceptance.as_str(), groups.by),
+            ("pilot", "acceptance", GroupBy::StudyGroups)
+        );
+        assert_eq!(m.stall_after_s, Some(123));
+        assert_eq!(m.roots["pdf"], "pdfs");
+        assert_eq!(
+            m.versions.prompts["screen.md"],
+            crate::seams::sha256_hex(b"prompt")
+        );
+        assert_eq!(m.versions.code.as_deref(), Some("revision-ref"));
+        assert_eq!(m.versions.environment["requires-python"], ">=3.11");
+        assert_eq!(m.research_version, "20250101");
+        put(root, ".git/HEAD", "detached-revision\n");
+        fs::remove_file(root.join("state/source_snapshot_20240101.json")).unwrap();
+        fs::remove_file(root.join("state/source_snapshot_20250101.json")).unwrap();
+        fs::remove_file(root.join("research/recall_check_final.json")).unwrap();
+        let m = manifest(root, &Default::default()).unwrap();
+        assert_eq!(m.versions.code.as_deref(), Some("detached-revision"));
+        assert_eq!(m.research_version, "unversioned");
+        assert!(!m.artifacts.iter().any(|a| a.id == "recall"));
+    }
     #[test]
     fn nested_flow_unread_and_artifact_availability() {
         let d = tempfile::tempdir().unwrap();
@@ -604,5 +809,12 @@ mod extra_tests {
         assert_eq!(m.settings["_unread"][0], "bad");
         assert!(m.capabilities.contains(&Capability::RawMeasurements));
         assert!(!m.capabilities.contains(&Capability::PdfPages));
+        assert_eq!(
+            m.artifacts
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["inventory", "raw_measurements", "protocol"]
+        );
     }
 }

@@ -204,7 +204,10 @@ impl Located {
         } else {
             Err(Failure::new(
                 "not_capable",
-                format!("capability {c:?} unavailable"),
+                format!(
+                    "capability {} ({c:?}) unavailable",
+                    serde_json::to_value(&c).unwrap().as_str().unwrap()
+                ),
             ))
         }
     }
@@ -380,13 +383,82 @@ mod extra_tests {
         m["research_id"] = "valid".into();
         std::fs::write(&p, m.to_string()).unwrap();
         let l = locate(d.path(), &Default::default()).unwrap();
-        assert_eq!(
-            l.require(Capability::PdfPages).unwrap_err().kind,
-            "not_capable"
-        );
+        let e = l.require(Capability::PdfPages).unwrap_err();
+        assert_eq!(e.kind, "not_capable");
+        assert!(e.message.contains("pdf_pages"), "{}", e.message);
         assert_eq!(
             l.manifest_sha256,
             crate::seams::sha256_hex(&std::fs::read(p).unwrap())
+        );
+    }
+    #[test]
+    fn locate_adapter_stores_and_paths() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(
+            locate(d.path(), &Default::default()).unwrap_err().kind,
+            "no_manifest"
+        );
+        std::fs::create_dir_all(d.path().join("data")).unwrap();
+        std::fs::create_dir_all(d.path().join("research")).unwrap();
+        std::fs::create_dir_all(d.path().join("pdfs")).unwrap();
+        std::fs::write(d.path().join("data/literature_inventory.csv"), "").unwrap();
+        std::fs::write(
+            d.path().join("research/protocol.yaml"),
+            "meta: {project: example}\npaths: {source_root: pdfs}\n",
+        )
+        .unwrap();
+        let home = d.path().join("orch");
+        let store = home.join("example");
+        std::fs::create_dir_all(&store).unwrap();
+        let explicit = d.path().join("explicit");
+        let opts = LocateOptions {
+            store: Some(explicit.clone()),
+            orch_home: Some(home.clone()),
+        };
+        let l = locate(d.path(), &opts).unwrap();
+        assert_eq!(
+            l.source,
+            ManifestSource::Adapter {
+                name: "rram".into()
+            }
+        );
+        assert_eq!(l.store.as_ref(), Some(&explicit));
+        let l = locate(
+            d.path(),
+            &LocateOptions {
+                store: None,
+                orch_home: Some(home),
+            },
+        )
+        .unwrap();
+        assert_eq!(l.store.as_ref(), Some(&store));
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let pdf = std::fs::canonicalize(d.path().join("pdfs")).unwrap();
+        assert_eq!(l.root_path(None).unwrap(), root);
+        assert_eq!(l.root_path(Some("project")).unwrap(), root);
+        assert_eq!(l.root_path(Some("pdf")).unwrap(), pdf);
+        assert_eq!(
+            l.root_path(Some("unknown")).unwrap_err().kind,
+            "invalid_manifest"
+        );
+        assert_eq!(l.document_path("paper.pdf").unwrap(), pdf.join("paper.pdf"));
+        let mut a = l.artifact("inventory").unwrap().clone();
+        assert_eq!(
+            l.artifact_path(&a).unwrap(),
+            root.join("data/literature_inventory.csv")
+        );
+        a.root = Some("pdf".into());
+        a.path = "../escape".into();
+        assert_eq!(l.artifact_path(&a).unwrap_err().kind, "escape");
+        assert_eq!(l.document_path("../escape").unwrap_err().kind, "escape");
+        assert_eq!(l.roots(), vec![root, pdf, store]);
+        assert_eq!(l.by_role(Role::Inventory).len(), 1);
+        assert!(l.has(Capability::Literature));
+        assert!(!l.has(Capability::PdfPages));
+        std::fs::write(d.path().join(MANIFEST_FILE), r#"{"manifest_version":1,"research_id":"valid","research_version":"1","title":"T","settings":[],"versions":{}}"#).unwrap();
+        assert_eq!(
+            locate(d.path(), &Default::default()).unwrap_err().kind,
+            "invalid_manifest"
         );
     }
 }

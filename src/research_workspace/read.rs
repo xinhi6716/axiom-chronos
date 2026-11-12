@@ -339,13 +339,11 @@ pub fn read_rows(
             offset += csv.bytes_read();
             r = csv.reader;
             let Some(record) = record else { break };
-            if record.len() != header.len() {
-                return Err(err(
-                    "corrupt_artifact",
-                    format!("CSV row {} has wrong field count", row + 1),
-                ));
-            }
-            header.iter().cloned().zip(record).collect()
+            header
+                .iter()
+                .cloned()
+                .zip(record.into_iter().chain(std::iter::repeat(String::new())))
+                .collect()
         } else {
             let mut line = Vec::new();
             let count = (&mut r)
@@ -356,11 +354,9 @@ pub fn read_rows(
             if count > lim.max_record_bytes {
                 return Err(err("oversized_record", format!("JSONL line {}", row + 1)));
             }
-            if line.last() != Some(&b'\n') {
-                return Err(err(
-                    "corrupt_artifact",
-                    format!("truncated JSONL line {}", row + 1),
-                ));
+            if line.iter().all(u8::is_ascii_whitespace) {
+                row += 1;
+                continue;
             }
             let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&line)
                 .map_err(|e| err("corrupt_artifact", format!("JSONL line {}: {e}", row + 1)))?;
@@ -504,5 +500,116 @@ mod extra_tests {
     fn bom_before_quoted_first_field() {
         let mut r = CsvReader::new(&b"\xef\xbb\xbf\"a,b\",c\n"[..], Limits::default());
         assert_eq!(r.next_record().unwrap().unwrap(), vec!["a,b", "c"]);
+    }
+    #[test]
+    fn jsonl_final_line_blanks_mapping_and_line_number() {
+        let (d, mut l) = setup();
+        l.manifest.artifacts[1]
+            .columns
+            .insert("path".into(), "name".into());
+        fs::write(
+            d.path().join("j.jsonl"),
+            "\n{\"name\":\"first\"}\n  \n{\"name\":\"last\"}",
+        )
+        .unwrap();
+        let first = read_rows(&l, "j", None, 1, &Limits::default()).unwrap();
+        assert_eq!(first.rows[0].fields["path"], "first");
+        let last = read_rows(&l, "j", first.next.as_ref(), 5, &Limits::default()).unwrap();
+        assert_eq!(last.rows.len(), 1);
+        assert_eq!(last.rows[0].fields["path"], "last");
+        assert!(last.next.is_none());
+        fs::write(d.path().join("j.jsonl"), "\n{\"x\":1}\n \n{\"x\":").unwrap();
+        let e = read_rows(&l, "j", None, 10, &Limits::default()).unwrap_err();
+        assert_eq!(e.kind, "corrupt_artifact");
+        assert!(e.message.contains("JSONL line 4"), "{}", e.message);
+    }
+    #[test]
+    fn jsonl_valid_unterminated_final_line() {
+        let (d, l) = setup();
+        fs::write(d.path().join("j.jsonl"), "{\"x\":1}\n{\"x\":2}").unwrap();
+        let rows = read_rows(&l, "j", None, 10, &Limits::default())
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].fields["x"], "2");
+    }
+    #[test]
+    fn csv_unequal_fields_are_padded_or_dropped() {
+        let (d, l) = setup();
+        fs::write(d.path().join("a.csv"), "name,x\none\ntwo,2,extra\n").unwrap();
+        let rows = read_rows(&l, "a", None, 10, &Limits::default())
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].fields["x"], "");
+        assert_eq!(rows[1].fields["x"], "2");
+        assert_eq!(rows[1].fields.len(), 2);
+    }
+    #[test]
+    fn read_limits_json_and_missing() {
+        let (d, mut l) = setup();
+        fs::write(
+            d.path().join("a.csv"),
+            format!(
+                "name,x\n{}",
+                (0..510).map(|i| format!("n{i},{i}\n")).collect::<String>()
+            ),
+        )
+        .unwrap();
+        let p = read_rows(&l, "a", None, 1000, &Limits::default()).unwrap();
+        assert_eq!(p.rows.len(), 500);
+        assert_eq!(
+            read_rows(&l, "a", p.next.as_ref(), 1000, &Limits::default())
+                .unwrap()
+                .rows
+                .len(),
+            10
+        );
+        let lim = Limits {
+            max_record_bytes: 12,
+            ..Default::default()
+        };
+        fs::write(d.path().join("a.csv"), "name,x\nlong-long-value,1\n").unwrap();
+        assert_eq!(
+            read_rows(&l, "a", None, 1, &lim).unwrap_err().kind,
+            "oversized_record"
+        );
+        fs::write(d.path().join("j.jsonl"), "{\"long\":123456}\n").unwrap();
+        assert_eq!(
+            read_rows(&l, "j", None, 1, &lim).unwrap_err().kind,
+            "oversized_record"
+        );
+        l.manifest.artifacts[1].format = Format::Json;
+        fs::write(d.path().join("j.jsonl"), "{\"ok\":true}").unwrap();
+        assert_eq!(read_json(&l, "j", &Limits::default()).unwrap()["ok"], true);
+        assert_eq!(verify(&l, "absent").unwrap_err().kind, "missing_artifact");
+        fs::remove_file(d.path().join("j.jsonl")).unwrap();
+        assert_eq!(verify(&l, "j").unwrap_err().kind, "missing_artifact");
+    }
+    #[test]
+    fn guard_absolute_and_link_component() {
+        let d = tempfile::tempdir().unwrap();
+        for path in ["/absolute", "C:/absolute", "\\absolute", "../outside"] {
+            assert_eq!(guard(d.path(), path).unwrap_err().kind, "escape");
+        }
+        let outside = tempfile::tempdir().unwrap();
+        let link = d.path().join("link");
+        #[cfg(windows)]
+        let created = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(outside.path(), &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let created = false;
+        if !created {
+            eprintln!("skipping link guard: link creation failed");
+            return;
+        }
+        assert_eq!(guard(d.path(), "link/file").unwrap_err().kind, "escape");
     }
 }
