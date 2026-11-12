@@ -75,7 +75,14 @@ fn initial_state(options: &Options) -> model::AppState {
         state.memory.clear();
         state.checks.clear();
         // ux: begin initial state
-        state.ux = ux::UxState::default();
+        state.ux = if options.demo {
+            ux::UxState::default()
+        } else {
+            ux::UxState {
+                seams: ux::real::wiring::production(&crate::base::axiom_home(), &crate::codex::slots::home()),
+                ..Default::default()
+            }
+        };
         // ux: end
     }
     if !options.demo { state.quota = Default::default(); }
@@ -258,6 +265,19 @@ mod strip_startup_tests {
         assert!(empty.codex_slots.is_none() && empty.codex_models.is_empty() && empty.live_models.is_empty());
         let demo=initial_state(&Options {demo:true,..Default::default()});
         assert_eq!(demo.codex_slots,Some(15)); assert!(!demo.live_models.is_empty());
+    }
+
+    #[test]
+    fn startup_uses_real_seams_only_outside_demo() {
+        let real = initial_state(&Options::default());
+        assert!(real.ux.seams.dual_core.is_some());
+        assert!(real.ux.seams.sessions.is_none());
+        let demo = initial_state(&Options { demo: true, ..Default::default() });
+        assert!(demo.ux.seams.dual_core.is_some());
+        assert!(demo.ux.seams.sessions.is_some());
+        let empty = initial_state(&Options { demo: true, empty: true, ..Default::default() });
+        assert!(empty.ux.seams.dual_core.is_none());
+        assert!(empty.ux.seams.sessions.is_none());
     }
 
     #[test]
