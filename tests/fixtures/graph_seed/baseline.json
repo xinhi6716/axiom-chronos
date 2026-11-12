@@ -1,0 +1,136 @@
+[
+  {
+    "budget": 2400,
+    "conditions": [
+      "Reject requests exceeding available stock"
+    ],
+    "evidence": [],
+    "explore_bytes": 469,
+    "findings": [],
+    "id": "s01",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Ignore missing observations"
+    ],
+    "evidence": [],
+    "explore_bytes": 465,
+    "findings": [],
+    "id": "s02",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Reject coupons past their expiry"
+    ],
+    "evidence": [],
+    "explore_bytes": 465,
+    "findings": [],
+    "id": "s03",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Apply the calibration offset"
+    ],
+    "evidence": [],
+    "explore_bytes": 465,
+    "findings": [],
+    "id": "s04",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Keep units explicit"
+    ],
+    "evidence": [],
+    "explore_bytes": 469,
+    "findings": [],
+    "id": "s05",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Preserve order for equal priorities"
+    ],
+    "evidence": [],
+    "explore_bytes": 464,
+    "findings": [],
+    "id": "s06",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Exclude unanswered items"
+    ],
+    "evidence": [],
+    "explore_bytes": 533,
+    "findings": [],
+    "id": "s07",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Keep first occurrence order"
+    ],
+    "evidence": [],
+    "explore_bytes": 856,
+    "findings": [
+      "Recipients are deduplicated before delivery"
+    ],
+    "id": "s08",
+    "seeds": 1
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Do not exceed three attempts"
+    ],
+    "evidence": [],
+    "explore_bytes": 463,
+    "findings": [],
+    "id": "s09",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Trim surrounding whitespace"
+    ],
+    "evidence": [],
+    "explore_bytes": 543,
+    "findings": [],
+    "id": "s10",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Use the heavy rate above ten kilograms"
+    ],
+    "evidence": [],
+    "explore_bytes": 534,
+    "findings": [],
+    "id": "s11",
+    "seeds": 0
+  },
+  {
+    "budget": 2400,
+    "conditions": [
+      "Treat the expiry instant as expired"
+    ],
+    "evidence": [],
+    "explore_bytes": 470,
+    "findings": [],
+    "id": "s12",
+    "seeds": 0
+  }
+]

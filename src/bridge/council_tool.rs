@@ -116,6 +116,7 @@ struct ProgramMember<'a> {
     bridge: &'a Bridge,
     setup: &'a council::Setup,
     cwd: &'a std::path::Path,
+    store: &'a std::path::Path,
 }
 
 impl crate::research_program::investigation::ResearchMember for ProgramMember<'_> {
@@ -129,6 +130,18 @@ impl crate::research_program::investigation::ResearchMember for ProgramMember<'_
         stop: &AtomicBool,
     ) -> crate::research_program::investigation::MemberReply {
         use crate::research_program::investigation::MemberReply;
+        if let Err(e) = budgets::check(self.store, Role::CouncilMember, "program") {
+            return MemberReply {
+                status: Status::Failed,
+                output: None,
+                raw: None,
+                model: None,
+                provider: self.name.into(),
+                usd: None,
+                tokens: 0,
+                detail: Some(e.to_json().to_string()),
+            };
+        }
         let schema_path = call.out_dir.join("schema.json");
         let mut reply = if let Err(e) = std::fs::write(&schema_path, call.schema.to_string()) {
             CrossReply {
@@ -140,7 +153,7 @@ impl crate::research_program::investigation::ResearchMember for ProgramMember<'_
                 detail: Some(e.to_string()),
             }
         } else {
-            match self.name {
+            let reply = match self.name {
                 "astra" => cross(
                     self.bridge,
                     &self.cwd.to_string_lossy(),
@@ -172,7 +185,17 @@ impl crate::research_program::investigation::ResearchMember for ProgramMember<'_
                     std::time::Duration::from_secs(call.timeout_s),
                     stop,
                 ),
-            }
+            };
+            let _ = budgets::record(
+                self.store,
+                Role::CouncilMember,
+                reply.model.as_deref().unwrap_or(self.name),
+                None,
+                0,
+                reply.tokens,
+                "program",
+            );
+            reply
         };
         if reply.status == Status::Ok && reply.output.is_none() {
             match reply.raw.as_deref().map(serde_json::from_str::<Value>) {
@@ -220,6 +243,12 @@ fn program(b: &Bridge, setup: &council::Setup, store: PathBuf, a: &Value) -> Res
             .collect::<Res<Vec<_>>>()?,
         Some(_) => return Err(invalid("sources must be an array of strings")),
     };
+    if let Err(e) = budgets::check(&store, Role::CouncilMember, "program") {
+        if e.kind == "budget_exceeded" {
+            return Ok(json!({"status":"refused","error":e.to_json()}));
+        }
+        return Err(e);
+    }
     let cfg = ProgramConfig {
         store,
         cwd: cwd.into(),
@@ -233,18 +262,21 @@ fn program(b: &Bridge, setup: &council::Setup, store: PathBuf, a: &Value) -> Res
         bridge: b,
         setup,
         cwd: &cfg.cwd,
+        store: &cfg.store,
     };
     let fable = ProgramMember {
         name: "fable",
         bridge: b,
         setup,
         cwd: &cfg.cwd,
+        store: &cfg.store,
     };
     let argon = ProgramMember {
         name: "argon",
         bridge: b,
         setup,
         cwd: &cfg.cwd,
+        store: &cfg.store,
     };
     let members = Members {
         investigators: vec![&astra, &fable, &argon],

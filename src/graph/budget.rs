@@ -30,7 +30,9 @@ fn update(v: &mut Value, limit: usize) {
         }
     }
 }
-/// Fits by dropping complete, lowest-ranked bundles; metadata is reduced only if it alone cannot fit.
+/// Removes snippets, then edges, then complete lowest-ranked bundles, starting
+/// from the end (restricted to memory bundles when over the memory budget).
+/// Reduces metadata only if necessary.
 pub fn fit(mut payload: Value, budget: usize, memory_budget: usize) -> Value {
     let mut omitted = payload["omitted"].as_u64().unwrap_or(0);
     let mut truncated = payload["truncated"].as_u64().unwrap_or(0);
@@ -39,6 +41,28 @@ pub fn fit(mut payload: Value, budget: usize, memory_budget: usize) -> Value {
         let mem_over = memory_size(&payload) > memory_budget;
         if !mem_over && size(&payload) <= budget {
             return payload;
+        }
+        // Keep nodes and their evidence when shedding snippets is sufficient.
+        if let Some(bundles) = payload["bundles"].as_array_mut() {
+            if let Some(bundle) = bundles
+                .iter_mut()
+                .rev()
+                .find(|b| (!mem_over || memory(b)) && b["snippet"].is_string())
+            {
+                bundle["snippet"] = Value::Null;
+                truncated += 1;
+                payload["truncated"] = json!(truncated);
+                continue;
+            }
+            if let Some(bundle) = bundles.iter_mut().rev().find(|b| {
+                (!mem_over || memory(b))
+                    && b["edges"].as_array().is_some_and(|edges| !edges.is_empty())
+            }) {
+                bundle["edges"].as_array_mut().unwrap().pop();
+                truncated += 1;
+                payload["truncated"] = json!(truncated);
+                continue;
+            }
         }
         let index = payload["bundles"].as_array().and_then(|a| {
             if mem_over {

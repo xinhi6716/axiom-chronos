@@ -538,11 +538,25 @@ pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> 
 }
 fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     let mut rows = read_units(store)?;
-    let out = supersede_rows(store, &mut rows, id, by)?;
+    let (out, cross_track) = supersede_rows(store, &mut rows, id, by)?;
     save_units(store, &rows)?;
+    if let Some((old_track, new_track, basis)) = cross_track {
+        crate::orch::events::append_event(
+            store,
+            "unit_superseded_cross_track",
+            None,
+            None,
+            serde_json::json!({"old": id, "new": by, "old_track": old_track, "new_track": new_track, "basis": basis}),
+        )?;
+    }
     Ok(out)
 }
-fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Unit> {
+fn supersede_rows(
+    store: &Path,
+    rows: &mut [Unit],
+    id: &str,
+    by: &str,
+) -> Res<(Unit, Option<(String, String, &'static str)>)> {
     let find = |name: &str| {
         rows.iter()
             .find(|u| u.id == name)
@@ -579,12 +593,29 @@ fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Un
             "unit {id} is verified and cannot be superseded; if its files changed, run orch accept <module> --repo <dir> first"
         )));
     }
-    if old.track != new.track {
-        return Err(fail(format!(
-            "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
-            new.track, old.track
-        )));
-    }
+    let cross_track = if old.track != new.track {
+        let basis = if new.state == "verified" {
+            Some("state")
+        } else if read_units(store)?.iter().any(|u| u.id == by)
+            && crate::orch::derive_state(
+                &crate::orch::evidence(store, by)?,
+                crate::orch::needs_accept(store, by)?,
+            ) == "verified"
+        {
+            Some("evidence")
+        } else {
+            None
+        };
+        let Some(basis) = basis else {
+            return Err(fail(format!(
+                "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
+                new.track, old.track
+            )));
+        };
+        Some((old.track.clone(), new.track.clone(), basis))
+    } else {
+        None
+    };
     // The replacement inherits the completion of `id` and of every unit that already stands on it.
     let mut scope: Vec<String> = vec![];
     for u in rows
@@ -613,7 +644,7 @@ fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Un
     }
     let row = rows.iter_mut().find(|u| u.id == id).unwrap();
     row.state = format!("{SUPERSEDED}:{by}");
-    Ok(row.clone())
+    Ok((row.clone(), cross_track))
 }
 fn push(
     store: &Path,

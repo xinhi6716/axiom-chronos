@@ -85,8 +85,29 @@ The diagnosis used code inspection and `axiom graph explore` on the s01 fixture;
 - Fallback queries for short CJK or short words (`src/graph/query.rs:95-114, 155-164`) use LIKE over title, summary and key, which do not contain the CJK query terms for code nodes either (s02, s04).
 - The leading hypothesis for the extra cost is that, with an empty packet, the agent must locate and read the source itself, adding turns and cache reads. This is not confirmed.
 
-Status: cause confirmed for the empty packet (no seeds for multi-word prose queries); the link between the empty packet and the higher token cost is not yet confirmed. A fix to query seeding (per-word matching and a code snippet in the packet) is needed, followed by a new live A/B run; no fix has been completed.
+Status: the word-level seeding and snippet fix is done offline. The link between empty packets and higher token cost remains unconfirmed; a new live paid A/B is pending owner approval.
 
 ## Honesty and limitations
 
 The resolution holdout was seen while tuning the resolver, so its scores are **not independent**: Rust 0.75, Python/TS/JS 0.875, and zero wrong certain edges. They are not an independent measure of resolver performance. tree-sitter is unavailable offline, so Rust uses syn and Python/TS/JS use native hand-written lexers.
+
+## Offline re-evaluation after word-level seeding
+
+Offline `graph_seed_words` re-evaluation on the same 12 manifest scenarios, using temporary data homes. Bytes are pretty explore JSON bytes, not tokens. Counts are required evidence / conditions / major findings present in the graph brief. This is a comparison against the pre-change baseline, not an independent acceptance set; the live paid A/B was not run.
+
+| Scenario | Seeds before → after | Bytes before → after | Evidence before → after | Conditions before → after | Findings before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| s01 | 0 → 2 | 469 → 1520 | 0 → 0 | 1 → 1 | 0 → 1 |
+| s02 | 0 → 0 | 465 → 465 | 0 → 0 | 1 → 1 | 0 → 0 |
+| s03 | 0 → 3 | 465 → 2099 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s04 | 0 → 0 | 465 → 465 | 0 → 0 | 1 → 1 | 0 → 0 |
+| s05 | 0 → 1 | 469 → 909 | 0 → 0 | 1 → 1 | 0 → 1 |
+| s06 | 0 → 2 | 464 → 2334 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s07 | 0 → 2 | 533 → 2080 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s08 | 1 → 3 | 856 → 2290 | 0 → 2 | 1 → 1 | 1 → 1 |
+| s09 | 0 → 3 | 463 → 2357 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s10 | 0 → 2 | 543 → 2278 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s11 | 0 → 2 | 534 → 2308 | 0 → 2 | 1 → 1 | 0 → 1 |
+| s12 | 0 → 2 | 470 → 2340 | 0 → 2 | 1 → 1 | 0 → 1 |
+
+Short CJK queries s02 and s04 still have no matching seed in these fixtures. The previous live result and token-cost hypothesis remain unchanged; offline byte counts do not establish token savings.

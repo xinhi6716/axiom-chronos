@@ -92,7 +92,43 @@ fn allowed(n: &Node, code_scope: Option<i64>, mem_scope: Option<i64>, view: View
             view != View::Code && Some(n.scope) == mem_scope
         }
 }
+fn ignored_word(word: &str) -> bool {
+    matches!(
+        word.to_lowercase().as_str(),
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "for"
+            | "from"
+            | "in"
+            | "is"
+            | "of"
+            | "on"
+            | "or"
+            | "the"
+            | "to"
+            | "with"
+    ) || (word.len() == 1 && word.is_ascii())
+}
+
+fn fallback_words(q: &str) -> Vec<&str> {
+    let words: Vec<_> = q.split_whitespace().collect();
+    if words.len() > 1 {
+        words
+            .into_iter()
+            .filter(|word| !ignored_word(word))
+            .collect()
+    } else {
+        words
+    }
+}
+
 fn fallback(q: &str) -> Option<&'static str> {
+    let q = fallback_words(q).join(" ");
     let mut run = 0;
     for c in q.chars().chain(std::iter::once(' ')) {
         if matches!(c as u32, 0x3400..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f) {
@@ -117,18 +153,50 @@ fn path_of(n: &Node) -> Option<&str> {
         .strip_prefix("file:")
         .or_else(|| n.key.strip_prefix("sym:").and_then(|s| s.split('#').next()))
 }
-fn bundle(n: &Node, why: &str, edges: Vec<Value>) -> Value {
+fn bundle(
+    n: &Node,
+    why: &str,
+    edges: Vec<Value>,
+    rank: Option<usize>,
+    project_dir: &Path,
+) -> Value {
+    let line = path_of(n).map(|_| n.attrs["span"]["line"].as_u64().unwrap_or(1).max(1));
+    let snippet = path_of(n).and_then(|path| {
+        if !Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let source = std::fs::read_to_string(project_dir.join(path)).ok()?;
+        let start = source
+            .split_inclusive('\n')
+            .take(line.unwrap_or(1).saturating_sub(1) as usize)
+            .map(str::len)
+            .sum::<usize>();
+        if start > source.len() {
+            return None;
+        }
+        let text = &source[start..];
+        let mut end = text.len().min(240);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(text[..end].to_owned())
+    });
     let at = path_of(n).map(|p| format!("{}:{}", p, n.attrs["span"]["line"].as_u64().unwrap_or(1)));
     let summary = if n.summary.is_empty() {
         n.attrs["signature"].as_str().unwrap_or("")
     } else {
         &n.summary
     };
-    json!({"key":n.key,"kind":n.kind,"label":n.label,"at":at,"sha256":n.source.as_ref().filter(|s| !s.sha256.is_empty()).map(|s| &s.sha256),"state":n.state,"summary":summary.chars().take(200).collect::<String>(),"why":why,"conditions":n.attrs.get("conditions").filter(|v|v.is_array()).cloned().unwrap_or(json!([])),"contradictions":n.attrs.get("contradictions").filter(|v|v.is_array()).cloned().unwrap_or(json!([])),"edges":edges})
+    json!({"key":n.key,"kind":n.kind,"label":n.label,"at":at,"sha256":n.source.as_ref().filter(|s| !s.sha256.is_empty()).map(|s| &s.sha256),"state":n.state,"summary":summary.chars().take(200).collect::<String>(),"why":why,"conditions":n.attrs.get("conditions").filter(|v|v.is_array()).cloned().unwrap_or(json!([])),"contradictions":n.attrs.get("contradictions").filter(|v|v.is_array()).cloned().unwrap_or(json!([])),"edges":edges,"rank":rank,"line":line,"snippet":snippet})
 }
 fn seed_nodes(
     store: &GraphStore,
     text: &str,
+    original: &str,
+    alias_words: &[String],
     node: Option<&str>,
     code_scope: Option<i64>,
     mem_scope: Option<i64>,
@@ -136,7 +204,8 @@ fn seed_nodes(
     fb: Option<&str>,
 ) -> Res<Vec<Node>> {
     let scopes: Vec<i64> = [code_scope, mem_scope].into_iter().flatten().collect();
-    let mut ranked: HashMap<i64, (i32, Node)> = HashMap::new();
+    // SQLite FTS5 BM25 ranks are negative, with more negative values better.
+    let mut ranked: HashMap<i64, (u8, f64, Node)> = HashMap::new();
     if let Some(key) = node {
         for scope in &scopes {
             if let Some(n) = store.node(&NodeRef {
@@ -144,15 +213,74 @@ fn seed_nodes(
                 key: key.into(),
             })? {
                 if allowed(&n, code_scope, mem_scope, view) {
-                    ranked.insert(n.id, (0, n));
+                    ranked.insert(n.id, (0, 0.0, n));
                 }
             }
         }
-    }
-    if !text.is_empty() && node.is_none() {
-        let ids: Vec<i64> = store.read(|c| {
-            if fb.is_some() {
-                let words: Vec<String> = text.split_whitespace().map(|word| format!("%{}%", word.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))).collect();
+    } else if !text.is_empty() {
+        let exact_ids = |word: &str| -> Res<Vec<i64>> {
+            store.read(|c| {
+                let mut s = c.prepare("SELECT n.id FROM g_nodes n LEFT JOIN entries e ON e.id=n.entry_id WHERE lower(COALESCE(e.title,n.label))=lower(?1) OR lower(n.key)=lower(?1) OR (n.kind='file' AND lower(substr(n.key,6))=lower(?1)) ORDER BY n.key,n.scope").map_err(err)?;
+                let rows = s.query_map([word], |r| r.get(0)).map_err(err)?.collect::<Result<Vec<_>, _>>().map_err(err)?;
+                Ok(rows)
+            })
+        };
+        for id in exact_ids(original)? {
+            if let Some(n) = store.node_by_id(id)? {
+                if allowed(&n, code_scope, mem_scope, view) {
+                    ranked.insert(id, (0, 0.0, n));
+                }
+            }
+        }
+        if text != original {
+            for id in exact_ids(text)? {
+                if let Some(n) = store.node_by_id(id)? {
+                    if allowed(&n, code_scope, mem_scope, view) {
+                        ranked.entry(id).or_insert((1, 0.0, n));
+                    }
+                }
+            }
+        }
+        let mut unique = HashSet::new();
+        let words: Vec<_> = text
+            .split_whitespace()
+            .filter(|word| {
+                let lower = word.to_lowercase();
+                !ignored_word(word) && unique.insert(lower)
+            })
+            .collect();
+        for word in words {
+            if fb.is_some() && word.chars().count() < 3 {
+                continue;
+            }
+            for id in exact_ids(word)? {
+                if let Some(n) = store.node_by_id(id)? {
+                    if allowed(&n, code_scope, mem_scope, view) {
+                        let category = if alias_words.iter().any(|a| a.eq_ignore_ascii_case(word)) {
+                            1
+                        } else {
+                            2
+                        };
+                        ranked
+                            .entry(id)
+                            .and_modify(|r| r.0 = r.0.min(category))
+                            .or_insert((category, 0.0, n));
+                    }
+                }
+            }
+            let fts = format!("\"{}\"", word.replace('"', "\"\""));
+            for (id, score) in store.fts(&scopes, &fts, 500)? {
+                if let Some(n) = store.node_by_id(id)? {
+                    if allowed(&n, code_scope, mem_scope, view) {
+                        ranked.entry(id).or_insert((2, 0.0, n)).1 -= score;
+                    }
+                }
+            }
+        }
+        // Preserve bounded, newest-first LIKE fallback for short queries.
+        if fb.is_some() {
+            let ids: Vec<i64> = store.read(|c| {
+                let words: Vec<String> = fallback_words(text).into_iter().map(|word| format!("%{}%", word.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))).collect();
                 let conditions = std::iter::repeat_n("(COALESCE(e.title,n.label)||' '||COALESCE(e.summary,n.summary)||' '||n.key) LIKE ? ESCAPE '\\'", words.len()).collect::<Vec<_>>().join(" OR ");
                 let sql = format!("SELECT n.id FROM (SELECT * FROM g_nodes WHERE ((scope=? AND kind IN ('file','symbol')) OR (scope=? AND kind NOT IN ('file','symbol'))) AND state NOT IN ('tombstone','retired','dirty','unresolved','ambiguous') ORDER BY revision DESC,id DESC LIMIT 5000) n LEFT JOIN entries e ON e.id=n.entry_id WHERE ({conditions}) ORDER BY n.revision DESC,n.id DESC");
                 let cs = if view == View::Memory { -1 } else { code_scope.unwrap_or(-1) };
@@ -162,29 +290,11 @@ fn seed_nodes(
                 let mut s = c.prepare(&sql).map_err(err)?;
                 let rows = s.query_map(rusqlite::params_from_iter(values), |r| r.get(0)).map_err(err)?.collect::<Result<Vec<_>, _>>().map_err(err)?;
                 Ok(rows)
-            } else {
-                let sql = "SELECT n.id FROM g_nodes n LEFT JOIN entries e ON e.id=n.entry_id WHERE lower(COALESCE(e.title,n.label))=lower(?1) OR lower(n.key)=lower(?1) OR (n.kind='file' AND lower(substr(n.key,6))=lower(?1)) ORDER BY n.key,n.id";
-                let mut s = c.prepare(sql).map_err(err)?;
-                let rows = s.query_map([text], |r| r.get(0)).map_err(err)?.collect::<Result<Vec<_>, _>>().map_err(err)?;
-                Ok(rows)
-            }
-        })?;
-        for id in ids {
-            if let Some(n) = store.node_by_id(id)? {
-                if allowed(&n, code_scope, mem_scope, view) {
-                    let exact = n.label.eq_ignore_ascii_case(text)
-                        || n.key.eq_ignore_ascii_case(text)
-                        || path_of(&n).is_some_and(|p| p.eq_ignore_ascii_case(text));
-                    ranked.insert(n.id, (if exact { 0 } else { 2 }, n));
-                }
-            }
-        }
-        if fb.is_none() {
-            let fts = format!("\"{}\"", text.replace('"', "\"\""));
-            for (id, _) in store.fts(&scopes, &fts, 500)? {
+            })?;
+            for id in ids {
                 if let Some(n) = store.node_by_id(id)? {
                     if allowed(&n, code_scope, mem_scope, view) {
-                        ranked.entry(id).or_insert((2, n));
+                        ranked.entry(id).or_insert((2, 0.0, n));
                     }
                 }
             }
@@ -193,18 +303,19 @@ fn seed_nodes(
     let mut list: Vec<_> = ranked.into_values().collect();
     list.sort_by(|a, b| {
         a.0.cmp(&b.0)
+            .then_with(|| b.1.total_cmp(&a.1))
             .then_with(|| {
-                if fb.is_some() && a.0 != 0 {
-                    b.1.revision.cmp(&a.1.revision).then(b.1.id.cmp(&a.1.id))
+                if fb.is_some() && a.0 != 0 && a.1 == 0.0 && b.1 == 0.0 {
+                    b.2.revision.cmp(&a.2.revision).then(b.2.id.cmp(&a.2.id))
                 } else {
                     std::cmp::Ordering::Equal
                 }
             })
-            .then(a.1.key.cmp(&b.1.key))
-            .then(a.1.scope.cmp(&b.1.scope))
+            .then(a.2.key.cmp(&b.2.key))
+            .then(a.2.scope.cmp(&b.2.scope))
     });
     list.truncate(MAX_SEEDS);
-    Ok(list.into_iter().map(|(_, n)| n).collect())
+    Ok(list.into_iter().map(|(_, _, n)| n).collect())
 }
 fn ranked_edges(
     store: &GraphStore,
@@ -244,14 +355,18 @@ pub fn explore(home: &Path, req: &ExploreRequest) -> Res<Value> {
 }
 
 fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize))> {
-    let limit = req.budget.clamp(256, HARD_BUDGET);
+    let limit = req.budget.min(HARD_BUDGET);
     let mut alias = None;
     let original = req.query.as_deref().unwrap_or("").trim();
     let mut words = Vec::new();
+    let mut alias_words = Vec::new();
     if let Some(project) = &req.project {
         let a = aliases::load(&home.join("orchestrate").join(project))?;
         for word in original.split_whitespace() {
             let r = a.resolve(word);
+            if r.via.is_some() {
+                alias_words.push(r.canonical.clone());
+            }
             if r.via.is_some() && alias.is_none() {
                 alias = Some(r.clone());
             }
@@ -289,6 +404,8 @@ fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize
         let mut found = seed_nodes(
             &store,
             &text,
+            original,
+            &alias_words,
             req.node.as_deref(),
             cs.as_ref().map(|s| s.id),
             ms.as_ref().map(|s| s.id),
@@ -311,6 +428,8 @@ fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize
             found = seed_nodes(
                 &store,
                 &text,
+                original,
+                &alias_words,
                 req.node.as_deref(),
                 cs.as_ref().map(|s| s.id),
                 ms.as_ref().map(|s| s.id),
@@ -337,11 +456,11 @@ fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize
         for (i, n) in found.into_iter().enumerate() {
             seen.insert(n.id);
             let why = format!("seed {} ({})", i + 1, n.key);
-            q.push_back((n, 0u8, why, 10000i32));
+            q.push_back((n, 0u8, why, 10000i32, Some(i)));
         }
         let mut records = Vec::new();
         let mut edge_count = 0usize;
-        while let Some((n, hop, why, score)) = q.pop_front() {
+        while let Some((n, hop, why, score, rank)) = q.pop_front() {
             let mut out = Vec::new();
             if hop < req.hops.min(MAX_HOPS) {
                 let mut edges = ranked_edges(&store, &n, req.direction)?;
@@ -411,11 +530,17 @@ fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize
                             hop + 1,
                             next_why,
                             score - 1000 - penalty + i32::from(e.weight) / 10,
+                            None,
                         ));
                     }
                 }
             }
-            records.push((score, n.key.clone(), bundle(&n, &why, out)));
+            records.push((
+                score,
+                rank,
+                n.key.clone(),
+                bundle(&n, &why, out, rank, &req.project_dir),
+            ));
         }
         counts = (seen.len(), edge_count);
         dirty.sort();
@@ -423,8 +548,8 @@ fn explore_inner(home: &Path, req: &ExploreRequest) -> Res<(Value, (usize, usize
         if !dirty.is_empty() && state != "partial" {
             state = "stale";
         }
-        records.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        bundles = records.into_iter().map(|x| x.2).collect();
+        records.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        bundles = records.into_iter().map(|x| x.3).collect();
     }
     let payload = json!({"status":"completed","error":null,"budget":{"method":"utf8_upper_bound","limit":limit,"used":0,"memory_limit":MEMORY_BUDGET,"memory_used":0},"revision":revision,"scope":scope_value,"query":{"text":original,"alias":alias,"fallback":fb},"freshness":{"state":state,"dirty_files":dirty},"seeds":seeds,"bundles":bundles,"omitted":omitted,"truncated":truncated});
     Ok((budget::fit(payload, limit, MEMORY_BUDGET), counts))
