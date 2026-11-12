@@ -31,8 +31,9 @@ impl Fixture {
         fs::write(store.join("astra/plan-final.md"), "### A Alpha\nmodule a\n### B Beta\nmodule b\n### C Gamma\nmodule c\n").unwrap();
         fs::write(store.join("decisions.md"), "# Decisions\n- Build the six files.\n").unwrap();
         let mut modules = String::new();
+        let py = common::python();
         for (m, dep, serves) in [("a", "none", "A"), ("b", "a", "B"), ("c", "none", "C")] {
-            modules.push_str(&format!("## {m}\nPURPOSE build {m}\nPATHS {m}/\nDEPENDS {dep}\nCONTRACT write the files\nACCEPT files `python -I check.py {m}/one.txt {m}/two.txt`\nSERVES {serves}\n"));
+            modules.push_str(&format!("## {m}\nPURPOSE build {m}\nPATHS {m}/\nDEPENDS {dep}\nCONTRACT write the files\nACCEPT files `{py} -I check.py {m}/one.txt {m}/two.txt`\nSERVES {serves}\n"));
         }
         fs::write(store.join("modules.md"), modules).unwrap();
         let mut config = Config::from_env(); config.data_home = Some(home.into()); config.codex = Ok(common::fake("fake_codex")); config.wsl = None; config.on_windows = false;
@@ -47,9 +48,10 @@ impl Fixture {
     fn brief(&self, unit: &str) -> (PathBuf, String) {
         let module = &unit[..1];
         let file = format!("{module}/{}.txt", if unit.ends_with('1') { "one" } else { "two" });
-        let text = format!("GOAL Build {file}\nSCOPE {file}\nVERIFY python -I check.py {file}\nCONTEXT contract: write the file\nFAKE_DELAY_MS 500\nFAKE_WRITE {file}\n");
+        let py = common::python();
+        let text = format!("GOAL Build {file}\nSCOPE {file}\nVERIFY {py} -I check.py {file}\nCONTEXT contract: write the file\nFAKE_DELAY_MS 500\nFAKE_WRITE {file}\n");
         let parsed = orch::parse_brief(&text).unwrap();
-        assert_eq!(parsed.verify, format!("python -I check.py {file}"));
+        assert_eq!(parsed.verify, format!("{py} -I check.py {file}"));
         assert!(parsed.text.contains(&format!("FAKE_WRITE {file}")));
         (self.store.join("briefs").join(format!("{unit}.md")), text)
     }
@@ -89,7 +91,7 @@ fn script(f: &Fixture, after: bool) -> Vec<Value> {
         }
         if !after { add(&mut s, &agent, ORCH, json!({"args":["report","--repo",f.repo,"--module",m]})); }
     }
-    for args in [json!(["fulltest","--repo",f.repo,"--command","python -I check.py all"]), json!(["status"]), json!(["report","--repo",f.repo])] { add(&mut s, "d-full", ORCH, json!({"args":args})); }
+    for args in [json!(["fulltest","--repo",f.repo,"--command",format!("{} -I check.py all", common::python())]), json!(["status"]), json!(["report","--repo",f.repo])] { add(&mut s, "d-full", ORCH, json!({"args":args})); }
     s
 }
 

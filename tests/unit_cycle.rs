@@ -240,7 +240,7 @@ fn verify_file_contains_whole_capture() {
     let f = Fixture::new(
         &[(
             "one",
-            "echo FIRST_MARKER && echo \"test result: ok. 7 passed; 0 failed; 0 ignored;\" && python -c \"print('x'*30000)\" && echo LAST_MARKER",
+            &format!("echo FIRST_MARKER && echo \"test result: ok. 7 passed; 0 failed; 0 ignored;\" && {} -c \"print('x'*30000)\" && echo LAST_MARKER", common::python()),
         )],
         "echo ok",
     );
@@ -376,7 +376,8 @@ fn accept_error_keeps_next_from_recorded_evidence() {
     )
     .unwrap();
     fs::write(f.store.join("modules.md"), format!(
-        "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `python \"{}\"`\n",
+        "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `{} \"{}\"`\n",
+        common::python(),
         script.display()
     )).unwrap();
     let result = f.cycle("one");
