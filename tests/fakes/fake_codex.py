@@ -7,6 +7,8 @@ child holding its output streams (as a wrapper whose child outlives it), writing
 to the file, and --fake-break=<method>:<effect> makes that request misbehave
 with exit, silent, not-json, no-result, empty-result or <code>:<message>. Method `start` exits
 before reading anything, as when the `app-server` command line is rejected.
+--fake-interrupt-gate=<path> acknowledges an interrupt but waits for that file before
+sending turn/completed; other callers keep the existing interrupt-delay behaviour.
 """
 import json
 import os
@@ -225,9 +227,18 @@ for line in sys.stdin:
             continue
         delay = re.search(r'^FAKE_DELAY_MS[ \t]+(\d+)[ \t]*$', text, flags=re.M)
         delay_ms = int(delay.group(1)) if delay else 0
-        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms):
+        gate = re.search(r'^FAKE_GATE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
+        gate_path = gate.group(1).strip() if gate else None
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path):
             if delay_ms:
                 time.sleep(delay_ms / 1000)
+            if gate_path:
+                deadline = time.monotonic() + 60
+                while not os.path.exists(gate_path):
+                    if time.monotonic() >= deadline:
+                        complete(thread_id, turn_id, 'failed', {'message': f'gate timeout: {gate_path}'})
+                        return
+                    time.sleep(0.02)
             from pathlib import Path
             import subprocess
             cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
@@ -295,7 +306,7 @@ for line in sys.stdin:
                 final = json.dumps({'wrong': 'shape'})
             item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
             complete(thread_id, turn_id)
-        if delay_ms:
+        if delay_ms or gate_path:
             threading.Thread(target=finish_normal, daemon=True).start()
         else:
             finish_normal()
@@ -303,6 +314,14 @@ for line in sys.stdin:
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)
         if turn:
+            interrupt_gate = option('interrupt-gate')
+            if interrupt_gate:
+                log_record('fake/interrupt-ack', params)
+                deadline = time.monotonic() + 120
+                while not os.path.exists(interrupt_gate):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f'interrupt gate timeout: {interrupt_gate}')
+                    time.sleep(0.02)
             time.sleep(float(option('interrupt-delay', '0')))
             complete(*turn, 'interrupted')
     time.sleep(0)
