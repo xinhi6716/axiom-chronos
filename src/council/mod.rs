@@ -284,6 +284,67 @@ pub fn ask_agy(
         detail: answer.detail,
     }
 }
+// BEGIN research-program single Fable call
+pub fn ask_fable_once(
+    setup: &Setup,
+    prompt: &str,
+    cwd: &Path,
+    schema: &Value,
+    _schema_path: &Path,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> CrossReply {
+    let ledger = std::env::temp_dir().join(format!(
+        "research-fable-{}-{}.json",
+        std::process::id(),
+        base::unique()
+    ));
+    let mut meter = match Meter::open(&ledger, "single", setup.fable_cap_usd) {
+        Ok(meter) => meter,
+        Err(e) => {
+            return CrossReply {
+                status: Status::Failed,
+                output: None,
+                raw: None,
+                tokens: 0,
+                model: Some(FABLE_MODEL.into()),
+                detail: Some(e.message),
+            }
+        }
+    };
+    let mut answer = ask_fable(
+        &setup.fable,
+        Ask {
+            prompt: prompt.to_owned(),
+            cwd,
+            schema,
+            timeout,
+            stop,
+            raw_path: None,
+        },
+        "",
+        &mut meter,
+    );
+    if answer.status == Status::Ok && (meter.exceeded() || !meter.observed()) {
+        answer.status = Status::BudgetCut;
+        answer.output = None;
+        answer.detail = Some(if !meter.observed() {
+            "no usage was reported, so its cost cannot be bounded".into()
+        } else {
+            "Fable budget spent".into()
+        });
+    }
+    let _ = std::fs::remove_file(ledger);
+    CrossReply {
+        status: answer.status,
+        output: answer.output,
+        raw: answer.raw,
+        tokens: answer.tokens,
+        model: Some(FABLE_MODEL.into()),
+        detail: answer.detail,
+    }
+}
+// END research-program single Fable call
 /// The longest prompt `ask_agy` accepts, in UTF-16 units; it travels on the command line.
 pub const AGY_PROMPT_LIMIT: usize = member::ARGV_LIMIT_UTF16;
 

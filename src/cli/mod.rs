@@ -1,4 +1,9 @@
 pub(crate) mod doctor;
+// p5b-cli begin
+mod workshop;
+mod extreme;
+pub mod research_budget;
+// p5b-cli end
 use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
@@ -87,6 +92,14 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             Ok(b) => Some(b), Err(e) => return usage(e),
         };
     }
+    // p5b-cli begin
+    if launch.advanced_research {
+        match base::data_home().and_then(|home| crate::research_program::history::estimate(&home, crate::research_program::PROGRAM_TYPE, &research_budget::default_models())) {
+            Ok(estimate) => eprintln!("{}", estimate.line()),
+            Err(e) => eprintln!("estimate unavailable: {}", e.message),
+        }
+    }
+    // p5b-cli end
     if let Some(id) = resume {
         if project_set || no_architect || creative {
             return usage(RESUME_USAGE);
@@ -412,6 +425,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        // p5b-cli begin
+        "workshop" => workshop::command(rest),
+        "extreme" => extreme::command(rest),
+        "research-budget" => research_budget::command(rest),
+        // p5b-cli end
         "wait" => wait_command(rest),
         #[cfg(feature = "app")]
         "app" => match crate::desktop::parse_options(rest) {

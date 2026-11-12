@@ -214,7 +214,58 @@ impl AppServer {
             run_times(&mut report, run_started_ms);
             return Ok(report);
         }
+        // extreme-mode begin
+        let extreme = super::extreme::load(&self.slots_home).on;
+        let mark = if extreme {
+            turn["serviceTier"] = json!(super::extreme::TIER);
+            self.stderr_mark()
+        } else {
+            0
+        };
+        // extreme-mode end
         let result = self.request("turn/start", turn).map_err(&with_wait);
+        // extreme-mode begin
+        let tier_report = if extreme {
+            std::thread::sleep(Duration::from_millis(300));
+            let (status, detail) = super::extreme::classify(&result, &self.stderr_since(mark));
+            let check = super::extreme::Check {
+                status,
+                detail: detail.clone(),
+                at: base::now_iso(),
+                turn: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.pointer("/turn/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            };
+            if let Err(e) = super::extreme::record_check(&self.slots_home, &check) {
+                self.unsubscribe(&thread_id);
+                self.close();
+                return Err(e);
+            }
+            let tier_report = super::extreme::report(status, &detail);
+            if status == super::extreme::TierStatus::Rejected {
+                self.unsubscribe(&thread_id);
+                let mut report = report_error(
+                    req,
+                    &thread_id,
+                    "",
+                    disabled,
+                    "bridge_error",
+                    "service_tier_rejected",
+                    &detail,
+                );
+                report["service_tier"] = tier_report;
+                slot_wait(&mut report, &wait, limit);
+                run_times(&mut report, run_started_ms);
+                return Ok(report);
+            }
+            Some(tier_report)
+        } else {
+            None
+        };
+        // extreme-mode end
         let started = match result {
             Ok(v) => v,
             Err(e) => {
@@ -230,6 +281,11 @@ impl AppServer {
                         &e.kind,
                         &e.message,
                     );
+                    // extreme-mode begin
+                    if let Some(tier) = tier_report {
+                        report["service_tier"] = tier;
+                    }
+                    // extreme-mode end
                     slot_wait(&mut report, &wait, limit);
                     run_times(&mut report, run_started_ms);
                     Ok(report)
@@ -247,6 +303,12 @@ impl AppServer {
         };
         self.register_turn(&thread_id, turn_id);
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
+        // extreme-mode begin
+        if let Some(tier) = tier_report {
+            report["service_tier"] = tier;
+        }
+        let mut turn_completed = false;
+        // extreme-mode end
         slot_wait(&mut report, &wait, limit);
         let mut ending: Option<Instant> = None;
         loop {
@@ -337,6 +399,9 @@ impl AppServer {
                     report["error"] = turn_error(&params["error"])
                 }
                 "turn/completed" if params["turn"]["id"] == turn_id => {
+                    // extreme-mode begin
+                    turn_completed = true;
+                    // extreme-mode end
                     if ending.is_some() {
                         break;
                     }
@@ -395,6 +460,25 @@ impl AppServer {
         run_times(&mut report, run_started_ms);
         self.unregister_turn(&thread_id, turn_id);
         self.unsubscribe(&thread_id);
+        // extreme-mode begin
+        if extreme && turn_completed {
+            let usage = &report["usage"];
+            crate::usage::extensions::append(
+                &self.slots_home,
+                &crate::usage::extensions::ExtRecord {
+                    ts_ms: unix_ms(),
+                    provider: "codex".into(),
+                    model: Some(req.model.clone()),
+                    tier: crate::usage::extensions::Tier::Extreme,
+                    turn: Some(turn_id.to_owned()),
+                    input_tokens: usage["inputTokens"].as_u64().unwrap_or(0),
+                    cached_input_tokens: usage["cachedInputTokens"].as_u64().unwrap_or(0),
+                    output_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
+                    ..Default::default()
+                },
+            )?;
+        }
+        // extreme-mode end
         Ok(report)
     }
 }

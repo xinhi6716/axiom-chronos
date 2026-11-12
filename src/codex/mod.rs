@@ -1,3 +1,4 @@
+pub mod extreme;
 pub mod rpc;
 pub mod run;
 pub mod slots;

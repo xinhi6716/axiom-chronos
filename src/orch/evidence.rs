@@ -722,6 +722,7 @@ pub fn astra_gate(store: &Path) -> Res<()> {
             return Err(Failure::new("astra_gate", format!("empty {file}")));
         }
     }
+    crate::research_program::gate(store).map_err(|e| Failure::new("astra_gate", e.message))?;
     Ok(())
 }
 pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
