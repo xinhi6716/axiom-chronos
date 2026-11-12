@@ -5,10 +5,9 @@ use crate::desktop::ux::seams::{
 };
 use crate::engine::approvals::{self, Origin};
 use crate::engine::kinds::*;
-use crate::orch::events::{read_events, Event};
+use crate::orch::events::{append_event, read_events, Event};
 use crate::orch::store::{is_wish_id, wish_of_store, wish_stores};
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
@@ -21,6 +20,7 @@ pub(crate) struct Binding {
     pub wish: String,
     pub digest: String,
     pub card: ApprovalCard,
+    valid_action: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,9 +34,7 @@ enum State {
 
 pub struct EngineApprovals {
     home: PathBuf,
-    gate: Mutex<()>,
     pub(crate) bound: Mutex<Vec<Binding>>,
-    keys: Mutex<HashMap<String, ApprovalReceipt>>,
 }
 
 fn version_of(digest: &str) -> u64 {
@@ -85,9 +83,7 @@ impl EngineApprovals {
     pub fn new(home: PathBuf) -> Self {
         Self {
             home,
-            gate: Mutex::new(()),
             bound: Mutex::new(vec![]),
-            keys: Mutex::new(HashMap::new()),
         }
     }
 
@@ -113,16 +109,18 @@ impl EngineApprovals {
                 };
                 let session = session_of(&self.home, &wish);
                 for e in events.iter().filter(|e| e.kind == APPROVAL_REQUESTED) {
-                    let (Some(id), Some(digest)) =
-                        (e.data["id"].as_str(), e.data["digest"].as_str())
-                    else {
+                    let Some(id) = e.data["id"].as_str() else {
                         continue;
                     };
-                    let Ok(action) =
-                        serde_json::from_value::<approvals::Action>(e.data["action"].clone())
-                    else {
-                        continue;
-                    };
+                    let digest = e.data["digest"].as_str().unwrap_or("");
+                    let action =
+                        serde_json::from_value::<approvals::Action>(e.data["action"].clone());
+                    let valid_action = action.is_ok() && !digest.is_empty();
+                    let action = action.unwrap_or(approvals::Action {
+                        command: String::new(),
+                        args: vec![],
+                        cwd: String::new(),
+                    });
                     let card = ApprovalCard {
                         action_id: id.to_owned(),
                         version: version_of(digest),
@@ -138,6 +136,7 @@ impl EngineApprovals {
                             wish: wish.clone(),
                             digest: digest.to_owned(),
                             card,
+                            valid_action,
                         },
                         state_of(&events, id),
                     ));
@@ -165,36 +164,60 @@ impl EngineApprovals {
         })
     }
 
-    fn remember(&self, r: ApprovalReceipt) -> ApprovalReceipt {
-        self.keys.lock().unwrap().insert(r.key.clone(), r.clone());
-        r
+    fn checked_state(b: &Binding) -> Res<State> {
+        if wish_of_store(&b.store) != b.wish {
+            return Err(Failure::new("wrong_wish", "Wish does not match store"));
+        }
+        let events = read_events(&b.store, 0)?;
+        let request = events
+            .iter()
+            .find(|e| {
+                e.kind == APPROVAL_REQUESTED && e.data["id"].as_str() == Some(&b.card.action_id)
+            })
+            .ok_or_else(|| Failure::new("wrong_wish", "Approval not found"))?;
+        let action: approvals::Action = serde_json::from_value(request.data["action"].clone())
+            .map_err(|_| Failure::new("tampered", "Invalid stored action"))?;
+        if request.wish != b.wish
+            || request.data["digest"].as_str() != Some(&b.digest)
+            || approvals::digest(&b.wish, &action) != b.digest
+        {
+            return Err(Failure::new("tampered", "Stored action or digest changed"));
+        }
+        Ok(state_of(&events, &b.card.action_id))
     }
 
     /// Wait for another decider (thread or process) to finish, then replay its result.
     fn settle(&self, b: &Binding, d: &Decision) -> Res<ApprovalReceipt> {
+        self.settle_until(b, d, Instant::now() + Duration::from_secs(60))
+    }
+
+    pub(super) fn settle_until(
+        &self,
+        b: &Binding,
+        d: &Decision,
+        deadline: Instant,
+    ) -> Res<ApprovalReceipt> {
         let id = &b.card.action_id;
-        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            let state = state_of(&read_events(&b.store, 0)?, id);
+            let state = Self::checked_state(b)?;
             if let Some(r) = Self::receipt(d, &state) {
-                return Ok(self.remember(r));
+                return Ok(r);
             }
-            if state == State::Approved && d.verdict == Verdict::Approve {
+            if state == State::Approved {
                 match approvals::execute(&b.store, id) {
                     Ok(_) => continue,
                     Err(e) if e.kind == "already_executed" => {}
-                    Err(e) if e.kind == "io" => continue,
+                    Err(e)
+                        if e.kind == "io"
+                            && matches!(Self::checked_state(b)?, State::Executed { .. }) =>
+                    {
+                        continue
+                    }
                     Err(e) => return Err(e),
                 }
             }
             if Instant::now() > deadline {
-                return Ok(ApprovalReceipt {
-                    action_id: id.clone(),
-                    key: d.key.clone(),
-                    outcome: ApprovalOutcome::Failed {
-                        reason: "execution did not finish".into(),
-                    },
-                });
+                return Err(Failure::new("timeout", "Execution did not finish"));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -206,19 +229,34 @@ impl ApprovalService for EngineApprovals {
         let pending: Vec<Binding> = self
             .scan()
             .into_iter()
-            .filter(|(_, s)| *s == State::Requested)
+            .filter(|(b, s)| *s == State::Requested && b.valid_action)
             .map(|(b, _)| b)
             .collect();
         let cards = pending.iter().map(|b| b.card.clone()).collect();
-        *self.bound.lock().unwrap() = pending;
+        let mut bound = self.bound.lock().unwrap();
+        for b in pending {
+            if !bound
+                .iter()
+                .any(|old| old.store == b.store && old.card.action_id == b.card.action_id)
+            {
+                bound.push(b);
+            }
+        }
         cards
     }
 
     fn decide(&self, d: &Decision) -> Res<ApprovalReceipt> {
-        let _gate = self.gate.lock().unwrap();
-        if let Some(r) = self.keys.lock().unwrap().get(&d.key) {
-            return Ok(r.clone());
-        }
+        // Serialize key claims across adapter instances and processes. The key index
+        // stores only bindings; outcomes always come from the engine's events.
+        let registry = self.home.join("approvals-seam");
+        std::fs::create_dir_all(&registry).map_err(|e| Failure::new("io", e.to_string()))?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(registry.join("decide.lock"))
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        lock.lock().map_err(|e| Failure::new("io", e.to_string()))?;
         let mut candidates: Vec<Binding> = self
             .bound
             .lock()
@@ -227,51 +265,96 @@ impl ApprovalService for EngineApprovals {
             .filter(|b| b.card.action_id == d.action_id)
             .cloned()
             .collect();
-        if candidates.is_empty() {
-            candidates = self
-                .scan()
-                .into_iter()
-                .map(|(b, _)| b)
-                .filter(|b| b.card.action_id == d.action_id)
-                .collect();
+        for (b, _) in self.scan() {
+            if b.card.action_id == d.action_id && !candidates.iter().any(|old| old.store == b.store)
+            {
+                candidates.push(b);
+            }
         }
         if candidates.is_empty() {
-            return Err(Failure::new("not_found", "Approval not found"));
+            return Err(Failure::new("wrong_wish", "Approval not found"));
         }
-        let b = candidates
+        if candidates.iter().any(|b| b.digest.is_empty()) {
+            return Err(Failure::new("tampered", "Missing stored digest"));
+        }
+        let mut matching = candidates
             .into_iter()
-            .find(|b| b.card.version == d.payload_version)
+            .filter(|b| b.card.version == d.payload_version);
+        let b = matching
+            .next()
             .ok_or_else(|| Failure::new("stale", "Approval changed"))?;
+        if matching.next().is_some() {
+            return Err(Failure::new("wrong_wish", "Ambiguous approval binding"));
+        }
         let id = b.card.action_id.clone();
-        let state = state_of(&read_events(&b.store, 0)?, &id);
-        if state != State::Requested {
-            return self.settle(&b, d);
+        let state = Self::checked_state(&b)?;
+        if let Some(event) = read_events(&registry, 0)?
+            .into_iter()
+            .find(|e| e.kind == "approval_key" && e.data["key"].as_str() == Some(&d.key))
+        {
+            let store: PathBuf = serde_json::from_value(event.data["store"].clone())
+                .map_err(|e| Failure::new("invalid_json", e.to_string()))?;
+            let wish = event.data["wish"]
+                .as_str()
+                .ok_or_else(|| Failure::new("invalid_json", "Missing wish"))?
+                .to_owned();
+            let digest = event.data["digest"]
+                .as_str()
+                .ok_or_else(|| Failure::new("invalid_json", "Missing digest"))?
+                .to_owned();
+            let original_id = event.data["id"]
+                .as_str()
+                .ok_or_else(|| Failure::new("invalid_json", "Missing id"))?
+                .to_owned();
+            let mut original = b.clone();
+            original.store = store;
+            original.wish = wish;
+            original.digest = digest;
+            original.card.action_id = original_id.clone();
+            let mut replay = d.clone();
+            replay.action_id = original_id;
+            return self.settle(&original, &replay);
         }
         let (approve, reason) = match &d.verdict {
             Verdict::Approve => (true, None),
             Verdict::Reject { reason } => (false, Some(reason.as_str())),
         };
-        match approvals::reply(
-            &self.home,
-            &b.store,
-            &id,
-            approve,
-            &b.digest,
-            &b.wish,
-            reason,
-            Origin::Person,
-        ) {
-            Ok(_) => {}
-            Err(e) if e.kind == "already_replied" => return self.settle(&b, d),
-            Err(e) => return Err(e),
-        }
-        if approve {
-            match approvals::execute(&b.store, &id) {
+        if state == State::Requested {
+            match approvals::reply(
+                &self.home,
+                &b.store,
+                &id,
+                approve,
+                &b.digest,
+                &b.wish,
+                reason,
+                Origin::Person,
+            ) {
                 Ok(_) => {}
-                Err(e) if e.kind == "already_executed" || e.kind == "io" => {}
+                Err(e) if e.kind == "already_replied" => {}
                 Err(e) => return Err(e),
             }
+            if approve && matches!(Self::checked_state(&b)?, State::Approved) {
+                match approvals::execute(&b.store, &id) {
+                    Ok(_) => {}
+                    Err(e) if e.kind == "already_executed" => {}
+                    Err(e)
+                        if e.kind == "io"
+                            && matches!(Self::checked_state(&b)?, State::Executed { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
         }
-        self.settle(&b, d)
+        let receipt = self.settle(&b, d)?;
+        append_event(
+            &registry,
+            "approval_key",
+            None,
+            None,
+            serde_json::json!({
+                "key": d.key, "id": id, "store": b.store, "wish": b.wish, "digest": b.digest
+            }),
+        )?;
+        Ok(receipt)
     }
 }

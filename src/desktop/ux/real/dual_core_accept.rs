@@ -39,6 +39,10 @@ fn topic(t: &str) -> gpui_kit::SharedString {
 fn off_without_policy_or_event_and_for_unknown_session() {
     let (home, _p, store) = setup();
     assert_eq!(state(&home), DualCore::Off);
+    enable(&store);
+    assert_eq!(state(&home), DualCore::Off);
+    assert_eq!(state(&home), DualCore::Off); // replay without an event
+    policy::set(&store, "dual_core", "off").unwrap();
     // An event with the policy off is still Off.
     event(&store, json!({"id":"a","kind":"goal_close","step":"co_core","agree":true}));
     assert_eq!(state(&home), DualCore::Off);
@@ -58,6 +62,7 @@ fn agreed_and_deciding_projections() {
     assert_eq!(state(&home), DualCore::Deciding { topic: topic("module_map") });
     event(&store, json!({"id":"b","kind":"plan_acceptance","step":"co_core","agree":true}));
     assert_eq!(state(&home), DualCore::Agreed { topic: topic("plan_acceptance") });
+    assert_eq!(state(&home), DualCore::Agreed { topic: topic("plan_acceptance") }); // replay
 }
 
 #[test]
@@ -81,6 +86,7 @@ fn arbitrated_and_split_projections_replay() {
     );
     events::append_event(&store, kinds::PERSON_REQUEST, None, None, json!({"id":"c","kind":"goal_close","reason":"r"})).unwrap();
     assert_eq!(state(&home), DualCore::Split { topic: topic("goal_close") });
+    assert_eq!(state(&home), DualCore::Split { topic: topic("goal_close") }); // replay
     // Negative control: a person request for another id does not make a split.
     event(&store, json!({"id":"d","kind":"council_ruling","step":"arbiter","choice":"co_core","agree":false}));
     assert_eq!(

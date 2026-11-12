@@ -5,40 +5,31 @@ use crate::{
     codex::extreme,
     desktop::ux::seams::{FastCost, TurnPolicy, TurnSettings},
 };
-use std::{path::PathBuf, sync::Mutex};
+use std::path::PathBuf;
 
 pub struct CodexTurnPolicy {
     slots_home: PathBuf,
-    seen: Mutex<TurnSettings>,
 }
 
 impl CodexTurnPolicy {
     pub fn new(slots_home: PathBuf) -> Self {
-        let on = extreme::load(&slots_home).on;
-        Self {
-            slots_home,
-            seen: Mutex::new(TurnSettings {
-                extreme: on,
-                revision: 0,
-            }),
-        }
+        Self { slots_home }
     }
     pub fn slots_home(&self) -> &std::path::Path {
         &self.slots_home
     }
-    fn observe(&self, on: bool) -> TurnSettings {
-        let mut seen = self.seen.lock().unwrap();
-        if seen.extreme != on {
-            seen.extreme = on;
-            seen.revision += 1;
+    fn settings(on: bool) -> TurnSettings {
+        // The persisted setting has no revision counter; use its value as a stable version.
+        TurnSettings {
+            extreme: on,
+            revision: u64::from(on),
         }
-        *seen
     }
 }
 
 impl TurnPolicy for CodexTurnPolicy {
     fn current(&self) -> TurnSettings {
-        self.observe(extreme::load(&self.slots_home).on)
+        Self::settings(extreme::load(&self.slots_home).on)
     }
     fn set_extreme(&self, on: bool) -> TurnSettings {
         match self.try_set_extreme(on) {
@@ -51,7 +42,7 @@ impl TurnPolicy for CodexTurnPolicy {
     }
     fn try_set_extreme(&self, on: bool) -> Res<TurnSettings> {
         let saved = extreme::set(&self.slots_home, on)?;
-        Ok(self.observe(saved.on))
+        Ok(Self::settings(saved.on))
     }
     fn begin_turn(&self) -> TurnSettings {
         self.current()

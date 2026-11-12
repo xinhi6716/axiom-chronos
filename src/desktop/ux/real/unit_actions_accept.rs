@@ -194,3 +194,61 @@ fn retry_adds_a_fix_unit_but_not_while_claimed_or_at_fix_rounds() {
     assert!(r.message.contains("fix_rounds"), "{}", r.message);
     let _ = &f.brief;
 }
+
+#[test]
+fn review_uses_the_latest_reviewers_matching_verdict() {
+    let f = fixture();
+    review(&f, "u1");
+    verdict(&f, "u1", &["major"]);
+    let pm = serde_json::json!({"unit":"u1","tree":"T1","verdict":"fail","findings":[{"severity":"blocker","check":"pm-bug","location":"b.rs:2"}]} );
+    std::fs::write(orch::review_verdict_path(&f.store, "u1", "chronos:pm-qa"), pm.to_string()).unwrap();
+    orch::append_evidence(&f.store, "u1", &row("review", "chronos:pm-qa", 1, "T1")).unwrap();
+    let text = actions(&f).evidence("s1", "u1").unwrap().review.unwrap();
+    assert!(text.contains("pm-bug"), "{text}");
+    assert!(!text.contains("a.rs:1"), "{text}");
+}
+
+#[test]
+fn waive_refuses_a_verdict_from_a_different_review() {
+    let f = fixture();
+    review(&f, "u1");
+    verdict(&f, "u1", &["major"]);
+    orch::append_evidence(&f.store, "u1", &row("review", "chronos:reviewer", 1, "T2")).unwrap();
+    let a = actions(&f);
+    let r = a.act("s1", "u1", &waive("why", Some(1)), "stale-tree").unwrap();
+    assert!(!r.accepted, "{}", r.message);
+    assert!(r.message.contains("stale"), "{}", r.message);
+    assert!(orch::evidence(&f.store, "u1").unwrap().iter().all(|r| r.kind != "waive"));
+}
+
+#[test]
+fn waive_refuses_another_reviewers_verdict_even_on_the_same_tree() {
+    let f = fixture();
+    review(&f, "u1");
+    verdict(&f, "u1", &["major"]);
+    orch::append_evidence(&f.store, "u1", &row("review", "chronos:pm-qa", 1, "T1")).unwrap();
+    let r = actions(&f).act("s1", "u1", &waive("why", Some(1)), "stale-reviewer").unwrap();
+    assert!(!r.accepted, "{}", r.message);
+    assert!(orch::evidence(&f.store, "u1").unwrap().iter().all(|r| r.kind != "waive"));
+}
+
+#[test]
+fn review_can_come_from_a_verdict_without_a_review_row() {
+    let f = fixture();
+    verdict(&f, "u1", &["major"]);
+    assert!(actions(&f).evidence("s1", "u1").unwrap().review.unwrap().contains("1 serious"));
+}
+
+#[test]
+fn usage_exposes_known_tokens_and_uses_the_report_model() {
+    let f = fixture();
+    review(&f, "u1");
+    let path = f.store.join("reports/u1.json");
+    std::fs::write(&path, r#"{"model":"gpt-5-mini","usage":{"inputTokens":1000000,"outputTokens":0}}"#).unwrap();
+    let e = actions(&f).evidence("s1", "u1").unwrap();
+    assert_eq!(e.tokens, Some(1_000_000));
+    assert_eq!(e.cost_usd, None);
+    std::fs::write(&path, r#"{"model":"gpt-5-mini","usage":{"inputTokens":1000000,"cachedInputTokens":0,"outputTokens":0}}"#).unwrap();
+    let e = actions(&f).evidence("s1", "u1").unwrap();
+    assert_eq!(e.cost_usd, Some(0.25));
+}

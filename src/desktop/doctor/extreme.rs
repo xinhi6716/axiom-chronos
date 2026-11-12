@@ -2,7 +2,7 @@ use super::super::{
     i18n::{fill, translate, Lang, Table},
     model::{Action, AppState},
     motion,
-    settings::Store,
+    settings::{Settings, Store},
     theme::{self, Density, Step, Tokens, TypeSize},
     ux::seams::{FastCost, TurnPolicy, TurnSettings},
 };
@@ -51,34 +51,59 @@ impl TurnPolicy for PrefsTurnPolicy {
     }
 }
 pub fn save_failure(lang: Lang, reason: &str) -> String {
-    fill(translate(lang, T, "Could not save extreme mode: {}"), &[reason])
+    fill(
+        translate(lang, T, "Could not save extreme mode: {}"),
+        &[reason],
+    )
 }
-pub fn install_policy(state: &mut AppState, cx: &mut App) {
-    match &state.ux.seams.turn_policy {
-        Some(policy) => {
-            let on = policy.current().extreme;
-            Store::edit(cx, |s| s.ux.extreme = on);
-        }
+pub(crate) fn policy_on_install(state: &mut AppState, prefs: &mut Settings) {
+    prefs.ux.extreme = match &state.ux.seams.turn_policy {
+        Some(policy) => policy.current().extreme,
         None => {
             let policy = PrefsTurnPolicy::default();
-            policy.set_extreme(Store::current(cx).ux.extreme);
+            policy.set_extreme(prefs.ux.extreme);
             state.ux.seams.turn_policy = Some(Arc::new(policy));
+            prefs.ux.extreme
+        }
+    };
+}
+pub fn install_policy(state: &mut AppState, cx: &mut App) {
+    Store::edit(cx, |prefs| policy_on_install(state, prefs));
+}
+pub(crate) fn policy_on_toggle(
+    state: &mut AppState,
+    prefs: &mut Settings,
+    on: bool,
+    lang: Lang,
+) -> bool {
+    match state
+        .ux
+        .seams
+        .turn_policy
+        .as_ref()
+        .map(|p| p.try_set_extreme(on))
+    {
+        Some(Ok(settings)) => prefs.ux.extreme = settings.extreme,
+        None => prefs.ux.extreme = on,
+        Some(Err(e)) => {
+            state.report(Action::Engine, None, save_failure(lang, &e.message));
+            return false;
         }
     }
+    true
 }
 impl AppState {
     pub fn set_extreme(&mut self, on: bool, cx: &mut Context<Self>) {
         let was_on = Store::current(cx).ux.extreme;
-        if let Some(policy) = &self.ux.seams.turn_policy {
-            if let Err(e) = policy.try_set_extreme(on) {
-                let lang = cx.try_global::<Lang>().copied().unwrap_or(Lang::En);
-                self.report(Action::Engine, None, save_failure(lang, &e.message));
-                self.ux.extreme_flash = None;
-                cx.notify();
-                return;
-            }
+        let lang = cx.try_global::<Lang>().copied().unwrap_or(Lang::En);
+        let mut saved = false;
+        Store::edit(cx, |prefs| saved = policy_on_toggle(self, prefs, on, lang));
+        if !saved {
+            self.ux.extreme_flash = None;
+            cx.notify();
+            return;
         }
-        Store::edit(cx, |s| s.ux.extreme = on);
+        let on = Store::current(cx).ux.extreme;
         self.ux.extreme_flash = if on && !was_on && !self.reduce_motion {
             Some(Instant::now())
         } else {

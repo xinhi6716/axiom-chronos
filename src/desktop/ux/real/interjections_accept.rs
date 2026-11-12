@@ -6,13 +6,18 @@ use crate::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 struct Transport {
     home: PathBuf,
     sent: Mutex<Vec<(String, String)>>,
     fail_pause: bool,
+    fail_interject: AtomicBool,
+    trim_line_endings: AtomicBool,
 }
 impl InterjectTransport for Transport {
     fn interject(&self, session: &str, text: &str) -> Res<()> {
@@ -20,7 +25,15 @@ impl InterjectTransport for Transport {
             .lock()
             .unwrap()
             .push((session.into(), text.into()));
-        interjections::submit(&self.home, session, text)?
+        if self.fail_interject.swap(false, Ordering::SeqCst) {
+            return Err(Failure::new("send_failed", "send failed"));
+        }
+        let delivered = if self.trim_line_endings.load(Ordering::SeqCst) {
+            text.trim_end_matches(['\r', '\n'])
+        } else {
+            text
+        };
+        interjections::submit(&self.home, session, delivered)?
             .ok_or_else(|| Failure::new("not_found", "submission refused"))?;
         Ok(())
     }
@@ -44,6 +57,8 @@ fn setup(
         home: home.into(),
         sent: Mutex::new(vec![]),
         fail_pause,
+        fail_interject: AtomicBool::new(false),
+        trim_line_endings: AtomicBool::new(false),
     });
     (
         transport.clone(),
@@ -148,6 +163,66 @@ fn pause_failure_does_not_send_or_persist() {
     assert!(transport.sent.lock().unwrap().is_empty());
     assert_eq!(adapter.receipt("client"), None);
     assert!(!dir.path().join("desktop").exists());
+}
+
+#[test]
+fn failed_send_is_not_persisted_and_can_be_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let (transport, adapter) = setup(dir.path(), &["one"], false);
+    transport.fail_interject.store(true, Ordering::SeqCst);
+    let d = draft("one", "client", "text");
+    assert_eq!(adapter.send(&d).unwrap_err().kind, "send_failed");
+    assert_eq!(adapter.receipt("client"), None);
+    assert!(adapter.history("one").is_empty());
+    assert!(!dir.path().join("desktop/interjections/one.json").exists());
+    assert_eq!(adapter.send(&d).unwrap().stage, ReceiptStage::Sent);
+    assert_eq!(transport.sent.lock().unwrap().len(), 2);
+    assert_eq!(
+        adapter.receipt("client").unwrap().stage,
+        ReceiptStage::Received
+    );
+    assert_eq!(
+        crate::goal::load(dir.path(), "one")
+            .unwrap()
+            .unwrap()
+            .interjection_counter,
+        1
+    );
+}
+
+#[test]
+fn earlier_external_identical_text_is_not_claimed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, adapter) = setup(dir.path(), &["one"], false);
+    interjections::submit(dir.path(), "one", "same").unwrap();
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::decline(dir.path(), "one", "ij-1", "external").unwrap();
+    adapter.send(&draft("one", "client", "same")).unwrap();
+    assert_eq!(
+        adapter.receipt("client").unwrap().stage,
+        ReceiptStage::Received
+    );
+    let history = adapter.history("one");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].client_id, None);
+    assert_eq!(
+        history[1].stage,
+        Some(ReceiptStage::Rejected {
+            reason: "external".into()
+        })
+    );
+}
+
+#[test]
+fn receipt_matches_hosted_transport_line_ending_trimming() {
+    let dir = tempfile::tempdir().unwrap();
+    let (transport, adapter) = setup(dir.path(), &["one"], false);
+    transport.trim_line_endings.store(true, Ordering::SeqCst);
+    adapter.send(&draft("one", "client", "text\r\n")).unwrap();
+    assert_eq!(
+        adapter.receipt("client").unwrap().stage,
+        ReceiptStage::Received
+    );
 }
 
 #[test]

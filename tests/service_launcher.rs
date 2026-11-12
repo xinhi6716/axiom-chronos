@@ -8,9 +8,7 @@ use axiom::{
         providers::{Ask, Member, Provider},
         Mode,
     },
-    routines::{
-        runner::tick, store::Store, validate, EventKind, Event, Routine, Trigger,
-    },
+    routines::{runner::tick, store::Store, validate, Event, EventKind, Routine, Trigger},
     seams::{FakeApproval, FakeClock},
     service::{
         launcher::{ServiceLauncher, StartPath, Unavailable},
@@ -106,7 +104,37 @@ fn quick_request_is_invalid_and_never_starts() {
         context: None,
         sources: vec![],
     };
-    assert_eq!(Launcher::launch(&l, &req).unwrap_err().kind, "invalid_argument");
+    assert_eq!(
+        Launcher::launch(&l, &req).unwrap_err().kind,
+        "invalid_argument"
+    );
+    assert!(start.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn invalid_promotion_parent_never_starts_service() {
+    let home = common::temp();
+    let project = common::temp();
+    let (l, start) = launcher(home.path());
+    let chat = Chat::open(
+        home.path(),
+        Some(project.path()),
+        &[],
+        ChatOptions::default(),
+    )
+    .unwrap();
+    let req = LaunchRequest {
+        kind: LaunchKind::Wish,
+        session: chat.session.id,
+        parent_run: "missing".into(),
+        goal: "Ship it".into(),
+        scope: vec![],
+        verify: None,
+        review: false,
+        context: None,
+        sources: vec![],
+    };
+    assert!(Launcher::launch(&l, &req).is_err());
     assert!(start.0.lock().unwrap().is_empty());
 }
 

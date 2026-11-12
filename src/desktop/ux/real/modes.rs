@@ -2,8 +2,8 @@
 use crate::{
     base::{self, Failure, Res},
     desktop::ux::seams::modes::{
-        ChatThread, Message, ModeEngine, ModeRef, Pin, PlazaAsk, PlazaRoom, PlazaSeat, QuickRequest,
-        QuickStep, QuickTask, RouteDecision, Speaker,
+        ChatThread, Message, ModeEngine, ModeRef, Pin, PlazaAsk, PlazaRoom, PlazaSeat,
+        QuickRequest, QuickStep, QuickTask, RouteDecision, Speaker,
     },
     modes::{
         self,
@@ -67,10 +67,9 @@ impl Launcher for LazyQuick {
         let project = runs::load_session(&self.home, &req.session)?
             .project
             .ok_or_else(|| Failure::new("invalid_argument", "quick requires a project"))?;
-        QuickLauncher {
-            cfg: QuickConfig::from_env(&project)?,
-        }
-        .launch(req)
+        let mut cfg = QuickConfig::from_env(&project)?;
+        cfg.home = self.home.clone();
+        QuickLauncher { cfg }.launch(req)
     }
 }
 
@@ -87,6 +86,8 @@ struct QuickMeta {
     run: String,
 }
 #[derive(Default)]
+// Kept: the seam has no task-discovery API; UI task state lasts for this engine's lifetime,
+// while actual Quick runs and receipts are stored by QuickLauncher.
 struct Tasks {
     tasks: HashMap<String, QuickTask>,
     meta: HashMap<String, QuickMeta>,
@@ -102,7 +103,7 @@ pub struct ModesEngine {
     alias_lock: Mutex<()>,
 }
 
-/// Quick text carries the brief: `SCOPE <paths>` and `VERIFY <command>` lines; the rest is the goal.
+/// Kept: the seam has only a text field, so `SCOPE` and `VERIFY` lines carry the required brief.
 pub fn parse_brief(text: &str, review: bool) -> Brief {
     let mut goal = Vec::new();
     let mut scope = Vec::new();
@@ -149,36 +150,52 @@ impl ModesEngine {
         }
     }
     fn aliases_path(&self) -> PathBuf {
+        // Kept: the seam's arbitrary UI IDs need a persistent mapping to modes session IDs.
         self.home.join("desktop").join("modes").join("aliases.json")
     }
-    fn read_aliases(&self) -> BTreeMap<String, String> {
-        std::fs::read(self.aliases_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    fn read_aliases(&self) -> Res<BTreeMap<String, String>> {
+        match std::fs::read(self.aliases_path()) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| Failure::new("io", e.to_string()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(Failure::new("io", e.to_string())),
+        }
     }
     fn lookup(&self, key: &str, id: &str) -> Option<String> {
         let _g = self.alias_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = self.read_aliases().get(key) {
+        if let Some(s) = self.read_aliases().ok()?.get(key) {
             return Some(s.clone());
         }
         runs::load_session(&self.home, id).ok().map(|s| s.id)
     }
-    fn session_for(&self, kind: &str, id: &str, create: impl FnOnce() -> Res<String>) -> Res<String> {
+    fn session_for(
+        &self,
+        kind: &str,
+        id: &str,
+        create: impl FnOnce() -> Res<String>,
+    ) -> Res<String> {
         let key = format!("{kind}:{id}");
         if let Some(s) = self.lookup(&key, id) {
             return Ok(s);
         }
         let _g = self.alias_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut all = self.read_aliases();
+        let dir = self.aliases_path().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| Failure::new("io", e.to_string()))?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("aliases.lock"))
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        lock.lock().map_err(|e| Failure::new("io", e.to_string()))?;
+        let mut all = self.read_aliases()?;
         if let Some(s) = all.get(&key) {
             return Ok(s.clone());
         }
         let session = create()?;
         all.insert(key, session.clone());
-        if let Some(dir) = self.aliases_path().parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Failure::new("io", e.to_string()))?;
-        }
         base::atomic_write(
             &self.aliases_path(),
             &serde_json::to_vec(&all).map_err(|e| Failure::new("io", e.to_string()))?,
@@ -195,6 +212,7 @@ impl ModesEngine {
     }
     fn plaza_room(&self, id: &str) -> Res<plaza::Room> {
         let sid = self.session_for("plaza", id, || {
+            // Kept: bounded per-seat defaults required by plaza; the seam has no budget inputs.
             let budgets = access::Budgets(
                 Member::ALL
                     .into_iter()
@@ -250,12 +268,17 @@ impl ModesEngine {
     pub fn promote_wish(&self, from: &ModeRef, goal: &str) -> Res<String> {
         let (session, run) = match from {
             ModeRef::Chat(id) => {
-                let sid = self.chat_session(id)?;
+                let sid = self
+                    .lookup(&format!("chat:{id}"), id)
+                    .ok_or_else(|| Failure::new("not_found", "Mode not found"))?;
                 let run = Chat::resume(&self.home, &sid, ChatOptions::default())?.run;
                 (sid, run)
             }
             ModeRef::Plaza(id) => {
-                let room = self.plaza_room(id)?;
+                let sid = self
+                    .lookup(&format!("plaza:{id}"), id)
+                    .ok_or_else(|| Failure::new("not_found", "Mode not found"))?;
+                let room = plaza::resume(&self.home, &sid)?;
                 (room.session.id.clone(), room.run)
             }
             ModeRef::Quick(id) => {
@@ -330,6 +353,17 @@ impl ModeEngine for ModesEngine {
         brief.validate()?;
         let session = runs::create_session(&self.home, r.cwd.as_deref(), &brief.scope)?;
         let origin = runs::start_run(&self.home, &session.id, Mode::Chat, None, None)?;
+        let transcript = Transcript::open(&self.home, &session.id)?;
+        if let Some(context) = &r.context {
+            transcript.append("person", "message", context, None, serde_json::Value::Null)?;
+        }
+        transcript.append(
+            "person",
+            "message",
+            &brief.goal,
+            None,
+            serde_json::Value::Null,
+        )?;
         let snapshot = r.context.as_ref().map(|c| Snapshot {
             session: session.id.clone(),
             upto_seq: 0,
@@ -378,7 +412,13 @@ impl ModeEngine for ModesEngine {
         };
         std::thread::spawn(move || {
             set_step(&state, &tid, QuickStep::Building);
-            let step = match launcher.launch(&request) {
+            let result = launcher.launch(&request);
+            if let Ok(launched) = &result {
+                if let Some(meta) = state.lock().unwrap().meta.get_mut(&tid) {
+                    meta.run = launched.run.id.clone();
+                }
+            }
+            let step = match result {
                 Ok(l) if l.detail["passed"].as_bool().unwrap_or(false) => QuickStep::Done {
                     summary: if request.review {
                         "Changes verified and reviewed.".into()
@@ -456,7 +496,10 @@ impl ModeEngine for ModesEngine {
             }
             PlazaAsk::Debate { text, a, b, judge } => {
                 let (Some(a), Some(b), Some(j)) = (member(*a), member(*b), member(*judge)) else {
-                    return Err(Failure::new("invalid_argument", "debate needs three members"));
+                    return Err(Failure::new(
+                        "invalid_argument",
+                        "debate needs three members",
+                    ));
                 };
                 person(text)?;
                 let replies = r.debate(MAIN_THREAD, text, a, b, j, provider, &tools)?;
@@ -467,6 +510,7 @@ impl ModeEngine for ModesEngine {
                 ))
             }
             PlazaAsk::Vote { question } => {
+                // Kept: the seam supplies only a question, so its vote is a yes/no decision.
                 let result = r.vote(
                     MAIN_THREAD,
                     question,

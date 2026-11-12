@@ -2,10 +2,21 @@
 use super::extreme::CodexTurnPolicy;
 use crate::{
     codex::{extreme, AppServer, RunRequest},
-    desktop::{doctor::extreme::save_failure, i18n::Lang, ux::seams::TurnPolicy},
+    desktop::{
+        demo,
+        doctor::extreme::{policy_on_install, policy_on_toggle},
+        i18n::Lang,
+        settings::Settings,
+        ux::seams::TurnPolicy,
+    },
 };
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 fn python() -> String {
     if let Ok(p) = std::env::var("AXIOM_TEST_PYTHON") {
@@ -68,16 +79,25 @@ fn toggle_is_shared_snapshotted_and_requested_as_fast_on_the_next_turn() {
     let home = d.path().join("slots");
     let log = d.path().join("fake.log");
     let policy = CodexTurnPolicy::new(home.clone());
-    let server = AppServer::new(fake(&log)).with_slots_home(home.clone());
+    let server = Arc::new(AppServer::new(fake(&log)).with_slots_home(home.clone()));
 
     let turn = policy.begin_turn();
     assert!(!turn.extreme);
-    let first = server.run(&request(d.path(), "first")).unwrap();
-    assert!(first.get("service_tier").is_none());
-
+    let release = d.path().join("release");
+    let req = request(d.path(), &format!("WAIT_FILE {}", release.display()));
+    let worker_server = server.clone();
+    let worker = std::thread::spawn(move || worker_server.run(&req).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while starts(&log).is_empty() {
+        assert!(Instant::now() < deadline, "fake did not start turn");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let next = policy.try_set_extreme(true).unwrap();
-    assert!(next.extreme && next.revision == 1);
+    assert!(next.extreme);
     assert!(!turn.extreme, "the running turn keeps its snapshot");
+    fs::write(&release, "").unwrap();
+    let first = worker.join().unwrap();
+    assert!(first.get("service_tier").is_none());
     assert!(policy.begin_turn().extreme);
     let second = server.run(&request(d.path(), "second")).unwrap();
     assert_eq!(second["service_tier"]["applied"], true);
@@ -91,10 +111,46 @@ fn toggle_is_shared_snapshotted_and_requested_as_fast_on_the_next_turn() {
     assert!(CodexTurnPolicy::new(home.clone()).current().extreme);
     extreme::set(&home, false).unwrap();
     assert!(!policy.current().extreme);
-    assert_eq!(policy.current().revision, 2);
     extreme::set(&home, true).unwrap();
     assert!(policy.current().extreme);
+    assert_eq!(
+        policy.current(),
+        CodexTurnPolicy::new(home.clone()).current()
+    );
     assert!(CodexTurnPolicy::new(home).begin_turn().extreme);
+}
+
+#[test]
+fn installation_and_toggles_share_the_cli_setting() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("slots");
+    // The CLI uses this same codex::extreme::set entry point.
+    extreme::set(&home, true).unwrap();
+    let policy = Arc::new(CodexTurnPolicy::new(home.clone()));
+    let mut state = demo::state();
+    let mut prefs = Settings::default();
+    state.ux.seams.turn_policy = Some(policy.clone());
+    policy_on_install(&mut state, &mut prefs);
+    assert!(prefs.ux.extreme);
+    assert!(Arc::ptr_eq(
+        state.ux.seams.turn_policy.as_ref().unwrap(),
+        &(policy.clone() as Arc<dyn TurnPolicy>)
+    ));
+    assert!(policy_on_toggle(&mut state, &mut prefs, false, Lang::En));
+    assert!(!prefs.ux.extreme);
+    assert!(!extreme::load(&home).on);
+    assert!(policy_on_toggle(&mut state, &mut prefs, true, Lang::En));
+    assert!(prefs.ux.extreme);
+    assert!(extreme::load(&home).on);
+    let mut restarted = demo::state();
+    restarted.ux.seams.turn_policy = Some(Arc::new(CodexTurnPolicy::new(home.clone())));
+    prefs.ux.extreme = false;
+    policy_on_install(&mut restarted, &mut prefs);
+    assert!(prefs.ux.extreme);
+    extreme::set(&home, false).unwrap();
+    policy_on_install(&mut restarted, &mut prefs);
+    assert!(!prefs.ux.extreme);
+    assert!(!policy.current().extreme);
 }
 
 #[test]
@@ -107,12 +163,19 @@ fn unwritable_slots_home_reports_and_keeps_the_setting() {
     assert_eq!(err.kind, "io");
     assert!(!policy.set_extreme(true).extreme);
     assert!(!policy.current().extreme);
-    assert_eq!(
-        save_failure(Lang::En, "disk full"),
-        "Could not save extreme mode: disk full"
-    );
-    assert_eq!(
-        save_failure(Lang::ZhTw, "disk full"),
-        "無法儲存極限模式：disk full"
-    );
+    for (lang, prefix) in [
+        (Lang::En, "Could not save extreme mode: "),
+        (Lang::ZhTw, "無法儲存極限模式："),
+    ] {
+        let mut state = demo::state();
+        state.ux.seams.turn_policy = Some(Arc::new(CodexTurnPolicy::new(blocker.join("slots"))));
+        let mut prefs = Settings::default();
+        assert!(!prefs.ux.extreme);
+        assert!(!policy_on_toggle(&mut state, &mut prefs, true, lang));
+        assert!(!prefs.ux.extreme);
+        assert_eq!(
+            state.errors.last().unwrap().message.as_ref(),
+            format!("{prefix}{}", err.message)
+        );
+    }
 }

@@ -77,8 +77,14 @@ fn card_is_bound_to_the_wish_and_its_session() {
     assert_eq!(card.action_id, "ap-1");
     assert_eq!(card.session, "session");
     assert_eq!(card.action, harmless().command);
+    assert_eq!(card.target, harmless().args.join(" "));
     assert_eq!(card.scope, harmless().cwd);
     assert_eq!(card.cost_usd, None);
+    let digest = approvals::digest(&f.wish, &harmless());
+    assert_eq!(
+        card.version,
+        u64::from_str_radix(&digest[..16], 16).unwrap()
+    );
     assert_eq!(f.wish.len(), 22);
 }
 
@@ -93,7 +99,8 @@ fn double_click_executes_once() {
     assert!(matches!(first.outcome, ApprovalOutcome::Executed { .. }));
     // Same key, then a new key for the same card.
     assert_eq!(
-        svc.decide(&decision(&card, "k1", Verdict::Approve)).unwrap(),
+        svc.decide(&decision(&card, "k1", Verdict::Approve))
+            .unwrap(),
         first
     );
     let again = svc
@@ -178,8 +185,197 @@ fn stale_card_is_refused() {
     d.payload_version ^= 1;
     assert_eq!(svc.decide(&d).unwrap_err().kind, "stale");
     d.action_id = "ap-9".into();
-    assert_eq!(svc.decide(&d).unwrap_err().kind, "not_found");
+    assert_eq!(svc.decide(&d).unwrap_err().kind, "wrong_wish");
     assert_eq!(f.count(APPROVAL_APPROVED), 0);
+    assert_eq!(f.count(APPROVAL_EXECUTING), 0);
+}
+
+#[test]
+fn replay_still_checks_version_and_stored_action() {
+    let f = Fixture::new();
+    let svc = f.service();
+    let card = svc.pending().remove(0);
+    let mut d = decision(&card, "same-key", Verdict::Approve);
+    svc.decide(&d).unwrap();
+    d.payload_version ^= 1;
+    assert_eq!(svc.decide(&d).unwrap_err().kind, "stale");
+    d.payload_version = card.version;
+    let file = f.store.join("events.jsonl");
+    let lines = std::fs::read_to_string(&file).unwrap();
+    let mut events: Vec<serde_json::Value> = lines
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    events[0]["data"]["action"]["command"] = serde_json::json!("altered");
+    std::fs::write(
+        &file,
+        events.iter().map(|e| format!("{e}\n")).collect::<String>(),
+    )
+    .unwrap();
+    assert_eq!(svc.decide(&d).unwrap_err().kind, "tampered");
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+}
+
+#[test]
+fn key_replays_across_restart_for_another_card() {
+    let f = Fixture::new();
+    approvals::request(&f.store, harmless(), "second", Origin::Model).unwrap();
+    let svc = f.service();
+    let cards = svc.pending();
+    let first = svc
+        .decide(&decision(&cards[0], "same-key", Verdict::Approve))
+        .unwrap();
+    let replay = f
+        .service()
+        .decide(&decision(&cards[1], "same-key", Verdict::Approve))
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+}
+
+#[test]
+fn concurrent_same_key_for_different_cards_executes_only_one() {
+    let f = Fixture::new();
+    approvals::request(&f.store, harmless(), "second", Origin::Model).unwrap();
+    let cards = f.service().pending();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = cards
+        .into_iter()
+        .map(|card| {
+            let home = f.home.path().to_path_buf();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                EngineApprovals::new(home)
+                    .decide(&decision(&card, "same-key", Verdict::Approve))
+                    .unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(results[0], results[1]);
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+}
+
+#[test]
+fn pending_refresh_preserves_old_binding_with_colliding_ids() {
+    let f = Fixture::new();
+    let other_store = f
+        .home
+        .path()
+        .join("orchestrate")
+        .join("other")
+        .join("w-1700000000000-abcdef");
+    approvals::request(&other_store, harmless(), "other", Origin::Model).unwrap();
+    let svc = f.service();
+    let cards = svc.pending();
+    let first = cards.iter().find(|c| c.session == "session").unwrap();
+    svc.decide(&decision(first, "first", Verdict::Approve))
+        .unwrap();
+    svc.pending();
+    let replay = svc
+        .decide(&decision(first, "again", Verdict::Approve))
+        .unwrap();
+    assert!(matches!(replay.outcome, ApprovalOutcome::Executed { .. }));
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+}
+
+#[test]
+fn already_approved_action_is_settled_even_if_replay_says_reject() {
+    let f = Fixture::new();
+    let svc = f.service();
+    let card = svc.pending().remove(0);
+    let digest = svc.bound.lock().unwrap()[0].digest.clone();
+    approvals::reply(
+        f.home.path(),
+        &f.store,
+        &card.action_id,
+        true,
+        &digest,
+        &f.wish,
+        None,
+        Origin::Person,
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        tx.send(svc.decide(&decision(
+            &card,
+            "replay",
+            Verdict::Reject {
+                reason: "no".into(),
+            },
+        )))
+        .unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+    if result.is_err() {
+        approvals::execute(&f.store, "ap-1").unwrap();
+    }
+    handle.join().unwrap();
+    assert!(matches!(
+        result.unwrap().unwrap().outcome,
+        ApprovalOutcome::Executed { .. }
+    ));
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+}
+
+#[test]
+fn unfinished_execution_does_not_invent_a_receipt() {
+    let f = Fixture::new();
+    let svc = f.service();
+    let card = svc.pending().remove(0);
+    let binding = svc.bound.lock().unwrap()[0].clone();
+    crate::orch::events::append_event(
+        &f.store,
+        APPROVAL_EXECUTING,
+        None,
+        None,
+        serde_json::json!({"id": card.action_id}),
+    )
+    .unwrap();
+    let result = svc.settle_until(
+        &binding,
+        &decision(&card, "k", Verdict::Approve),
+        std::time::Instant::now(),
+    );
+    assert_eq!(result.unwrap_err().kind, "timeout");
+    assert_eq!(f.count(APPROVAL_EXECUTED), 0);
+}
+
+#[test]
+fn execution_claim_io_error_is_reported_without_spinning() {
+    let f = Fixture::new();
+    let svc = f.service();
+    let card = svc.pending().remove(0);
+    let binding = svc.bound.lock().unwrap()[0].clone();
+    approvals::reply(
+        f.home.path(),
+        &f.store,
+        &card.action_id,
+        true,
+        &binding.digest,
+        &f.wish,
+        None,
+        Origin::Person,
+    )
+    .unwrap();
+    let lock = f.store.join("events.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        tx.send(svc.settle_until(
+            &binding,
+            &decision(&card, "k", Verdict::Approve),
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        ))
+        .unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+    std::fs::remove_dir(&lock).unwrap();
+    thread.join().unwrap();
+    assert_eq!(result.unwrap().unwrap_err().kind, "io");
     assert_eq!(f.count(APPROVAL_EXECUTING), 0);
 }
 
@@ -216,6 +412,73 @@ fn modified_action_is_refused() {
         "tampered"
     );
     assert_eq!(f.count(APPROVAL_APPROVED), 0);
+    assert_eq!(f.count(APPROVAL_EXECUTING), 0);
+}
+
+#[test]
+fn refreshing_does_not_rebind_a_modified_request() {
+    let f = Fixture::new();
+    let svc = f.service();
+    let original = svc.pending().remove(0);
+    let file = f.store.join("events.jsonl");
+    let mut event: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&file).unwrap().trim()).unwrap();
+    let mut action = harmless();
+    action.args.push("changed".into());
+    event["data"]["action"] = serde_json::to_value(&action).unwrap();
+    event["data"]["digest"] = approvals::digest(&f.wish, &action).into();
+    std::fs::write(&file, format!("{event}\n")).unwrap();
+    let changed = svc.pending().remove(0);
+    assert_eq!(
+        svc.decide(&decision(&changed, "new", Verdict::Approve))
+            .unwrap_err()
+            .kind,
+        "stale"
+    );
+    assert_eq!(
+        svc.decide(&decision(&original, "old", Verdict::Approve))
+            .unwrap_err()
+            .kind,
+        "tampered"
+    );
+    assert_eq!(f.count(APPROVAL_EXECUTING), 0);
+}
+
+#[test]
+fn invalid_stored_action_is_tampered_even_after_restart() {
+    let f = Fixture::new();
+    let card = f.service().pending().remove(0);
+    let file = f.store.join("events.jsonl");
+    let mut event: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&file).unwrap().trim()).unwrap();
+    event["data"]["action"] = serde_json::Value::Null;
+    std::fs::write(&file, format!("{event}\n")).unwrap();
+    assert_eq!(
+        f.service()
+            .decide(&decision(&card, "k", Verdict::Approve))
+            .unwrap_err()
+            .kind,
+        "tampered"
+    );
+    assert_eq!(f.count(APPROVAL_EXECUTING), 0);
+}
+
+#[test]
+fn missing_digest_is_tampered_even_after_restart() {
+    let f = Fixture::new();
+    let card = f.service().pending().remove(0);
+    let file = f.store.join("events.jsonl");
+    let mut event: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&file).unwrap().trim()).unwrap();
+    event["data"].as_object_mut().unwrap().remove("digest");
+    std::fs::write(&file, format!("{event}\n")).unwrap();
+    assert_eq!(
+        f.service()
+            .decide(&decision(&card, "k", Verdict::Approve))
+            .unwrap_err()
+            .kind,
+        "tampered"
+    );
     assert_eq!(f.count(APPROVAL_EXECUTING), 0);
 }
 

@@ -45,9 +45,16 @@ impl Launcher for ServiceLauncher {
             ));
         }
         let session = runs::load_session(&self.home, &req.session)?;
-        let cwd = session.project.ok_or_else(|| {
-            Failure::new("invalid_argument", "wish promotion requires a project")
-        })?;
+        let cwd = session
+            .project
+            .ok_or_else(|| Failure::new("invalid_argument", "wish promotion requires a project"))?;
+        let parent = runs::load_run(&self.home, &req.parent_run)?;
+        if parent.session != req.session {
+            return Err(Failure::new(
+                "invalid_argument",
+                "promotion parent belongs to another session",
+            ));
+        }
         let mut wish = req.goal.clone();
         if let Some(snapshot) = &req.context {
             let background = context::bounded(&snapshot.messages, DEFAULT_CONTEXT_BYTES);
@@ -72,7 +79,10 @@ impl Launcher for ServiceLauncher {
 /// Refuses before any model call: no real provider or router exists yet (D13).
 pub struct Unavailable;
 fn unavailable() -> Failure {
-    Failure::new("unavailable", "no model provider is configured for this mode")
+    Failure::new(
+        "unavailable",
+        "no model provider is configured for this mode",
+    )
 }
 impl Provider for Unavailable {
     fn ask(&self, _: &Ask) -> Res<Reply> {

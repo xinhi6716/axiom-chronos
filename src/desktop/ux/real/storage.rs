@@ -7,7 +7,7 @@ use crate::{
     },
     storage::{
         preflight,
-        retention::{self, Action, AuditRecord, Mode},
+        retention::{self, Action, AuditRecord, Mode, Planned},
         Entry, Ledger, Policy,
     },
 };
@@ -17,7 +17,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -48,13 +48,12 @@ fn item_of(entry: &Entry, policy: &Policy, now: i64) -> StorageItem {
     }
 }
 
-/// The ledger revision: a hash of which entries are present. Sizes and use times are left out
-/// because background measurement changes them without changing what a plan would remove.
+/// The ledger exposes no revision counter, so fingerprint the current entries, including changes
+/// to eligibility and measurement, without treating leases as ledger-entry changes.
 fn revision(entries: &[Entry]) -> u64 {
     let mut hash = Sha256::new();
     for entry in entries {
-        hash.update(entry.id.to_le_bytes());
-        hash.update(path_text(&entry.path).as_bytes());
+        hash.update(serde_json::to_vec(entry).expect("ledger entries are serializable"));
         hash.update([0]);
     }
     u64::from_be_bytes(hash.finalize()[..8].try_into().unwrap())
@@ -77,12 +76,13 @@ fn plan_id(paths: &[String]) -> String {
 struct StoredPlan {
     version: u64,
     paths: Vec<String>,
+    items: Vec<Planned>,
 }
 
 struct Job {
     paths: Vec<String>,
-    skipped: Vec<(String, String)>,
     audit_offset: usize,
+    audit_end: Arc<AtomicUsize>,
     finished: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
 }
@@ -132,6 +132,7 @@ impl StorageService for LedgerStorage {
         let entries = ledger.entries()?;
         let planned = retention::plan(&self.home, &policy, Mode::Routine, now)?;
         let mut items = Vec::new();
+        let mut planned_items = Vec::new();
         for item in planned.items.iter().filter(|p| p.action == Action::Delete) {
             let id = path_text(&item.path);
             if !ids.contains(&id) {
@@ -139,6 +140,7 @@ impl StorageService for LedgerStorage {
             }
             if let Some(entry) = entries.iter().find(|e| path_text(&e.path) == id) {
                 items.push(item_of(entry, &policy, now));
+                planned_items.push(item.clone());
             }
         }
         let paths: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
@@ -148,10 +150,14 @@ impl StorageService for LedgerStorage {
             .iter()
             .filter(|i| i.measured)
             .fold(0u64, |sum, i| sum.saturating_add(i.bytes));
-        self.plans
-            .lock()
-            .unwrap()
-            .insert(id.clone(), StoredPlan { version, paths });
+        self.plans.lock().unwrap().insert(
+            id.clone(),
+            StoredPlan {
+                version,
+                paths,
+                items: planned_items,
+            },
+        );
         Ok(CleanupPlan {
             id,
             version,
@@ -165,10 +171,10 @@ impl StorageService for LedgerStorage {
             return Err(Failure::new("unconfirmed", "Confirmation required"));
         }
         let stale = || Failure::new("stale", "Storage changed since the preview");
-        let (stored_version, stored_paths) = {
+        let (stored_version, stored_paths, stored_items) = {
             let plans = self.plans.lock().unwrap();
             let plan = plans.get(plan_id).ok_or_else(stale)?;
-            (plan.version, plan.paths.clone())
+            (plan.version, plan.paths.clone(), plan.items.clone())
         };
         let ledger = Ledger::open(&self.home)?;
         if stored_version != version || revision(&ledger.entries()?) != version {
@@ -177,8 +183,8 @@ impl StorageService for LedgerStorage {
         let policy = Policy::load(&self.home)?;
         let now = now_ms();
         let mut current = retention::plan(&self.home, &policy, Mode::Routine, now)?;
-        let mut skipped = Vec::new();
         let mut run = retention::Plan::default();
+        let mut protection = Vec::new();
         for path in &stored_paths {
             let used = ledger.in_use(Path::new(path))?;
             let position = current
@@ -186,20 +192,32 @@ impl StorageService for LedgerStorage {
                 .iter()
                 .position(|p| p.action == Action::Delete && path_text(&p.path) == *path);
             match position {
-                Some(index) if !used => run.items.push(current.items.remove(index)),
-                _ => skipped.push((path.clone(), "protected".to_string())),
+                _ if used => {
+                    // Keep the entry leased until execute has audited its protected outcome.
+                    protection.push(ledger.lease(Path::new(path))?);
+                    run.items.push(
+                        stored_items
+                            .iter()
+                            .find(|item| path_text(&item.path) == *path)
+                            .ok_or_else(stale)?
+                            .clone(),
+                    );
+                }
+                Some(index) => run.items.push(current.items.remove(index)),
+                None => return Err(stale()),
             }
         }
         let mut jobs = self.jobs.lock().unwrap();
         let job_id = format!("clean-{}-{}", plan_id, jobs.len() + 1);
         let finished = Arc::new(AtomicBool::new(false));
+        let audit_end = Arc::new(AtomicUsize::new(0));
         let error = Arc::new(Mutex::new(None));
         jobs.insert(
             job_id.clone(),
             Job {
                 paths: stored_paths,
-                skipped,
                 audit_offset: self.audit_len(),
+                audit_end: audit_end.clone(),
                 finished: finished.clone(),
                 error: error.clone(),
             },
@@ -211,6 +229,11 @@ impl StorageService for LedgerStorage {
             if let Err(e) = retention::execute(&home, &run, now, &cancel) {
                 *error.lock().unwrap() = Some(e.message);
             }
+            let end = fs::metadata(retention::audit_log(&home))
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            audit_end.store(end, Ordering::SeqCst);
+            drop(protection);
             finished.store(true, Ordering::SeqCst);
         });
         self.plans.lock().unwrap().remove(plan_id);
@@ -224,9 +247,14 @@ impl StorageService for LedgerStorage {
             .ok_or_else(|| Failure::new("not_found", "Job not found"))?;
         let finished = job.finished.load(Ordering::SeqCst);
         let mut done = Vec::new();
-        let mut failed = job.skipped.clone();
+        let mut failed = Vec::new();
         let log = fs::read(retention::audit_log(&self.home)).unwrap_or_default();
-        let log = log.get(job.audit_offset..).unwrap_or_default();
+        let end = if finished {
+            job.audit_end.load(Ordering::SeqCst)
+        } else {
+            log.len()
+        };
+        let log = log.get(job.audit_offset..end).unwrap_or_default();
         for line in String::from_utf8_lossy(log).lines() {
             let Ok(record) = serde_json::from_str::<AuditRecord>(line) else {
                 continue;
@@ -237,7 +265,12 @@ impl StorageService for LedgerStorage {
             if record.outcome == "done" {
                 done.push(record.path);
             } else {
-                failed.push((record.path, record.outcome));
+                let outcome = if record.outcome == "skipped: in use" {
+                    "protected".into()
+                } else {
+                    record.outcome
+                };
+                failed.push((record.path, outcome));
             }
         }
         if finished {

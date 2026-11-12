@@ -24,19 +24,19 @@ impl ServiceTransport {
         Self { home }
     }
 }
+fn hosted_key<'a>(snapshot: &'a crate::service::Snapshot, session: &str) -> Res<&'a str> {
+    snapshot
+        .wishes
+        .iter()
+        .find(|w| w.session.as_deref() == Some(session))
+        .map(|w| w.key.as_str())
+        .ok_or_else(|| Failure::new("not_found", format!("no hosted wish for session {session}")))
+}
 impl InterjectTransport for ServiceTransport {
     fn interject(&self, session: &str, text: &str) -> Res<()> {
         let client = crate::service::Client::connect(&self.home)?;
-        let key = client
-            .snapshot()?
-            .wishes
-            .into_iter()
-            .find(|w| w.session.as_deref() == Some(session))
-            .map(|w| w.key)
-            .ok_or_else(|| {
-                Failure::new("not_found", format!("no hosted wish for session {session}"))
-            })?;
-        client.interject(&key, text)
+        let snapshot = client.snapshot()?;
+        client.interject(hosted_key(&snapshot, session)?, text)
     }
     fn pause(&self, _: &str) -> Res<()> {
         crate::service::Client::connect(&self.home)?
@@ -54,6 +54,8 @@ struct Entry {
     replan: bool,
     #[serde(default)]
     ij: Option<String>,
+    #[serde(default)]
+    after_seq: u64,
 }
 #[derive(Serialize, Deserialize)]
 struct SessionFile {
@@ -176,11 +178,15 @@ impl EngineInterjections {
             if entry.ij.is_some() {
                 continue;
             }
+            // The hosted transport strips trailing line endings before delivery.
+            let delivered_digest = digest(entry.text.trim_end_matches(['\r', '\n']));
             if let Some(id) = events
                 .iter()
                 .filter(|e| {
                     e.kind == "interjection_received"
-                        && e.data["digest"].as_str() == Some(&entry.digest)
+                        && e.seq > entry.after_seq
+                        && (e.data["digest"].as_str() == Some(&entry.digest)
+                            || e.data["digest"].as_str() == Some(&delivered_digest))
                 })
                 .filter_map(|e| e.data["id"].as_str())
                 .find(|id| !claimed.contains(*id))
@@ -242,7 +248,10 @@ impl Interjections for EngineInterjections {
                 &events,
             ));
         }
+        let after_seq = self.events(&d.session).last().map_or(0, |e| e.seq);
         self.client.interject(&d.session, &d.text)?;
+        // The transport may succeed before this entry is saved. If saving fails or
+        // the process stops in that window, retrying can send the text again.
         let entry = Entry {
             client_id: d.client_id.clone(),
             digest: digest(&d.text),
@@ -250,6 +259,7 @@ impl Interjections for EngineInterjections {
             sent_ms: crate::desktop::ux::wall_ms(),
             replan: d.replan,
             ij: None,
+            after_seq,
         };
         let receipt = Self::receipt_for(&d.session, &entry, &[]);
         file.entries.push(entry);
@@ -372,5 +382,28 @@ impl Interjections for EngineInterjections {
     }
     fn pause_batch(&self, session: &str) -> Res<()> {
         self.client.pause(session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_key_resolves_session_and_reports_missing() {
+        let snapshot: crate::service::Snapshot = serde_json::from_value(serde_json::json!({
+            "instance": "instance", "cursor": 0, "login_start": false,
+            "wishes": [{
+                "key": "hosted-key", "handle": "handle", "session": "session",
+                "text": "wish", "cwd": ".", "started_unix": 0, "state": "running",
+                "limit_until": null, "ended_at": null, "ending": "", "disk_line": null, "log": []
+            }]
+        }))
+        .unwrap();
+        assert_eq!(hosted_key(&snapshot, "session").unwrap(), "hosted-key");
+        assert_eq!(
+            hosted_key(&snapshot, "other").unwrap_err().kind,
+            "not_found"
+        );
     }
 }

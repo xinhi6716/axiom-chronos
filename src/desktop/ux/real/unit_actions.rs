@@ -91,11 +91,28 @@ fn diff_text(store: &Path, unit: &str, rows: &[Evidence]) -> Option<String> {
     Some(text)
 }
 fn review_text(store: &Path, unit: &str, rows: &[Evidence]) -> Option<String> {
-    let row = rows.iter().rfind(|r| r.kind == "review")?;
-    let outcome = if row.exit_code == 0 { "pass" } else { "fail" };
-    Some(match orch::read_verdict(store, unit) {
-        Ok(Some(v)) => {
+    let row = rows.iter().rfind(|r| r.kind == "review");
+    let verdict = match row {
+        Some(r) => {
+            let reviewer = r
+                .command
+                .split_once(orch::CARRIED_MARK)
+                .map_or(r.command.as_str(), |(name, _)| name);
+            std::fs::read_to_string(orch::review_verdict_path(store, unit, reviewer))
+                .ok()
+                .and_then(|s| orch::parse_verdict(&s).ok())
+                .filter(|v| v.unit == unit && v.tree == r.commit)
+        }
+        None => orch::read_verdict(store, unit)
+            .ok()
+            .flatten()
+            .filter(|v| v.unit == unit),
+    };
+    let outcome = row.map(|r| if r.exit_code == 0 { "pass" } else { "fail" });
+    match verdict {
+        Some(v) => {
             let serious = v.findings.iter().filter(|f| f.is_serious()).count();
+            let outcome = outcome.unwrap_or(&v.verdict);
             let mut text = format!(
                 "{outcome}: verdict {}, {} findings, {serious} serious",
                 v.verdict,
@@ -104,10 +121,10 @@ fn review_text(store: &Path, unit: &str, rows: &[Evidence]) -> Option<String> {
             for f in v.findings.iter().filter(|f| f.is_serious()) {
                 text.push_str(&format!("\n#{} {} {}", f.number, f.check, f.location));
             }
-            text
+            Some(text)
         }
-        _ => outcome.to_owned(),
-    })
+        None => outcome.map(str::to_owned),
+    }
 }
 fn failure_text(rows: &[Evidence]) -> Option<String> {
     rows.iter()
@@ -124,28 +141,28 @@ fn usage_of(store: &Path, unit: &str, rows: &[Evidence]) -> (Option<f64>, Option
         return (None, None);
     };
     let usage = &report["usage"];
-    let (Some(input), Some(cached), Some(output)) = (
-        usage["inputTokens"].as_u64(),
-        usage["cachedInputTokens"].as_u64(),
-        usage["outputTokens"].as_u64(),
-    ) else {
-        return (None, None);
-    };
-    let model = rows
-        .iter()
-        .rfind(|r| r.kind == "run")
-        .map(|r| r.command.as_str());
+    let input = usage["inputTokens"].as_u64();
+    let cached = usage["cachedInputTokens"].as_u64();
+    let output = usage["outputTokens"].as_u64();
+    let tokens = usage["totalTokens"]
+        .as_u64()
+        .or_else(|| input?.checked_add(output?));
+    let model = report["model"].as_str().or_else(|| {
+        rows.iter()
+            .rfind(|r| r.kind == "run")
+            .map(|r| r.command.as_str())
+    });
     let usd = model.and_then(|m| {
         price::codex_usd(
             m,
             &CodexUsage {
-                input,
-                cached_input: cached,
-                output,
+                input: input?,
+                cached_input: cached?,
+                output: output?,
             },
         )
     });
-    (usd, Some(input + output))
+    (usd, tokens)
 }
 
 fn retry(store: &Path, unit: &orch::Unit, key: &str) -> Res<ActionReceipt> {
@@ -204,6 +221,20 @@ fn waive(
     let Some(verdict) = orch::read_verdict(store, unit)? else {
         return Ok(refuse(key, "no verdict file to waive"));
     };
+    let review = &rows[review_at];
+    let reviewer = review
+        .command
+        .split_once(orch::CARRIED_MARK)
+        .map_or(review.command.as_str(), |(name, _)| name);
+    if verdict.unit != unit
+        || verdict.tree != review.commit
+        || orch::review_verdict_path(store, unit, reviewer) != orch::verdict_path(store, unit)
+    {
+        return Ok(refuse(
+            key,
+            "stale review: verdict does not match the latest review",
+        ));
+    }
     let number = match finding {
         Some(n) => n,
         None => {

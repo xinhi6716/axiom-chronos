@@ -91,11 +91,17 @@ fn clean_requires_confirmation_and_a_fresh_plan() {
     let plan = storage.preview(std::slice::from_ref(&id)).unwrap();
     assert_eq!(plan.items.len(), 1);
     assert_eq!(
-        storage.clean(&plan.id, plan.version, false).unwrap_err().kind,
+        storage
+            .clean(&plan.id, plan.version, false)
+            .unwrap_err()
+            .kind,
         "unconfirmed"
     );
     assert_eq!(
-        storage.clean("missing", plan.version, true).unwrap_err().kind,
+        storage
+            .clean("missing", plan.version, true)
+            .unwrap_err()
+            .kind,
         "stale"
     );
     assert_eq!(
@@ -108,7 +114,10 @@ fn clean_requires_confirmation_and_a_fresh_plan() {
     // The ledger changes after the preview, so the plan is stale and nothing is deleted.
     scratch(home.path(), "second");
     assert_eq!(
-        storage.clean(&plan.id, plan.version, true).unwrap_err().kind,
+        storage
+            .clean(&plan.id, plan.version, true)
+            .unwrap_err()
+            .kind,
         "stale"
     );
     assert!(first.exists());
@@ -144,6 +153,19 @@ fn in_use_data_is_never_deleted() {
     assert_eq!(progress.failed.len(), 1);
     assert!(progress.failed[0].0.ends_with("busy"));
     assert_eq!(progress.failed[0].1, "protected");
+    let records: Vec<crate::storage::retention::AuditRecord> =
+        fs::read_to_string(crate::storage::retention::audit_log(home.path()))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(records.len(), 2);
+    assert!(records
+        .iter()
+        .any(|r| r.path.ends_with("busy") && r.outcome == "skipped: in use"));
+    assert!(records
+        .iter()
+        .any(|r| r.path.ends_with("free") && r.outcome == "done"));
     drop(lease);
 
     // A leased entry is also left out of a new preview.
@@ -154,6 +176,38 @@ fn in_use_data_is_never_deleted() {
         .items
         .is_empty());
     drop(lease);
+}
+
+#[test]
+fn changing_an_existing_ledger_entry_makes_the_plan_stale() {
+    let home = tempfile::tempdir().unwrap();
+    let path = scratch(home.path(), "first");
+    let storage = LedgerStorage::new(home.path());
+    let id = id_of(&storage, "first");
+    let plan = storage.preview(&[id]).unwrap();
+    Ledger::open(home.path()).unwrap().touch(&path, 2).unwrap();
+    assert_eq!(
+        storage
+            .clean(&plan.id, plan.version, true)
+            .unwrap_err()
+            .kind,
+        "stale"
+    );
+    assert!(path.exists());
+}
+
+#[test]
+fn finished_progress_ignores_later_audit_records_for_the_same_path() {
+    let home = tempfile::tempdir().unwrap();
+    let path = scratch(home.path(), "first");
+    let storage = LedgerStorage::new(home.path());
+    let id = id_of(&storage, "first");
+    let plan = storage.preview(&[id.clone()]).unwrap();
+    let job = storage.clean(&plan.id, plan.version, true).unwrap();
+    let completed = wait(&storage, &job);
+    assert_eq!(completed.done, vec![id]);
+    crate::storage::retention::remove_entry(home.path(), &path, "later operation", 3);
+    assert_eq!(storage.progress(&job).unwrap(), completed);
 }
 
 #[test]
