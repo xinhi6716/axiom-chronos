@@ -314,6 +314,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     if role.is_none() && explicit.is_none() {
         return Err(invalid("model or role is required"));
     }
+    if let Some(r) = role { crate::laya::router::observe_routing(crate::laya::home_from_env().as_deref(), None, string(a, "unit"), r, string(a, "brief").unwrap_or("")); } // laya-shadow
     let project = string(a, "project");
     let unit = string(a, "unit");
     let save = string(a, "save_to");

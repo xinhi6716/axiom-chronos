@@ -409,6 +409,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     }
                 })?;
                 let v = parse_verdict(&data)?;
+                crate::laya::router::observe_verdict(store, &v); // laya-shadow
                 let reviewed_unit = &v.unit;
                 if *reviewed_unit != units[0] {
                     return Err(invalid(&format!(

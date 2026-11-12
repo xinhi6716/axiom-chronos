@@ -1,0 +1,28 @@
+{
+  "model": {
+    "laya-multilingual": {
+      "source": "convaiinnovations/laya-multilingual",
+      "revision": null,
+      "layout": null,
+      "files": {}
+    }
+  },
+  "runtime": {
+    "version": "1.20.1",
+    "archives": {
+      "win-x64": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip",
+        "revision": "v1.20.1",
+        "sha256": null,
+        "size": null
+      },
+      "linux-x64": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz",
+        "revision": "v1.20.1",
+        "sha256": null,
+        "size": null
+      }
+    },
+    "files": {"win-x64": {}, "linux-x64": {}}
+  }
+}

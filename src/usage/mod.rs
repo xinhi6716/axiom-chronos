@@ -4,6 +4,7 @@
 //! headless stream-json log: the log holds every assistant event at stream start, so its
 //! `output_tokens` are far below what was billed.
 
+pub mod laya;
 pub mod price;
 pub mod quota;
 mod report;

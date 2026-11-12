@@ -1,0 +1,7 @@
+{
+ "model": {"type":"WordPiece", "unk_token":"[UNK]", "continuing_subword_prefix":"##", "max_input_chars_per_word":12, "vocab":{"[PAD]":0,"[UNK]":1,"[CLS]":2,"[SEP]":3,"[MASK]":4,"hello":5,"world":6,"!":7,",":8,"play":9,"##ing":10,"cafe":11,"中":12,"x":13}},
+ "normalizer":{"type":"BertNormalizer","clean_text":true,"handle_chinese_chars":true,"strip_accents":null,"lowercase":true},
+ "pre_tokenizer":{"type":"BertPreTokenizer"},
+ "post_processor":{"type":"TemplateProcessing","single":"[CLS] $A [SEP]"},
+ "added_tokens":[{"id":0,"content":"[PAD]","special":true},{"id":1,"content":"[UNK]","special":true},{"id":2,"content":"[CLS]","special":true},{"id":3,"content":"[SEP]","special":true},{"id":4,"content":"[MASK]","special":true},{"id":14,"content":"<TAG>","special":false,"normalized":false}]
+}

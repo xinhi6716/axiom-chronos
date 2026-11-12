@@ -13,6 +13,7 @@ pub mod evolve;
 pub mod goal;
 pub mod hook;
 pub mod host;
+pub mod laya;
 pub mod linux;
 pub mod memory;
 pub mod orch;

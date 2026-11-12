@@ -302,14 +302,29 @@ fn usage_command(args: &[String]) -> i32 {
         i += 1;
     }
     match crate::usage::ledger(&crate::usage::Locations::from_env(), session.as_deref()) {
+        // laya: begin
         Ok(ledger) if as_json => {
-            println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            let laya = crate::laya::home_from_env()
+                .and_then(|home| crate::usage::laya::cli_json(&home).ok().flatten());
+            if let Some(laya) = laya {
+                let mut value = serde_json::to_value(&ledger).unwrap();
+                value.as_object_mut().unwrap().insert("laya".into(), laya);
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            }
             0
         }
         Ok(ledger) => {
             print!("{}", crate::usage::render(&ledger));
+            if let Some(home) = crate::laya::home_from_env() {
+                if let Ok(text) = crate::usage::laya::cli_text(&home) {
+                    print!("{text}");
+                }
+            }
             0
         }
+        // laya: end
         Err(e) if e.kind == "invalid_argument" => usage(e.message),
         Err(e) => {
             eprintln!("axiom: {}", e.message);
@@ -431,6 +446,9 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "memory" => memory_command(rest),
         "lint" => lint_command(rest),
         "usage" => usage_command(rest),
+        // laya: begin
+        "laya" => crate::laya::pipeline::cli(rest),
+        // laya: end
         "evolve" => evolve_command(rest),
         "review" => crate::review::command(rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
