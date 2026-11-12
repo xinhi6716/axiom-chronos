@@ -70,7 +70,7 @@ Source: https://github.com/Plusero/agentic-research-skills
 Version: 461e3d07b49d2e99ac58ae189e55d2f6598da90d
 Licence: CC0-1.0
 Decision: reference-only
-Reason: The README catalogues reusable manuscript skills in individual folders; retain it only as a reference under the requested Creative Commons decision rule.
+Reason: The CC0 1.0 licence permits copying, but this catalogue of skills is reference-only because the paper workflow does not need to copy it.
 
 ### y9c/scifig
 Source: https://github.com/y9c/scifig
