@@ -668,7 +668,7 @@ mod extra_tests {
         let outside = tempfile::tempdir().unwrap();
         let link = d.path().join("link");
         #[cfg(windows)]
-        let created = std::process::Command::new("cmd")
+        let created = crate::base::proc::cmd("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(&link)
             .arg(outside.path())
