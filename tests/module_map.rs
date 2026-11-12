@@ -1,6 +1,4 @@
-use axiom::orch::{
-    lint_map, module_context, parse_map, render_module_context, run, MAX_CONTEXT_BYTES,
-};
+use axiom::orch::{lint_map, module_context, parse_map, run, MAX_CONTEXT_BYTES};
 use std::path::Path;
 
 fn section(id: &str, paths: &str, deps: &str, extra: &str, command: &str) -> String {
@@ -452,33 +450,36 @@ fn context_units_and_entry_boundaries() {
 
 #[test]
 fn long_header_that_fits_is_not_charged_for_unused_markers() {
-    let t = tempfile::tempdir().unwrap();
+    let t = tempfile::Builder::new()
+        .prefix(&"d".repeat(110))
+        .tempdir()
+        .unwrap();
     let p = t.path();
     init(p);
-    write(p, "modules.md", &section("m", "p", "none", "", "test"));
-    let baseline = module_context(p, "m", p).unwrap();
-    // Missing-source paths are absolute and JSON-escaped; include their actual byte cost.
-    let base_bytes = render_module_context(&baseline)
-        .len()
-        .max(serde_json::to_string_pretty(&baseline).unwrap().len() + 1);
-    let purpose = "x".repeat(MAX_CONTEXT_BYTES - base_bytes + baseline.purpose.len());
-    write(
-        p,
-        "modules.md",
-        &section("m", "p", "none", "", "test")
-            .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
-    );
+    let write_purpose = |purpose: &str| {
+        write(
+            p,
+            "modules.md",
+            &section("m", "p", "none", "", "test")
+                .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
+        );
+    };
+    write_purpose("x");
+    let short = module_context(p, "m", p).unwrap();
+    let overhead = serde_json::to_string_pretty(&short).unwrap().len() + 1 - short.purpose.len();
+    let purpose = "x".repeat(MAX_CONTEXT_BYTES - overhead);
+    write_purpose(&purpose);
     let c = module_context(p, "m", p).unwrap();
     assert_eq!(c.purpose, purpose);
     assert!(c.incomplete.is_empty());
-    assert_eq!(c.missing, baseline.missing);
-    assert_eq!(c.contract, baseline.contract);
     assert_eq!(
-        render_module_context(&c)
-            .len()
-            .max(serde_json::to_string_pretty(&c).unwrap().len() + 1),
+        serde_json::to_string_pretty(&c).unwrap().len() + 1,
         MAX_CONTEXT_BYTES
     );
+
+    write_purpose(&format!("{purpose}x"));
+    let error = module_context(p, "m", p).unwrap_err();
+    assert!(error.message.contains("exceeds byte limit"), "{error:?}");
 }
 
 #[test]

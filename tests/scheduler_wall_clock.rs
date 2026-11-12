@@ -320,7 +320,7 @@ fn check_barrier(f: &Fixture, receipt: &Receipts) {
     }
 }
 fn save_events(store: &Path, label: &str) -> PathBuf {
-    let dir = common::repo_root().join(".axiom-tmp/wallclock-all");
+    let dir = std::env::temp_dir().join("axiom-wallclock-all");
     fs::create_dir_all(&dir).unwrap();
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -394,4 +394,3 @@ fn scheduler_wall_clock_development() {
     let _guard = setup();
     compare(900, 60, false);
 }
-
