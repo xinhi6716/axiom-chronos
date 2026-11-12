@@ -14,6 +14,10 @@ fn is_false(v: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
     pub wish: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wish_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_limit: Option<u32>,
     #[serde(default)]
     pub cwd: Option<String>,
     pub status: String,
@@ -103,6 +107,8 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     let _lock = lock(home)?;
     let goal = Goal {
         wish: wish.into(),
+        wish_id: Some(mint_wish_id(home)),
+        turn_limit: None,
         cwd: cwd.map(str::to_owned),
         status: "active".into(),
         amendments: vec![],
@@ -122,6 +128,49 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
     save(home, session, &goal)?;
     progress::clear(home, session)?;
     Ok(goal)
+}
+fn mint_wish_id(home: &Path) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let prefix = format!("w-{:013}-", now.as_millis());
+        let mut suffix = ((now.as_nanos() as u64
+            ^ u64::from(std::process::id())
+            ^ COUNTER.fetch_add(1, Ordering::Relaxed))
+            & 0xffffff) as u32;
+        if let Ok(entries) = std::fs::read_dir(home.join("goals")) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(goal) = std::fs::read(entry.path())
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Goal>(&b).ok())
+                else {
+                    continue;
+                };
+                if let Some(id) = goal
+                    .wish_id
+                    .as_deref()
+                    .and_then(|id| id.strip_prefix(&prefix))
+                {
+                    if id.len() == 6 {
+                        if let Ok(previous) = u32::from_str_radix(id, 16) {
+                            suffix = suffix.max(previous + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if suffix <= 0xffffff {
+            return format!("{prefix}{suffix:06x}");
+        }
+        std::thread::yield_now();
+    }
 }
 fn leave_waiting(goal: &mut Goal, end: Option<BatchEnd>) {
     if goal.status == "waiting" {
@@ -149,6 +198,24 @@ pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
     save(home, session, &goal)?;
     Ok(Some(goal))
 }
+pub fn cut_off(home: &Path, session: &str, turn_limit: u32) -> Res<Option<Goal>> {
+    let _lock = lock(home)?;
+    let Some(mut goal) = load(home, session)? else {
+        return Ok(None);
+    };
+    if goal.status != "active" {
+        return Ok(None);
+    }
+    goal.status = "blocked".into();
+    goal.reason = Some("max_turns".into());
+    goal.turn_limit = Some(turn_limit);
+    goal.note = Some(format!(
+        "cut off at {turn_limit} turns. Resume with: axiom wish --resume {session}"
+    ));
+    goal.interjection = None;
+    save(home, session, &goal)?;
+    Ok(Some(goal))
+}
 pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
     let _lock = lock(home)?;
     let mut goal = required(home, session)?;
@@ -163,6 +230,7 @@ pub fn reopen(home: &Path, session: &str) -> Res<Goal> {
     goal.note = None;
     goal.batch = None;
     goal.reason = None;
+    goal.turn_limit = None;
     goal.interjection = None;
     save(home, session, &goal)?;
     progress::clear(home, session)?;
@@ -320,17 +388,17 @@ pub fn set_status_with_batch(
         ));
     }
     if status == "done" {
-        if let Some(project) = &goal.project {
+        if goal.project.is_some() {
             crate::orch::done_gate(
-                &crate::orch::store_for(home, project)?,
+                &crate::orch::store_for_goal(home, &goal)?,
                 goal.mode.as_deref() == Some("change"),
             )?;
         }
     }
     let mut note = note.unwrap_or("").to_string();
     if status == "blocked" {
-        if let Some(project) = &goal.project {
-            let store = crate::orch::store_for(home, project)?;
+        if goal.project.is_some() {
+            let store = crate::orch::store_for_goal(home, &goal)?;
             let pending = crate::orch::pending_handoffs(&store)?;
             if let Some(h) = pending
                 .iter()

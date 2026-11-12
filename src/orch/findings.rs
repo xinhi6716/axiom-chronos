@@ -72,7 +72,7 @@ pub fn parse_verdict(text: &str) -> Res<Verdict> {
                 _ => Severity::Minor,
             };
             let needs = match item.get("needs") {
-                None => None,
+                None | Some(Value::Null) => None,
                 Some(Value::String(s)) if s == "smoke" => Some(Needs::Smoke),
                 Some(Value::String(s)) if s == "manual" => Some(Needs::Manual),
                 Some(other) => {

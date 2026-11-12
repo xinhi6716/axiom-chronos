@@ -89,6 +89,7 @@ fn failure(e: impl std::fmt::Display) -> Failure {
 }
 
 pub const CONTINUE_TAG: &str = "<chronos-continue/>";
+pub const MAX_TURNS_EXIT: i32 = 3;
 /// Long `codex_run` calls outlast the five-minute prompt cache; the one-hour
 /// TTL keeps the dispatcher's prefix warm across them (Claude Code 2.1.242+).
 pub const CACHE_TTL_ENV: [(&str, &str); 2] = [
@@ -618,7 +619,7 @@ pub fn drive(
     let codex_max_parallel = spawned.codex_max_parallel;
     let mut spawned = spawned;
     loop {
-        let outcome = drive_once(spawned, config, out, stop, observe)?;
+        let outcome = drive_once(spawned, config, out, stop, observe, max_turns)?;
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
@@ -658,6 +659,7 @@ fn drive_once(
     out: &mut dyn Write,
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
+    max_turns: Option<u32>,
 ) -> Res<Outcome> {
     let Spawned {
         mut child,
@@ -672,6 +674,7 @@ fn drive_once(
     let mut renderer = Renderer::new();
     let mut session = None::<String>;
     let mut final_result = false;
+    let mut max_turns_cut_off = false;
     let mut goal_error = None;
     let mut cause = None;
     let mut reset = None;
@@ -724,7 +727,32 @@ fn drive_once(
                 if event["type"] != "result" {
                     continue;
                 }
-                if event["is_error"].as_bool().unwrap_or(false) {
+                if max_turns_cut_off {
+                    continue;
+                }
+                if event["subtype"] == "error_max_turns" {
+                    let turns = max_turns
+                        .or_else(|| {
+                            event["num_turns"]
+                                .as_u64()
+                                .and_then(|n| u32::try_from(n).ok())
+                        })
+                        .unwrap_or(0);
+                    if let Some(id) = session.as_deref() {
+                        if let Err(e) = goal::cut_off(&config.home, id, turns) {
+                            goal_error = Some(e);
+                        }
+                        observe(
+                            &json!({"type":"chronos","subtype":"max_turns","session":id,"turn_limit":turns}),
+                        );
+                        let _ = writeln!(
+                            out,
+                            "wish cut off at {turns} turns; resume: axiom wish --resume {id}"
+                        );
+                    }
+                    max_turns_cut_off = true;
+                    final_result = true;
+                } else if event["is_error"].as_bool().unwrap_or(false) {
                     let message = event["result"].as_str().unwrap_or("");
                     let now = (config.clock.now)();
                     reset = limit_reset(message, now, local_offset_secs(now));
@@ -809,7 +837,13 @@ fn drive_once(
                     Err(e) => break Err(failure(e)),
                 };
                 if final_result {
-                    break Ok(if renderer.is_error() { 1 } else { 0 });
+                    break Ok(if max_turns_cut_off {
+                        MAX_TURNS_EXIT
+                    } else if renderer.is_error() {
+                        1
+                    } else {
+                        0
+                    });
                 }
                 let code = status.code().filter(|c| *c != 0).unwrap_or(1);
                 cause = Some(format!("claude exited {code} without a result"));

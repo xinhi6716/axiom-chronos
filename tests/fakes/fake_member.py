@@ -108,6 +108,22 @@ if 'crash' in scenario:
     sys.exit(3)
 
 if not is_fable:
+    repair = 'REPAIR: The previous review failed validation:' in prompt
+    if 'repair-once' in scenario and not repair or 'repair-bad' in scenario and not repair:
+        print('not JSON: 初回')
+        sys.exit(0)
+    if 'repair-long' in scenario and not repair:
+        print(json.dumps({'stances': [], 'x' * 350: 1}))
+        sys.exit(0)
+    if 'repair-schema' in scenario and not repair:
+        print('{"wrong":true}')
+        sys.exit(0)
+    if 'repair-bad' in scenario and repair:
+        print('{"stances":false}')
+        sys.exit(0)
+    if 'raw-valid' in scenario or repair and ('repair-once' in scenario or 'repair-schema' in scenario or 'repair-long' in scenario):
+        print('{"stances":[{"claim":"C01","stance":"agree","evidence":"src/a.rs:12"}]}')
+        sys.exit(0)
     if out_of_quota:
         print('Error: RESOURCE_EXHAUSTED: You have exceeded your quota', file=sys.stderr)
         sys.exit(1)
@@ -124,6 +140,10 @@ if not is_fable:
     sys.exit(0)
 
 print('unrecognized_model: claude-fable-5-2', file=sys.stderr, flush=True)
+if 'raw-test' in scenario:
+    print('{"type":"assistant","message":{"id":"fixed","model":"claude-fable-5-2","content":[],"usage":{"input_tokens":1000,"output_tokens":500}}}')
+    print(json.dumps({'type':'result','is_error':False,'result':json.dumps(answer, ensure_ascii=False, separators=(',', ':'))}, ensure_ascii=False, separators=(',', ':')))
+    sys.exit(0)
 
 
 def emit(event):

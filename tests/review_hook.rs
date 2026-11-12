@@ -316,7 +316,7 @@ fn missing_verdict_file_is_not_recorded() {
 }
 
 #[test]
-fn needs_null_is_named_plainly_and_still_rejected() {
+fn needs_null_is_accepted_like_an_omitted_needs() {
     let f = Fx::new("gpt-6.1-terra");
     f.bind("r1", "a");
     f.verdict(
@@ -326,7 +326,10 @@ fn needs_null_is_named_plainly_and_still_rejected() {
     let text = f
         .fire(&agent_event(Some("r1"), "chronos:reviewer"))
         .unwrap();
-    rejected(&f, &text, "invalid needs null");
+    assert!(text.starts_with("Chronos recorded the review."), "{text}");
+    assert!(text.contains("a\tverified\tnext=done\tverdict blocker=0 major=0 minor=1"), "{text}");
+    assert_eq!(f.reviews("a"), 1);
+    assert_eq!(f.state("a"), "verified");
 }
 
 #[test]

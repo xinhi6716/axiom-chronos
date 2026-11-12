@@ -28,6 +28,9 @@ impl AppServer {
     pub fn run(&self, req: &RunRequest) -> Res<Value> {
         self.run_capped(req, None)
     }
+    pub fn run_with_env(&self, req: &RunRequest, env: &[(String, String)]) -> Res<Value> {
+        self.run_internal(req, None, None, env, true)
+    }
     /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
     pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
         self.run_cancellable(req, token_cap, None)
@@ -37,6 +40,16 @@ impl AppServer {
         req: &RunRequest,
         token_cap: Option<u64>,
         stop: Option<&AtomicBool>,
+    ) -> Res<Value> {
+        self.run_internal(req, token_cap, stop, &[], false)
+    }
+    fn run_internal(
+        &self,
+        req: &RunRequest,
+        token_cap: Option<u64>,
+        stop: Option<&AtomicBool>,
+        env: &[(String, String)],
+        set_env: bool,
     ) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
@@ -144,6 +157,13 @@ impl AppServer {
         };
         if graph {
             thread["config"]["mcp_servers"][codegraph::NAME] = codegraph::codex_server(&req.cwd);
+        }
+        if set_env {
+            let set: Map<String, Value> = env
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(value)))
+                .collect();
+            thread["config"]["shell_environment_policy"]["set"] = Value::Object(set);
         }
         if let Err(e) = stopped() {
             let mut report = report_error(req, "", "", disabled, &e.kind, &e.kind, &e.message);

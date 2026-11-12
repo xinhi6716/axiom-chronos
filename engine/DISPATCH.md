@@ -12,11 +12,11 @@ SCOPE   the exact paths the worker may create, change or delete
 VERIFY  one command; exit code 0 means done
 ```
 
-SCOPE lists paths only; notes such as "(new)" go in CONTEXT. Put all paths space-separated on one SCOPE line. Write all module briefs in one call: a single Bash heredoc, or Write for one unit.
+SCOPE lists paths only; notes such as "(new)" go in CONTEXT. SCOPE may span lines or bullets; every path counts. Write all module briefs in one call: a single Bash heredoc, or Write for one unit.
 
 VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME.
 
-The sandbox cannot write to the system temp directory. Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit.
+Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically.
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 

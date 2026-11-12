@@ -113,10 +113,22 @@ fn drive_idle(limit: Option<&str>, progress: bool, refusal: bool) -> (String, Va
         &["handoff".into(), "--next".into(), "check acceptance".into()],
     )
     .unwrap();
+    // Keep the shared fake's turn sequence, but write progress to this wish's store.
+    let source = include_str!("fakes/fake_claude.py");
+    let legacy_store = "Path(os.environ['AXIOM_DATA_HOME']) / 'orchestrate' / 'demo'";
+    assert!(source.contains(legacy_store));
+    let fake = dir.path().join("fake_claude.py");
+    fs::write(
+        &fake,
+        source.replace(legacy_store, &format!("Path({})", json!(store))),
+    )
+    .unwrap();
+    let mut claude = common::fake("fake_claude");
+    claude[2] = fake.to_str().unwrap().into();
     let config = session::Config {
         home: home.clone(),
         bin: dir.path().join("axiom"),
-        claude: Ok(common::fake("fake_claude")),
+        claude: Ok(claude),
         clock: session::Clock::system(),
     };
     let mut out = Vec::new();

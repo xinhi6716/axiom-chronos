@@ -208,7 +208,7 @@ pub fn after_agent(event: &Value, home: Option<&Path>) -> Option<Value> {
     if g.status != "active" {
         return None;
     }
-    let store = orch::store_for(home, g.project.as_deref()?).ok()?;
+    let store = super::store_of_goal(home, &g)?;
     let unit = match event.pointer("/tool_response/agentId") {
         Some(id) => id
             .as_str()

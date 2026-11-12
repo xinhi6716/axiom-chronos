@@ -43,6 +43,15 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 - When the [optional code graph](#code-graph) is active, lean mode leaves that one server running; every other configured server is still turned off.
 - Upstream API rejections that Codex labels `other` are reported by their provider code, such as `model_not_found`. Available models depend on the signed-in account; `model/list` is the source of truth.
 
+- Each wish has its own store, `<data home>/orchestrate/<project>/<wish id>`, resolved by `orch::wish_store`; a goal without a wish id keeps the project store, and memory and history stay per project.
+- Workers and VERIFY commands get private scratch (`TMP`, `TEMP`, `TMPDIR`, pytest `--basetemp`) under `<store>/scratch/`, removed afterwards; nothing is created in the repository.
+- The scope check records git-ignored and test-scratch paths as `scope-ignored` and changes made while peers ran as `scope-unattributed` (also in `reports/<unit>.scope.json`); only writes outside the unit's own SCOPE are refused.
+- Dispatching a running or verified unit again returns `status: "refused"` with `error.kind` `already_running` or `already_verified` and the `owner` (wish, module, unit, attempt); no Codex turn starts.
+- A dispatcher is bound to one module by its first `codex_run` or its first brief inside that module's PATHS; briefs, `unit add --track` and `codex_run` for another module are denied.
+- A session that reaches its turn limit stops with exit code 3 and a `chronos` `max_turns` event; the goal is `blocked` with reason `max_turns`, and `axiom wish --resume <session>` continues it.
+- `"needs": null` in a verdict reads as omitted, and a brief's SCOPE may span lines or bullets; a repeated SCOPE or a note inside it is rejected at registration.
+- The council keeps each member's raw reply, repairs a malformed Argon review once, rewrites only attribution when anonymising, and records `degraded_members` and `member_degraded` events (progress notifications and `council-events.jsonl`).
+
 Codex's base instructions (~3.5k tokens) stay in place because they teach the shell and patch tools.
 
 <details>

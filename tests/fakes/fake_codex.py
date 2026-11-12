@@ -229,10 +229,20 @@ for line in sys.stdin:
             if delay_ms:
                 time.sleep(delay_ms / 1000)
             item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
+            from pathlib import Path
+            cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
+            temp = (configs[thread_id].get('shell_environment_policy') or {}).get('set', {}).get('TMP')
+            for name in re.findall(r'^FAKE_TEMPDIR[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                target = Path(temp) if temp else cwd
+                target = target / 'pytest-of-fake' / 'pytest-0' / name.strip() / 'case.txt'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fake-temp\n', encoding='utf-8')
+            for path in re.findall(r'^FAKE_SHELL_WRITE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                target = cwd / path.strip()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fake-shell\n', encoding='utf-8')
             paths = re.findall(r'^FAKE_WRITE[ \t]+([^\r\n]+)\s*$', text, flags=re.M)
             if paths:
-                from pathlib import Path
-                cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
                 for path in paths:
                     target = cwd / path
                     target.parent.mkdir(parents=True, exist_ok=True)

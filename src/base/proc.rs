@@ -140,6 +140,33 @@ pub struct ShellRun {
     pub timed_out: bool,
 }
 pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
+    run_shell_env(cmd, cwd, timeout, &[])
+}
+pub fn scratch_env(dir: &Path) -> std::io::Result<Vec<(String, String)>> {
+    let dir = std::path::absolute(dir)?;
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&tmp)?;
+    let tmp = tmp.to_string_lossy().into_owned();
+    let prefix = std::env::var("PYTEST_ADDOPTS")
+        .ok()
+        .map(|value| format!("{value} "))
+        .unwrap_or_default();
+    Ok(vec![
+        ("TMP".into(), tmp.clone()),
+        ("TEMP".into(), tmp.clone()),
+        ("TMPDIR".into(), tmp),
+        (
+            "PYTEST_ADDOPTS".into(),
+            format!("{prefix}--basetemp={}", dir.join("pytest").display()),
+        ),
+    ])
+}
+pub fn run_shell_env(
+    cmd: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env: &[(String, String)],
+) -> Res<ShellRun> {
     #[cfg(unix)]
     let args = vec!["sh".into(), "-c".into(), cmd.into()];
     #[cfg(windows)]
@@ -152,6 +179,7 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> Res<ShellRun> {
     }
     let child = shell
         .current_dir(cwd)
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

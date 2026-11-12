@@ -112,7 +112,7 @@ fn lifecycle_reuse_scope_and_limit() {
             .err()
             .unwrap()
             .kind,
-        "busy"
+        "already_running"
     );
     let report = json!({"status":"completed","final_message":"done","file_changes":[]});
     let finished = finish_unit(
@@ -154,7 +154,7 @@ fn lifecycle_reuse_scope_and_limit() {
             store.join("reports").join("a.md").display()
         )));
     record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
-    assert!(matches!(begin(&store, &repo), Begin::Reused));
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
     fs::write(repo.join("a.txt"), "changed").unwrap();
     assert!(matches!(
         begin(&store, &repo),

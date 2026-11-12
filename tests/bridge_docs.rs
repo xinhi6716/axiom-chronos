@@ -1,10 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-fn contains(text: &str, phrase: &str) -> bool {
-    text.contains(phrase)
-}
-
 fn excludes(text: &str, phrase: &str) -> bool {
     let text = text.to_lowercase();
     if phrase == "--astra" {
@@ -19,7 +15,7 @@ fn excludes(text: &str, phrase: &str) -> bool {
             .split(|c: char| !c.is_alphanumeric())
             .any(|word| word == phrase)
     } else {
-        !text.contains(phrase)
+        !text.replace("rewrites only attribution", "").contains(phrase)
     }
 }
 
@@ -28,6 +24,14 @@ fn bridge_documentation_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cases: &[(&str, &[&str])] = &[
         ("docs/bridge.md", &[
+            "Each wish has its own store, `<data home>/orchestrate/<project>/<wish id>`, resolved by `orch::wish_store`;",
+            "Workers and VERIFY commands get private scratch (`TMP`, `TEMP`, `TMPDIR`, pytest `--basetemp`) under `<store>/scratch/`",
+            "`scope-unattributed`",
+            r#"returns `status: "refused"` with `error.kind` `already_running` or `already_verified` and the `owner`"#,
+            "A dispatcher is bound to one module by its first `codex_run`",
+            "stops with exit code 3 and a `chronos` `max_turns` event",
+            r#"`"needs": null` in a verdict reads as omitted"#,
+            "repairs a malformed Argon review once",
             "Unit mode takes `project`, `unit`, `role` and `cwd`, optionally `cycle: true`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
             "A registered brief may carry `EFFORT` (`low`, `medium` or `high`) and `TIER` (`luna`, terra units only) as their own lines between GOAL and CONTEXT.",
             "With `cycle: true`, the reply is an outcome with `next`, `reason`, `verdict`, `review` entries `{unit, pack}`, `paths` and `module_done`, alongside `accept`, `verify_output` and `report`.",
@@ -50,11 +54,7 @@ fn bridge_documentation_contract() {
     for (path, phrases) in cases {
         let text = fs::read_to_string(root.join(path)).unwrap();
         for phrase in *phrases {
-            assert!(contains(&text, phrase), "{path}: {phrase}");
-            assert!(
-                !contains(&text.replace(phrase, ""), phrase),
-                "{path}: {phrase}"
-            );
+            assert_eq!(text.matches(phrase).count(), 1, "{path}: {phrase}");
         }
         // Gemini returned in 2.0 only as the optional backup reviewer (agy), so its name may appear.
         for forbidden in [

@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts\n";
 
 fn setup(home: &Path) -> std::path::PathBuf {
-    let store = home.join("orchestrate/project");
+    let store = orch::store_for(home, "project").unwrap();
     fs::create_dir_all(store.join("reports")).unwrap();
     units(&store, "verified");
     fs::write(
@@ -32,10 +32,10 @@ fn units(store: &Path, state: &str) {
 fn done_without_rewrite_row() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
+    goal::open(home, "s", "wish", Some("project")).unwrap();
     let store = setup(home);
     assert!(!store.join("reports/_stages.evidence.tsv").exists());
     assert!(orch::done_gate(&store, true).is_ok());
-    goal::open(home, "s", "wish", Some("project")).unwrap();
     assert_eq!(
         goal::set_status(home, "s", "done", None).unwrap()["status"],
         "completed"
@@ -77,8 +77,8 @@ fn done_without_rewrite_row() {
 fn external_failure_keeps_the_goal_open_until_a_later_pass() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
-    let store = setup(home);
     goal::open(home, "s", "wish", Some("project")).unwrap();
+    let store = setup(home);
     let log = home.join("ci.log");
     fs::write(&log, "failing job").unwrap();
     orch::record_external_full(&store, home, "ci-run-1", 1, &log).unwrap();

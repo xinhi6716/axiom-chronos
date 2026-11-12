@@ -18,20 +18,26 @@ pub enum Begin {
     },
     Reused,
 }
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct Owner {
+    pub wish: String,
+    pub module: String,
+    pub unit: String,
+    pub attempt: String,
+}
 pub struct Finished {
     pub state: String,
     pub verify_exit: Option<i32>,
     pub verify_tail: String,
     pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
+    pub ignored: Vec<(String, String)>,
+    pub unattributed: Vec<String>,
     pub changed: Vec<String>,
     pub pack: Option<PathBuf>,
     pub pack_error: Option<String>,
 }
 struct Claim {
-    // Units of different projects never block or excuse each other.
-    store: PathBuf,
-    scope: Vec<String>,
     dirty: BTreeSet<String>,
     attempt_id: String,
     base: String,
@@ -43,10 +49,63 @@ fn key(store: &Path, unit: &str) -> String {
 fn claims() -> &'static Mutex<HashMap<String, Claim>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
+fn claim_owner(store: &Path, c: &DiskClaim, units: &[Unit]) -> Owner {
+    Owner {
+        wish: if c.wish.is_empty() {
+            wish_of_store(store)
+        } else {
+            c.wish.clone()
+        },
+        module: if c.module.is_empty() {
+            units
+                .iter()
+                .find(|u| u.id == c.unit)
+                .map(|u| u.track.clone())
+                .unwrap_or_default()
+        } else {
+            c.module.clone()
+        },
+        unit: c.unit.clone(),
+        attempt: c.attempt.clone(),
+    }
+}
+fn owner_text(owner: &Owner) -> String {
+    format!(
+        "wish {}, module {}, unit {}, attempt {}",
+        owner.wish, owner.module, owner.unit, owner.attempt
+    )
+}
+pub fn unit_owner(store: &Path, unit: &str) -> Res<Option<Owner>> {
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        if let Some(c) = read_claims(store)?.iter().find(|c| c.unit == unit) {
+            return Ok(Some(claim_owner(store, c, &units)));
+        }
+        let Some(u) = units.iter().find(|u| u.id == unit) else {
+            return Ok(None);
+        };
+        let rows = evidence(store, unit)?;
+        if derive_state(&rows, needs_accept(store, unit)?) != "verified" {
+            return Ok(None);
+        }
+        Ok(Some(Owner {
+            wish: wish_of_store(store),
+            module: u.track.clone(),
+            unit: unit.into(),
+            attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+        }))
+    })
+}
 fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     let out = base::proc::cmd("git")
         .current_dir(repo)
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=traditional",
+        ])
         .output()
         .map_err(|e| Failure::new("process", e.to_string()))?;
     if !out.status.success() {
@@ -160,7 +219,7 @@ pub fn begin_unit(
     repo: &Path,
     astra_required: bool,
 ) -> Res<Begin> {
-    Ok(begin_inner(store, unit, role, repo, astra_required, false)?.unwrap())
+    Ok(begin_inner(store, unit, role, repo, astra_required, false, &mut None)?.unwrap())
 }
 
 /// Performs the normal begin gates atomically, returning None for a resumable build.
@@ -171,7 +230,20 @@ pub fn begin_unit_cycle(
     repo: &Path,
     astra_required: bool,
 ) -> Res<Option<Begin>> {
-    begin_inner(store, unit, role, repo, astra_required, true)
+    begin_inner(store, unit, role, repo, astra_required, true, &mut None)
+}
+
+pub(crate) fn begin_dispatch(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+    cycle: bool,
+) -> (Res<Option<Begin>>, Option<Owner>) {
+    let mut owner = None;
+    let result = begin_inner(store, unit, role, repo, astra_required, cycle, &mut owner);
+    (result, owner)
 }
 
 fn begin_inner(
@@ -181,6 +253,7 @@ fn begin_inner(
     repo: &Path,
     astra_required: bool,
     cycle: bool,
+    refused_owner: &mut Option<Owner>,
 ) -> Res<Option<Begin>> {
     let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
     with_lock(store, false, || {
@@ -193,21 +266,32 @@ fn begin_inner(
         let brief = unit_brief(store, unit)?;
         let rows = evidence(store, unit)?;
         let mut disk = read_claims(store)?;
-        if let Some(c) = disk
-            .iter()
-            .find(|c| c.unit == unit || overlaps(&brief.scope, &c.scope))
-        {
+        if let Some(c) = disk.iter().find(|c| c.unit == unit) {
             let held = active
                 .get(&key(store, &c.unit))
                 .is_some_and(|a| a.attempt_id == c.attempt);
-            return Err(if held {
-                Failure::new("busy", format!("scope busy: {unit}"))
-            } else {
-                Failure::new(
-                    "outcome_unknown",
-                    format!("claim outcome unknown: {}", c.attempt),
-                )
-            });
+            let owner = claim_owner(store, c, &units);
+            let text = owner_text(&owner);
+            *refused_owner = Some(owner);
+            return Err(
+                if held || c.pid.parse().ok().is_some_and(base::proc::pid_alive) {
+                    Failure::new(
+                        "already_running",
+                        format!("unit {unit} is already running: {text}"),
+                    )
+                } else {
+                    Failure::new("outcome_unknown", format!("claim outcome unknown: {text}"))
+                },
+            );
+        }
+        if let Some(c) = disk.iter().find(|c| overlaps(&brief.scope, &c.scope)) {
+            return Err(Failure::new(
+                "busy",
+                format!(
+                    "scope busy: {unit}; {}",
+                    owner_text(&claim_owner(store, c, &units))
+                ),
+            ));
         }
         if role != "sol" && !known_track(store, u)? {
             return Err(Failure::new(
@@ -241,7 +325,18 @@ fn begin_inner(
                 .find(|r| r.kind == "verify")
                 .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
         {
-            return Ok(Some(Begin::Reused));
+            let owner = Owner {
+                wish: wish_of_store(store),
+                module: u.track.clone(),
+                unit: unit.into(),
+                attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+            };
+            let text = owner_text(&owner);
+            *refused_owner = Some(owner);
+            return Err(Failure::new(
+                "already_verified",
+                format!("unit {unit} is already verified: {text}; nothing to run"),
+            ));
         }
         let count = rows.iter().filter(|r| r.kind == "run").count();
         if count >= 2 {
@@ -285,18 +380,24 @@ fn begin_inner(
         let attempt_id = format!("{}-{}", attempt, base::unique());
         let before = dirty(repo)?;
         let base = base_snapshot(repo, &brief.scope);
+        let peers = disk.iter().map(|c| c.attempt.clone()).collect();
+        for c in &mut disk {
+            c.peers.push(attempt_id.clone());
+        }
         disk.push(DiskClaim {
             unit: unit.into(),
             attempt: attempt_id.clone(),
             scope: brief.scope.clone(),
             started: base::now_iso(),
+            module: u.track.clone(),
+            wish: wish_of_store(store),
+            pid: std::process::id().to_string(),
+            peers,
         });
         save_claims(store, &disk)?;
         active.insert(
             key(store, unit),
             Claim {
-                store: store.to_path_buf(),
-                scope: brief.scope.clone(),
                 dirty: before,
                 attempt_id: attempt_id.clone(),
                 base,
@@ -611,6 +712,30 @@ pub(crate) fn report_paths(report: &Value, repo: &Path) -> Vec<String> {
         })
         .collect()
 }
+
+fn ignored_reason(repo: &Path, path: &str) -> Option<&'static str> {
+    let mut parts = path.split('/');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next().unwrap_or("");
+    let scratch = path.starts_with(TEMP_DIR)
+        || (first
+            .strip_prefix("pytest-of-")
+            .is_some_and(|name| !name.is_empty())
+            && second.strip_prefix("pytest-").is_some_and(|n| {
+                n == "current" || (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+            && parts.next().is_some());
+    if scratch {
+        return Some("test-scratch");
+    }
+    base::proc::cmd("git")
+        .current_dir(repo)
+        .args(["check-ignore", "-q", "--", path])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| "git-ignored")
+}
 pub fn finish_unit(
     store: &Path,
     unit: &str,
@@ -628,29 +753,30 @@ pub fn finish_unit(
     }
 
     let brief = unit_brief(store, unit)?;
-    let (before, others, base_tree) = {
+    let (before, had_peers, base_tree) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
             .filter(|c| c.attempt_id == attempt_id)
             .ok_or_else(|| Failure::new("claim_mismatch", "unit attempt is not running"))?;
-        if !read_claims(store)?
-            .iter()
-            .any(|d| d.unit == unit && d.attempt == attempt_id)
-        {
-            return Err(Failure::new("claim_mismatch", "disk claim does not match"));
-        }
-        (
-            c.dirty.clone(),
-            active
+        let had_peers = with_lock(store, false, || {
+            let disk = read_claims(store)?;
+            let own = disk
                 .iter()
-                .filter(|(id, c)| c.store == store && **id != key(store, unit))
-                .flat_map(|(_, c)| c.scope.clone())
-                .collect::<Vec<_>>(),
-            c.base.clone(),
-        )
+                .find(|d| d.unit == unit && d.attempt == attempt_id)
+                .ok_or_else(|| Failure::new("claim_mismatch", "disk claim does not match"))?;
+            Ok(!own.peers.is_empty() || disk.iter().any(|d| d.attempt != attempt_id))
+        })?;
+        (c.dirty.clone(), had_peers, c.base.clone())
     };
     let _release = Release(store, unit, attempt_id);
+    struct ScratchCleanup(PathBuf);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _scratch = ScratchCleanup(scratch_dir(store, &[unit, attempt_id]));
     let status = report
         .get("status")
         .and_then(Value::as_str)
@@ -689,17 +815,35 @@ pub fn finish_unit(
     base::atomic_write(&dir.join(format!("{unit}.json")), &json)
         .map_err(|e| Failure::new("io", e.to_string()))?;
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
-    let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
-    paths.extend(report_paths(report, repo));
+    let tree: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
+    let mut paths: BTreeSet<String> = report_paths(report, repo).into_iter().collect();
+    if !had_peers {
+        paths.extend(tree.iter().cloned());
+    }
     let changed: Vec<_> = paths.into_iter().collect();
     if let Ok(bytes) = serde_json::to_vec(&changed) {
         let _ = base::atomic_write(&dir.join(format!("{unit}.changed.json")), &bytes);
     }
+    let ignored: Vec<_> = changed
+        .iter()
+        .filter_map(|p| ignored_reason(repo, p).map(|reason| (p.clone(), reason.to_owned())))
+        .collect();
     let outside_scope: Vec<_> = changed
         .iter()
+        .filter(|p| !ignored.iter().any(|(path, _)| path == *p) && !covers(&brief.scope, p))
         .cloned()
-        .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))
         .collect();
+    let unattributed: Vec<_> = if had_peers {
+        tree.into_iter()
+            .filter(|p| {
+                !changed.contains(p)
+                    && !covers(&brief.scope, p)
+                    && ignored_reason(repo, p).is_none()
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     append_evidence(
         store,
         unit,
@@ -710,6 +854,35 @@ pub fn finish_unit(
             String::new(),
         ),
     )?;
+    if !ignored.is_empty() {
+        let command = ignored
+            .iter()
+            .map(|(path, reason)| format!("{path} ({reason})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        append_evidence(
+            store,
+            unit,
+            &mk("scope-ignored", &command, 0, String::new()),
+        )?;
+    }
+    if !unattributed.is_empty() {
+        append_evidence(
+            store,
+            unit,
+            &mk(
+                "scope-unattributed",
+                &unattributed.join(" "),
+                0,
+                String::new(),
+            ),
+        )?;
+    }
+    let scope_json = serde_json::json!({"outside": outside_scope, "ignored": ignored.iter().map(|(path, reason)| serde_json::json!({"path": path, "reason": reason})).collect::<Vec<_>>(), "unattributed": unattributed});
+    let bytes = serde_json::to_vec_pretty(&scope_json)
+        .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+    base::atomic_write(&dir.join(format!("{unit}.scope.json")), &bytes)
+        .map_err(|e| Failure::new("io", e.to_string()))?;
     let mut verify_output = None;
     let mut verify_exit = None;
     let mut verify_tail = String::new();
@@ -717,7 +890,11 @@ pub fn finish_unit(
     let mut pack = None;
     let mut pack_error = None;
     if status == "completed" && outside_scope.is_empty() {
-        match base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800)) {
+        let verify_env =
+            base::proc::scratch_env(&scratch_dir(store, &[unit, attempt_id, "verify"]))
+                .map_err(|e| Failure::new("io", e.to_string()))?;
+        match base::proc::run_shell_env(&brief.verify, repo, Duration::from_secs(1800), &verify_env)
+        {
             Ok(result) => {
                 verify_exit = Some(result.exit_code);
                 let path = dir.join(format!("{unit}.verify.txt"));
@@ -790,6 +967,8 @@ pub fn finish_unit(
         verify_tail,
         verify_output,
         outside_scope,
+        ignored,
+        unattributed,
         changed,
         pack,
         pack_error,

@@ -35,6 +35,7 @@ const FABLE_ENV_CLEARED: [&str; 8] = [
 pub(super) struct Answer {
     pub status: Status,
     pub output: Option<Value>,
+    pub raw: Option<String>,
     pub tokens: u64,
     pub detail: Option<String>,
 }
@@ -43,8 +44,9 @@ impl Answer {
         Self {
             status,
             output: None,
+            raw: None,
             tokens,
-            detail: Some(detail.into().trim().chars().take(240).collect()),
+            detail: Some(detail.into()),
         }
     }
 }
@@ -194,6 +196,7 @@ fn run_process(
     timeout: Duration,
     stop: &AtomicBool,
     member: &str,
+    raw_path: Option<&Path>,
     on_line: &mut dyn FnMut(&[u8]) -> bool,
 ) -> std::io::Result<Finished> {
     command
@@ -241,6 +244,7 @@ fn run_process(
     });
     let start = Instant::now();
     let mut stdout = Vec::new();
+    let mut raw_file: Option<std::fs::File> = None;
     let mut exited_at = None;
     let end = loop {
         if stop.load(Ordering::SeqCst) {
@@ -253,6 +257,18 @@ fn run_process(
         }
         match lines.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
+                if let Some(path) = raw_path {
+                    let write = (|| -> std::io::Result<()> {
+                        if raw_file.is_none() {
+                            raw_file = Some(std::fs::File::create(path)?);
+                        }
+                        raw_file.as_mut().unwrap().write_all(&line)
+                    })();
+                    if let Err(e) = write {
+                        proc::kill_tree(&mut child);
+                        return Err(e);
+                    }
+                }
                 stdout.extend_from_slice(&line);
                 if !on_line(&line) {
                     proc::kill_tree(&mut child);
@@ -340,6 +356,7 @@ fn checked(candidate: Option<Value>, shape: &Value, tokens: u64, what: &str) -> 
         Ok(()) => Answer {
             status: Status::Ok,
             output: Some(value),
+            raw: None,
             tokens,
             detail: None,
         },
@@ -362,6 +379,7 @@ pub(super) struct Ask<'a> {
     pub schema: &'a Value,
     pub timeout: Duration,
     pub stop: &'a AtomicBool,
+    pub raw_path: Option<&'a Path>,
 }
 
 /// `tools` empty means the round that may use none; the prompt goes on stdin.
@@ -420,6 +438,7 @@ pub(super) fn ask_fable(
         ask.timeout,
         ask.stop,
         "fable",
+        ask.raw_path,
         &mut |line| {
             let Ok(event) = serde_json::from_slice::<Value>(line) else {
                 return true;
@@ -457,9 +476,11 @@ pub(super) fn ask_fable(
         Ok(f) => f,
         Err(e) => return spawn_failure(e),
     };
+    let raw = (!finished.stdout.is_empty())
+        .then(|| String::from_utf8_lossy(&finished.stdout).into_owned());
     let tokens = meter.tokens() - tokens_before;
     let reply = result.as_ref().filter(|r| r["is_error"] != true);
-    match finished.end {
+    let mut answer = match finished.end {
         // A reply delivered with the event that crossed the cap is already paid for.
         End::Capped if reply.is_none() => Answer::bad(
             Status::BudgetCut,
@@ -471,7 +492,9 @@ pub(super) fn ask_fable(
         End::Exited(_) | End::Capped => {
             if let Some(reply) = reply {
                 let text = reply["result"].as_str().unwrap_or("");
-                return checked(json_in(text), ask.schema, tokens, "fable");
+                let mut answer = checked(json_in(text), ask.schema, tokens, "fable");
+                answer.raw = raw;
+                return answer;
             }
             let text = match &result {
                 Some(r) => r["result"].as_str().unwrap_or("").to_owned(),
@@ -489,7 +512,9 @@ pub(super) fn ask_fable(
             };
             Answer::bad(status, tokens, detail)
         }
-    }
+    };
+    answer.raw = raw;
+    answer
 }
 
 fn token_count(value: &Value) -> Option<u64> {
@@ -564,17 +589,28 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
     child.env_remove(super::ENV);
     // A margin past --print-timeout, so agy can report its own timeout first.
     let limit = ask.timeout + Duration::from_secs(30);
-    let finished = match run_process(child, None, limit, ask.stop, "argon", &mut |_| true) {
+    let finished = match run_process(
+        child,
+        None,
+        limit,
+        ask.stop,
+        "argon",
+        ask.raw_path,
+        &mut |_| true,
+    ) {
         Ok(f) => f,
         Err(e) => return spawn_failure(e),
     };
     let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
-    match finished.end {
+    let raw = (!finished.stdout.is_empty()).then(|| stdout.clone());
+    let mut answer = match finished.end {
         End::Timeout => Answer::bad(Status::Timeout, 0, "timed out"),
         End::Stopped | End::Capped => Answer::bad(Status::Failed, 0, "stopped"),
         End::Exited(Some(0)) => {
             let Ok(parsed) = serde_json::from_str::<Value>(stdout.trim()) else {
-                return Answer::bad(Status::Malformed, 0, "argon: stdout is not JSON");
+                let mut answer = Answer::bad(Status::Malformed, 0, "argon: stdout is not JSON");
+                answer.raw = raw;
+                return answer;
             };
             let tokens = token_count(&parsed).unwrap_or(0);
             let candidates = envelope_candidates(&parsed);
@@ -583,7 +619,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
                 .find(|c| schema::validate(ask.schema, c).is_ok())
                 .cloned();
             checked(
-                valid.or_else(|| candidates.into_iter().next()),
+                valid.or_else(|| candidates.into_iter().last()),
                 ask.schema,
                 tokens,
                 "argon",
@@ -598,5 +634,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
             };
             Answer::bad(status, 0, format!("exit {code:?}: {text}"))
         }
-    }
+    };
+    answer.raw = raw;
+    answer
 }

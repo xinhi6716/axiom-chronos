@@ -101,6 +101,10 @@ fn state_file(home: &Path, path: &Path) -> bool {
             ["units.tsv", "claims.tsv"].contains(file) || file.starts_with(".orch.lock")
         }
         ["orchestrate", _, "reports", file] => file.ends_with(".evidence.tsv"),
+        ["orchestrate", _, _, file] => {
+            ["units.tsv", "claims.tsv"].contains(file) || file.starts_with(".orch.lock")
+        }
+        ["orchestrate", _, _, "reports", file] => file.ends_with(".evidence.tsv"),
         _ => false,
     }
 }
@@ -204,7 +208,7 @@ pub fn stop_reason(session: &str, goal: &Goal) -> String {
 }
 
 pub fn stop_reason_in(home: &Path, session: &str, goal: &Goal) -> String {
-    let Some(store) = store_of(home, goal.project.as_deref()) else {
+    let Some(store) = store_of_goal(home, goal) else {
         return stop_reason(session, goal);
     };
     match crate::orch::pending_handoffs(&store) {
@@ -349,13 +353,8 @@ fn reviewer_binding(store: &Path, event: &Value, input: &Value, tool: &str) -> O
 
 /// With a module map, a dispatcher stays on the first module it dispatches, so its context stays small.
 fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
-    let agent: String = event
-        .get("agent_id")?
-        .as_str()?
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    if agent.is_empty() || input.get("role").and_then(Value::as_str) == Some("sol") {
+    let agent = context::agent_key(event)?;
+    if input.get("role").and_then(Value::as_str) == Some("sol") {
         return None;
     }
     let unit = input.get("unit")?.as_str()?;
@@ -390,15 +389,140 @@ fn other_module(home: &Path, event: &Value, input: &Value) -> Option<String> {
 fn store_of(home: &Path, project: Option<&str>) -> Option<PathBuf> {
     crate::orch::store_for(home, project?).ok()
 }
+fn store_of_goal(home: &Path, goal: &Goal) -> Option<PathBuf> {
+    crate::orch::store_for_goal(home, goal).ok()
+}
+
+/// Bind an unbound dispatcher only when the whole brief belongs to one module.
+fn brief_ownership(store: &Path, event: &Value, input: &Value, tool: &str) -> Option<String> {
+    let key = context::agent_key(event)?;
+    if !matches!(tool, "Write" | "Edit") {
+        return None;
+    }
+    let map =
+        crate::orch::parse_map(&std::fs::read_to_string(store.join("modules.md")).ok()?).ok()?;
+    let cwd = event.get("cwd").and_then(Value::as_str);
+    let path = resolved_path(input.get("file_path")?.as_str()?, cwd)?;
+    if !path
+        .parent()
+        .is_some_and(|parent| same_path(parent, &real(&store.join("briefs"))))
+    {
+        return None;
+    }
+    let text = if tool == "Write" {
+        input.get("content")?.as_str()?.to_string()
+    } else {
+        let current = std::fs::read_to_string(&path).ok()?;
+        let old = input.get("old_string")?.as_str()?;
+        let new = input.get("new_string")?.as_str()?;
+        if old.is_empty() || !current.contains(old) {
+            return None;
+        }
+        if input.get("replace_all").and_then(Value::as_bool) == Some(true) {
+            current.replace(old, new)
+        } else {
+            current.replacen(old, new, 1)
+        }
+    };
+    let brief = crate::orch::parse_brief(&text).ok()?;
+    let marker = store.join("agents").join(key);
+    let read_marker = || {
+        std::fs::read_to_string(&marker)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let mut matches = map
+        .modules
+        .iter()
+        .filter(|m| brief.scope.iter().all(|p| crate::orch::covers(&m.paths, p)));
+    let candidate = matches.next().filter(|_| matches.next().is_none());
+    let bound = crate::orch::with_lock(store, false, || {
+        if let Some(bound) = read_marker() {
+            return Ok(Some(bound));
+        }
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        std::fs::create_dir_all(store.join("agents"))
+            .map_err(|e| base::Failure::new("io", e.to_string()))?;
+        base::atomic_write(&marker, candidate.id.as_bytes())
+            .map_err(|e| base::Failure::new("io", e.to_string()))?;
+        Ok(Some(candidate.id.clone()))
+    })
+    .ok()??;
+    if let Ok(units) = crate::orch::read_units(store) {
+        if let Some(unit) = units.iter().find(|u| {
+            u.track != bound
+                && (path.file_stem().and_then(|s| s.to_str()) == Some(u.id.as_str())
+                    || (!u.brief.is_empty()
+                        && resolved_path(&u.brief, cwd).is_some_and(|p| same_path(&path, &p))))
+        }) {
+            return Some(format!(
+                "This dispatcher works on module {bound}; brief belongs to module {} (unit {}).",
+                unit.track, unit.id
+            ));
+        }
+    }
+    let module = map.modules.iter().find(|m| m.id == bound);
+    if let Some(path) = brief
+        .scope
+        .iter()
+        .find(|p| !module.is_some_and(|m| crate::orch::covers(&m.paths, p)))
+    {
+        let owner = map
+            .modules
+            .iter()
+            .find(|m| crate::orch::covers(&m.paths, path))
+            .map_or("no module", |m| m.id.as_str());
+        return Some(format!(
+            "This dispatcher works on module {bound}; scope {path} belongs to {owner}."
+        ));
+    }
+    None
+}
+
+fn foreign_registration(store: &Path, event: &Value, input: &Value) -> Option<String> {
+    let key = context::agent_key(event)?;
+    if !store.join("modules.md").is_file() {
+        return None;
+    }
+    let marker = std::fs::read_to_string(store.join("agents").join(key)).ok()?;
+    let bound = marker.trim();
+    if bound.is_empty() {
+        return None;
+    }
+    let args = input.get("args")?.as_array()?;
+    let args = if args.first().and_then(Value::as_str) == Some("--json") {
+        &args[1..]
+    } else {
+        &args[..]
+    };
+    if args.first().and_then(Value::as_str) != Some("unit")
+        || args.get(1).and_then(Value::as_str) != Some("add")
+    {
+        return None;
+    }
+    let track = args.windows(2).find_map(|w| {
+        (w[0].as_str() == Some("--track"))
+            .then(|| w[1].as_str())
+            .flatten()
+    })?;
+    (track != bound).then(|| {
+        format!(
+            "This dispatcher works on module {bound}; cannot register a unit on module {track}."
+        )
+    })
+}
 /// The module this agent was bound to by its first `codex_run`, if any.
 fn agent_module(home: &Path, g: &Goal, input: &Value, event: &Value) -> Option<String> {
     let key = context::agent_key(event)?;
     [
-        input.get("project").and_then(Value::as_str),
-        g.project.as_deref(),
+        store_of(home, input.get("project").and_then(Value::as_str)),
+        store_of_goal(home, g),
     ]
     .into_iter()
-    .filter_map(|p| store_of(home, p))
+    .flatten()
     .find_map(|store| {
         let module = std::fs::read_to_string(store.join("agents").join(&key)).ok()?;
         let module = module.trim();
@@ -407,7 +531,7 @@ fn agent_module(home: &Path, g: &Goal, input: &Value, event: &Value) -> Option<S
 }
 /// The engine's record of the work: the module's latest handoff and digest, or the whole wish's.
 fn recall(home: &Path, g: &Goal, module: Option<&str>) -> Option<String> {
-    let store = store_of(home, g.project.as_deref())?;
+    let store = store_of_goal(home, g)?;
     crate::orch::resume_text(&store, g.cwd.as_deref().map(Path::new), module).ok()
 }
 fn names_module(prompt: &str, module: &str) -> bool {
@@ -461,7 +585,7 @@ fn start_dispatcher(
     g: &Goal,
     input: &Value,
 ) -> Option<Result<Value, String>> {
-    let store = store_of(home, g.project.as_deref())?;
+    let store = store_of_goal(home, g)?;
     let prompt = input.get("prompt")?.as_str()?;
     let pending = crate::orch::pending_handoffs(&store).ok()?;
     if pending.is_empty() {
@@ -542,7 +666,7 @@ fn start_dispatcher(
 /// Marks taken each pending handoff this dispatcher was started with: its transcript opens with
 /// the prompt that carried it, so a launch that failed or was cancelled consumes nothing.
 fn confirm_handoffs(home: &Path, g: &Goal, event: &Value) {
-    let Some(store) = store_of(home, g.project.as_deref()) else {
+    let Some(store) = store_of_goal(home, g) else {
         return;
     };
     let pending = crate::orch::pending_handoffs(&store).unwrap_or_default();
@@ -596,7 +720,7 @@ fn compaction_anchor(
 
 /// After Claude Code compacts a dispatcher, its next gated call brings back the work state once.
 fn after_compaction(home: &Path, g: &Goal, event: &Value, input: &Value) -> Option<String> {
-    let store = store_of(home, g.project.as_deref())?;
+    let store = store_of_goal(home, g)?;
     let (boundary, marker) = pending_compaction(&store, event)?;
     let module = agent_module(home, g, input, event);
     let text = match recall(home, g, module.as_deref()) {
@@ -664,7 +788,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 g.status
             );
             if context::in_dispatcher(event) {
-                if let Some(anchor) = store_of(home, g.project.as_deref())
+                if let Some(anchor) = store_of_goal(home, &g)
                     .filter(|store| store.is_dir())
                     .and_then(|store| {
                         let (boundary, marker) = pending_compaction(&store, event)?;
@@ -766,9 +890,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             };
             let reviewer = agent
                 && event.get("agent_type").and_then(Value::as_str) == Some("chronos:reviewer");
-            let store = reviewer
-                .then(|| store_of(home, g.project.as_deref()))
-                .flatten();
+            let store = reviewer.then(|| store_of_goal(home, &g)).flatten();
             let bound = store
                 .as_deref()
                 .and_then(|store| reviewer_binding(store, event, input, tool));
@@ -808,6 +930,18 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 }) && !own_pack
                 {
                     return deny("Reviewers may not read files larger than 50,000 bytes whole; use Read with a limit.");
+                }
+            }
+            if agent {
+                if let Some(store) = store_of_goal(home, &g) {
+                    let reason = if tool == ORCH {
+                        foreign_registration(&store, event, input)
+                    } else {
+                        brief_ownership(&store, event, input, tool)
+                    };
+                    if let Some(reason) = reason {
+                        return deny(&reason);
+                    }
                 }
             }
             let mut warning = None;

@@ -73,7 +73,7 @@ fn parsing_errors_are_ordered_and_descriptive() {
             .message,
         "missing unit"
     );
-    for bad in [r#""Smoke""#, "null", "42", r#""other""#] {
+    for bad in [r#""Smoke""#, "42", r#""other""#] {
         let text = format!(
             r#"{{"verdict":"fail","unit":"u","tree":"t","findings":[{{}},{{"needs":{bad}}}]}}"#
         );

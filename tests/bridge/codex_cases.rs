@@ -108,10 +108,10 @@ fn unit_build_reuse_and_gates() {
             .count(),
         turns
     );
-    assert_eq!(reused["status"], "completed");
+    assert_eq!(reused["status"], "refused");
+    assert_eq!(reused["error"]["kind"], "already_verified");
     assert_eq!(reused["state"], "verified");
     assert_eq!(reused["unit"], "bridgeunit");
-    assert_eq!(reused["reused"], true, "{reused}");
     let sol = invoke(
         &b,
         json!({"project":"demo","unit":"bridgeunit","cwd":repo,"role":"terra","model":"gpt-6-sol"}),
@@ -140,6 +140,7 @@ fn sol_and_astra_restrictions() {
     )
     .unwrap();
     g.project = Some("demo".into());
+    g.wish_id = None;
     fs::write(
         home.join("goals/session.json"),
         serde_json::to_vec(&g).unwrap(),
@@ -408,6 +409,7 @@ fn astra_gate_requires_every_prerequisite() {
         let mut g =
             axiom::goal::open(home, "s", "[astra] build", Some(repo.to_str().unwrap())).unwrap();
         g.project = Some("demo".into());
+        g.wish_id = None;
         fs::write(home.join("goals/s.json"), serde_json::to_vec(&g).unwrap()).unwrap();
         if missing != 0 {
             orch::record_stage(&store, "astra", "gpt-6-astra", true).unwrap();
@@ -614,6 +616,7 @@ fn creative_goal_requires_architect() {
     )
     .unwrap();
     goal.project = Some("demo".into());
+    goal.wish_id = None;
     fs::write(
         temp.path().join("goals/creative.json"),
         serde_json::to_vec(&goal).unwrap(),

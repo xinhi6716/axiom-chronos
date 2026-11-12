@@ -422,6 +422,20 @@ pub fn accept_output_path(store: &Path, module: &str) -> PathBuf {
     store.join("reports").join(format!("{module}.accept.txt"))
 }
 
+pub fn scratch_dir(store: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(store.join("scratch"), |path, part| path.join(part))
+}
+
+fn run_scratch(command: &str, repo: &Path, dir: &Path) -> Res<ShellRun> {
+    let result = base::proc::scratch_env(dir)
+        .map_err(io)
+        .and_then(|env| base::proc::run_shell_env(command, repo, Duration::from_secs(1800), &env));
+    let _ = std::fs::remove_dir_all(dir);
+    result
+}
+
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
         .modules
@@ -436,7 +450,11 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .iter()
         .map(|u| unit_brief(store, &u.id).map(|b| b.scope))
         .collect::<Res<Vec<_>>>()?;
-    let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
+    let result = run_scratch(
+        &m.accept_command,
+        repo,
+        &scratch_dir(store, &[&format!("accept-{module}"), &base::unique()]),
+    )?;
     std::fs::create_dir_all(store.join("reports")).map_err(io)?;
     base::atomic_write(&accept_output_path(store, module), result.output.as_bytes()).map_err(io)?;
     for (u, scope) in units.into_iter().zip(scopes) {
@@ -470,7 +488,11 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
         )));
     }
     let brief = unit_brief(store, unit)?;
-    let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
+    let result = run_scratch(
+        &brief.verify,
+        repo,
+        &scratch_dir(store, &[unit, &format!("verify-{}", base::unique())]),
+    )?;
     let dir = store.join("reports");
     std::fs::create_dir_all(&dir).map_err(io)?;
     base::atomic_write(
@@ -505,7 +527,11 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
                 .ok_or_else(|| invalid("missing FULL TEST command"))?
         }
     };
-    let result = base::proc::run_shell(&command, repo, Duration::from_secs(1800))?;
+    let result = run_scratch(
+        &command,
+        repo,
+        &scratch_dir(store, &["fulltest", &base::unique()]),
+    )?;
     append_evidence(
         store,
         "_full",

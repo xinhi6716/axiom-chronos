@@ -35,3 +35,21 @@ fn release_and_council_documentation_match_the_contract() {
         .unwrap()
         .contains("## 2.0.1"));
 }
+
+#[test]
+fn council_doc_states_robust_contract() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(root.join("engine/research/COUNCIL.md")).unwrap();
+    for phrase in [
+        "one repair ask in the same turn",
+        ".raw.txt",
+        ".repair.raw.txt",
+        "degraded_members",
+        "member_degraded",
+        "council-events.jsonl",
+        "Anonymisation rewrites only attribution",
+    ] {
+        assert!(text.contains(phrase), "{phrase}");
+    }
+    assert!(!text.replace("member_degraded", "").contains("member_degraded"));
+}

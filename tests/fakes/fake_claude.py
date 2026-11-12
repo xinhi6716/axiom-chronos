@@ -45,6 +45,9 @@ first = incoming.get()
 if first is None:
     sys.exit(0)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'failed' if scenario == 'no-bridge' else 'connected'}]})
+if scenario == 'max-turns':
+    emit({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True, 'num_turns': int(os.environ.get('FAKE_CLAUDE_TURNS', '7')), 'result': ''})
+    sys.exit(0)
 if scenario == 'limit':
     emit({'type': 'result', 'is_error': True, 'result': "You've hit your usage limit"})
     sys.exit(0)

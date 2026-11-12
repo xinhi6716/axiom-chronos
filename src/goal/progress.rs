@@ -25,8 +25,8 @@ pub(super) fn clear(home: &Path, session: &str) -> Res<()> {
 fn fingerprint(home: &Path, session: &str) -> Res<String> {
     let goal = required(home, session)?;
     let mut files = vec![path(home, session)?];
-    if let Some(project) = goal.project {
-        let store = crate::orch::store_for(home, &project)?;
+    if goal.project.is_some() {
+        let store = crate::orch::store_for_goal(home, &goal)?;
         files.extend(["units.tsv", "ledger.tsv", "claims.tsv"].map(|name| store.join(name)));
         for dir in [store.join("handoffs"), store.join("handoffs/module")] {
             let entries = match fs::read_dir(dir) {

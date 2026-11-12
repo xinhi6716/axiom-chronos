@@ -326,9 +326,11 @@ fn context_selection_bounds_and_missing() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path();
     init(p);
-    let map = include_str!("fixtures/module_map/modules.md").replace('\n', "\r\n");
-    let plan = include_str!("fixtures/module_map/plan.md").replace('\n', "\r\n");
-    let decisions = include_str!("fixtures/module_map/decisions.md").replace('\n', "\r\n");
+    // Checkout may already use CRLF; normalize before constructing CRLF inputs.
+    let crlf = |text: &str| text.replace("\r\n", "\n").replace('\n', "\r\n");
+    let map = crlf(include_str!("fixtures/module_map/modules.md"));
+    let plan = crlf(include_str!("fixtures/module_map/plan.md"));
+    let decisions = crlf(include_str!("fixtures/module_map/decisions.md"));
     write(p, "modules.md", &map);
     write(p, "astra/plan-final.md", &plan);
     write(p, "decisions.md", &decisions);

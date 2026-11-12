@@ -4,10 +4,6 @@ fn asset(path: &str) -> &'static str {
     FILES.iter().find(|(name, _)| *name == path).unwrap().1
 }
 
-fn contains(text: &str, phrase: &str) -> bool {
-    text.contains(phrase)
-}
-
 #[test]
 fn contract_sentences_are_embedded() {
     let unit_mode = "Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
@@ -15,22 +11,22 @@ fn contract_sentences_are_embedded() {
         ("DISPATCH.md", "SCOPE lists paths only; notes such as \"(new)\" go in CONTEXT."),
         ("DISPATCH.md", "VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME."),
         ("DISPATCH.md", unit_mode),
-        ("DISPATCH.md", "Put all paths space-separated on one SCOPE line."),
+        ("DISPATCH.md", "SCOPE may span lines or bullets; every path counts."),
+        ("DISPATCH.md", "Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically."),
         ("DISPATCH.md", "Write all module briefs in one call: a single Bash heredoc, or Write for one unit."),
         ("agents/dispatcher.md", r#"`orch` `["module-context", <module>, "--repo", <dir>]`"#),
         ("agents/dispatcher.md", "For any `incomplete` section, Grep its named source file."),
         ("agents/dispatcher.md", "call `memory_search` once per module"),
         ("agents/dispatcher.md", r#"unless the core says "no memory"; then skip it."#),
-        ("agents/dispatcher.md", "put all paths space-separated on its single SCOPE line."),
+        ("agents/dispatcher.md", "SCOPE may span lines or bullets. Write and register briefs only for your own module: a foreign brief or `--track` is denied."),
+        ("agents/dispatcher.md", r#"A `codex_run` reply may carry `status: "refused"` (`already_running`, `already_verified`) with the `owner`; report it, never retry it."#),
         ("agents/dispatcher.md", "Write all module briefs in one call: a Bash heredoc, or Write for one unit."),
         ("agents/dispatcher.md", "The PostToolUse hook records the review;"),
         ("agents/dispatcher.md", "only when the hook says the review was not recorded, after fixing the cause."),
-        ("agents/dispatcher.md", r#"leave the key out instead of writing `"needs": null`"#),
         ("agents/dispatcher.md", "process every `{unit, pack}` in `review`"),
         ("agents/dispatcher.md", "For `wait`, a later unit runs ACCEPT, or `reason` names what to do."),
         ("agents/dispatcher.md", "For `fix`, follow the fix flow below."),
         ("agents/dispatcher.md", "the outcome saying `module_done` is the report: return it without calling `orch report` or `orch status`"),
-        ("DISPATCH.md", "Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit."),
         ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
         ("agents/dispatcher.md", "Before dispatching a fix, register it separately with `orch` `[\"unit\", \"add\", <new>, \"--track\", <module>, \"--brief\", <path>, \"--fixes\", <old>]`."),
         ("agents/dispatcher.md", "For other takeovers by a later unit of the same module, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`"),
@@ -69,9 +65,21 @@ fn contract_sentences_are_embedded() {
     ];
     for (path, phrase) in cases {
         let text = asset(path);
-        assert!(contains(text, phrase), "{path}: {phrase}");
-        assert!(!contains(&text.replace(phrase, ""), phrase), "{path}: {phrase}");
+        assert_eq!(text.matches(phrase).count(), 1, "{path}: {phrase}");
     }
+}
+
+#[test]
+fn removed_workarounds_are_gone() {
+    fn has_workaround(text: &str) -> bool {
+        [".axiom-tmp", "space-separated", "single SCOPE line", "\"needs\": null"]
+            .iter()
+            .any(|phrase| text.contains(phrase))
+    }
+    for path in ["DISPATCH.md", "agents/dispatcher.md"] {
+        assert!(!has_workaround(asset(path)), "{path}");
+    }
+    assert!(has_workaround(".axiom-tmp"));
 }
 
 const FIRST: &str = "1. Read `<store>/units.tsv` and list the units whose state is `verified`; skip every other unit without reading its files.";

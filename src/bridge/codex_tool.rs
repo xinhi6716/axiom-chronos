@@ -175,6 +175,19 @@ fn unit_reply(
         Some(&finished.changed),
     );
     let mut result = json!({"status":if built {"completed"} else {"failed"},"error":error,"unit":unit,"state":state,"registered":registered,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_exit":finished.verify_exit,"verify_output":sum["output_file"],"tests":sum["tests"],"failing":sum["failing"],"changed":sum["changed"],"outside_scope":finished.outside_scope.iter().take(summary::MAX_PATH_SAMPLE).collect::<Vec<_>>(),"outside_scope_count":finished.outside_scope.len(),"accept":accept,"report":root.join("reports").join(format!("{unit}.md")),"report_json":root.join("reports").join(format!("{unit}.json")),"pack":finished.pack,"usage":report["usage"],"slot_wait_ms":report["slot_wait_ms"],"slot_wait":report["slot_wait"]});
+    result["scope_ignored"] = json!(finished
+        .ignored
+        .iter()
+        .take(summary::MAX_PATH_SAMPLE)
+        .map(|(path, reason)| json!({"path":path,"reason":reason}))
+        .collect::<Vec<_>>());
+    result["scope_ignored_count"] = json!(finished.ignored.len());
+    result["unattributed"] = json!(finished
+        .unattributed
+        .iter()
+        .take(summary::MAX_PATH_SAMPLE)
+        .collect::<Vec<_>>());
+    result["unattributed_count"] = json!(finished.unattributed.len());
     if reused {
         result["reused"] = json!(true);
     }
@@ -368,14 +381,28 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             ));
         }
         let required = active.is_some();
-        let begin = if cycle {
-            orch::begin_unit_cycle(root, u, r, Path::new(cwd), required)?
-        } else {
-            Some(orch::begin_unit(root, u, r, Path::new(cwd), required)?)
+        let (begin_result, refused_owner) =
+            orch::lifecycle::begin_dispatch(root, u, r, Path::new(cwd), required, cycle);
+        let begin = match begin_result {
+            Ok(begin) => begin,
+            Err(e) if e.kind == "already_running" || e.kind == "already_verified" => {
+                let rows = orch::evidence(root, u)?;
+                let state = orch::derive_state(&rows, orch::needs_accept(root, u)?);
+                let owner = refused_owner.expect("refused begin records its owner under the lock");
+                let mut result = json!({"status":"refused", "error":e.to_json(), "unit":u, "state":state, "owner":owner});
+                if cycle {
+                    result["next"] = json!(if e.kind == "already_running" {
+                        "wait"
+                    } else {
+                        "done"
+                    });
+                }
+                return Ok(result);
+            }
+            Err(e) => return Err(e),
         };
         match begin {
-            Some(orch::Begin::Reused) | None => {
-                let reused = begin.is_some();
+            None => {
                 let rows = orch::evidence(root, u)?;
                 let verify = rows.iter().rev().find(|r| r.kind == "verify");
                 let saved: Value = std::fs::read(root.join("reports").join(format!("{u}.json")))
@@ -386,14 +413,13 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 let pack_path = orch::pack_path(root, u);
                 let mut pack = pack_path.is_file().then_some(pack_path.clone());
                 let mut pack_error = None;
-                if !reused
-                    && (pack.is_none()
-                        || std::fs::metadata(&pack_path)
+                if pack.is_none()
+                    || std::fs::metadata(&pack_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        < std::fs::metadata(&verify_path)
                             .and_then(|m| m.modified())
                             .ok()
-                            < std::fs::metadata(&verify_path)
-                                .and_then(|m| m.modified())
-                                .ok())
                 {
                     match orch::review_pack(root, u, Path::new(cwd)) {
                         Ok(info) => pack = Some(info.path),
@@ -403,12 +429,34 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                         }
                     }
                 }
+                let scope: Value =
+                    std::fs::read(root.join("reports").join(format!("{u}.scope.json")))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| json!({}));
                 let finished = orch::Finished {
-                    state: if reused { "verified" } else { "built" }.into(),
+                    state: "built".into(),
                     verify_exit: verify.map(|v| v.exit_code),
                     verify_tail: String::new(),
                     verify_output: verify_path.is_file().then_some(verify_path),
                     outside_scope: vec![],
+                    ignored: scope["ignored"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| {
+                            Some((
+                                item["path"].as_str()?.to_owned(),
+                                item["reason"].as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect(),
+                    unattributed: scope["unattributed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| item.as_str().map(str::to_owned))
+                        .collect(),
                     changed: std::fs::read(root.join("reports").join(format!("{u}.changed.json")))
                         .ok()
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -440,7 +488,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                     &saved,
                     finished,
                     cycle,
-                    reused,
+                    false,
                 );
             }
             Some(orch::Begin::Run {
@@ -460,6 +508,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                     ));
                 }
             }
+            Some(_) => unreachable!("begin never reuses a verified unit"),
         }
     }
     let mut resolved = explicit.unwrap_or("").to_owned();
@@ -487,7 +536,23 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             keep_plugins: plugins,
             web_search: a.get("web_search") == Some(&Value::Bool(true)),
         };
-        Ok((model, server.run(&req)?))
+        let report = if let Some(root) = &store {
+            let path = if let Some(u) = unit {
+                orch::scratch_dir(root, &[u, &attempt_id])
+            } else {
+                orch::scratch_dir(root, &["astra", &base::unique()])
+            };
+            let env =
+                base::proc::scratch_env(&path).map_err(|e| Failure::new("io", e.to_string()))?;
+            let result = server.run_with_env(&req, &env);
+            if unit.is_none() || result.is_err() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            result?
+        } else {
+            server.run(&req)?
+        };
+        Ok((model, report))
     })();
     let (model, mut report) = match result {
         Ok(r) => r,

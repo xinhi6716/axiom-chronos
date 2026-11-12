@@ -65,7 +65,74 @@ pub struct Output {
 }
 pub fn store_for(home: &Path, project: &str) -> Res<PathBuf> {
     base::require_slug("project", project)?;
-    Ok(home.join("orchestrate").join(project))
+    wish_store(home, project, current_wish(home, project)?.as_deref())
+}
+fn valid_wish_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 22
+        && &bytes[..2] == b"w-"
+        && bytes[2..15].iter().all(u8::is_ascii_digit)
+        && bytes[15] == b'-'
+        && bytes[16..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+pub fn wish_store(home: &Path, project: &str, wish_id: Option<&str>) -> Res<PathBuf> {
+    base::require_slug("project", project)?;
+    let store = home.join("orchestrate").join(project);
+    match wish_id {
+        Some(id) if valid_wish_id(id) => Ok(store.join(id)),
+        Some(id) => Err(fail(format!("invalid wish id: {id:?}"))),
+        None => Ok(store),
+    }
+}
+pub fn current_wish(home: &Path, project: &str) -> Res<Option<String>> {
+    base::require_slug("project", project)?;
+    let entries = match std::fs::read_dir(home.join("goals")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    let mut active: Option<String> = None;
+    let mut any: Option<String> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(goal) = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<crate::goal::Goal>(&b).ok())
+        else {
+            continue;
+        };
+        if goal.project.as_deref() != Some(project) {
+            continue;
+        }
+        if let Some(id) = goal.wish_id {
+            if goal.status == "active" && active.as_ref().map_or(true, |old| id > *old) {
+                active = Some(id.clone());
+            }
+            if any.as_ref().map_or(true, |old| id > *old) {
+                any = Some(id);
+            }
+        }
+    }
+    Ok(active.or(any))
+}
+pub fn store_for_goal(home: &Path, goal: &crate::goal::Goal) -> Res<PathBuf> {
+    let project = goal
+        .project
+        .as_deref()
+        .ok_or_else(|| fail("goal has no project"))?;
+    wish_store(home, project, goal.wish_id.as_deref())
+}
+pub fn wish_of_store(store: &Path) -> String {
+    store
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
@@ -367,6 +434,10 @@ pub(crate) struct DiskClaim {
     pub attempt: String,
     pub scope: Vec<String>,
     pub started: String,
+    pub module: String,
+    pub wish: String,
+    pub pid: String,
+    pub peers: Vec<String>,
 }
 pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
     let text = match std::fs::read_to_string(store.join("claims.tsv")) {
@@ -375,14 +446,16 @@ pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
         Err(e) => return Err(io(e)),
     };
     let mut lines = text.lines();
-    if lines.next() != Some("unit\tattempt\tscope\tstarted") {
-        return Err(fail("claims.tsv has an invalid header"));
-    }
+    let columns = match lines.next() {
+        Some("unit\tattempt\tscope\tstarted") => 4,
+        Some("unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers") => 8,
+        _ => return Err(fail("claims.tsv has an invalid header")),
+    };
     lines
         .filter(|l| !l.is_empty())
         .map(|line| {
             let c: Vec<_> = line.split('\t').collect();
-            if c.len() != 4 || c[0].is_empty() || c[1].is_empty() {
+            if c.len() != columns || c[0].is_empty() || c[1].is_empty() {
                 return Err(fail("claims.tsv has a malformed row"));
             }
             Ok(DiskClaim {
@@ -390,19 +463,32 @@ pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
                 attempt: c[1].into(),
                 scope: c[2].split_whitespace().map(str::to_owned).collect(),
                 started: c[3].into(),
+                module: c.get(4).unwrap_or(&"").to_string(),
+                wish: c.get(5).unwrap_or(&"").to_string(),
+                pid: c.get(6).unwrap_or(&"").to_string(),
+                peers: c
+                    .get(7)
+                    .unwrap_or(&"")
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect(),
             })
         })
         .collect()
 }
 pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
-    let mut text = String::from("unit\tattempt\tscope\tstarted\n");
+    let mut text = String::from("unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers\n");
     for c in rows {
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            c.unit,
-            c.attempt,
-            c.scope.join(" "),
-            c.started
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            c.unit.replace(['\t', '\r', '\n'], " "),
+            c.attempt.replace(['\t', '\r', '\n'], " "),
+            c.scope.join(" ").replace(['\t', '\r', '\n'], " "),
+            c.started.replace(['\t', '\r', '\n'], " "),
+            c.module.replace(['\t', '\r', '\n'], " "),
+            c.wish.replace(['\t', '\r', '\n'], " "),
+            c.pid.replace(['\t', '\r', '\n'], " "),
+            c.peers.join(" ").replace(['\t', '\r', '\n'], " ")
         ));
     }
     write(store, "claims.tsv", &text)

@@ -263,12 +263,17 @@ fn reused_and_carry_forward_stay_verified() {
     let first = f.cycle("one");
     orch::record_review(&f.store, &["one".into()], "claude-review", true, &f.repo).unwrap();
     let rows = orch::evidence(&f.store, "one").unwrap();
+    let evidence_file = fs::read(f.store.join("reports/one.evidence.tsv")).unwrap();
+    let changed_file = fs::read(f.store.join("reports/one.changed.json")).unwrap();
     let reused = f.cycle("one");
+    assert_eq!(reused["status"], "refused");
+    assert_eq!(reused["error"]["kind"], "already_verified");
     assert_eq!(reused["state"], "verified", "{reused}");
     assert_eq!(reused["next"], "done");
-    assert_eq!(reused["attempt"], first["attempt"]);
-    assert_eq!(reused["changed"], first["changed"]);
+    assert_eq!(reused["owner"]["attempt"], first["attempt"].to_string());
     assert_eq!(orch::evidence(&f.store, "one").unwrap().len(), rows.len());
+    assert_eq!(fs::read(f.store.join("reports/one.evidence.tsv")).unwrap(), evidence_file);
+    assert_eq!(fs::read(f.store.join("reports/one.changed.json")).unwrap(), changed_file);
     orch::record_accept(&f.store, "m", &f.repo).unwrap();
     let carried = f.cycle("one");
     assert_eq!(carried["next"], "done", "{carried}");
@@ -399,7 +404,8 @@ fn cycle_claim_conflicts_match_plain_errors() {
         "unit\tattempt\tscope\tstarted\none\tunknown\tsrc/mod.py\ttime\n",
     )
     .unwrap();
-    assert_eq!(f.cycle("two")["error"]["kind"], "outcome_unknown");
+    assert_eq!(f.cycle("two")["error"]["kind"], "busy");
+    assert_eq!(f.cycle("one")["error"]["kind"], "outcome_unknown");
 }
 
 #[test]
@@ -440,6 +446,7 @@ fn cycle_preserves_pre_turn_gates() {
     )
     .unwrap();
     g.project = Some("demo".into());
+    g.wish_id = None;
     fs::write(
         f.temp.path().join("goals/session.json"),
         serde_json::to_vec(&g).unwrap(),
@@ -468,6 +475,7 @@ fn cycle_fix_limit_and_goal_hold() {
     )
     .unwrap();
     g.project = Some("demo".into());
+    g.wish_id = None;
     fs::write(
         f.temp.path().join("goals/session.json"),
         serde_json::to_vec(&g).unwrap(),

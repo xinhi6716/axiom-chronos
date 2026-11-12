@@ -8,6 +8,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
+    io::Write,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -36,6 +37,7 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
     let failed = |e: Failure| CrossReply {
         status: Status::Failed,
         output: None,
+        raw: None,
         tokens: 0,
         model: None,
         detail: Some(e.message),
@@ -54,7 +56,7 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         model: model.clone(),
         sandbox: "read-only".into(),
         effort: Some("high".into()),
-        output_schema: Some(request.schema.clone()),
+        output_schema: None,
         developer_instructions: Some(
             "Answer from the text you are given. Do not run commands or read files.".into(),
         ),
@@ -63,16 +65,18 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
         keep_plugins: vec![],
         web_search: false,
     };
-    let report = match server.run_cancellable(&run, Some(request.token_cap), Some(b.council_flags().1)) {
-        Ok(report) => report,
-        Err(e) => return failed(e),
-    };
+    let report =
+        match server.run_cancellable(&run, Some(request.token_cap), Some(b.council_flags().1)) {
+            Ok(report) => report,
+            Err(e) => return failed(e),
+        };
     let kind = report["error"]["kind"]
         .as_str()
         .unwrap_or("")
         .to_lowercase();
     let status = match report["status"].as_str() {
-        Some("completed") if !report["structured_output"].is_null() => Status::Ok,
+        Some("completed") if report["final_message"].is_string() => Status::Ok,
+        Some("completed") => Status::Malformed,
         Some("token_cap") => Status::BudgetCut,
         Some("timeout") => Status::Timeout,
         _ if kind.contains("usagelimit") => Status::Quota,
@@ -81,11 +85,22 @@ fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
     };
     CrossReply {
         status,
-        output: (status == Status::Ok).then(|| report["structured_output"].clone()),
+        output: None,
+        raw: report["final_message"].as_str().map(str::to_owned),
         tokens: report["usage"]["totalTokens"].as_u64().unwrap_or(0),
         model: Some(model),
-        detail: if status == Status::Ok { report["slot_wait"].as_str().map(str::to_owned) }
-            else { Some(format!("{}{}", report["error"]["message"], report["slot_wait"].as_str().map(|s| format!("; {s}")).unwrap_or_default())) },
+        detail: if status == Status::Ok {
+            report["slot_wait"].as_str().map(str::to_owned)
+        } else {
+            Some(format!(
+                "{}{}",
+                report["error"]["message"],
+                report["slot_wait"]
+                    .as_str()
+                    .map(|s| format!("; {s}"))
+                    .unwrap_or_default()
+            ))
+        },
     }
 }
 
@@ -127,7 +142,31 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
                         }
                     }
                 });
-                let result = council::run(setup, &request, &|r| cross(b, cwd, r), stop);
+                let events_path = request
+                    .plan_path
+                    .parent()
+                    .unwrap()
+                    .join("council-events.jsonl");
+                let event_error = std::sync::Mutex::new(None);
+                let sink = |event: &Value| {
+                    let message = event.to_string();
+                    if let Some(progress) = &progress {
+                        progress.emit(&message);
+                    }
+                    let write = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&events_path)
+                        .and_then(|mut f| writeln!(f, "{message}"));
+                    if let Err(e) = write {
+                        *event_error.lock().unwrap() = Some(e.to_string());
+                    }
+                };
+                let mut result =
+                    council::run_with_events(setup, &request, &|r| cross(b, cwd, r), stop, &sink);
+                if let Some(e) = event_error.into_inner().unwrap() {
+                    result = Err(Failure::new("io", e));
+                }
                 done.store(true, Ordering::SeqCst);
                 result
             })

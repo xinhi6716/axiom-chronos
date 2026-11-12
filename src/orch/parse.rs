@@ -108,19 +108,65 @@ fn is_valid_setting(line: &str) -> bool {
     };
     valid("EFFORT", &EFFORTS) || valid("TIER", &TIERS)
 }
+const SECTION_FIELDS: [&str; 6] = ["GOAL", "SCOPE", "VERIFY", "CONTEXT", "EFFORT", "TIER"];
+/// The complete SCOPE section: its own line and every following line up to the next brief field,
+/// bullets and blank lines allowed. Line numbers in errors are 1-based in the whole brief.
+fn scope_section(text: &str, from: usize) -> Result<Vec<String>, String> {
+    let mut scope = Vec::new();
+    let mut first: Option<usize> = None;
+    let mut inside = false;
+    for (index, line) in text.lines().enumerate().skip(from) {
+        let number = index + 1;
+        let field = SECTION_FIELDS.iter().find(|name| is_field(line, name));
+        if let Some(name) = field {
+            inside = false;
+            if *name == "SCOPE" {
+                if let Some(m) = first {
+                    return Err(format!(
+                        "has SCOPE twice: line {number} repeats line {m}"
+                    ));
+                }
+                first = Some(number);
+                inside = true;
+            }
+        }
+        if !inside {
+            continue;
+        }
+        let mut rest = if field.is_some() { &line["SCOPE".len()..] } else { line };
+        rest = rest.trim();
+        for bullet in ["- ", "* ", "+ "] {
+            if let Some(r) = rest.strip_prefix(bullet) {
+                rest = r;
+                break;
+            }
+        }
+        for token in words(rest) {
+            if token.contains(['(', ')', '"', '`']) || token.ends_with(':') {
+                return Err(format!(
+                    "has SCOPE entry {token:?} on line {number} that is not a path; put notes in CONTEXT"
+                ));
+            }
+            scope.push(token);
+        }
+    }
+    Ok(scope)
+}
 pub fn parse_brief(text: &str) -> Result<Brief, String> {
     let start = text.lines().position(|line| is_field(line, "GOAL"));
     let body = start
         .map(|n| text.lines().skip(n).collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
     let f = fields(&body, &["GOAL", "SCOPE", "VERIFY", "CONTEXT"]);
-    for n in ["GOAL", "SCOPE", "VERIFY"] {
-        if f.get(n).is_none_or(|s| s.trim().is_empty()) {
-            return Err(format!("is missing {n}"));
-        }
+    if f.get("GOAL").is_none_or(|s| s.trim().is_empty()) {
+        return Err("is missing GOAL".into());
     }
-    if words(&f["SCOPE"]).is_empty() {
+    let scope = scope_section(text, start.unwrap_or(0))?;
+    if scope.is_empty() {
         return Err("is missing SCOPE".into());
+    }
+    if f.get("VERIFY").is_none_or(|s| s.trim().is_empty()) {
+        return Err("is missing VERIFY".into());
     }
     let (mut effort, mut tier) = (None, None);
     let mut worker_text = String::with_capacity(text.len());
@@ -146,7 +192,7 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
     }
     Ok(Brief {
         goal: f["GOAL"].clone(),
-        scope: words(&f["SCOPE"]),
+        scope,
         verify: f["VERIFY"].clone(),
         context: f.get("CONTEXT").cloned(),
         effort,

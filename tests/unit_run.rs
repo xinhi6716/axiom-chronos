@@ -96,6 +96,7 @@ impl Fixture {
         )
         .unwrap();
         g.project = Some("demo".into());
+        g.wish_id = None;
         fs::write(
             self.temp.path().join("goals/session.json"),
             serde_json::to_vec(&g).unwrap(),
