@@ -399,7 +399,7 @@ pub fn mark_ready(store: &Path, project_root: &Path) -> Res<ReadyStatus> {
             store,
             Step::Ready,
             map,
-            &sha256_hex(outputs.as_bytes()),
+            &outputs,
             true,
             None,
         )?;

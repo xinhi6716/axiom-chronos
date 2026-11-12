@@ -402,11 +402,45 @@ fn happy_path() {
     }
     assert_ok(&c.evaluate());
     assert_ok(&readiness::mark_ready(c.store(), &c.cfg.project_root).unwrap());
-    assert!(state::load(c.store())
-        .unwrap()
-        .unwrap()
-        .steps
-        .contains_key(&Step::Ready));
+    let state = state::load(c.store()).unwrap().unwrap();
+    let steps = [
+        Step::Evidence,
+        Step::Shortlist,
+        Step::Journal,
+        Step::Pass1,
+        Step::Pass2,
+        Step::Pass3,
+        Step::Pass4,
+        Step::Figures,
+        Step::Citations,
+        Step::Numbers,
+        Step::Compile,
+        Step::Render,
+        Step::Disclosure,
+        Step::Review,
+    ];
+    let inputs: BTreeMap<_, _> = steps
+        .iter()
+        .map(|step| {
+            (
+                serde_json::to_value(step)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                state.steps[step].output.clone(),
+            )
+        })
+        .collect();
+    let outputs = steps
+        .iter()
+        .map(|step| state.steps[step].output.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ready = &state.steps[&Step::Ready];
+    assert_eq!(ready.inputs, inputs);
+    assert_eq!(ready.output, outputs);
+    assert!(ready.ok);
     assert!(readiness::is_ready(c.store(), &c.cfg.project_root).unwrap());
 }
 #[test]
@@ -516,14 +550,31 @@ fn evidence_file_edit_invalidates_ready() {
     readiness::mark_ready(c.store(), &c.cfg.project_root).unwrap();
     fs::write(c.cfg.project_root.join("data.csv"), b"changed").unwrap();
     c.no_ready(Condition::FourPasses);
+    // A project data edit does not change any review input file.
+    assert!(
+        c.evaluate()
+            .conditions
+            .iter()
+            .find(|x| x.0 == Condition::Review)
+            .unwrap()
+            .1
+    );
 }
 #[test]
 fn bibliography_edit_invalidates_ready() {
-    invalidate_file(
-        readiness::bibliography_path,
-        b"changed",
-        Condition::Citations,
-        false,
+    let c = Case::new();
+    c.ready_review();
+    readiness::mark_ready(c.store(), &c.cfg.project_root).unwrap();
+    fs::write(readiness::bibliography_path(c.store()), b"changed").unwrap();
+    c.no_ready(Condition::Citations);
+    // A refs.bib edit does not change any review input file.
+    assert!(
+        c.evaluate()
+            .conditions
+            .iter()
+            .find(|x| x.0 == Condition::Review)
+            .unwrap()
+            .1
     );
 }
 #[test]
@@ -746,6 +797,22 @@ fn seeded(bad_citation: bool, bad_number: bool) {
         bad_citation,
         "{citations:?}"
     );
+    if bad_citation {
+        assert!(
+            citations
+                .blocking
+                .iter()
+                .any(|s| s.contains("unverified citation w123456789")),
+            "{citations:?}"
+        );
+        assert!(
+            citations
+                .blocking
+                .iter()
+                .all(|s| !s.contains("10-1234-example")),
+            "{citations:?}"
+        );
+    }
     readiness::record_citations(c.store(), &citations, &bibliography::to_bibtex(&bib)).unwrap();
     assert_eq!(
         state::load(c.store()).unwrap().unwrap().steps[&Step::Citations].ok,
@@ -824,4 +891,114 @@ fn review_input_paths_hash_and_missing_source() {
     let error = review::input_files(c.store()).unwrap_err();
     assert_eq!(error.kind, "not_ready");
     assert!(format!("{error:?}").contains("manuscript"));
+}
+
+#[test]
+fn rerun_clears_old_review_and_recreates_exact_inputs() {
+    let c = Case::new();
+    c.ready_review();
+    let input = paper_dir(c.store()).join("review/input");
+    fs::write(input.join("stale-extra"), b"stale").unwrap();
+    let mut failing = Fake::new("ready", json!([]));
+    failing.reply.status = Status::Failed;
+    assert_eq!(c.run_review(&failing).unwrap_err().kind, "member_failed");
+    assert_eq!(failing.calls.lock().unwrap().len(), 1);
+    c.no_review();
+    // Plant it again to ensure the successful re-run also clears stale inputs.
+    fs::write(input.join("stale-extra"), b"stale").unwrap();
+    c.ready_review();
+    let mut names = fs::read_dir(input)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    let mut expected = review::input_files(c.store())
+        .unwrap()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 7);
+    expected.sort();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn preset_stop_does_not_call_reviewer_or_leave_review() {
+    let c = Case::new();
+    c.ready_review();
+    c.stop.store(true, Ordering::SeqCst);
+    let f = Fake::new("ready", json!([]));
+    assert_eq!(c.run_review(&f).unwrap_err().kind, "cancelled");
+    assert!(f.calls.lock().unwrap().is_empty());
+    c.no_review();
+}
+
+#[test]
+fn failed_charge_leaves_no_review() {
+    let c = Case::new();
+    let mut budget = c.budget();
+    let path = paper_dir(c.store()).join("budget.json");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let f = Fake::new("ready", json!([]));
+    assert_eq!(
+        review::review(&c.cfg, &f, &mut budget, &c.stop)
+            .unwrap_err()
+            .kind,
+        "budget_exceeded"
+    );
+    assert_eq!(f.calls.lock().unwrap().len(), 1);
+    c.no_review();
+}
+
+#[test]
+fn recorder_hash_mismatches_are_not_ok() {
+    let c = Case::new();
+    let mut citations = c.citation(true);
+    citations.manuscript_hash = "different".into();
+    readiness::record_citations(c.store(), &citations, "bib").unwrap();
+    assert!(!state::load(c.store()).unwrap().unwrap().steps[&Step::Citations].ok);
+    let mut numbers = c.numbers(true);
+    numbers.manuscript_hash = "different".into();
+    readiness::record_numbers(c.store(), &numbers).unwrap();
+    assert!(!state::load(c.store()).unwrap().unwrap().steps[&Step::Numbers].ok);
+}
+
+#[test]
+fn compile_diagnostics_are_not_ok() {
+    for issue in 0..3 {
+        let c = Case::new();
+        let mut report = compile(true);
+        match issue {
+            0 => report.undefined_refs.push("ref".into()),
+            1 => report.missing_files.push("file".into()),
+            _ => report.missing_chars.push("char".into()),
+        }
+        readiness::record_compile(c.store(), &report, PDF).unwrap();
+        assert!(
+            !state::load(c.store()).unwrap().unwrap().steps[&Step::Compile].ok,
+            "issue {issue}"
+        );
+    }
+}
+
+#[test]
+fn recorders_reject_missing_upstream() {
+    let c = Case::new();
+    state::invalidate(c.store(), Step::Compile).unwrap();
+    assert_eq!(
+        readiness::record_render(c.store(), &pages(false))
+            .unwrap_err()
+            .kind,
+        "not_ready"
+    );
+    let mut st = state::load(c.store()).unwrap().unwrap();
+    st.steps.remove(&Step::Pass4);
+    state::save(c.store(), &st).unwrap();
+    assert_eq!(
+        readiness::record_gate(c.store(), Step::Citations, "output", true, None)
+            .unwrap_err()
+            .kind,
+        "not_ready"
+    );
 }

@@ -167,7 +167,7 @@ pub fn review(
         .output
         .ok_or_else(|| Failure::new("malformed", "missing output"))?;
     schema::validate(&schema, &output).map_err(|e| Failure::new("malformed", e))?;
-    charged?;
+    charged.map_err(|e| Failure::new("budget_exceeded", e.to_string()))?;
     let input_hash = current_input_hash(&cfg.store)?;
     if input_hash != sha256_hex(material.as_bytes()) {
         return Err(Failure::new(
