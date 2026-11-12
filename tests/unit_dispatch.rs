@@ -23,7 +23,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(brief: &str) -> Self {
-        let temp = common::temp();
+        Self::with_temp(brief, common::temp())
+    }
+    fn with_temp(brief: &str, temp: tempfile::TempDir) -> Self {
         let home = temp.path().to_path_buf();
         let repo = home.join("repo");
         let store = orch::store_for(&home, "demo").unwrap();
@@ -458,14 +460,20 @@ fn scope_records_ignored_paths() {
         brief.push_str(&format!("FAKE_WRITE .axiom-tmp/{n:02}.txt\n"));
     }
     brief.push_str("FAKE_WRITE pytest-of-fake/pytest-current/x.txt\n");
-    let bounded = Fixture::new(&brief);
+    let bounded = Fixture::with_temp(
+        &brief,
+        tempfile::Builder::new()
+            // Keep the absolute path long without doubling an already-long TEMP path.
+            .prefix(&"d".repeat(130_usize.saturating_sub(std::env::temp_dir().as_os_str().len())))
+            .tempdir()
+            .unwrap(),
+    );
     let first = bounded.run("one", false);
     assert_eq!(first["state"], "built", "{first}");
     assert_eq!(first["scope_ignored_count"], 23);
-    assert_eq!(
-        first["scope_ignored"].as_array().unwrap().len(),
-        orch::summary::MAX_PATH_SAMPLE
-    );
+    let first_ignored = first["scope_ignored"].as_array().unwrap();
+    assert!(!first_ignored.is_empty());
+    assert!(first_ignored.len() <= orch::summary::MAX_PATH_SAMPLE);
     let saved: Value =
         serde_json::from_slice(&fs::read(bounded.store.join("reports/one.scope.json")).unwrap())
             .unwrap();
@@ -475,8 +483,20 @@ fn scope_records_ignored_paths() {
         json!({"path":"pytest-of-fake/pytest-current/x.txt", "reason":"test-scratch"})
     );
     let replay = bounded.run("one", true);
-    assert_eq!(replay["scope_ignored"], first["scope_ignored"], "{replay}");
-    assert_eq!(replay["scope_ignored_count"], 23);
+    let replay_ignored = replay["scope_ignored"].as_array().unwrap();
+    let shared_len = replay_ignored.len().min(first_ignored.len());
+    assert_eq!(
+        replay_ignored[..shared_len],
+        first_ignored[..shared_len],
+        "{replay}"
+    );
+    let saved_ignored = saved["ignored"].as_array().unwrap();
+    assert!(saved_ignored.starts_with(first_ignored));
+    assert!(saved_ignored.starts_with(replay_ignored));
+    // A truncated replay may omit the count, but any reported count must be complete.
+    if replay["truncated"] != true || replay.get("scope_ignored_count").is_some() {
+        assert_eq!(replay["scope_ignored_count"], 23, "{replay}");
+    }
 }
 
 #[test]

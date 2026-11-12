@@ -450,19 +450,36 @@ fn context_units_and_entry_boundaries() {
 
 #[test]
 fn long_header_that_fits_is_not_charged_for_unused_markers() {
-    let t = tempfile::tempdir().unwrap();
+    let t = tempfile::Builder::new()
+        .prefix(&"d".repeat(110))
+        .tempdir()
+        .unwrap();
     let p = t.path();
     init(p);
-    let purpose = "x".repeat(15800);
-    write(
-        p,
-        "modules.md",
-        &section("m", "p", "none", "", "test")
-            .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
-    );
+    let write_purpose = |purpose: &str| {
+        write(
+            p,
+            "modules.md",
+            &section("m", "p", "none", "", "test")
+                .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
+        );
+    };
+    write_purpose("x");
+    let short = module_context(p, "m", p).unwrap();
+    let overhead = serde_json::to_string_pretty(&short).unwrap().len() + 1 - short.purpose.len();
+    let purpose = "x".repeat(MAX_CONTEXT_BYTES - overhead);
+    write_purpose(&purpose);
     let c = module_context(p, "m", p).unwrap();
     assert_eq!(c.purpose, purpose);
     assert!(c.incomplete.is_empty());
+    assert_eq!(
+        serde_json::to_string_pretty(&c).unwrap().len() + 1,
+        MAX_CONTEXT_BYTES
+    );
+
+    write_purpose(&format!("{purpose}x"));
+    let error = module_context(p, "m", p).unwrap_err();
+    assert!(error.message.contains("exceeds byte limit"), "{error:?}");
 }
 
 #[test]
