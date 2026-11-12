@@ -86,6 +86,30 @@
     "headers": {}
   },
   {
+    "url": "https://api.openalex.org/retry-default-429",
+    "status": 429,
+    "file": "retry-0.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-429",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-503",
+    "status": 503,
+    "file": "retry-0.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-503",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  },
+  {
     "url": "https://api.openalex.org/limited",
     "status": 429,
     "file": "limited-0.json",

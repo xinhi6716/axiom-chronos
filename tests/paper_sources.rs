@@ -134,6 +134,23 @@ fn rate_limit_429_retries_with_fake_clock() {
     assert!(r.clock.now_ms() - 1_700_000_000_000 >= 9000);
 }
 #[test]
+fn retry_without_retry_after_defaults_to_two_seconds() {
+    for url in [
+        "https://api.openalex.org/retry-default-429",
+        "https://api.openalex.org/retry-default-503",
+    ] {
+        let r = Rig::new();
+        let start = r.clock.now_ms();
+        let fetched = r.get(url, FetchMode::Online).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fetched.body).unwrap(),
+            json!({"ok":true})
+        );
+        assert_eq!(r.clock.now_ms() - start, 2000);
+        assert_eq!(r.transport.requests(), vec![url, url]);
+    }
+}
+#[test]
 fn corrupt_cache_refetched_online_and_miss_offline() {
     let r = Rig::new();
     let fetched = r.get(SOURCE, FetchMode::Online).unwrap();
