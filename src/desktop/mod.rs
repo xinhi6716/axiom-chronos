@@ -1,4 +1,7 @@
 //! The Chronos desktop app. Screens draw `model::AppState`; `live` fills it from disk and the session host.
+// --- research workspace (phase 9) ---
+pub mod research;
+// --- end research workspace (phase 9) ---
 mod composer;
 mod control;
 mod concurrency;
@@ -80,6 +83,9 @@ fn initial_state(options: &Options) -> model::AppState {
         } else {
             ux::UxState {
                 seams: ux::real::wiring::production(&crate::base::axiom_home(), &crate::codex::slots::home()),
+                // --- research workspace (phase 9) ---
+                research: research::ResearchSeams::production(&crate::base::axiom_home()),
+                // --- end research workspace (phase 9) ---
                 ..Default::default()
             }
         };

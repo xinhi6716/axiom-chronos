@@ -23,6 +23,9 @@ use std::{
 pub use usage::*;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Page {
+    // --- research workspace (phase 9) ---
+    Research,
+    // --- end research workspace (phase 9) ---
     Storage,
     Chat,
     QuickTask,
@@ -172,6 +175,9 @@ impl Seams {
 }
 #[derive(Default)]
 pub struct UxState {
+    // --- research workspace (phase 9) ---
+    pub research: crate::desktop::research::ResearchSeams,
+    // --- end research workspace (phase 9) ---
     pub seams: Seams,
     pub page: Option<Page>,
     pub activity: HashMap<SharedString, Projection>,

@@ -27,6 +27,9 @@ impl Shell {
             }
             self.page_view = page.map(|page| {
                 let view: AnyView = match &page {
+                    // --- research workspace (phase 9) ---
+                    Page::Research => cx.new(|cx| crate::desktop::research::ResearchPage::new(self.state.clone(), window, cx)).into(),
+                    // --- end research workspace (phase 9) ---
                     Page::Storage => cx.new(|cx| StoragePage::new(self.state.clone(), cx)).into(),
                     Page::Chat => cx
                         .new(|cx| ChatPage::new(self.state.clone(), window, cx))

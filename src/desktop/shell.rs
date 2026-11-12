@@ -741,6 +741,9 @@ impl Shell {
             }
             Command::Undo => self.undo(window, cx),
             // ux: begin commands
+            // --- research workspace (phase 9) ---
+            Command::Research => self.state.update(cx, |s, cx| s.open_page(super::ux::Page::Research, cx)),
+            // --- end research workspace (phase 9) ---
             Command::Storage => self.state.update(cx, |s,cx| s.open_page(super::ux::Page::Storage,cx)),
             Command::Chat | Command::QuickTask | Command::Plaza => {
                 use super::ux::seams::ModeKind;
