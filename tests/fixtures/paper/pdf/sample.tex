@@ -1,0 +1,45 @@
+\documentclass[preprint,12pt]{elsarticle}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tikz}
+
+\begin{document}
+\begin{frontmatter}
+\title{A Sample Paper}
+\author{Anonymous author(s)}
+\begin{abstract}
+This fixture contains a simple figure and a table for testing the rendering of a paper as a PDF document.
+\end{abstract}
+\end{frontmatter}
+
+\section{Results}
+Figure~\ref{fig:trend} illustrates a small increasing trend. Table~\ref{tab:values} lists the corresponding observations. Together they provide a compact example of graphical and tabular content in an Elsevier manuscript.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[x=1.2cm,y=0.8cm]
+  \draw[->] (0,0) -- (3.5,0) node[right] {Step};
+  \draw[->] (0,0) -- (0,3.3) node[above] {Value};
+  \draw[thick] (0.5,0.8) -- (1.5,1.6) -- (2.5,2.5);
+  \foreach \x/\y in {0.5/0.8,1.5/1.6,2.5/2.5}
+    \fill (\x,\y) circle (2pt);
+\end{tikzpicture}
+\caption{An increasing trend across three steps.}
+\label{fig:trend}
+\end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{Values at each step.}
+\label{tab:values}
+\begin{tabular}{lr}
+\toprule
+Step & Value \\
+\midrule
+1 & 0.8 \\
+2 & 1.6 \\
+3 & 2.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{document}

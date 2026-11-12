@@ -536,6 +536,7 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "ttf-parser",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
 ]
 
