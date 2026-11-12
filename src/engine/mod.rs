@@ -127,6 +127,9 @@ pub const FILES: &[(&str, &str)] = &[
     ("paper/prompts/revise.md", include_str!("../../engine/paper/prompts/revise.md")),
     ("paper/prompts/style.md", include_str!("../../engine/paper/prompts/style.md")),
     ("paper/prompts/review.md", include_str!("../../engine/paper/prompts/review.md")),
+    ("paper/academic-humanizer/SKILL.md", include_str!("../../engine/paper/academic-humanizer/SKILL.md")),
+    ("paper/academic-humanizer/LICENSE", include_str!("../../engine/paper/academic-humanizer/LICENSE")),
+    ("paper/academic-humanizer/SOURCE.json", include_str!("../../engine/paper/academic-humanizer/SOURCE.json")),
     // END paper assets
 ];
 
