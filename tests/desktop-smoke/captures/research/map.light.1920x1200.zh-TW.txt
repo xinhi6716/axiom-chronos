@@ -23,7 +23,7 @@ gpui_component::window_border::WindowBorder/root/research-page/research-map-pane
 gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-5	splits — 已完成 · 未宣告關卡
 gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-5/research-map-open-5	開啟輸出
 gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stale-0	validation: 輸入已變更: measurements; 記錄值: 0000000000000000000000000000000000000000000000000000000000000000; 目前值: 83e94d7a2489525e475e11bbf049900cb8a5620bc7373b2cc340ed0a2a1fbcb3
-gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	E:\codex\.axiom-2.1\orchestrate\r9-p9\w-1794503648987-064d1c\scratch\accept-rw-gates\ece0094e0f7931a17a8003d1c52c3328\tmp\axiom-research-smoke-108976-4\rram\project
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	<tmp>\rram\project
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%

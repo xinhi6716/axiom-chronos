@@ -212,12 +212,42 @@ const ENGLISH_UI: &[&str] = &[
     "Page unavailable",
 ];
 
+fn normalize_capture(body: &str, temp_paths: &[&Path]) -> String {
+    temp_paths.iter().fold(body.to_owned(), |body, path| {
+        body.replace(
+            path.to_str().expect("temporary path must be UTF-8"),
+            "<tmp>",
+        )
+    })
+}
+
+#[test]
+fn capture_normalizes_temp_paths_without_hiding_content_changes() {
+    let first = "recent\t/tmp/run-one/rram/project\nhome\t/tmp/home-one/session\nstatus\tReady\n";
+    let second = "recent\t/tmp/run-two/rram/project\nhome\t/tmp/home-two/session\nstatus\tReady\n";
+    let first = normalize_capture(
+        first,
+        &[Path::new("/tmp/run-one"), Path::new("/tmp/home-one")],
+    );
+    let second = normalize_capture(
+        second,
+        &[Path::new("/tmp/run-two"), Path::new("/tmp/home-two")],
+    );
+    assert_eq!(
+        first,
+        "recent\t<tmp>/rram/project\nhome\t<tmp>/session\nstatus\tReady\n"
+    );
+    assert_eq!(first, second);
+    assert_ne!(first, second.replace("Ready", "Loading"));
+}
+
 fn save_capture(
     view: &str,
     lang: Lang,
     mode: ThemeMode,
     size: (f32, f32),
     lines: &[(String, String)],
+    temp_paths: &[&Path],
 ) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("captures/research");
     fs::create_dir_all(&dir).unwrap();
@@ -236,7 +266,7 @@ fn save_capture(
             "{view}.{theme}.{}x{}.{lang}.txt",
             size.0 as u32, size.1 as u32
         )),
-        body,
+        normalize_capture(&body, temp_paths),
     )
     .unwrap();
 }
@@ -335,7 +365,14 @@ fn capture_walk(cx: &mut TestAppContext) {
                         } else {
                             format!("rawonly-{}", tab.key())
                         };
-                        save_capture(&view_name, lang, mode, size, &lines);
+                        save_capture(
+                            &view_name,
+                            lang,
+                            mode,
+                            size,
+                            &lines,
+                            &[rram.parent().unwrap(), raw.parent().unwrap(), &home],
+                        );
                         count += 1;
                         cx.update_window(window, |_, w, _| {
                             if w.try_find(panel.clone()).is_none() {
