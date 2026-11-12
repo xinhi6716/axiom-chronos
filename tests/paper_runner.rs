@@ -296,7 +296,7 @@ fn assert_error(c: &Case, m: &Members, kind: &str) {
         m.events()
     );
 }
-fn assert_failed_pass(c: &Case, m: &Members, n: usize, status: Status) {
+fn assert_failed_pass(c: &Case, m: &Members, n: usize, status: Status, expected: &str) {
     let calls = m.calls();
     assert_eq!(calls.len(), n, "later pass or retry was called");
     assert_eq!(
@@ -306,15 +306,18 @@ fn assert_failed_pass(c: &Case, m: &Members, n: usize, status: Status) {
             .count(),
         1
     );
+    assert_failed_record(c, n, status, expected);
+}
+fn assert_failed_record(c: &Case, n: usize, status: Status, expected: &str) {
     let dir = c.pass_dir(n);
     let record: PassRecord = read_json(dir.join("pass-record.json"));
     assert_eq!(record.pass, PassId::ALL[n - 1]);
     assert_eq!(record.status, status);
-    assert!(!record.validation.is_empty());
-    let validation: Value = read_json(dir.join("validation.json"));
+    let validation: Vec<String> = read_json(dir.join("validation.json"));
+    assert_eq!(record.validation, validation);
     assert!(
-        validation.to_string().len() > 2,
-        "validation must describe failure"
+        validation.iter().any(|message| message.contains(expected)),
+        "expected {expected:?} in validation: {validation:?}"
     );
 }
 
@@ -487,7 +490,7 @@ fn precondition_evidence() {
     let c = Case::new();
     state::invalidate(&c.cfg.store, Step::Evidence).unwrap();
     let m = Members::new();
-    assert_eq!(c.run(&m).unwrap_err().kind, "not_ready");
+    assert_error(&c, &m, "not_ready");
     assert!(m.calls().is_empty());
 }
 #[test]
@@ -495,7 +498,7 @@ fn precondition_journal() {
     let c = Case::new();
     state::invalidate(&c.cfg.store, Step::Journal).unwrap();
     let m = Members::new();
-    assert_eq!(c.run(&m).unwrap_err().kind, "no_journal");
+    assert_error(&c, &m, "no_journal");
     assert!(m.calls().is_empty());
 }
 
@@ -506,7 +509,7 @@ fn status_failure(status: Status) {
     r.status = status;
     m.replace("astra", 0, r);
     assert_error(&c, &m, "member_failed");
-    assert_failed_pass(&c, &m, 1, status);
+    assert_failed_pass(&c, &m, 1, status, "member_failed");
 }
 #[test]
 fn missing_member_blocks() {
@@ -520,40 +523,61 @@ fn timed_out_member_blocks() {
 fn failed_member_blocks() {
     status_failure(Status::Failed);
 }
-fn bad_output(n: usize, fixture: &str) {
+fn bad_output(n: usize, fixture: &str, expected: &str) {
     let c = Case::new();
     let m = Members::new();
     let mut r = reply(n);
     r.output = Some(serde_json::from_str(fixture).unwrap());
     m.replace(PassId::ALL[n - 1].member(), if n == 4 { 1 } else { 0 }, r);
     assert_error(&c, &m, "rejected");
-    assert_failed_pass(&c, &m, n, Status::Ok);
+    assert_failed_pass(&c, &m, n, Status::Ok, expected);
 }
 #[test]
 fn malformed_output_rejected() {
-    bad_output(1, include_str!("fixtures/paper/runner/malformed.json"));
+    bad_output(
+        1,
+        include_str!("fixtures/paper/runner/malformed.json"),
+        "malformed:",
+    );
 }
 #[test]
 fn unknown_claim_rejected() {
-    bad_output(1, include_str!("fixtures/paper/runner/bad_claim.json"));
+    bad_output(
+        1,
+        include_str!("fixtures/paper/runner/bad_claim.json"),
+        "unknown claim missing",
+    );
 }
 #[test]
 fn unknown_evidence_rejected() {
-    bad_output(1, include_str!("fixtures/paper/runner/bad_evidence.json"));
+    bad_output(
+        1,
+        include_str!("fixtures/paper/runner/bad_evidence.json"),
+        "unknown evidence missing",
+    );
 }
 #[test]
 fn unknown_quantity_rejected() {
-    bad_output(1, include_str!("fixtures/paper/runner/bad_quantity.json"));
+    bad_output(
+        1,
+        include_str!("fixtures/paper/runner/bad_quantity.json"),
+        "unknown quantity missing",
+    );
 }
 #[test]
 fn revision_literal_number_rejected() {
-    bad_output(2, include_str!("fixtures/paper/runner/bad_numeral.json"));
+    bad_output(
+        2,
+        include_str!("fixtures/paper/runner/bad_numeral.json"),
+        "new literal numeral",
+    );
 }
 #[test]
 fn style_claim_change_rejected() {
     bad_output(
         4,
         include_str!("fixtures/paper/runner/bad_style_claim.json"),
+        "ClaimChanged: invariant changed",
     );
 }
 #[test]
@@ -561,6 +585,7 @@ fn style_citation_change_rejected() {
     bad_output(
         4,
         include_str!("fixtures/paper/runner/bad_style_citation.json"),
+        "CitationChanged: invariant changed",
     );
 }
 fn wrong_model(n: usize) {
@@ -570,7 +595,7 @@ fn wrong_model(n: usize) {
     r.model = Some("other-model".into());
     m.replace(PassId::ALL[n - 1].member(), 0, r);
     assert_error(&c, &m, "rejected");
-    assert_failed_pass(&c, &m, n, Status::Ok);
+    assert_failed_pass(&c, &m, n, Status::Ok, "wrong_model");
     let record: PassRecord = read_json(c.pass_dir(n).join("pass-record.json"));
     assert!(record.validation.iter().any(|s| s.contains("wrong_model")));
     assert!(fs::read_to_string(c.pass_dir(n).join("validation.json"))
@@ -602,8 +627,9 @@ fn cancelled_before_run() {
     let c = Case::new();
     let m = Members::new();
     c.stop.store(true, Ordering::SeqCst);
-    assert_eq!(c.run(&m).unwrap_err().kind, "cancelled");
+    assert_error(&c, &m, "cancelled");
     assert!(m.calls().is_empty());
+    assert_failed_record(&c, 1, Status::Failed, "cancelled");
     assert!(m
         .events()
         .iter()
@@ -614,7 +640,8 @@ fn cancelled_during_pass_two() {
     let c = Case::new();
     let mut m = Members::new();
     m.fable.cancel = true;
-    assert_eq!(c.run(&m).unwrap_err().kind, "cancelled");
+    assert_error(&c, &m, "cancelled");
+    assert_failed_pass(&c, &m, 2, Status::Ok, "cancelled");
     assert_eq!(
         m.calls()
             .iter()
@@ -633,6 +660,7 @@ fn zero_fable_budget_refuses_pass_two() {
     c.cfg.fable_cap_usd = 0.0;
     let m = Members::new();
     assert_error(&c, &m, "budget_exceeded");
+    assert_failed_record(&c, 2, Status::BudgetCut, "budget_exceeded");
     assert_eq!(
         m.calls()
             .iter()
@@ -650,6 +678,7 @@ fn fable_cap_is_shared_between_passes() {
     r.usd = Some(1.0);
     m.replace("fable", 0, r);
     assert_error(&c, &m, "budget_exceeded");
+    assert_failed_record(&c, 4, Status::BudgetCut, "budget_exceeded");
     assert_eq!(
         m.calls()
             .iter()
@@ -668,7 +697,7 @@ fn resume_current_passes_and_invalidate_on_changed_evidence() {
     bad.output = Some(json!({"bad": true}));
     m.replace("argon", 0, bad);
     assert_error(&c, &m, "rejected");
-    assert_failed_pass(&c, &m, 3, Status::Ok);
+    assert_failed_pass(&c, &m, 3, Status::Ok, "malformed:");
     m.argon.replies.lock().unwrap().push_back(reply(3));
     let records = c.run(&m).unwrap();
     assert_eq!(records.len(), 4);

@@ -1,1 +1,1 @@
-<!-- owned by module paper-runner -->
+Write the manuscript using only the evidence bundle. Use {{q:ID}} tokens for every result number; never write literal result numbers. Cite only bundle references using [@key]. For every paragraph provide claim links {claim, evidence[]} using only claim and evidence IDs from the bundle. Preserve the qualifications and hedges supported by the evidence. Return the manuscript and change_log in the output schema.

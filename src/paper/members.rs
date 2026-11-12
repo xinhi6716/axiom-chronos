@@ -7,6 +7,10 @@ pub struct PaperMembers<'a> {
     pub reviewer: &'a dyn ResearchMember,
 }
 
-pub fn expected_model(_member: &str) -> Option<&'static str> {
-    unimplemented!()
+pub fn expected_model(member: &str) -> Option<&'static str> {
+    match member {
+        "fable" => Some(crate::council::FABLE_MODEL),
+        "argon" => Some(crate::council::ARGON_MODEL),
+        _ => None,
+    }
 }
