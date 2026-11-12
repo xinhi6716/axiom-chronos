@@ -1,0 +1,1 @@
+{"min_samples":200,"min_agreement":0.9,"max_ece":0.05,"max_abstain_rate":0.3,"max_drift":0.05,"ece_bins":10}

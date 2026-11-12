@@ -397,7 +397,7 @@ pub fn render(d: &Digest) -> String {
                     )
                 }
             }),
-        2000,
+        1000,
     );
     if d.problems.is_empty() {
         out.push_str("There are no recorded problems in the period.\n");
@@ -432,6 +432,13 @@ pub fn render(d: &Digest) -> String {
             p.metric.samples,
             locations
         ));
+        let class = super::harness::classify(p);
+        out.push_str(&format!(
+            "  class: {}; evidence: {}; suggestion: {}\n",
+            class.label(),
+            locations,
+            class.change_type()
+        ));
     }
     section(
         &mut out,
@@ -446,7 +453,7 @@ pub fn render(d: &Digest) -> String {
                 money(c.usd, c.unpriced_calls)
             )
         }),
-        2500,
+        1000,
     );
     match d.estimate.median_usd {
         Some(v) => out.push_str(&format!(
@@ -476,7 +483,7 @@ pub fn render(d: &Digest) -> String {
                 c.difference
             )
         }),
-        2500,
+        1000,
     );
     debug_assert!(out.len() <= MAX_DIGEST_BYTES);
     out

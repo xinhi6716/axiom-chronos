@@ -308,6 +308,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             } else if let Some(v) = opt(a, "mode") {
                 json!(goal::set_mode(home, session, v)?)
             } else if let Some(v) = opt(a, "classify") {
+                crate::laya::router::observe_interjection(home, session, v); // laya-shadow
                 let g = goal::classify(home, session, v)?;
                 if v == "stop" {
                     b.cancel();

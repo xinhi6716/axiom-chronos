@@ -1,0 +1,15 @@
+{
+  "files": {
+    "README.md": "a0a33dfcd677aabb2f0aea7895a82ccd80f9fba795b4e5a58ba28f8071a142c9",
+    "make_model.py": "cd374e9886e0e2510e608f02a809b2d00bb8cbab7cf4cf5f235131f256220d26",
+    "model.onnx": "3f574ec9a1c53f4ab3f257a7283f7145cc5db5556d34447037905ed2656b7fee",
+    "rl_agent_config.json": "03696ed6921fecf20b8399ec926f8ec6357f351ca386ccd8f6efa4fabb78a3ea",
+    "test_fixture.py": "4d106f01893f2ebf3b943bb1a8188617d8220879261b6ee2e3b0f26fc001cccb",
+    "tokenizer.json": "932786cfbf8ac8e283630d54699417662efa932a6842c5b604d28fa1af1203a1"
+  },
+  "format": 1,
+  "layout": "fused",
+  "model_version": "fixture-1",
+  "revision": "fixture-1",
+  "source": "fixture"
+}
