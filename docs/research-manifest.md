@@ -55,5 +55,20 @@ Precise bbox highlighting (2 px at 100%), snapshot diff, model and proposal deta
 <!-- research workspace (phase 9) -->
 ## Measured performance
 
-Filled by rw-gates.
+Measured 2026-11-13 on Microsoft Windows 10.0.26300, Intel Core i9-13900K, 68,447,649,792 bytes physical RAM (~63.75 GiB). The offline debug-profile `research_index::perf_50k_records` benchmark used 50,000 records:
+
+`PERF screen_p95_ms=263.375 filter_max_ms=6.328 filter_p95_ms=6.156 peak_growth_bytes=22259152 refresh_ms=213.936 refresh_peak_extra_bytes=18459924`
+
+- First screen p95: 263.375 ms (limit 2,000 ms); filter maximum: 6.328 ms, p95: 6.156 ms (limit 300 ms); incremental peak growth: 22,259,152 bytes (limit 512 MiB). Refresh: 213.936 ms, extra peak 18,459,924 bytes.
+- Desktop rg-smoke3, 50,000 records, 1100x700 dark en: `GATE first_screen_p95_ms=285.987 runs=10` (earlier run 260.974 ms; limit 2,000 ms). This measures Open button activation to `research-dataset-row-0` visible while state is Indexing. Click-to-row was about 130–190 ms; Open to Ready about 370–480 ms. Simulated path typing before Open (about 1,500 ms, including harness frame renders) is excluded.
+- LF-normalised prompt bytes before and after: 20,768 / 20,768 (cap 20,813); prompts unchanged.
+
+### v2 follow-ups
+
+- precise highlighting
+- snapshot diff
+- model and proposal detail
+- paper (phase 8) and memory (phase 6) wiring
+- interactive DAG
+- collaboration sync
 <!-- end research workspace (phase 9) -->

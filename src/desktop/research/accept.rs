@@ -138,15 +138,55 @@ fn background_index_opens_real_fixture_and_reports_bad_manifest() {
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/research/rram"),
         &tmp.0,
     );
+    let path = tmp.0.join("project/data/measurements.csv");
+    let input = std::fs::read_to_string(&path).unwrap();
+    let mut lines = input.lines();
+    let header = lines.next().unwrap();
+    let row = lines.next().unwrap();
+    let mut data = format!("{header}\n");
+    for i in 0..421 {
+        data.push_str(&format!("M{i},{}\n", row.split_once(',').unwrap().1));
+    }
+    std::fs::write(path, data).unwrap();
     let r = ResearchRef {
         root: tmp.0.join("project"),
         store: Some(tmp.0.join("store")),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        index_research(r, None, 0, tx);
+        index_research(r, None, 0, SessionPrefs::default(), tx);
     });
     let events: Vec<_> = rx.iter().collect();
+    let first_progress = events
+        .iter()
+        .position(|e| matches!(e, WorkEvent::Progress(..)))
+        .unwrap();
+    assert!(
+        first_progress > 1,
+        "a dataset preview must arrive between Located and indexing progress"
+    );
+    let rows = match &events[1] {
+        WorkEvent::Preview(rows, false) => rows,
+        _ => panic!("expected preview after Located"),
+    };
+    assert_eq!(rows.len(), 200);
+    let index = events
+        .iter()
+        .find_map(|e| match e {
+            WorkEvent::Ready(index, _) => Some(index),
+            _ => None,
+        })
+        .unwrap();
+    let page = dataset::load_page(
+        index,
+        crate::research_workspace::dataset::DataLayer::Extracted,
+        &[],
+        0,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(page.rows.len(), 200);
+    assert_eq!(rows[0].fields["variable"], page.rows[0].variable);
     assert!(events.iter().any(|e| matches!(e, WorkEvent::Progress(..))));
     assert!(events
         .iter()
@@ -160,6 +200,7 @@ fn background_index_opens_real_fixture_and_reports_bad_manifest() {
         },
         None,
         0,
+        SessionPrefs::default(),
         tx,
     );
     assert!(

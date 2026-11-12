@@ -28,8 +28,16 @@ pub enum StageState {
 pub enum GateResult {
     Passed,
     Failed { detail: String },
-    NotRun { reason: String },
+    NotRun { reason: GateNotRun },
     NotDeclared,
+}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum GateNotRun {
+    ArtifactUnreadable { artifact: String },
+    MissingSetting { pointer: String },
+    MissingThreshold,
+    MissingPointer { pointer: String },
+    NonNumeric,
 }
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum StaleCause {
@@ -174,7 +182,7 @@ fn gate(ix: &Index, stage: &StageDecl) -> GateResult {
             Some(v) => v,
             None => {
                 return GateResult::NotRun {
-                    reason: format!("missing setting {s}"),
+                    reason: GateNotRun::MissingSetting { pointer: s.clone() },
                 }
             }
         }
@@ -183,19 +191,23 @@ fn gate(ix: &Index, stage: &StageDecl) -> GateResult {
             Some(v) => v,
             None => {
                 return GateResult::NotRun {
-                    reason: "missing gate threshold".into(),
+                    reason: GateNotRun::MissingThreshold,
                 }
             }
         }
     };
     let Ok(value) = read::read_json(l, &g.artifact, &Limits::default()) else {
         return GateResult::NotRun {
-            reason: format!("gate artifact {} missing or corrupt", g.artifact),
+            reason: GateNotRun::ArtifactUnreadable {
+                artifact: g.artifact.clone(),
+            },
         };
     };
     let Some(actual) = value.pointer(&g.pointer) else {
         return GateResult::NotRun {
-            reason: format!("missing gate pointer {}", g.pointer),
+            reason: GateNotRun::MissingPointer {
+                pointer: g.pointer.clone(),
+            },
         };
     };
     let passed = match g.op {
@@ -207,7 +219,7 @@ fn gate(ix: &Index, stage: &StageDecl) -> GateResult {
             (Some(a), Some(b)) => a >= b,
             _ => {
                 return GateResult::NotRun {
-                    reason: "gate requires numeric values".into(),
+                    reason: GateNotRun::NonNumeric,
                 }
             }
         },
@@ -215,7 +227,7 @@ fn gate(ix: &Index, stage: &StageDecl) -> GateResult {
             (Some(a), Some(b)) => a <= b,
             _ => {
                 return GateResult::NotRun {
-                    reason: "gate requires numeric values".into(),
+                    reason: GateNotRun::NonNumeric,
                 }
             }
         },

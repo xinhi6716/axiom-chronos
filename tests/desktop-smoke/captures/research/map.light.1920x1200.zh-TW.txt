@@ -1,0 +1,45 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: 已暫停: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	已就緒
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	地圖
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	來源
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	證據
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	資料集
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	匯出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-status	已暫停: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-engineering	建置工作：1 / 1 個單位已驗證（這不是研究結果）
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-repro	重現性檢查：失敗；重疊群組: P0
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-0	inventory — 已完成 · 未宣告關卡
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-0/research-map-open-0	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-1	screen — 已暫停: rate limited · 152/172 · 關卡尚未執行: 關卡產物 recall 遺失或損毀
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-1/research-map-current	 ◉
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-1/research-map-open-1	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-2	pilot — 已完成 · 關卡通過
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-2/research-map-open-2	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-3	acceptance — 已完成 · 關卡通過
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-3/research-map-open-3	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-4	extract — 已完成 · 關卡通過
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-4/research-map-open-4	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-5	splits — 已完成 · 未宣告關卡
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stage-5/research-map-open-5	開啟輸出
+gpui_component::window_border::WindowBorder/root/research-page/research-map-panel/research-map-stale-0	validation: 輸入已變更: measurements; 記錄值: 0000000000000000000000000000000000000000000000000000000000000000; 目前值: 83e94d7a2489525e475e11bbf049900cb8a5620bc7373b2cc340ed0a2a1fbcb3
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	E:\codex\.axiom-2.1\orchestrate\r9-p9\w-1794503648987-064d1c\scratch\accept-rw-gates\ece0094e0f7931a17a8003d1c52c3328\tmp\axiom-research-smoke-108976-4\rram\project
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	顯示阻礙事項

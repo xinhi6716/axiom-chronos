@@ -8,9 +8,9 @@ use crate::{
     },
     research_workspace::{
         index::{Filter, Index, IndexEvent, Indexer, Op},
-        manifest::{locate, LocateOptions, Located, ManifestSource},
+        manifest::{locate, Capability, LocateOptions, Located, ManifestSource, Role},
         pdf::PdfiumProcess,
-        read::Limits,
+        read::{self, Limits, Row},
         seams::{PageRenderer, SnapshotConsumer, VaultActions},
         session::{self, ResearchRef, SessionPrefs, TabView},
         stages::{self, ResearchMap, StageState},
@@ -120,6 +120,7 @@ pub enum LoadState {
 
 enum WorkEvent {
     Located(Arc<Located>),
+    Preview(Vec<Row>, bool),
     Progress(usize, usize),
     Ready(Arc<Index>, ResearchMap),
     Failed(Failure),
@@ -129,6 +130,7 @@ fn index_research(
     r: ResearchRef,
     orch_home: Option<PathBuf>,
     now_ms: i64,
+    prefs: SessionPrefs,
     out: mpsc::Sender<WorkEvent>,
 ) {
     let located = match locate(
@@ -145,6 +147,35 @@ fn index_research(
         }
     };
     let _ = out.send(WorkEvent::Located(located.clone()));
+    let view = prefs
+        .views
+        .get(&located.manifest.research_id)
+        .and_then(|v| v.tabs.get(Tab::Dataset.key()));
+    let raw = view.and_then(|v| v.node.as_deref()) == Some("raw");
+    let role = if raw {
+        Role::RawMeasurements
+    } else {
+        Role::Measurements
+    };
+    let capability = if raw {
+        Capability::RawMeasurements
+    } else {
+        Capability::Dataset
+    };
+    let rows = located
+        .require(capability)
+        .ok()
+        .and_then(|_| {
+            located
+                .manifest
+                .artifacts
+                .iter()
+                .find(|a| a.role == role)
+                .and_then(|a| read::read_first_rows(&located, &a.id, 200, &Limits::default()).ok())
+                .map(|p| p.rows)
+        })
+        .unwrap_or_default();
+    let _ = out.send(WorkEvent::Preview(rows, raw));
     let (tx, rx) = mpsc::channel();
     let progress = out.clone();
     let indexer = Indexer::start(
@@ -230,6 +261,8 @@ pub struct Workbench {
     pub located: Option<Arc<Located>>,
     pub index: Option<Arc<Index>>,
     pub map: Option<ResearchMap>,
+    preview: Arc<Vec<Row>>,
+    preview_raw: bool,
     pub load: LoadState,
     pub tab: Tab,
     pub prefs: SessionPrefs,
@@ -275,6 +308,8 @@ impl Workbench {
             located: None,
             index: None,
             map: None,
+            preview: Arc::default(),
+            preview_raw: false,
             load: LoadState::NoResearch,
             tab: Tab::Map,
             prefs: SessionPrefs::default(),
@@ -306,6 +341,8 @@ impl Workbench {
         self.located = None;
         self.index = None;
         self.map = None;
+        self.preview = Arc::default();
+        self.preview_raw = false;
         self.tab = Tab::Map;
         self.load = LoadState::Opening;
         session::remember(&mut self.prefs, r.clone());
@@ -313,7 +350,8 @@ impl Workbench {
         let (tx, rx) = mpsc::channel();
         let orch = self.seams.orch_home.clone();
         let now = self.clock.now_ms();
-        std::thread::spawn(move || index_research(r, orch, now, tx));
+        let prefs = self.prefs.clone();
+        std::thread::spawn(move || index_research(r, orch, now, prefs, tx));
         cx.spawn(async move |this, cx| {
             let mut rx = rx;
             loop {
@@ -333,11 +371,16 @@ impl Workbench {
                         match event {
                             WorkEvent::Located(l) => {
                                 this.tab = restore_tab(&this.prefs, &l.manifest.research_id);
+                                let total = l.manifest.artifacts.len();
                                 this.located = Some(l);
-                                this.load = LoadState::Indexing { done: 0, total: 0 };
+                                this.load = LoadState::Indexing { done: 0, total };
                             }
                             WorkEvent::Progress(done, total) => {
                                 this.load = LoadState::Indexing { done, total }
+                            }
+                            WorkEvent::Preview(rows, raw) => {
+                                this.preview = Arc::new(rows);
+                                this.preview_raw = raw;
                             }
                             WorkEvent::Ready(index, map) => {
                                 this.index = Some(index);
@@ -680,15 +723,22 @@ impl Render for ResearchPage {
         });
         let load = load_text(&wb.load, lang);
         let current = wb.tab;
+        let ready = matches!(wb.load, LoadState::Ready);
         let view_state = view_state_text(&wb.view(current), lang);
         let recent = wb.prefs.recent.clone();
         let notice = wb.notice_text.clone();
-        let panel: AnyElement = match current {
-            Tab::Map => self.map.clone().into_any_element(),
-            Tab::Sources => self.sources.clone().into_any_element(),
-            Tab::Evidence => self.evidence.clone().into_any_element(),
-            Tab::Dataset => self.dataset.clone().into_any_element(),
-            Tab::Exports => self.exports.clone().into_any_element(),
+        let panel: AnyElement = if matches!(wb.load, LoadState::Indexing { .. })
+            && matches!(current, Tab::Sources | Tab::Evidence | Tab::Exports)
+        {
+            marked("research-indexing", load.clone()).into_any_element()
+        } else {
+            match current {
+                Tab::Map => self.map.clone().into_any_element(),
+                Tab::Sources => self.sources.clone().into_any_element(),
+                Tab::Evidence => self.evidence.clone().into_any_element(),
+                Tab::Dataset => self.dataset.clone().into_any_element(),
+                Tab::Exports => self.exports.clone().into_any_element(),
+            }
         };
         let mut rail = h_flex().gap(px(8.)).border_b_1().border_color(colors.orbit);
         for tab in [
@@ -773,7 +823,11 @@ impl Render for ResearchPage {
             .child(marked("research-load", load))
             .children(notice)
             .child(rail)
-            .children(view_state.map(|text| marked("research-view-state", text)))
+            .children(if ready {
+                view_state.map(|text| marked("research-view-state", text))
+            } else {
+                None
+            })
             .child(panel)
             .child(tr(lang, "Research folder"))
             .child(Input::new(&self.path).id("research-open-path"))

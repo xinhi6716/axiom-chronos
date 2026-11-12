@@ -4,8 +4,8 @@ use crate::{
     research_workspace::{
         repro::{ReproResult, ReproStatus},
         stages::{
-            Engineering, GateResult, Progress, ResearchMap, ResearchStatus, Retry, StageState,
-            StageView, StaleCause, Staleness,
+            Engineering, GateNotRun, GateResult, Progress, ResearchMap, ResearchStatus, Retry,
+            StageState, StageView, StaleCause, Staleness,
         },
     },
 };
@@ -158,5 +158,57 @@ fn chinese_state_words_are_localized() {
             .to_lowercase();
         let zh = map_lines(&m, Lang::ZhTw)[0].state_text.to_lowercase();
         assert!(!zh.contains(&en), "{en}: {zh}");
+    }
+}
+
+#[test]
+fn gate_not_run_reasons_are_localized() {
+    let cases = [
+        (
+            GateNotRun::ArtifactUnreadable {
+                artifact: "artifact-id".into(),
+            },
+            Some("artifact-id"),
+            "Gate not run: gate artifact artifact-id missing or corrupt",
+        ),
+        (
+            GateNotRun::MissingSetting {
+                pointer: "/setting-name".into(),
+            },
+            Some("/setting-name"),
+            "Gate not run: missing setting /setting-name",
+        ),
+        (
+            GateNotRun::MissingThreshold,
+            None,
+            "Gate not run: missing gate threshold",
+        ),
+        (
+            GateNotRun::MissingPointer {
+                pointer: "/pointer-name".into(),
+            },
+            Some("/pointer-name"),
+            "Gate not run: missing gate pointer /pointer-name",
+        ),
+        (
+            GateNotRun::NonNumeric,
+            None,
+            "Gate not run: gate requires numeric values",
+        ),
+    ];
+    for (reason, value, english) in cases {
+        let m = map(StageState::NotStarted, GateResult::NotRun { reason });
+        assert_eq!(map_lines(&m, Lang::En)[0].gate_text, english);
+        let zh = &map_lines(&m, Lang::ZhTw)[0].gate_text;
+        let without_value = if let Some(value) = value {
+            assert!(zh.contains(value), "{zh}");
+            zh.replace(value, "")
+        } else {
+            zh.clone()
+        };
+        assert!(
+            !without_value.chars().any(|c| c.is_ascii_alphabetic()),
+            "{zh}"
+        );
     }
 }

@@ -3,7 +3,7 @@ use axiom::research_workspace::{
     manifest::{locate, LocateOptions},
     read::{hash_file, Limits},
     repro::{self, ReproStatus},
-    stages::{self, GateResult, ResearchStatus, Retry, StageState, StaleCause},
+    stages::{self, GateNotRun, GateResult, ResearchStatus, Retry, StageState, StaleCause},
 };
 use serde_json::{json, Value};
 use std::{
@@ -397,6 +397,55 @@ fn gate_comparisons_and_status() {
         stages::research_map(&ix(&t.0, None), 0).stages[0].gate,
         GateResult::NotDeclared
     );
+}
+#[test]
+fn gate_not_run_reasons_are_typed() {
+    let t = Temp::new();
+    let mut m = base();
+    setup(&t.0, &m);
+    let check = |m: &Value, expected| {
+        write_manifest(&t.0, m);
+        assert_eq!(
+            stages::research_map(&ix(&t.0, None), 0).stages[0].gate,
+            GateResult::NotRun { reason: expected }
+        );
+    };
+    m["stages"][0]["gate"]["setting"] = json!("/missing");
+    check(
+        &m,
+        GateNotRun::MissingSetting {
+            pointer: "/missing".into(),
+        },
+    );
+    m["stages"][0]["gate"]["setting"] = Value::Null;
+    check(&m, GateNotRun::MissingThreshold);
+    m["stages"][0]["gate"]["value"] = json!(5);
+    put(&t.0, "gate.json", "invalid json");
+    check(
+        &m,
+        GateNotRun::ArtifactUnreadable {
+            artifact: "gate".into(),
+        },
+    );
+    fs::remove_file(t.0.join("gate.json")).unwrap();
+    check(
+        &m,
+        GateNotRun::ArtifactUnreadable {
+            artifact: "gate".into(),
+        },
+    );
+    put(&t.0, "gate.json", r#"{"other":5}"#);
+    check(
+        &m,
+        GateNotRun::MissingPointer {
+            pointer: "/value".into(),
+        },
+    );
+    put(&t.0, "gate.json", r#"{"value":"not numeric"}"#);
+    for op in ["ge", "le"] {
+        m["stages"][0]["gate"]["op"] = json!(op);
+        check(&m, GateNotRun::NonNumeric);
+    }
 }
 #[test]
 fn repro_groups_and_missing() {

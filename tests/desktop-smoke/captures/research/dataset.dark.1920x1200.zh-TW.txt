@@ -1,0 +1,47 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: 已暫停: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	已就緒
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	地圖
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	來源
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	證據
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	資料集
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	匯出
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-layer-extracted	擷取資料
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-layer-raw	原始資料
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-validation	已過期: 000000000000 → 83e94d7a2489
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-missing	sha256 0/60
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0	P0 · C1 · voltage · HfO2 · 原始值: 0 V · 標準值: 0 V · 評級: A · 旗標: 
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-dataset-evidence-0	E1
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-spot-confirm-0	確認
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-spot-dispute-0	提出異議
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-dataset-correct-0	修正
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1	P1 · C1 · voltage · HfO2 · 原始值: 空值: not reported V · 標準值: 空值: not reported V · 評級: A · 旗標: 
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-dataset-evidence-1	E2
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-spot-confirm-1	確認
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-spot-dispute-1	提出異議
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-dataset-correct-1	修正
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-2	P0 · C1 · voltage · HfO2 · 原始值: 2 V · 標準值: 空值 V · 無法轉換: no canonical value recorded · 評級: A · 旗標: 
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-2/research-dataset-evidence-2	E3
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-2/research-spot-confirm-2	確認
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-2/research-spot-dispute-2	提出異議
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-2/research-dataset-correct-2	修正
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	E:\codex\.axiom-2.1\orchestrate\r9-p9\w-1794503648987-064d1c\scratch\accept-rw-gates\ece0094e0f7931a17a8003d1c52c3328\tmp\axiom-research-smoke-108976-4\rram\project
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	顯示阻礙事項

@@ -113,6 +113,32 @@ fn synthetic(root: &Path) -> Arc<Located> {
     drop(file);
     located(root)
 }
+
+#[test]
+fn first_read_is_bounded_even_for_pinned_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut l = (*synthetic(dir.path())).clone();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("data/evidence.csv"))
+        .unwrap();
+    for n in 40_000..50_000 {
+        writeln!(file, "E{n},P0,hash,1,experimental evidence").unwrap();
+    }
+    drop(file);
+    let a = l
+        .manifest
+        .artifacts
+        .iter_mut()
+        .find(|a| a.id == "evidence")
+        .unwrap();
+    a.sha256 = Some("deliberately-not-verified-by-preview".into());
+    let page =
+        axiom::research_workspace::read::read_first_rows(&l, "evidence", 200, &Limits::default())
+            .unwrap();
+    assert_eq!(page.rows.len(), 200);
+    assert!(page.next.unwrap().offset < 32_000);
+}
 fn filter(column: &str, op: Op) -> Filter {
     Filter {
         column: column.into(),

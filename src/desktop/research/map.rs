@@ -8,8 +8,8 @@ use crate::{
         manifest::Role,
         repro::{ReproResult, ReproStatus},
         stages::{
-            Engineering, GateResult, ResearchMap, ResearchStatus, Retry, StageState, StaleCause,
-            Staleness,
+            Engineering, GateNotRun, GateResult, ResearchMap, ResearchStatus, Retry, StageState,
+            StaleCause, Staleness,
         },
     },
 };
@@ -34,6 +34,12 @@ const T: Table = &[
     ("Stale", "已過期"),
     ("Passed", "通過"),
     ("Gate not run", "關卡尚未執行"),
+    ("gate artifact", "關卡產物"),
+    ("missing or corrupt", "遺失或損毀"),
+    ("missing setting", "缺少設定"),
+    ("missing gate threshold", "缺少關卡門檻"),
+    ("missing gate pointer", "缺少關卡指標"),
+    ("gate requires numeric values", "關卡需要數值"),
     ("Gate not declared", "未宣告關卡"),
     ("Gate failed", "關卡失敗"),
     ("Gate passed", "關卡通過"),
@@ -135,6 +141,23 @@ fn stale_text(stale: &Staleness, lang: Lang) -> String {
         tr(lang, "current")
     )
 }
+fn gate_not_run_text(reason: &GateNotRun, lang: Lang) -> String {
+    match reason {
+        GateNotRun::ArtifactUnreadable { artifact } => format!(
+            "{} {artifact} {}",
+            tr(lang, "gate artifact"),
+            tr(lang, "missing or corrupt")
+        ),
+        GateNotRun::MissingSetting { pointer } => {
+            format!("{} {pointer}", tr(lang, "missing setting"))
+        }
+        GateNotRun::MissingThreshold => tr(lang, "missing gate threshold").into(),
+        GateNotRun::MissingPointer { pointer } => {
+            format!("{} {pointer}", tr(lang, "missing gate pointer"))
+        }
+        GateNotRun::NonNumeric => tr(lang, "gate requires numeric values").into(),
+    }
+}
 pub(crate) fn map_lines(map: &ResearchMap, lang: Lang) -> Vec<MapLine> {
     map.stages
         .iter()
@@ -153,7 +176,11 @@ pub(crate) fn map_lines(map: &ResearchMap, lang: Lang) -> Vec<MapLine> {
             let gate_text = match &stage.gate {
                 GateResult::Passed => tr(lang, "Gate passed").into(),
                 GateResult::Failed { detail } => format!("{}: {detail}", tr(lang, "Gate failed")),
-                GateResult::NotRun { reason } => format!("{}: {reason}", tr(lang, "Gate not run")),
+                GateResult::NotRun { reason } => format!(
+                    "{}: {}",
+                    tr(lang, "Gate not run"),
+                    gate_not_run_text(reason, lang)
+                ),
                 GateResult::NotDeclared => tr(lang, "Gate not declared").into(),
             };
             MapLine {
@@ -216,6 +243,9 @@ impl Render for MapPanel {
             .test_support()
             .w_full()
             .gap(px(4.));
+        if matches!(wb.load, super::LoadState::Indexing { .. }) {
+            return panel.child(super::marked("research-map-indexing", super::load_text(&wb.load, lang)));
+        }
         if let Some(map) = &wb.map {
             panel = panel.child(super::marked(
                 "research-map-status",

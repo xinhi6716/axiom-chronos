@@ -292,13 +292,41 @@ pub fn read_rows(
     n: usize,
     lim: &Limits,
 ) -> Res<RowsPage> {
+    read_rows_impl(l, id, after, n, lim, false)
+}
+
+/// Read a bounded, unverified first page. Full integrity verification belongs to indexing.
+pub fn read_first_rows(l: &Located, id: &str, n: usize, lim: &Limits) -> Res<RowsPage> {
+    read_rows_impl(l, id, None, n, lim, true)
+}
+
+fn read_rows_impl(
+    l: &Located,
+    id: &str,
+    after: Option<&Cursor>,
+    n: usize,
+    lim: &Limits,
+    preview: bool,
+) -> Res<RowsPage> {
+    read_rows_impl_with(l, id, after, n, lim, preview, |path| File::open(path))
+}
+
+fn read_rows_impl_with<R: Read + Seek>(
+    l: &Located,
+    id: &str,
+    after: Option<&Cursor>,
+    n: usize,
+    lim: &Limits,
+    preview: bool,
+    open: impl FnOnce(&Path) -> std::io::Result<R>,
+) -> Res<RowsPage> {
     let a = artifact(l, id)?;
     if a.format != Format::Csv && a.format != Format::Jsonl {
         return Err(err("invalid_argument", "artifact is not CSV or JSONL"));
     }
     let p = l.artifact_path(a)?;
     let v = version(&p)?;
-    if a.sha256.is_some() {
+    if !preview && a.sha256.is_some() {
         verify(l, id)?;
     }
     if let Some(c) = after {
@@ -310,7 +338,7 @@ pub fn read_rows(
             return Err(err("stale_cursor", "source changed"));
         }
     }
-    let f = File::open(&p).map_err(|e| err("io", e))?;
+    let f = open(&p).map_err(|e| err("io", e))?;
     let mut r = BufReader::new(f);
     let mut header = Vec::new();
     let mut offset = 0;
@@ -331,7 +359,9 @@ pub fn read_rows(
     r.seek(SeekFrom::Start(offset)).map_err(|e| err("io", e))?;
     let mut rows = Vec::new();
     let cap = n.min(lim.max_page_rows);
-    while rows.len() < cap && offset < v.bytes {
+    let mut records_read = 0usize;
+    while rows.len() < cap && offset < v.bytes && (!preview || records_read < cap) {
+        records_read += 1;
         let fields = if a.format == Format::Csv {
             let mut csv = CsvReader::new(r, lim.clone());
             csv.first = false;
@@ -462,6 +492,49 @@ mod extra_tests {
         std::fs::write(d.path().join("j.jsonl"), "{\"x\":1}\n{\"x\":").unwrap();
         let l = super::super::manifest::locate(d.path(), &Default::default()).unwrap();
         (d, l)
+    }
+    #[test]
+    fn first_page_reads_only_a_bounded_prefix_of_50k_rows() {
+        use std::io::Write;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        struct Counted {
+            file: File,
+            bytes: Arc<AtomicUsize>,
+        }
+        impl Read for Counted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.file.read(buf)?;
+                self.bytes.fetch_add(n, Ordering::Relaxed);
+                Ok(n)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(pos)
+            }
+        }
+        let (dir, mut l) = setup();
+        let mut file = std::io::BufWriter::new(File::create(dir.path().join("a.csv")).unwrap());
+        writeln!(file, "name,x").unwrap();
+        for i in 0..50_000 {
+            writeln!(file, "row{i},value{i}").unwrap();
+        }
+        drop(file);
+        l.manifest.artifacts[0].sha256 = Some("not-verified-in-preview".into());
+        let bytes = Arc::new(AtomicUsize::new(0));
+        let page = read_rows_impl_with(&l, "a", None, 200, &Limits::default(), true, |path| {
+            Ok(Counted {
+                file: File::open(path)?,
+                bytes: bytes.clone(),
+            })
+        })
+        .unwrap();
+        assert_eq!(page.rows.len(), 200);
+        assert_eq!(page.rows[0].fields["path"], "row0");
+        assert!(bytes.load(Ordering::Relaxed) <= 32_768);
     }
     #[test]
     fn pages_mapping_stale_and_jsonl_error() {

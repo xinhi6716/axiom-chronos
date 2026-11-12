@@ -1,6 +1,6 @@
 use super::{
     actions::{self, Actions},
-    Tab, Workbench,
+    LoadState, Tab, Workbench,
 };
 use crate::{
     base::Res,
@@ -53,6 +53,10 @@ const T: Table = &[
     ("Grade", "評級"),
     ("Flags", "旗標"),
     ("No missing-rate columns", "沒有缺失率欄位"),
+    (
+        "Indexing in progress; showing the first page only.",
+        "正在建立索引；目前僅顯示第一頁。",
+    ),
 ];
 fn tr(lang: Lang, key: &'static str) -> &'static str {
     translate(lang, T, key)
@@ -426,6 +430,68 @@ impl Render for DatasetPanel {
             .gap(px(4.))
             .text_color(colors.text)
             .w_full();
+        let wb = self.wb.read(cx);
+        let indexing = matches!(wb.load, LoadState::Indexing { .. });
+        let view = wb.view(Tab::Dataset);
+        let showing_first = matches!(wb.load, LoadState::Ready)
+            && self.pages.is_empty()
+            && self.error.is_none()
+            && view.filters.is_empty()
+            && view.offset == 0
+            && (layer_of(&view) == DataLayer::Raw) == wb.preview_raw;
+        if indexing || showing_first {
+            let rows = wb.preview.clone();
+            let raw = layer_of(&view) == DataLayer::Raw;
+            let sizes = Rc::new(vec![size(px(1.), px(84.)); rows.len()]);
+            let list = v_virtual_list(
+                cx.entity(),
+                "research-dataset-preview-rows",
+                sizes,
+                move |_, range, _, _| {
+                    range
+                        .map(|i| {
+                            let fields = &rows[i].fields;
+                            let get = |key: &str| fields.get(key).map(String::as_str).unwrap_or("");
+                            let entity = if get("entity_canonical").is_empty() {
+                                get("entity_raw")
+                            } else {
+                                get("entity_canonical")
+                            };
+                            let source = if raw {
+                                get("source_file")
+                            } else {
+                                get("paper_id")
+                            };
+                            let text = format!(
+                                "{} · {} · {} · {} · {}: {} {} · {}: {} {}",
+                                source,
+                                get("condition_id"),
+                                get("variable"),
+                                entity,
+                                tr(lang, "Original"),
+                                get("value_original"),
+                                get("unit_original"),
+                                tr(lang, "Canonical"),
+                                get("value_canonical"),
+                                get("unit_canonical")
+                            );
+                            div()
+                                .id(SharedString::from(format!("research-dataset-row-{i}")))
+                                .test_support()
+                                .h(px(84.))
+                                .child(text.clone().test_text(text))
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                },
+            );
+            let notice = tr(lang, "Indexing in progress; showing the first page only.");
+            return panel
+                .children(
+                    indexing.then(|| marked("research-dataset-preview-notice", notice.into())),
+                )
+                .child(div().h(px(200.)).w_full().child(list));
+        }
         if self.wb.read(cx).index.is_none() {
             let text = tr(lang, "No research open");
             return panel.child(text.test_text(text));
