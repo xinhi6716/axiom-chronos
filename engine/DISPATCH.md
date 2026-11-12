@@ -2,7 +2,7 @@
 
 For whoever writes `codex_run` briefs. Workers never see this file; they see only the brief.
 
-A worker stays small when the brief leaves nothing to infer. In 18 runs of delete, bug-fix and rename tasks with three-field briefs, `gpt-5.6-terra` finished every task in 2–7 commands and 1–13 changed lines, with no writes outside SCOPE, no backups and no added tests, under both the stock and a trimmed system prompt. Where a brief left a choice open, runs diverged: "rename `calc` everywhere" also renamed the test method `test_calc` in 2 of 6 runs.
+A brief must leave nothing to infer: open choices let workers diverge.
 
 ## The brief
 
@@ -12,13 +12,13 @@ SCOPE   the exact paths the worker may create, change or delete
 VERIFY  one command; exit code 0 means done
 ```
 
-SCOPE lists paths only; notes such as "(new)" go in CONTEXT.
+SCOPE lists paths only; notes such as "(new)" go in CONTEXT. Put all paths space-separated on one SCOPE line. Write all module briefs in one call: a single Bash heredoc, or Write for one unit.
 
 VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME.
 
 The sandbox cannot write to the system temp directory. Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit.
 
-Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
+Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
 A registered brief can run its unit cheaper with two optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use them only when the wish or the plan asks for a cheaper run of that unit, such as reading papers into notes. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Any other value, or either line anywhere else in the brief, is refused when the unit is registered. Without them the unit keeps its role's model and the default effort. `TIER luna` alone keeps luna's own default effort, which can be higher than terra's, so set both for the cheapest run.
 

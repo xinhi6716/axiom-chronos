@@ -132,6 +132,33 @@ if scenario in ('idle', 'idle-progress', 'idle-refusal'):
     while incoming.get(timeout=5) is not None:
         pass
     sys.exit(0)
+if scenario == 'script':
+    script = json.loads(Path(os.environ['FAKE_CLAUDE_SCRIPT']).read_text(encoding='utf-8'))
+    started = {entry.get('id', f't{i}') for i, entry in enumerate(script) if entry['name'] == 'Agent'}
+    roots = dict.fromkeys(entry['agent'] for entry in script if entry['agent'] not in started)
+    def tools(parent, entries):
+        emit({'type': 'assistant', 'parent_tool_use_id': parent, 'message': {'content': [
+            {'type': 'tool_use', 'id': ident, 'name': name, 'input': input}
+            for ident, name, input in entries]}})
+        for ident, _, _ in entries:
+            emit({'type': 'user', 'parent_tool_use_id': parent, 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': ident, 'content': 'done'}]}})
+    for root in roots:
+        tools(None, [(root, 'Agent', {'subagent_type': 'chronos:dispatcher'})])
+    i = 0
+    while i < len(script):
+        entry = script[i]
+        group = entry.get('group')
+        entries = []
+        while i < len(script):
+            current = script[i]
+            if entries and (group is None or current.get('group') != group or current['agent'] != entry['agent']):
+                break
+            entries.append((current.get('id', f't{i}'), current['name'], current['input']))
+            i += 1
+        tools(entry['agent'], entries)
+    emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'})
+    sys.exit(0)
 emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})
 emit({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a1', 'content': 'done'}]}})

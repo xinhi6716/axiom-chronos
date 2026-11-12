@@ -99,7 +99,10 @@ use super::{
     parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief, with_lock,
 };
 use crate::base::{proc::ShellRun, Failure, Res};
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts";
 fn io(e: std::io::Error) -> Failure {
@@ -415,6 +418,10 @@ pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
         Ok(state)
     })
 }
+pub fn accept_output_path(store: &Path, module: &str) -> PathBuf {
+    store.join("reports").join(format!("{module}.accept.txt"))
+}
+
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
         .modules
@@ -430,6 +437,8 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .map(|u| unit_brief(store, &u.id).map(|b| b.scope))
         .collect::<Res<Vec<_>>>()?;
     let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
+    std::fs::create_dir_all(store.join("reports")).map_err(io)?;
+    base::atomic_write(&accept_output_path(store, module), result.output.as_bytes()).map_err(io)?;
     for (u, scope) in units.into_iter().zip(scopes) {
         append_check(
             store,
@@ -464,16 +473,11 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
     let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
     let dir = store.join("reports");
     std::fs::create_dir_all(&dir).map_err(io)?;
-    let tail: String = result
-        .output
-        .chars()
-        .rev()
-        .take(20000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
+    base::atomic_write(
+        &dir.join(format!("{unit}.verify.txt")),
+        result.output.as_bytes(),
+    )
+    .map_err(io)?;
     append_check(
         store,
         unit,

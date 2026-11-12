@@ -223,25 +223,46 @@ for line in sys.stdin:
             send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
             complete(thread_id, turn_id, 'failed', error)
             continue
-        item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
-        item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
-                                  'changes': [{'path': 'src/mod.py', 'kind': {'type': 'add'}, 'diff': ''}]})
-        usage = {'inputTokens': 1200, 'cachedInputTokens': 800, 'outputTokens': 40, 'reasoningOutputTokens': 10, 'totalTokens': 1240, 'cacheWriteInputTokens': 0}
-        send({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'total': usage, 'last': usage}}})
-        echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
-                'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
-        final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
-        if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
-            ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
-            final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
-        if params.get('outputSchema') and 'DIFF REVIEW' in text:
-            final = json.dumps({'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'codex reviewed this diff'}]}) if 'BLOCKME' in text else json.dumps({'verdict': 'pass', 'findings': []})
-        elif params.get('outputSchema') and 'BADJSON' in text:
-            final = 'not json'
-        elif params.get('outputSchema') and 'WRONGSHAPE' in text:
-            final = json.dumps({'wrong': 'shape'})
-        item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
-        complete(thread_id, turn_id)
+        delay = re.search(r'^FAKE_DELAY_MS[ \t]+(\d+)[ \t]*$', text, flags=re.M)
+        delay_ms = int(delay.group(1)) if delay else 0
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms):
+            if delay_ms:
+                time.sleep(delay_ms / 1000)
+            item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
+            paths = re.findall(r'^FAKE_WRITE[ \t]+([^\r\n]+)\s*$', text, flags=re.M)
+            if paths:
+                from pathlib import Path
+                cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
+                for path in paths:
+                    target = cwd / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('fake-written\n', encoding='utf-8')
+                if delay_ms:
+                    time.sleep(delay_ms / 1000)
+            else:
+                paths = ['src/mod.py']
+            item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
+                                      'changes': [{'path': path, 'kind': {'type': 'add'}, 'diff': ''} for path in paths]})
+            usage = {'inputTokens': 1200, 'cachedInputTokens': 800, 'outputTokens': 40, 'reasoningOutputTokens': 10, 'totalTokens': 1240, 'cacheWriteInputTokens': 0}
+            send({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'total': usage, 'last': usage}}})
+            echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
+                    'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
+            final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
+            if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
+                ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
+                final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
+            if params.get('outputSchema') and 'DIFF REVIEW' in text:
+                final = json.dumps({'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'codex reviewed this diff'}]}) if 'BLOCKME' in text else json.dumps({'verdict': 'pass', 'findings': []})
+            elif params.get('outputSchema') and 'BADJSON' in text:
+                final = 'not json'
+            elif params.get('outputSchema') and 'WRONGSHAPE' in text:
+                final = json.dumps({'wrong': 'shape'})
+            item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
+            complete(thread_id, turn_id)
+        if delay_ms:
+            threading.Thread(target=finish_normal, daemon=True).start()
+        else:
+            finish_normal()
     elif method == 'turn/interrupt':
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)

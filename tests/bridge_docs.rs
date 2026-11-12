@@ -28,8 +28,12 @@ fn bridge_documentation_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cases: &[(&str, &[&str])] = &[
         ("docs/bridge.md", &[
-            "Unit mode takes exactly `project`, `unit`, `role` and `cwd`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
+            "Unit mode takes `project`, `unit`, `role` and `cwd`, optionally `cycle: true`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
             "A registered brief may carry `EFFORT` (`low`, `medium` or `high`) and `TIER` (`luna`, terra units only) as their own lines between GOAL and CONTEXT.",
+            "With `cycle: true`, the reply is an outcome with `next`, `reason`, `verdict`, `review` entries `{unit, pack}`, `paths` and `module_done`, alongside `accept`, `verify_output` and `report`.",
+            r#"`orch` `["module-context", <module>, "--repo", <dir>]` returns bounded module context (16,384 bytes), with `missing` and `incomplete` sections naming sources to consult."#,
+            r#"`orch` `["map", "--repo", <dir>]` lints the map and reports all problems together, including `NEW_PATHS` and `SHARED_OWNER`."#,
+            "A PostToolUse review hook records the reviewer verdict and says `Chronos recorded the review.`; if it says the review was not recorded, fix the cause and call `orch review` yourself.",
             "When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.",
             "Every wish runs Astra first; no option or marker skips it.",
             "Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; `chronos:narrator` (Haiku) writes the final report from the run digest and the core's rulings.",

@@ -196,7 +196,8 @@ fn dispatcher_reports_the_digest_and_reviews_through_the_pack() {
     let dispatcher = asset("agents/dispatcher.md");
     assert!(dispatcher.contains(r#"`orch` `["review-pack", <unit>, "--repo", <dir>]`"#));
     let report = dispatcher.split("## Report").nth(1).unwrap();
-    assert!(report.contains(r#"`orch` `["report", "--repo", <dir>, "--module", <module>]` unedited"#));
+    assert!(report.contains("the outcome saying `module_done` is the report: return it without calling `orch report` or `orch status`"));
+    assert!(report.contains(r#"`orch` `["report", "--repo", <dir>]` unedited"#));
     assert!(report.contains("at most ten lines"));
     assert!(!report.contains("each decided choice"));
     let reviewer = asset("agents/reviewer.md");
@@ -224,4 +225,12 @@ fn fix_rounds_are_resolved_by_the_core() {
     assert!(skill.contains(sentence));
     assert_eq!(skill.matches(sentence).count(), 1);
     assert!(!skill.replace(sentence, "").contains(sentence));
+}
+
+#[test]
+fn empty_memory_and_module_outcomes_are_forwarded() {
+    let skill = axiom::engine::FILES.iter()
+        .find(|(path, _)| *path == "skills/wish/SKILL.md").unwrap().1;
+    assert!(skill.contains(r#"if `memory_digest` is empty, say "no memory""#));
+    assert!(skill.contains("Dispatchers report outcomes; the module-done outcome is the module report."));
 }

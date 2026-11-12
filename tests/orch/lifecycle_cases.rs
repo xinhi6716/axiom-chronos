@@ -830,8 +830,14 @@ fn verify_command_refreshes_a_stale_unit() {
     );
     let out = verify(false);
     assert_eq!(out.exit_code, 0, "{}", out.stderr);
-    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\tpack="), "{}", out.stdout);
-    assert!(out.stdout.contains("\nok"), "{}", out.stdout);
+    assert_eq!(
+        out.stdout,
+        format!(
+            "a\texit=0\tbuilt\taccept\tpack={}\ntests unknown\noutput={}\n",
+            store.join("reports").join("a.review.md").display(),
+            store.join("reports").join("a.verify.txt").display(),
+        )
+    );
     assert_eq!(
         fs::read_to_string(store.join("reports/a.verify.txt")).unwrap().trim(),
         "ok"

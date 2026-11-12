@@ -147,10 +147,8 @@ fn auto_accept_and_verify_failure() {
     assert_eq!(f.accepts("one"), 1);
     let f = Fixture::new(&[("one", "exit 1")], "echo accepted");
     let result = f.run("one");
-    assert_eq!(
-        result["accept"],
-        json!({"ran":false,"reason":"not_built","detail":""})
-    );
+    assert_eq!(result["accept"]["reason"], "not_built");
+    assert!(result["accept"]["output_file"].is_null());
     assert_eq!(f.accepts("one"), 0);
 }
 

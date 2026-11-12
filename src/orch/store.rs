@@ -10,7 +10,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -237,7 +237,12 @@ fn abandoned(marker: &Path) -> Option<String> {
     let claimant = std::fs::read_to_string(marker).ok()?;
     let claimant = claimant.trim();
     if claimant.is_empty() {
-        let age = std::fs::metadata(marker).ok()?.modified().ok()?.elapsed().ok()?;
+        let age = std::fs::metadata(marker)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()?;
         return (age > EMPTY_MARKER_GRACE).then(|| "unknown".to_string());
     }
     (dead(claimant) || claimant == std::process::id().to_string()).then(|| claimant.to_string())
@@ -329,8 +334,10 @@ fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<
             continue;
         }
         if !dead && force && std::fs::remove_file(&path).is_ok() {
-            note.push_str(&format!("stealing store lock held by pid {holder}
-"));
+            note.push_str(&format!(
+                "stealing store lock held by pid {holder}
+"
+            ));
             continue;
         }
         if holder == pid || Instant::now() >= deadline {
@@ -680,7 +687,10 @@ fn remove_pointer(path: &Path) -> Res<()> {
     std::fs::remove_file(path).map_err(io)
 }
 fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
-    Ok(pointer_files(store)?.into_iter().map(|(_, row)| row).collect())
+    Ok(pointer_files(store)?
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect())
 }
 fn pointer_files(store: &Path) -> Res<Vec<(PathBuf, serde_json::Value)>> {
     let dir = store.join("inbox");
@@ -1546,22 +1556,53 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             }
             ("frontier", "set") => Err(fail("frontier set is not supported")),
             ("map", _) => {
-                let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
-                let map = crate::orch::parse_map(&text).map_err(fail)?;
+                let map_path = store.join("modules.md");
+                let text = std::fs::read_to_string(&map_path).map_err(|e| {
+                    Failure::new("io", format!("cannot read {}: {e}", map_path.display()))
+                })?;
                 let plan_path = store.join("astra").join("plan-final.md");
-                match std::fs::read_to_string(&plan_path) {
-                    Ok(plan) => crate::orch::check_goals(&map, &crate::orch::parse_plan(&plan))
-                        .map_err(fail)?,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                let plan = match std::fs::read_to_string(&plan_path) {
+                    Ok(text) => Some(text),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => {
                         return Err(Failure::new(
                             "io",
                             format!("cannot read {}: {e}", plan_path.display()),
                         ))
                     }
+                };
+                let repo = option(args, "--repo")?.map(Path::new);
+                if repo.is_some_and(|p| !p.is_dir()) {
+                    return Err(fail("--repo must be an existing directory"));
+                }
+                let problems = crate::orch::lint_map(&text, plan.as_deref(), repo);
+                if !problems.is_empty() {
+                    let mut message = format!(
+                        "modules.md has {} problems; fix them all, then run orch map again:",
+                        problems.len()
+                    );
+                    for p in problems {
+                        message.push_str(&format!(
+                            "\n- {}{}: {}",
+                            p.module.map(|m| format!("{m}: ")).unwrap_or_default(),
+                            p.kind,
+                            p.message
+                        ));
+                    }
+                    return Err(fail(message));
+                }
+                if repo.is_none() {
+                    note.push_str("paths not checked: pass --repo <dir>\n");
+                }
+                let map = crate::orch::parse_map(&text).map_err(fail)?;
+                let mut map_json = serde_json::to_value(&map).unwrap();
+                for module in map_json["modules"].as_array_mut().unwrap() {
+                    let module = module.as_object_mut().unwrap();
+                    module.remove("new_paths");
+                    module.remove("shared_owner");
                 }
                 Ok(emit(
-                    serde_json::to_value(&map).unwrap(),
+                    map_json,
                     map.modules
                         .iter()
                         .map(|m| {
@@ -1570,6 +1611,16 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         .collect::<Vec<_>>()
                         .join("\n"),
                     json,
+                ))
+            }
+            ("module-context", _) => {
+                let module = arg(args, 1)?;
+                let repo = option(args, "--repo")?.ok_or_else(|| fail("--repo is required"))?;
+                let context = crate::orch::module_context(store, module, Path::new(repo))?;
+                Ok(emit(
+                    serde_json::to_value(&context).unwrap(),
+                    crate::orch::render_module_context(&context),
+                    json || args.iter().any(|arg| arg == "--json"),
                 ))
             }
             _ => {
@@ -1610,15 +1661,26 @@ mod tests {
     fn a_holder_that_never_lets_go_ends_the_wait_with_an_error() {
         let t = tempfile::tempdir().unwrap();
         let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
-        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
         let mut holder = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
         let lock = t.path().join(".orch.lock");
-        std::fs::write(&lock, format!("{}
-", holder.id())).unwrap();
+        std::fs::write(
+            &lock,
+            format!(
+                "{}
+",
+                holder.id()
+            ),
+        )
+        .unwrap();
         let started = Instant::now();
         let refused = acquire(
             t.path(),
@@ -1660,7 +1722,11 @@ mod tests {
             .expect("an abandoned reclaim marker is itself reclaimed");
         assert!(note.contains("replacing stale store lock"), "{note}");
         drop(held);
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
 
         // A reclaimer that died before writing its pid leaves an empty marker.
         std::fs::write(&lock, "4294967295\n").unwrap();
@@ -1670,11 +1736,19 @@ mod tests {
             .unwrap();
         drop(empty);
         drop(acquire(t.path(), false, &mut String::new(), short).expect("an old empty marker"));
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
 
         // A live reclaimer keeps its claim, and every level of a dead chain is cleared once it ends.
         let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
-        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
         let mut claimant = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1682,13 +1756,19 @@ mod tests {
             .unwrap();
         std::fs::write(&lock, "4294967295\n").unwrap();
         std::fs::write(&marker, "4294967294\n").unwrap();
-        let second = t.path().join(".orch.lock.4294967295.stale.4294967294.stale");
+        let second = t
+            .path()
+            .join(".orch.lock.4294967295.stale.4294967294.stale");
         std::fs::write(&second, format!("{}\n", claimant.id())).unwrap();
         assert!(acquire(t.path(), false, &mut String::new(), short).is_err());
         assert_eq!(std::fs::read_to_string(&lock).unwrap().trim(), "4294967295");
         drop(claimant.stdin.take());
         claimant.wait().unwrap();
         drop(acquire(t.path(), false, &mut String::new(), short).expect("the claimant died"));
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
     }
 }

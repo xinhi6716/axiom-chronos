@@ -213,7 +213,7 @@ fn fresh_process_claim() {
 }
 
 #[test]
-fn verify_output_truncation() {
+fn verify_output_preserves_capture_and_bounds_tail() {
     let f = Fixture::new();
     let expected = "01234567\r\n".repeat(2100);
     fs::write(f.repo.join("long-output.txt"), &expected).unwrap();
@@ -240,7 +240,7 @@ fn verify_output_truncation() {
     assert_eq!(result.verify_exit, Some(0));
     assert_eq!(
         fs::read_to_string(result.verify_output.unwrap()).unwrap(),
-        expected[1000..]
+        expected
     );
     assert_eq!(result.verify_tail, expected[19000..]);
 }

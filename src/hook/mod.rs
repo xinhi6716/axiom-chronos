@@ -11,6 +11,7 @@ use std::{
 };
 
 pub mod context;
+pub mod review;
 
 const CODEX: &str = "mcp__plugin_chronos_bridge__codex_run";
 const GOAL: &str = "mcp__plugin_chronos_bridge__goal";
@@ -941,6 +942,7 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             }
             warning.map(|line| json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":line}}))
         }
+        "PostToolUse" => review::after_agent(event, home),
         _ => None,
     }
 }
@@ -996,7 +998,7 @@ pub fn main_stdin() -> i32 {
     };
     if !matches!(
         event.get("hook_event_name").and_then(Value::as_str),
-        Some("UserPromptSubmit" | "Stop" | "PreToolUse" | "SessionStart")
+        Some("UserPromptSubmit" | "Stop" | "PreToolUse" | "PostToolUse" | "SessionStart")
     ) {
         eprintln!("Unknown hook event");
         return 0;

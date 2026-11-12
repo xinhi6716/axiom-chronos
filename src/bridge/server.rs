@@ -74,7 +74,14 @@ impl Bridge {
     pub fn codex(&self) -> Res<Arc<AppServer>> {
         let mut lock = self.codex.lock().unwrap_or_else(|e| e.into_inner());
         if lock.is_none() {
-            *lock = Some(Arc::new(AppServer::new(self.config.codex.clone()?).with_slots_home(self.config.data_home.clone().unwrap_or_else(crate::codex::slots::home))));
+            *lock = Some(Arc::new(
+                AppServer::new(self.config.codex.clone()?).with_slots_home(
+                    self.config
+                        .data_home
+                        .clone()
+                        .unwrap_or_else(crate::codex::slots::home),
+                ),
+            ));
         }
         Ok(lock.as_ref().unwrap().clone())
     }
@@ -163,6 +170,7 @@ pub fn tools() -> Value {
                 for name in ["project", "unit", "save_to", "stage", "track", "brief_file"] {
                     tool["inputSchema"]["properties"][name] = json!({"type":"string"});
                 }
+                tool["inputSchema"]["properties"]["cycle"] = json!({"type":"boolean"});
             }
             "goal" => {
                 tool["description"] = json!(
@@ -208,7 +216,10 @@ pub fn serve(config: Config, input: impl BufRead, output: impl Write + Send + 's
     match council::Setup::from_env() {
         Ok(Some(setup)) => bridge = bridge.with_council(setup),
         Ok(None) => (),
-        Err(e) => { eprintln!("axiom: {}", e.message); return 2; }
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            return 2;
+        }
     }
     let bridge = Arc::new(bridge);
     let out = Arc::new(Mutex::new(output));

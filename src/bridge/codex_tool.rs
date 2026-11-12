@@ -1,4 +1,5 @@
 use super::server::Bridge;
+use crate::orch::summary::{self, Next, Outcome, ReviewItem};
 use crate::{
     base::{self, Failure, Res},
     codex::{self, RunRequest},
@@ -90,8 +91,189 @@ impl Drop for UnitGuard {
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
+fn unit_reply(
+    b: &Bridge,
+    project: &str,
+    root: &Path,
+    unit: &str,
+    repo: &Path,
+    registered: bool,
+    model: &str,
+    attempt: u32,
+    attempt_id: Value,
+    report: &Value,
+    finished: orch::Finished,
+    cycle: bool,
+    reused: bool,
+) -> Res<Value> {
+    let built = finished.state == "built" || reused;
+    let mut accept = json!({"ran":false,"reason":if reused {"reused"} else {"not_built"},"detail":"","tests":null,"failing":[],"output_file":null});
+    if !reused && built && finished.verify_exit == Some(0) {
+        let result = goal::accept_hold(b.home()?, project).and_then(|hold| match hold {
+            Some(reason) => Ok(orch::AutoAccept::Skipped {
+                reason,
+                detail: String::new(),
+            }),
+            None => orch::accept_if_ready(root, unit, repo),
+        });
+        match result {
+            Ok(orch::AutoAccept::Ran {
+                module,
+                exit_code,
+                output_file,
+                states,
+                ..
+            }) => {
+                let output = std::fs::read_to_string(&output_file).unwrap_or_default();
+                let sum = summary::summary(Some(exit_code), &output, Some(&output_file), None);
+                let states: serde_json::Map<String, Value> =
+                    states.into_iter().map(|(u, s)| (u, json!(s))).collect();
+                accept = json!({"ran":true,"module":module,"exit_code":exit_code,"states":states,"tests":sum["tests"],"failing":sum["failing"],"output_file":sum["output_file"]});
+            }
+            Ok(orch::AutoAccept::Skipped { reason, detail }) => {
+                accept["reason"] = json!(reason);
+                accept["detail"] = json!(summary::one_line(&detail));
+            }
+            Err(e) => {
+                accept["reason"] = json!("error");
+                accept["detail"] = json!(summary::one_line(&e.message));
+            }
+        }
+    }
+    let state = if reused {
+        "verified".to_string()
+    } else {
+        orch::derive_state(
+            &orch::evidence(root, unit)?,
+            orch::needs_accept(root, unit)?,
+        )
+    };
+    let mut error = if built {
+        Value::Null
+    } else if report["status"] != "completed" {
+        report["error"].clone()
+    } else if !finished.outside_scope.is_empty() {
+        json!({"kind":"outside_scope","message":"changes outside unit scope"})
+    } else if finished.verify_exit.is_some_and(|code| code != 0) {
+        json!({"kind":"verify_failed","message":"unit verification failed"})
+    } else {
+        json!({"kind":"unit_not_built","message":"unit was not built"})
+    };
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        error["message"] = json!(summary::one_line(message));
+    }
+    let output = finished
+        .verify_output
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let sum = summary::summary(
+        finished.verify_exit,
+        &output,
+        finished.verify_output.as_deref(),
+        Some(&finished.changed),
+    );
+    let mut result = json!({"status":if built {"completed"} else {"failed"},"error":error,"unit":unit,"state":state,"registered":registered,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_exit":finished.verify_exit,"verify_output":sum["output_file"],"tests":sum["tests"],"failing":sum["failing"],"changed":sum["changed"],"outside_scope":finished.outside_scope.iter().take(summary::MAX_PATH_SAMPLE).collect::<Vec<_>>(),"outside_scope_count":finished.outside_scope.len(),"accept":accept,"report":root.join("reports").join(format!("{unit}.md")),"report_json":root.join("reports").join(format!("{unit}.json")),"pack":finished.pack,"usage":report["usage"],"slot_wait_ms":report["slot_wait_ms"],"slot_wait":report["slot_wait"]});
+    if reused {
+        result["reused"] = json!(true);
+    }
+    if let Some(e) = finished.pack_error {
+        result["pack_error"] = json!(summary::one_line(&e));
+    }
+    if cycle {
+        let mut next = if reused {
+            Next::Done
+        } else {
+            summary::next_for(root, unit)?
+        };
+        let accept_reason = accept["reason"].as_str().unwrap_or("");
+        let reason = if accept["ran"] == false
+            && !matches!(
+                accept_reason,
+                "not_built" | "not_module" | "already_accepted" | "reused"
+            ) {
+            if matches!(
+                accept_reason,
+                "units_pending" | "claimed" | "amend_pending" | "stopped"
+            ) || accept_reason.starts_with("goal_")
+            {
+                next = Next::Wait;
+            }
+            format!(
+                "{}: {}",
+                accept_reason,
+                accept["detail"].as_str().unwrap_or("")
+            )
+        } else if !error.is_null() {
+            error["message"].as_str().unwrap_or("").to_owned()
+        } else if accept["exit_code"].as_i64().is_some_and(|v| v != 0) {
+            "accept failed".into()
+        } else {
+            String::new()
+        };
+        let mut review = Vec::new();
+        if next == Next::Review || (accept["ran"] == true && accept["exit_code"] == 0) {
+            let units = orch::read_units(root)?;
+            let track = units
+                .iter()
+                .find(|u| u.id == unit)
+                .map(|u| u.track.as_str())
+                .unwrap_or("");
+            for u in units.iter().filter(|u| {
+                u.superseded_by().is_none()
+                    && (u.id == unit
+                        || (accept["ran"] == true && accept["exit_code"] == 0 && u.track == track))
+            }) {
+                if summary::next_for(root, &u.id)? == Next::Review {
+                    let path = orch::pack_path(root, &u.id);
+                    review.push(ReviewItem {
+                        unit: u.id.clone(),
+                        pack: path.is_file().then_some(path),
+                    });
+                }
+            }
+        }
+        let mut paths = std::collections::BTreeMap::new();
+        paths.insert(
+            "report".into(),
+            root.join("reports").join(format!("{unit}.md")),
+        );
+        paths.insert(
+            "report_json".into(),
+            root.join("reports").join(format!("{unit}.json")),
+        );
+        if let Some(path) = &finished.verify_output {
+            paths.insert("verify_output".into(), path.clone());
+        }
+        if let Some(path) = &finished.pack {
+            paths.insert("pack".into(), path.clone());
+        }
+        if let Some(path) = accept["output_file"].as_str() {
+            paths.insert("accept_output".into(), path.into());
+        }
+        let outcome = Outcome {
+            unit: unit.into(),
+            state,
+            next,
+            reason: summary::one_line(&reason),
+            verdict: None,
+            review,
+            paths,
+            module_done: None,
+        };
+        for (key, value) in serde_json::to_value(outcome).unwrap().as_object().unwrap() {
+            result[key] = value.clone();
+        }
+    }
+    Ok(result)
+}
 fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let role = string(a, "role");
+    let cycle = a.get("cycle") == Some(&Value::Bool(true));
+    if cycle && string(a, "unit").is_none() {
+        return Err(invalid("cycle needs unit mode"));
+    }
     if string(a, "unit").is_some()
         && (!matches!(role, Some("terra" | "sol"))
             || a.get("brief").is_some()
@@ -186,17 +368,86 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             ));
         }
         let required = active.is_some();
-        match orch::begin_unit(root, u, r, Path::new(cwd), required)? {
-            orch::Begin::Reused => {
-                return Ok(
-                    json!({"status":"completed","unit":u,"state":"verified","reused":true,"registered":registered,"attempt_id":null,"verify_output":null}),
-                )
+        let begin = if cycle {
+            orch::begin_unit_cycle(root, u, r, Path::new(cwd), required)?
+        } else {
+            Some(orch::begin_unit(root, u, r, Path::new(cwd), required)?)
+        };
+        match begin {
+            Some(orch::Begin::Reused) | None => {
+                let reused = begin.is_some();
+                let rows = orch::evidence(root, u)?;
+                let verify = rows.iter().rev().find(|r| r.kind == "verify");
+                let saved: Value = std::fs::read(root.join("reports").join(format!("{u}.json")))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .unwrap_or_else(|| json!({}));
+                let verify_path = root.join("reports").join(format!("{u}.verify.txt"));
+                let pack_path = orch::pack_path(root, u);
+                let mut pack = pack_path.is_file().then_some(pack_path.clone());
+                let mut pack_error = None;
+                if !reused
+                    && (pack.is_none()
+                        || std::fs::metadata(&pack_path)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            < std::fs::metadata(&verify_path)
+                                .and_then(|m| m.modified())
+                                .ok())
+                {
+                    match orch::review_pack(root, u, Path::new(cwd)) {
+                        Ok(info) => pack = Some(info.path),
+                        Err(e) => {
+                            pack = None;
+                            pack_error = Some(e.message);
+                        }
+                    }
+                }
+                let finished = orch::Finished {
+                    state: if reused { "verified" } else { "built" }.into(),
+                    verify_exit: verify.map(|v| v.exit_code),
+                    verify_tail: String::new(),
+                    verify_output: verify_path.is_file().then_some(verify_path),
+                    outside_scope: vec![],
+                    changed: std::fs::read(root.join("reports").join(format!("{u}.changed.json")))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| {
+                            let mut paths = orch::lifecycle::report_paths(&saved, Path::new(cwd));
+                            paths.sort();
+                            paths.dedup();
+                            paths
+                        }),
+                    pack,
+                    pack_error,
+                };
+                let model = rows
+                    .iter()
+                    .rev()
+                    .find(|r| r.kind == "run")
+                    .map(|r| r.command.as_str())
+                    .unwrap_or("");
+                return unit_reply(
+                    b,
+                    project.unwrap(),
+                    root,
+                    u,
+                    Path::new(cwd),
+                    registered,
+                    model,
+                    rows.iter().filter(|r| r.kind == "run").count() as u32,
+                    Value::Null,
+                    &saved,
+                    finished,
+                    cycle,
+                    reused,
+                );
             }
-            orch::Begin::Run {
+            Some(orch::Begin::Run {
                 brief: value,
                 attempt: n,
                 attempt_id: id,
-            } => {
+            }) => {
                 brief = value.text;
                 effort = value.effort;
                 tier = value.tier;
@@ -249,61 +500,21 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     };
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
-        let built = finished.state == "built";
-        let accept = if built && finished.verify_exit == Some(0) {
-            let result =
-                goal::accept_hold(b.home()?, project.unwrap()).and_then(|hold| match hold {
-                    Some(reason) => Ok(orch::AutoAccept::Skipped {
-                        reason,
-                        detail: String::new(),
-                    }),
-                    None => orch::accept_if_ready(root, u, Path::new(cwd)),
-                });
-            match result {
-                Ok(orch::AutoAccept::Ran {
-                    module,
-                    exit_code,
-                    output,
-                    states,
-                }) => {
-                    let states: serde_json::Map<String, Value> = states
-                        .into_iter()
-                        .map(|(unit, state)| (unit, json!(state)))
-                        .collect();
-                    json!({"ran":true,"module":module,"exit_code":exit_code,"output":output,"states":states})
-                }
-                Ok(orch::AutoAccept::Skipped { reason, detail }) => {
-                    json!({"ran":false,"reason":reason,"detail":detail})
-                }
-                Err(e) => json!({"ran":false,"reason":"error","detail":e.message}),
-            }
-        } else {
-            json!({"ran":false,"reason":"not_built","detail":""})
-        };
-        let state = orch::evidence(root, u)
-            .and_then(|rows| Ok(orch::derive_state(&rows, orch::needs_accept(root, u)?)))
-            .unwrap_or_else(|_| finished.state.clone());
-        let error = if built {
-            Value::Null
-        } else if report["status"] != "completed" {
-            report["error"].clone()
-        } else if !finished.outside_scope.is_empty() {
-            json!({"kind":"outside_scope","message":"changes outside unit scope"})
-        } else if finished.verify_exit.is_some_and(|code| code != 0) {
-            json!({"kind":"verify_failed","message":"unit verification failed"})
-        } else {
-            json!({"kind":"unit_not_built","message":"unit was not built"})
-        };
-        let mut result = json!({"status":if built {"completed"} else {"failed"},"unit":u,"state":state,"registered":registered,"accept":accept,"model":model,"attempt":attempt,"attempt_id":attempt_id,"verify_output":finished.verify_output,"verify_exit":finished.verify_exit,"outside_scope":finished.outside_scope,"file_changes":report["file_changes"],"usage":report["usage"],"report":root.join("reports").join(format!("{u}.md")),"error":error,"pack":finished.pack});
-        if let Some(error) = finished.pack_error {
-            result["pack_error"] = json!(error);
-        }
-        result["slot_wait_ms"] = report["slot_wait_ms"].clone();
-        result["slot_wait"] = report["slot_wait"].clone();
-        if !built {
-            result["verify_tail"] = json!(finished.verify_tail);
-        }
-        return Ok(result);
+        return unit_reply(
+            b,
+            project.unwrap(),
+            root,
+            u,
+            Path::new(cwd),
+            registered,
+            &model,
+            attempt,
+            json!(attempt_id),
+            &report,
+            finished,
+            cycle,
+            false,
+        );
     }
     if let Some(dest) = dest {
         let valid = report["status"] == "completed" && !report["structured_output"].is_null();

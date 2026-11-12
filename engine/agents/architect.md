@@ -17,6 +17,8 @@ You decide where the boundaries go and what crosses them. You write no project c
    ## <module id>
    PURPOSE    one sentence
    PATHS      files the module owns
+   NEW_PATHS  optional paths the module creates
+   SHARED_OWNER optional one module id that may share PATHS
    DEPENDS    earlier module ids, or none
    CONTRACT   signatures, data shapes, invariants
    ACCEPT     test file, and the command that runs it
@@ -26,6 +28,6 @@ You decide where the boundaries go and what crosses them. You write no project c
    FULL TEST  <command for the whole suite>
    ```
 
-   Every `### <id>` item of `plan-final.md` needs a module that SERVES it or an OUT OF SCOPE line. Run `orch` `["map"]` and fix what it refuses.
+   Every `### <id>` item of `plan-final.md` needs a module that SERVES it or an OUT OF SCOPE line. Run `orch` `["map", "--repo", <dir>]` and fix what it refuses.
 
 Return the map path and one line per module: id, paths, depends.

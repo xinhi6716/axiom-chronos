@@ -3,6 +3,30 @@ use crate::base::{self, Failure, Res};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+fn check_text(summary: &serde_json::Value) -> String {
+    let tests = match summary["tests"].as_object() {
+        Some(t) => format!(
+            "tests passed={} failed={} ignored={}",
+            t["passed"], t["failed"], t["ignored"]
+        ),
+        None => "tests unknown".to_string(),
+    };
+    let mut lines = vec![tests];
+    lines.extend(
+        summary["failing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_owned),
+    );
+    lines.push(format!(
+        "output={}",
+        summary["output_file"].as_str().unwrap_or("")
+    ));
+    lines.join("\n")
+}
+
 fn cut(text: &str) -> String {
     let mut chars = text.chars();
     let mut result: String = chars.by_ref().take(240).collect();
@@ -150,20 +174,20 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 };
                 let next = next_step_for(store, unit)?;
                 let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-                let tail: String = result
-                    .output
-                    .chars()
-                    .rev()
-                    .take(2000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
+                let output_file = store.join("reports").join(format!("{unit}.verify.txt"));
+                let mut value = summary::summary(
+                    Some(result.exit_code),
+                    &result.output,
+                    Some(&output_file),
+                    None,
+                );
                 let pack_text = pack
                     .as_ref()
                     .map(|p| format!("\tpack={}", p.display()))
                     .unwrap_or_default();
-                let mut value = serde_json::json!({"exit_code":result.exit_code,"state":state,"next":next,"output":tail,"pack":pack});
+                value["state"] = serde_json::json!(state);
+                value["next"] = serde_json::json!(next);
+                value["pack"] = serde_json::json!(pack);
                 if let Some(error) = pack_error {
                     value["pack_error"] = serde_json::json!(error);
                 }
@@ -172,7 +196,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     format!(
                         "{unit}\texit={}\t{state}\t{next}{pack_text}\n{}",
                         result.exit_code,
-                        tail.trim_end()
+                        check_text(&value)
                     ),
                     value,
                 ))
@@ -208,6 +232,17 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     };
                     ("fulltest", record_full(store, repo, command)?)
                 };
+                if cmd == "accept" {
+                    let output_file = accept_output_path(store, name);
+                    let value = summary::summary(
+                        Some(result.exit_code),
+                        &result.output,
+                        Some(&output_file),
+                        None,
+                    );
+                    let text = format!("{name}\texit={}\n{}", result.exit_code, check_text(&value));
+                    return Ok((if result.exit_code == 0 { 0 } else { 1 }, text, value));
+                }
                 let tail: String = result
                     .output
                     .chars()

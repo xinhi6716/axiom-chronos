@@ -62,9 +62,155 @@ fn batch(a: &Value) -> Res<Option<goal::Batch>> {
         )),
     }
 }
+
+fn protected(key: &str) -> bool {
+    matches!(
+        key,
+        "status"
+            | "kind"
+            | "unit"
+            | "state"
+            | "next"
+            | "exit_code"
+            | "path"
+            | "pack"
+            | "report"
+            | "report_json"
+            | "verify_output"
+            | "output_file"
+    ) || key.ends_with("_file")
+}
+
+fn contains_protected(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| protected(k) || contains_protected(v)),
+        Value::Array(values) => values.iter().any(contains_protected),
+        _ => false,
+    }
+}
+
+fn shrink(value: &mut Value, limit: usize, keep: bool, level: u8) {
+    match value {
+        Value::String(s) if !keep && s.len() > limit => {
+            let mut end = limit.min(s.len());
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            s.truncate(end);
+        }
+        Value::Array(values) => {
+            let count = limit / 16;
+            values.truncate(count);
+            for v in values {
+                shrink(v, limit, keep, level);
+            }
+        }
+        Value::Object(map) => {
+            let count = limit / 16;
+            let mut i = 0;
+            map.retain(|k, v| {
+                i += 1;
+                i <= count || protected(k) || contains_protected(v)
+            });
+            for (k, v) in map {
+                if k == "stdout" {
+                    if let Some(s) = v.as_str() {
+                        if let Ok(mut inner) = serde_json::from_str::<Value>(s) {
+                            shrink(&mut inner, limit, false, level);
+                            *v = json!(inner.to_string());
+                            continue;
+                        }
+                    }
+                }
+                let keep = protected(k)
+                    && (level == 0
+                        || (level == 1
+                            && matches!(
+                                k.as_str(),
+                                "status" | "kind" | "unit" | "state" | "next" | "exit_code"
+                            )));
+                shrink(v, limit, keep, level);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reply_size(payload: &Value) -> usize {
+    let body = super::server::call_body(|| Ok(payload.clone()));
+    serde_json::to_vec(&body).expect("JSON payload").len()
+}
+
+/// Bound the complete bridge response, including its duplicated pretty-printed content.
+pub fn bound_reply(payload: Value) -> Value {
+    use crate::orch::summary::MAX_REPLY_BYTES;
+    if reply_size(&payload) <= MAX_REPLY_BYTES {
+        return payload;
+    }
+    let payload = if payload.is_object() {
+        payload
+    } else {
+        json!({"value":payload})
+    };
+    for level in 0..=2 {
+        let mut low = 0;
+        let mut high = MAX_REPLY_BYTES;
+        let mut best = None;
+        while low <= high {
+            let middle = (low + high) / 2;
+            let mut candidate = payload.clone();
+            shrink(&mut candidate, middle, false, level);
+            candidate["truncated"] = json!(true);
+            if reply_size(&candidate) <= MAX_REPLY_BYTES {
+                best = Some(candidate);
+                low = middle + 1;
+            } else if middle == 0 {
+                break;
+            } else {
+                high = middle - 1;
+            }
+        }
+        if let Some(best) = best {
+            return best;
+        }
+    }
+    let mut candidate = payload;
+    shrink(&mut candidate, 0, false, 2);
+    candidate["truncated"] = json!(true);
+    candidate
+}
+
+fn unit_reply(mut value: Value, b: &Bridge, args: &Value) -> Value {
+    if let Some(map) = value.as_object_mut() {
+        map.remove("verify_tail");
+        if let Some(accept) = map.get_mut("accept").and_then(Value::as_object_mut) {
+            if accept.remove("output").is_some() {
+                if let (Ok(root), Some(module)) = (
+                    store(b, s(args, "project")),
+                    accept.get("module").and_then(Value::as_str),
+                ) {
+                    accept.insert(
+                        "output_file".into(),
+                        json!(orch::accept_output_path(&root, module)),
+                    );
+                }
+            }
+        }
+    }
+    bound_reply(value)
+}
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
-        "codex_run" => Ok(super::codex_tool::codex_run(b, a)),
+        "codex_run" => {
+            let result = super::codex_tool::codex_run(b, a);
+            Ok(if a.get("unit").is_some() {
+                unit_reply(result, b, a)
+            } else {
+                result
+            })
+        }
         "council" => super::council_tool::council(b, a),
         "orch" => {
             let path = store(b, s(a, "project"))?;
@@ -75,6 +221,7 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             if json_flag {
                 args.remove(0);
             }
+            let bounded = matches!(args.first().map(String::as_str), Some("verify" | "accept"));
             let force = args.iter().any(|x| x == "--force");
             args.retain(|x| x != "--force");
             let r = orch::run(&path, &args, json_flag, force);
@@ -83,9 +230,8 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             } else {
                 json!({"kind":"orch_failed","message":if r.stderr.is_empty(){&r.stdout}else{&r.stderr}.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()})
             };
-            Ok(
-                json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err}),
-            )
+            let result = json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err});
+            Ok(if bounded { bound_reply(result) } else { result })
         }
         "run_on_linux" => linux::run(
             b.config.wsl.clone(),

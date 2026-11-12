@@ -312,11 +312,11 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
         &[
             (
                 "verifyunit",
-                "GOAL build\nSCOPE failure-only.txt\nVERIFY exit 1\n",
+                "GOAL build\nSCOPE failure-only.txt\nVERIFY exit 1\nCONTEXT\nFAKE_WRITE failure-only.txt\n",
             ),
             (
                 "scopeunit",
-                "GOAL TOUCH_OUTSIDE\nSCOPE allowed.txt\nVERIFY echo ok\n",
+                "GOAL build\nSCOPE allowed.txt\nVERIFY echo ok\nCONTEXT\nFAKE_WRITE outside.txt\n",
             ),
             (
                 "limitunit",
@@ -324,21 +324,7 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
             ),
         ],
     );
-    let wrapper = temp.path().join("failure_codex.py");
-    fs::write(&wrapper, "import sys\np=sys.argv[1]\ns=open(p,encoding='utf8').read().replace(\"'path': 'src/mod.py'\", \"'path': 'failure-only.txt'\")\ns=s.replace(\"turn_id = thread_id + '-turn'\", \"turn_id = thread_id + '-turn'\\n        if 'TOUCH_OUTSIDE' in text:\\n            open(os.path.join(thread_params[thread_id]['cwd'], 'outside.txt'), 'w').write('changed')\")\nexec(compile(s,p,'exec'))\n").unwrap();
-    let b = Bridge::new(Config {
-        data_home: Some(temp.path().into()),
-        codex: Ok(vec![
-            common::python(),
-            wrapper.to_string_lossy().into_owned(),
-            common::repo_root()
-                .join("tests/fakes/fake_codex.py")
-                .to_string_lossy()
-                .into_owned(),
-        ]),
-        wsl: None,
-        on_windows: false,
-    });
+    let b = bridge(temp.path());
     for (unit, kind) in [
         ("verifyunit", "verify_failed"),
         ("scopeunit", "outside_scope"),
@@ -356,7 +342,10 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
         }
         if unit == "verifyunit" {
             assert_eq!(r["verify_exit"], 1);
-            assert!(r["verify_tail"].is_string());
+            assert_eq!(r["outside_scope_count"], 0);
+            assert!(repo.join("failure-only.txt").is_file());
+            assert!(r["failing"].is_array());
+            assert!(r.get("verify_tail").is_none());
             assert!(r["attempt_id"].is_string());
             let path = std::path::Path::new(r["verify_output"].as_str().unwrap());
             assert!(path.is_file());
@@ -364,7 +353,9 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
             assert!(report.contains(&format!("BRIDGE VERIFY exit=1 output={}", path.display())));
         }
         if unit == "scopeunit" {
-            assert!(!r["outside_scope"].as_array().unwrap().is_empty());
+            assert_eq!(r["outside_scope"], json!(["outside.txt"]));
+            assert_eq!(r["outside_scope_count"], 1);
+            assert!(r["verify_exit"].is_null());
             assert!(repo.join("outside.txt").exists());
         }
         let retry = invoke(&b, args);

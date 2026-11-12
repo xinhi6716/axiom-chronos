@@ -24,6 +24,7 @@ pub struct Finished {
     pub verify_tail: String,
     pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
+    pub changed: Vec<String>,
     pub pack: Option<PathBuf>,
     pub pack_error: Option<String>,
 }
@@ -159,6 +160,28 @@ pub fn begin_unit(
     repo: &Path,
     astra_required: bool,
 ) -> Res<Begin> {
+    Ok(begin_inner(store, unit, role, repo, astra_required, false)?.unwrap())
+}
+
+/// Performs the normal begin gates atomically, returning None for a resumable build.
+pub fn begin_unit_cycle(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+) -> Res<Option<Begin>> {
+    begin_inner(store, unit, role, repo, astra_required, true)
+}
+
+fn begin_inner(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+    cycle: bool,
+) -> Res<Option<Begin>> {
     let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
     with_lock(store, false, || {
         let units = read_units(store)?;
@@ -218,7 +241,7 @@ pub fn begin_unit(
                 .find(|r| r.kind == "verify")
                 .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
         {
-            return Ok(Begin::Reused);
+            return Ok(Some(Begin::Reused));
         }
         let count = rows.iter().filter(|r| r.kind == "run").count();
         if count >= 2 {
@@ -244,6 +267,20 @@ pub fn begin_unit(
         if astra_required {
             astra_gate(store)?;
         }
+        if cycle
+            && derive_state(&rows, needs_accept(store, unit)?) == "built"
+            && rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .is_some_and(|r| {
+                    r.exit_code == 0
+                        && !r.commit.is_empty()
+                        && snapshot(repo, &brief.scope) == r.commit
+                })
+        {
+            return Ok(None);
+        }
         let attempt = count as u32 + 1;
         let attempt_id = format!("{}-{}", attempt, base::unique());
         let before = dirty(repo)?;
@@ -265,11 +302,53 @@ pub fn begin_unit(
                 base,
             },
         );
-        Ok(Begin::Run {
+        Ok(Some(Begin::Run {
             brief,
             attempt,
             attempt_id,
-        })
+        }))
+    })
+}
+/// Resume only a built unit whose verified scope still matches and is unclaimed.
+pub fn resume_built(store: &Path, unit: &str, repo: &Path) -> Res<bool> {
+    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        let u = units
+            .iter()
+            .find(|u| u.id == unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        u.refuse_superseded()?;
+        let brief = unit_brief(store, unit)?;
+        if let Some(c) = read_claims(store)?
+            .iter()
+            .find(|c| c.unit == unit || overlaps(&brief.scope, &c.scope))
+        {
+            return Err(
+                if active
+                    .get(&key(store, &c.unit))
+                    .is_some_and(|a| a.attempt_id == c.attempt)
+                {
+                    Failure::new("busy", format!("scope busy: {unit}"))
+                } else {
+                    Failure::new(
+                        "outcome_unknown",
+                        format!("claim outcome unknown: {}", c.attempt),
+                    )
+                },
+            );
+        }
+        let rows = evidence(store, unit)?;
+        Ok(derive_state(&rows, needs_accept(store, unit)?) == "built"
+            && rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .is_some_and(|r| {
+                    r.exit_code == 0
+                        && !r.commit.is_empty()
+                        && snapshot(repo, &brief.scope) == r.commit
+                }))
     })
 }
 pub fn release_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
@@ -410,6 +489,7 @@ pub enum AutoAccept {
         module: String,
         exit_code: i32,
         output: String,
+        output_file: PathBuf,
         states: Vec<(String, String)>,
     },
     Skipped {
@@ -508,6 +588,7 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         module: trigger.track.clone(),
         exit_code: result.exit_code,
         output,
+        output_file: super::evidence::accept_output_path(store, &trigger.track),
         states,
     })
 }
@@ -610,8 +691,13 @@ pub fn finish_unit(
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
     let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
     paths.extend(report_paths(report, repo));
-    let outside_scope: Vec<_> = paths
-        .into_iter()
+    let changed: Vec<_> = paths.into_iter().collect();
+    if let Ok(bytes) = serde_json::to_vec(&changed) {
+        let _ = base::atomic_write(&dir.join(format!("{unit}.changed.json")), &bytes);
+    }
+    let outside_scope: Vec<_> = changed
+        .iter()
+        .cloned()
         .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))
         .collect();
     append_evidence(
@@ -635,16 +721,7 @@ pub fn finish_unit(
             Ok(result) => {
                 verify_exit = Some(result.exit_code);
                 let path = dir.join(format!("{unit}.verify.txt"));
-                let output: String = result
-                    .output
-                    .chars()
-                    .rev()
-                    .take(20000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                base::atomic_write(&path, output.as_bytes())
+                base::atomic_write(&path, result.output.as_bytes())
                     .map_err(|e| Failure::new("io", e.to_string()))?;
                 verify_output = Some(path);
                 verify_tail = result
@@ -713,6 +790,7 @@ pub fn finish_unit(
         verify_tail,
         verify_output,
         outside_scope,
+        changed,
         pack,
         pack_error,
     })

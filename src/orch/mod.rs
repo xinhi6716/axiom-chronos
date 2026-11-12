@@ -7,6 +7,7 @@ pub mod parse;
 pub mod report;
 pub mod restore;
 pub mod store;
+pub mod summary;
 
 pub use commands::*;
 pub use evidence::*;

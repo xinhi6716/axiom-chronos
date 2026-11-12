@@ -41,6 +41,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${AXIOM_BIN:-axiom}\" hook"
+          }
+        ]
+      }
     ]
   }
 }

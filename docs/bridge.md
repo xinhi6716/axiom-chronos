@@ -29,8 +29,10 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 
 ## II · Contracts
 
-- Unit mode takes exactly `project`, `unit`, `role` and `cwd`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.
+- Unit mode takes `project`, `unit`, `role` and `cwd`, optionally `cycle: true`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra. With `cycle: true`, the reply is an outcome with `next`, `reason`, `verdict`, `review` entries `{unit, pack}`, `paths` and `module_done`, alongside `accept`, `verify_output` and `report`.
 - A registered brief may carry `EFFORT` (`low`, `medium` or `high`) and `TIER` (`luna`, terra units only) as their own lines between GOAL and CONTEXT. The bridge applies them and removes them from the text the worker gets. Any other value, or either line anywhere else in the brief, is refused with `invalid_argument` by `orch unit add` and again at dispatch. Dispatch also refuses an `effort` argument in unit mode, and `TIER` with role `sol` or a `model` argument. With neither line a unit keeps its role's model and Codex's default effort. If the account lists no model for the tier, the call fails with `model_not_found`; it does not fall back.
+- `orch` `["module-context", <module>, "--repo", <dir>]` returns bounded module context (16,384 bytes), with `missing` and `incomplete` sections naming sources to consult. `orch` `["map", "--repo", <dir>]` lints the map and reports all problems together, including `NEW_PATHS` and `SHARED_OWNER`.
+- A PostToolUse review hook records the reviewer verdict and says `Chronos recorded the review.`; if it says the review was not recorded, fix the cause and call `orch review` yourself.
 - When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.
 - `brief` follows the [dispatch policy](../engine/DISPATCH.md): GOAL, SCOPE and VERIFY, decided before dispatch. The worker sees nothing else. Map a returned report onto `orch inbox push` the same way as any other worker completion.
 - A workspace-writing `codex_run` without a bound project and unit is refused with `unbound_write` before Codex starts.
