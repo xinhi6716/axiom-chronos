@@ -39,7 +39,8 @@ impl Drop for Running<'_> {
     }
 }
 
-fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
+// p8: shared with the paper member adapters.
+pub(super) fn cross(b: &Bridge, cwd: &str, request: &CrossRequest) -> CrossReply {
     let failed = |e: Failure| CrossReply {
         status: Status::Failed,
         output: None,
