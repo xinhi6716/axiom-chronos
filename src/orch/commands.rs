@@ -51,6 +51,9 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         "handoff",
         "resume",
         "waive",
+        "schedule",
+        "activity",
+        "setup",
     ]
     .contains(&cmd)
     {
@@ -70,6 +73,107 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         };
         let has = |name: &str| args.iter().any(|s| s == name);
         match cmd {
+            "schedule" => {
+                use super::lifecycle::scheduler;
+                let sub = args.get(1).map(String::as_str).unwrap_or("");
+                let value = match sub {
+                    "next" => {
+                        let cursor = if has("--cursor") {
+                            Some(
+                                option("--cursor")?
+                                    .parse::<u64>()
+                                    .map_err(|_| invalid("invalid cursor"))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let seconds = if has("--timeout") {
+                            option("--timeout")?
+                                .parse::<u64>()
+                                .map_err(|_| invalid("invalid timeout"))?
+                        } else {
+                            300
+                        };
+                        if seconds > 1800 {
+                            return Err(invalid("timeout must be at most 1800 seconds"));
+                        }
+                        serde_json::to_value(scheduler::next(
+                            store,
+                            cursor,
+                            std::time::Duration::from_secs(seconds),
+                        )?)
+                        .unwrap()
+                    }
+                    "claim" => {
+                        let module = args
+                            .get(2)
+                            .filter(|s| !s.starts_with("--"))
+                            .ok_or_else(|| invalid("missing module"))?;
+                        scheduler::claim(store, module)?;
+                        serde_json::json!({"claimed":module})
+                    }
+                    "release" => {
+                        let module = args
+                            .get(2)
+                            .filter(|s| !s.starts_with("--"))
+                            .ok_or_else(|| invalid("missing module"))?;
+                        scheduler::release(store, module, option("--reason")?)?;
+                        serde_json::json!({"released":module})
+                    }
+                    _ => return Err(invalid("expected schedule next, claim or release")),
+                };
+                Ok((0, value.to_string(), value))
+            }
+            "activity" => {
+                let module = option("--module")?;
+                let actor = option("--actor")?;
+                let phase = option("--phase")?;
+                let value = match args.get(1).map(String::as_str) {
+                    Some("start") => {
+                        let e = super::events::activity_start(store, module, actor, phase)?;
+                        serde_json::json!({"id":e.data["activity"]})
+                    }
+                    Some("finish") => {
+                        let id = if has("--id") {
+                            Some(option("--id")?)
+                        } else {
+                            None
+                        };
+                        let outcome = if has("--outcome") {
+                            option("--outcome")?
+                        } else {
+                            "finished"
+                        };
+                        if !["finished", "cancelled", "failed"].contains(&outcome) {
+                            return Err(invalid("invalid outcome"));
+                        }
+                        serde_json::json!({"event":super::events::activity_finish(store, module, actor, phase, id, outcome)?})
+                    }
+                    _ => return Err(invalid("expected activity start or finish")),
+                };
+                let text = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                Ok((0, text, value))
+            }
+            "setup" => {
+                let ids: Vec<String> = args.iter().skip(2).cloned().collect();
+                let statuses = match args.get(1).map(String::as_str) {
+                    Some("start") => crate::setup::start(store, Path::new(option("--repo")?))?,
+                    Some("status") => crate::setup::status(store)?,
+                    Some("keep") if !ids.is_empty() => crate::setup::keep(store, &ids)?,
+                    Some("cancel") => crate::setup::cancel(
+                        store,
+                        if ids.is_empty() { None } else { Some(&ids) },
+                        "cancelled by core",
+                    )?,
+                    _ => return Err(invalid("expected setup start, status, keep or cancel")),
+                };
+                let value = serde_json::to_value(statuses).unwrap();
+                Ok((0, value.to_string(), value))
+            }
             "report" => {
                 let repo = Path::new(option("--repo")?);
                 let module = if args.iter().any(|s| s == "--module") {
@@ -454,7 +558,11 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         Err(e) => Output {
             exit_code: if e.kind == "not_found" { 2 } else { 1 },
             stdout: String::new(),
-            stderr: format!("error: {}\n", e.message),
+            stderr: if cmd == "schedule" {
+                format!("error: {e}\n")
+            } else {
+                format!("error: {}\n", e.message)
+            },
         },
     })
 }

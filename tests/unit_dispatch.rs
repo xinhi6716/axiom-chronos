@@ -227,7 +227,7 @@ fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
     fs::write(
         f.store.join("one.brief"),
         format!(
-            "GOAL build\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\nFAKE_TEMPDIR test\n",
+        "GOAL build\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\nFAKE_TEMPDIR test\nFAKE_TEMPFILE real\n",
             common::python(),
             script.display()
         ),
@@ -252,6 +252,11 @@ fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
         .filter(|entry| entry["method"] == "thread/start")
         .collect();
     assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts[0]["params"]["config"]["sandbox_workspace_write"]["writable_roots"],
+        json!([attempt_dir])
+    );
+    assert!(starts[1]["params"]["config"]["sandbox_workspace_write"]["writable_roots"].is_null());
     for (entry, prefix) in starts
         .iter()
         .zip([attempt_dir, orch::scratch_dir(&f.store, &["astra"])])
@@ -265,6 +270,68 @@ fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
         assert!(!tmp.exists());
     }
     assert!(!f.repo.join("pytest-of-fake").exists());
+    assert!(!f.repo.join(".axiom-tmp").exists());
+}
+
+#[test]
+fn unit_runs_record_receipts_even_on_failure() {
+    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let good = f.run("one", false);
+    fs::write(
+        f.store.join("one.brief"),
+        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nAUTH\n",
+    )
+    .unwrap();
+    let bad = f.run("one", false);
+    let rows = orch::receipts::read_runs(&f.store).unwrap();
+    assert!(f.store.join("receipts/runs.jsonl").is_file());
+    assert_eq!(rows.len(), 2);
+    for (row, reply, status) in [(&rows[0], &good, "completed"), (&rows[1], &bad, "failed")] {
+        assert_eq!(row.unit, "one");
+        assert_eq!(row.attempt, reply["attempt_id"].as_str().unwrap());
+        assert_eq!(row.status, status);
+        assert!(row.started_ms > 0 && row.started_ms <= row.ended_ms);
+    }
+    let starts: Vec<Value> = fs::read_to_string(&f.log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["method"] == "thread/start")
+        .collect();
+    for (entry, row) in starts.iter().zip(&rows) {
+        assert_eq!(
+            entry["params"]["config"]["sandbox_workspace_write"]["writable_roots"],
+            json!([orch::scratch_dir(&f.store, &["one", &row.attempt])])
+        );
+    }
+    assert_ne!(
+        starts[0]["params"]["config"]["sandbox_workspace_write"]["writable_roots"],
+        starts[1]["params"]["config"]["sandbox_workspace_write"]["writable_roots"]
+    );
+}
+
+#[test]
+fn receipt_write_failure_does_not_fail_unit() {
+    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    fs::write(f.store.join("receipts"), "not a directory").unwrap();
+    let result = f.run("one", false);
+    assert_eq!(result["state"], "built", "{result}");
+}
+
+#[test]
+fn interrupted_unit_records_receipt() {
+    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nWAIT_FOR_INTERRUPT\n");
+    thread::scope(|scope| {
+        let run = scope.spawn(|| f.run("one", false));
+        f.wait_turns(1);
+        f.bridge.cancel();
+        let result = run.join().unwrap();
+        let rows = orch::receipts::read_runs(&f.store).unwrap();
+        assert_eq!(rows.len(), 1, "{result}");
+        assert_eq!(rows[0].status, "interrupted");
+        assert_eq!(rows[0].attempt, result["attempt_id"].as_str().unwrap());
+        assert!(rows[0].started_ms <= rows[0].ended_ms);
+    });
 }
 
 #[test]

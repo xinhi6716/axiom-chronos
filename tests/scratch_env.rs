@@ -79,7 +79,7 @@ fn codex_thread_gets_shell_env() {
     let server =
         AppServer::new(common::fake_codex(&[])).with_slots_home(scratch.path().join("slots"));
     let mut req = RunRequest {
-        brief: "FAKE_TEMPDIR safe\nFAKE_SHELL_WRITE shell.txt".into(),
+        brief: "FAKE_TEMPDIR safe\nFAKE_TEMPFILE real\nFAKE_SHELL_WRITE shell.txt".into(),
         cwd: dir.path().to_string_lossy().into_owned(),
         model: "gpt-6.1-terra".into(),
         sandbox: "workspace-write".into(),
@@ -91,7 +91,9 @@ fn codex_thread_gets_shell_env() {
         keep_plugins: vec![],
         web_search: false,
     };
-    let result = server.run_with_env(&req, &env).unwrap();
+    let result = server
+        .run_with_scratch(&req, &env, &[scratch.path().to_path_buf()])
+        .unwrap();
     assert_eq!(result["status"], "completed");
     let echo: Value = serde_json::from_str(result["final_message"].as_str().unwrap()).unwrap();
     assert_eq!(
@@ -99,6 +101,15 @@ fn codex_thread_gets_shell_env() {
         env[0].1
     );
     assert_eq!(echo["config"]["features"]["apps"], false);
+    assert_eq!(
+        echo["config"]["sandbox_workspace_write"]["writable_roots"],
+        serde_json::json!([scratch.path()])
+    );
+    assert!(fs::read_dir(scratch.path().join("tmp")).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("real")));
     assert!(scratch
         .path()
         .join("tmp/pytest-of-fake/pytest-0/safe/case.txt")
@@ -127,6 +138,69 @@ fn codex_thread_gets_shell_env() {
         .path()
         .join("pytest-of-fake/pytest-0/old/case.txt")
         .is_file());
+}
+
+#[test]
+fn scratch_roots_restrict_shell_writes_and_are_ignored_for_read_only() {
+    let home = common::temp();
+    let cwd = home.path().join("repo");
+    let own = home.path().join("scratch/one");
+    let sibling = home.path().join("scratch/two");
+    fs::create_dir_all(&cwd).unwrap();
+    let env = proc::scratch_env(&own).unwrap();
+    let server = AppServer::new(common::fake_codex(&[])).with_slots_home(home.path().join("slots"));
+    let mut req = RunRequest {
+        brief: format!("FAKE_SHELL_WRITE {}", sibling.join("outside.txt").display()),
+        cwd: cwd.to_string_lossy().into_owned(),
+        model: "gpt-6.1-terra".into(),
+        sandbox: "workspace-write".into(),
+        effort: None,
+        output_schema: None,
+        developer_instructions: None,
+        timeout_s: 10,
+        lean: false,
+        keep_plugins: vec![],
+        web_search: false,
+    };
+    let r = server.run_with_scratch(&req, &env, &[own.clone()]).unwrap();
+    assert_eq!(r["status"], "failed", "{r}");
+    assert_eq!(r["commands"][0]["exit_code"], 1);
+    assert!(r["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("sandbox denied write: "));
+    assert!(!sibling.join("outside.txt").exists());
+    req.brief = "FAKE_TEMPDIR denied".into();
+    let r = server.run_with_env(&req, &env).unwrap();
+    assert_eq!(r["status"], "failed", "{r}");
+    req.brief = "FAKE_TEMPFILE denied".into();
+    let r = server.run_with_env(&req, &env).unwrap();
+    assert_eq!(r["status"], "failed", "{r}");
+    assert_eq!(r["commands"][0]["exit_code"], 1);
+    // Python's tempfile chooses TMPDIR before TMP; check the actual child environment.
+    fs::create_dir_all(&sibling).unwrap();
+    let mut different_tmpdir = env.clone();
+    different_tmpdir
+        .iter_mut()
+        .find(|(key, _)| key == "TMPDIR")
+        .unwrap()
+        .1 = sibling.to_string_lossy().into_owned();
+    req.brief = "FAKE_TEMPFILE outside".into();
+    let r = server
+        .run_with_scratch(&req, &different_tmpdir, &[own.clone()])
+        .unwrap();
+    assert_eq!(r["status"], "failed", "{r}");
+    assert_eq!(r["commands"][0]["exit_code"], 1);
+    assert!(!fs::read_dir(&sibling).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("outside")));
+    req.sandbox = "read-only".into();
+    req.brief = "normal".into();
+    let r = server.run_with_scratch(&req, &env, &[own]).unwrap();
+    let echo: Value = serde_json::from_str(r["final_message"].as_str().unwrap()).unwrap();
+    assert!(echo["config"]["sandbox_workspace_write"]["writable_roots"].is_null());
 }
 
 fn git(repo: &Path, args: &[&str]) {

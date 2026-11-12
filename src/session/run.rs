@@ -1,7 +1,7 @@
 use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
-    codegraph, council, engine, goal, hook, provenance,
+    codegraph, council, engine, goal, hook, orch, provenance, setup,
 };
 use serde_json::{json, Value};
 use std::{
@@ -417,9 +417,14 @@ pub fn spawn_with(
     };
     let advanced_research = launch.advanced_research
         || resume.is_some_and(|id| council::switch_remembered(&config.home, id));
-    let budgets = if advanced_research { Some(match launch.council_budgets {
-        Some(b) => b.validate()?, None => council::Budgets::from_env()?,
-    }) } else { None };
+    let budgets = if advanced_research {
+        Some(match launch.council_budgets {
+            Some(b) => b.validate()?,
+            None => council::Budgets::from_env()?,
+        })
+    } else {
+        None
+    };
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
     let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
     if advanced_research {
@@ -485,7 +490,10 @@ pub fn spawn_with(
         .stdout(Stdio::piped());
     if advanced_research {
         child.env(council::ENV, "1");
-        if let Some(budgets) = budgets { child.envs(budgets.env()); eprintln!("axiom: {}", budgets.notice()); }
+        if let Some(budgets) = budgets {
+            child.envs(budgets.env());
+            eprintln!("axiom: {}", budgets.notice());
+        }
     }
     let mut child = child
         .spawn()
@@ -610,6 +618,69 @@ pub fn drive(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
 ) -> Res<i32> {
+    let session = Arc::new(Mutex::new(None::<String>));
+    let heartbeat = Heartbeats::start(config.home.clone(), Arc::clone(&session));
+    let result = drive_inner(spawned, config, out, stop, observe, &session);
+    drop(heartbeat);
+    if let Some(store) = session_store(&config.home, &session) {
+        let _ = orch::events::close_open_activities(&store, None, "exit");
+        let _ = setup::cancel_all(&store, "session_end");
+    }
+    result
+}
+
+fn session_store(home: &Path, session: &Mutex<Option<String>>) -> Option<PathBuf> {
+    let id = session.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let goal = goal::load(home, &id).ok()??;
+    let store = orch::store_for_goal(home, &goal).ok()?;
+    store.is_dir().then_some(store)
+}
+
+struct Heartbeats {
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Heartbeats {
+    fn start(home: PathBuf, session: Arc<Mutex<Option<String>>>) -> Self {
+        let interval = std::env::var("AXIOM_HEARTBEAT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30_000)
+            .max(100);
+        let (stop, rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            while matches!(
+                rx.recv_timeout(Duration::from_millis(interval)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                if let Some(store) = session_store(&home, &session) {
+                    let _ = orch::events::heartbeat(&store);
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for Heartbeats {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn drive_inner(
+    spawned: Spawned,
+    config: &Config,
+    out: &mut dyn Write,
+    stop: &AtomicBool,
+    observe: &mut dyn FnMut(&Value),
+    session: &Arc<Mutex<Option<String>>>,
+) -> Res<i32> {
     let writer = Arc::clone(&spawned.writer);
     let (skill, project, max_turns) = (
         spawned.skill.clone(),
@@ -619,7 +690,7 @@ pub fn drive(
     let codex_max_parallel = spawned.codex_max_parallel;
     let mut spawned = spawned;
     loop {
-        let outcome = drive_once(spawned, config, out, stop, observe, max_turns)?;
+        let outcome = drive_once(spawned, config, out, stop, observe, max_turns, session)?;
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
@@ -641,8 +712,19 @@ pub fn drive(
             return Ok(130);
         }
         let prompt = continue_prompt(config, &session)?;
-        let launch = Launch { codex_max_parallel: Some(codex_max_parallel), ..Launch::default() };
-        let mut next = spawn_with(config, &skill, &prompt, &project, max_turns, Some(&session), &launch)?;
+        let launch = Launch {
+            codex_max_parallel: Some(codex_max_parallel),
+            ..Launch::default()
+        };
+        let mut next = spawn_with(
+            config,
+            &skill,
+            &prompt,
+            &project,
+            max_turns,
+            Some(&session),
+            &launch,
+        )?;
         *writer.lock().unwrap_or_else(|e| e.into_inner()) =
             next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
         next.writer = Arc::clone(&writer);
@@ -660,6 +742,7 @@ fn drive_once(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
     max_turns: Option<u32>,
+    shared_session: &Mutex<Option<String>>,
 ) -> Res<Outcome> {
     let Spawned {
         mut child,
@@ -697,6 +780,9 @@ fn drive_once(
                 };
                 if event["type"] == "system" && event["subtype"] == "init" {
                     session = event["session_id"].as_str().map(str::to_owned);
+                    if session.is_some() {
+                        *shared_session.lock().unwrap_or_else(|e| e.into_inner()) = session.clone();
+                    }
                     if let (true, Some(id)) = (advanced_research, session.as_deref()) {
                         council::remember_switch(&config.home, id);
                     }

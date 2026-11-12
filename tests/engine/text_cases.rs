@@ -8,6 +8,11 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 fn required_phrases_are_present() {
     let cases = [
         ("skills/wish/BATCH.md", "A batch that calls Codex sizes its worker pool from `AXIOM_CODEX_MAX_PARALLEL`, minus the slots the wish itself still needs, and never hard-codes a smaller pool."),
+        ("skills/wish/SKILL.md", r#""schedule", "next""#),
+        ("skills/wish/SKILL.md", r#""setup", "start""#),
+        ("skills/wish/SKILL.md", r#""activity""#),
+        ("agents/dispatcher.md", r#""activity""#),
+        ("agents/dispatcher.md", r#""schedule", "release""#),
         ("agents/dispatcher.md", "Call `codex_run` yourself"),
         ("agents/dispatcher.md", "Never forward Codex work through another agent"),
         ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),
@@ -78,6 +83,28 @@ fn required_phrases_are_present() {
     assert!(!wish.contains("`$!` in Git Bash is not a Windows pid"));
     let dispatch = fs::read_to_string(root.join("DISPATCH.md")).unwrap();
     assert!(!dispatch.contains("After the worker returns"));
+}
+
+fn has_forbidden_wish_phrase(text: &str) -> bool {
+    [
+        "run independent ready modules as parallel calls in one message",
+        "Keep every dispatcher in the foreground",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
+#[test]
+fn wish_forbids_obsolete_dispatch_rules() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md");
+    let wish = fs::read_to_string(path).unwrap();
+    assert!(!has_forbidden_wish_phrase(&wish));
+    for phrase in [
+        "run independent ready modules as parallel calls in one message",
+        "Keep every dispatcher in the foreground",
+    ] {
+        assert!(has_forbidden_wish_phrase(&format!("{wish}\n{phrase}")));
+    }
 }
 
 #[test]

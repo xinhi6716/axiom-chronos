@@ -16,20 +16,20 @@ SCOPE lists paths only; notes such as "(new)" go in CONTEXT. SCOPE may span line
 
 VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME.
 
-Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically.
+Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically; workers' scratch is a sandbox writable root.
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
-A registered brief can run its unit cheaper with two optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use them only when the wish or the plan asks for a cheaper run of that unit, such as reading papers into notes. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Any other value, or either line anywhere else in the brief, is refused when the unit is registered. Without them the unit keeps its role's model and the default effort. `TIER luna` alone keeps luna's own default effort, which can be higher than terra's, so set both for the cheapest run.
+A registered brief can run cheaper with two optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use only when the wish or plan asks for a cheaper run. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Other values or positions are refused. Without them the unit keeps its role model and default effort. `TIER luna` alone keeps luna's default effort, possibly higher than terra's; set both for the cheapest run.
 
-Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)); the full template is for coordinators.
+Add `CONTEXT` only when the unit depends on something outside SCOPE: paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer to it. This is Pstack's collapsed brief for a one-command unit ([orchestrate](https://github.com/cursor/plugins/blob/99b609a72323b70204eab407c622f436e858e112/pstack/skills/poteto-mode/playbooks/orchestrate.md)).
 
 ## Before dispatch
 
 - Decide every open choice in GOAL or SCOPE. If two reasonable workers could deliver different results, the brief is not finished.
 - A field you cannot fill precisely means the unit is not ready. Split it, or decide the missing choice and record it; do not dispatch it as is.
-- A check that guards an invariant gets a negative control: VERIFY includes a case that breaks the invariant and expects the check to fail. Without one the check can be vacuous: in the first Clotho experiment a TLA+ invariant passed model checking because no action ever set the variable it forbade, and a no-raw-rows test passed because its request never contained rows.
-- VERIFY runs a test file, never inline code. Put the check in a test file listed in SCOPE and make VERIFY the test runner, such as `python -m unittest test_todo`. In the first end-to-end wish, both units used `python -c "..."` checks that broke on Windows shell quoting; the workers spent 106k and 157k input tokens working around them, one wrote and deleted a file outside SCOPE, and no test survived the unit.
+- A check guarding an invariant gets a negative control: VERIFY includes a case that breaks it and expects the check to fail.
+- VERIFY runs a test file, never inline code. Put the check in a test file listed in SCOPE and make VERIFY the test runner, such as `python -m unittest test_todo`.
 
 ## Write by subtraction
 

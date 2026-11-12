@@ -655,5 +655,25 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
             out.push_str(&format!("council: {note}\n"));
         }
     }
+    let cap = crate::codex::slots::from_env().unwrap_or(48);
+    if let Ok(path) = super::receipts::write_receipts(store, cap) {
+        if let Ok(data) = std::fs::read(&path) {
+            if let Ok(r) = serde_json::from_slice::<super::receipts::Receipts>(&data) {
+                let per_unit = r
+                    .per_unit_ms
+                    .map_or_else(|| "n/a".to_string(), |ms| format!("{:.1}s", ms / 1000.0));
+                out.push_str(&format!(
+                    "receipts: T={:.1}s N={} T/N={} mean={:.2} peak={} cap={}\nreceipts file: {}\n",
+                    r.total_ms as f64 / 1000.0,
+                    r.verified_units,
+                    per_unit,
+                    r.concurrency.mean,
+                    r.concurrency.peak,
+                    r.concurrency.cap,
+                    path.display()
+                ));
+            }
+        }
+    }
     Ok(out)
 }

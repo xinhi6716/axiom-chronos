@@ -19,4 +19,5 @@ pub mod orch;
 pub mod provenance;
 pub mod review;
 pub mod session;
+pub mod setup;
 pub mod usage;

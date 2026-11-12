@@ -15,7 +15,7 @@ fn excludes(text: &str, phrase: &str) -> bool {
             .split(|c: char| !c.is_alphanumeric())
             .any(|word| word == phrase)
     } else {
-        !text.replace("rewrites only attribution", "").contains(phrase)
+        !text.contains(phrase)
     }
 }
 
@@ -25,6 +25,12 @@ fn bridge_documentation_contract() {
     let cases: &[(&str, &[&str])] = &[
         ("docs/bridge.md", &[
             "Each wish has its own store, `<data home>/orchestrate/<project>/<wish id>`, resolved by `orch::wish_store`;",
+            "`orch` `schedule next|claim|release` uses `<store>/events.jsonl`, with one JSON object per line and gap-free `seq`. `schedule next [--cursor N] [--timeout S]` blocks until a wake kind (`module_claimed`, `module_verified` or `module_released`) after the cursor; S defaults to 300, is capped at 1800, and 0 means no wait. It claims modules whose DEPENDS are all verified and returns `cursor`, `start`, `running`, `verified`, `waiting`, `stuck`, `held`, `done`, `timed_out`. Replaying an old cursor lists the same `start` modules again and never claims twice; a stop or max-turns hold claims nothing. `schedule claim <module>` re-claims a released module; `schedule release <module> --reason <text>` releases it.",
+            "The hook allows `chronos:dispatcher` with `run_in_background: true` only for an engine-claimed module: the goal store has `modules.md` and the target module is claimed. Otherwise it must run in the foreground. Agents may call `schedule release` and `activity`, but not `schedule next`, `schedule claim` or `setup`.",
+            "`activity start|finish --module M --actor core|dispatcher --phase brief|review|decide [--id ID] [--outcome finished|cancelled|failed]` writes activity events with id `a<seq>`; a finish with nothing open appends nothing, and session end and `schedule release` close open activities. A `heartbeat` event every `AXIOM_HEARTBEAT_MS` (default 30000, minimum 100) records `emitted_at` and `latest_activity_at` and never moves `latest_activity_at`.",
+            r#"`.axiom/setup.json` has `{"version": 1, "steps": [...]}` with step fields `id`, `argv`, `cwd`, `timeout_s` (1..=7200, default 600), `plan_independent`, `cache_dirs`. Built-in steps are `index` and, when Cargo.toml exists, `cargo-fetch`. Use `orch setup start --repo <dir>`, `orch setup status`, `orch setup keep <id>...` or `orch setup cancel [<id>...]`. Cancel kills the process tree and removes the step's scratch output, never cache dirs or repository files; it also runs on stop and session end. Setup never counts as VERIFY or ACCEPT."#,
+            "`orch report` writes `<store>/receipts.json` with `T` (wish window), `N` (final verified non-superseded units), `T/N`, mean concurrency (run overlap integrated over the whole window, including idle gaps), `peak` and `cap`; failed and cancelled runs count.",
+            "Per-attempt scratch writable roots: unit runs get workspace-write with only `<store>/scratch/<unit>/<attempt>` as an extra writable root; Astra stays read-only.",
             "Workers and VERIFY commands get private scratch (`TMP`, `TEMP`, `TMPDIR`, pytest `--basetemp`) under `<store>/scratch/`",
             "`scope-unattributed`",
             r#"returns `status: "refused"` with `error.kind` `already_running` or `already_verified` and the `owner`"#,

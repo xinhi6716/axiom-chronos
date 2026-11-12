@@ -458,15 +458,8 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
     }
     out.sources.push(status("goal", goal_samples));
     let (mut orch_samples, mut review_samples, mut handoff_samples) = (0, 0, 0);
-    for store in paths(&inputs.home.join("orchestrate"), &mut out.gaps, "orch")
-        .into_iter()
-        .filter(|p| p.is_dir())
-    {
-        let project = store
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+    let projects = paths(&inputs.home.join("orchestrate"), &mut out.gaps, "orch");
+    let mut collect_store = |store: &Path, project: String| {
         for path in paths(&store.join("reports"), &mut out.gaps, "orch") {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let loc = path.display().to_string();
@@ -647,6 +640,17 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
                 e.count = u64::from(h.stalled);
                 out.events.push(e);
             }
+        }
+    };
+    for project_dir in projects.into_iter().filter(|p| p.is_dir()) {
+        let project = project_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        collect_store(&project_dir, project.clone());
+        for store in crate::orch::wish_stores(&project_dir) {
+            collect_store(&store, project.clone());
         }
     }
     out.sources.push(status("orch", orch_samples));

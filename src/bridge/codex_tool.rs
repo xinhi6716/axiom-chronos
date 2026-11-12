@@ -544,7 +544,12 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             };
             let env =
                 base::proc::scratch_env(&path).map_err(|e| Failure::new("io", e.to_string()))?;
-            let result = server.run_with_env(&req, &env);
+            let roots = if unit.is_some() {
+                vec![path.clone()]
+            } else {
+                vec![]
+            };
+            let result = server.run_with_scratch(&req, &env, &roots);
             if unit.is_none() || result.is_err() {
                 let _ = std::fs::remove_dir_all(&path);
             }
@@ -564,6 +569,22 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         }
     };
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
+        if let (Some(started_ms), Some(ended_ms), Some(status)) = (
+            report["run_started_ms"].as_i64(),
+            report["run_ended_ms"].as_i64(),
+            report["status"].as_str(),
+        ) {
+            let _ = orch::receipts::record_run(
+                root,
+                &orch::receipts::RunRecord {
+                    unit: u.to_owned(),
+                    attempt: attempt_id.clone(),
+                    started_ms,
+                    ended_ms,
+                    status: status.to_owned(),
+                },
+            );
+        }
         let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
         return unit_reply(
             b,

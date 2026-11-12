@@ -228,19 +228,45 @@ for line in sys.stdin:
         def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms):
             if delay_ms:
                 time.sleep(delay_ms / 1000)
-            item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
             from pathlib import Path
+            import subprocess
             cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
             temp = (configs[thread_id].get('shell_environment_policy') or {}).get('set', {}).get('TMP')
+            roots = (configs[thread_id].get('sandbox_workspace_write') or {}).get('writable_roots', [])
+            allowed = [cwd.resolve()] + [Path(root).resolve() for root in roots]
+            def permitted(target):
+                resolved = target.resolve()
+                return thread_params[thread_id].get('sandbox') != 'workspace-write' or any(resolved == root or root in resolved.parents for root in allowed)
+            def denied(target):
+                message = f'sandbox denied write: {target}'
+                item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'failed', 'exitCode': 1})
+                complete(thread_id, turn_id, 'failed', {'message': message})
             for name in re.findall(r'^FAKE_TEMPDIR[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
                 target = Path(temp) if temp else cwd
                 target = target / 'pytest-of-fake' / 'pytest-0' / name.strip() / 'case.txt'
+                if not permitted(target):
+                    denied(target)
+                    return
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('fake-temp\n', encoding='utf-8')
+            for name in re.findall(r'^FAKE_TEMPFILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                env = os.environ.copy()
+                env.update((configs[thread_id].get('shell_environment_policy') or {}).get('set', {}))
+                candidates = json.loads(subprocess.check_output([sys.executable, '-c', 'import json,tempfile; print(json.dumps(tempfile._candidate_tempdir_list()))'], cwd=cwd, env=env, text=True))
+                tempdir = next(Path(p) for p in candidates if Path(p).is_dir() and os.access(p, os.W_OK))
+                target = tempdir / name.strip()
+                if not permitted(target):
+                    denied(target)
+                    return
+                subprocess.run([sys.executable, '-c', 'import sys,tempfile; f=tempfile.NamedTemporaryFile(prefix=sys.argv[1], delete=False); f.write(b"fake-temp"); f.close()', name.strip()], cwd=cwd, env=env, check=True)
             for path in re.findall(r'^FAKE_SHELL_WRITE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
                 target = cwd / path.strip()
+                if not permitted(target):
+                    denied(target)
+                    return
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('fake-shell\n', encoding='utf-8')
+            item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
             paths = re.findall(r'^FAKE_WRITE[ \t]+([^\r\n]+)\s*$', text, flags=re.M)
             if paths:
                 for path in paths:

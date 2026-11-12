@@ -1,5 +1,5 @@
 //! Walk the real Shell with platform key events, without a live backend or translation runner.
-//! Persistent stores are confined to .axiom-tmp/audit-walk-1; restart means a new GPUI app.
+//! Persistent stores are confined to temp_dir()/axiom-walk/audit-walk-{1,2}; restart means a new GPUI app.
 use axiom::desktop::model::{AppState, Screen, Undoable};
 use axiom::desktop::theme::{Density, Step};
 use axiom::desktop::{demo, i18n, theme, Shell, Store};
@@ -7,7 +7,7 @@ use gpui_kit::component::ThemeMode;
 use gpui_kit::test::{TestEventExt as _, TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{px, size, AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -106,10 +106,9 @@ struct TestHome {
 impl TestHome {
     fn new(name: &str) -> Self {
         let lock = HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = root
-            .join(".axiom-tmp/audit-walk-1")
+        let path = std::env::temp_dir()
+            .join("axiom-walk/audit-walk-1")
             .join(format!("{name}-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create isolated settings folder");
         let prior = std::env::var_os("AXIOM_HOME");
@@ -134,7 +133,39 @@ impl Drop for TestHome {
             Some(prior) => std::env::set_var("AXIOM_HOME", prior),
             None => std::env::remove_var("AXIOM_HOME"),
         }
+        std::fs::remove_dir_all(&self.path).expect("remove isolated settings folder");
     }
+}
+
+fn under_root(home: &Path, root: &Path) -> bool {
+    home.canonicalize().unwrap().starts_with(root.canonicalize().unwrap())
+}
+
+#[test]
+fn test_homes_are_temporary_and_removed() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = std::env::temp_dir().join("axiom-walk");
+    for (builder, audit) in [
+        (TestHome::new as fn(&str) -> TestHome, "audit-walk-1"),
+        (TestHome::audit2 as fn(&str) -> TestHome, "audit-walk-2"),
+    ] {
+        let home = builder("location-check");
+        assert!(!under_root(&home.path, &repo));
+        assert!(under_root(&home.path, &temp));
+        assert!(under_root(&home.path, &temp.join(audit)));
+        let path = home.path.clone();
+        drop(home);
+        assert!(!path.exists());
+    }
+    for audit in ["audit-walk-1", "audit-walk-2"] {
+        assert!(!repo.join(".axiom-tmp").join(audit).exists());
+    }
+}
+
+#[test]
+fn under_root_detects_repo_paths() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert!(under_root(&repo.join("tests"), &repo));
 }
 
 fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
@@ -773,9 +804,8 @@ fn reduce_motion_focus_full_and_density_survive_a_restart(cx: &mut TestAppContex
 impl TestHome {
     fn audit2(name: &str) -> Self {
         let lock = HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = root.join(".axiom-tmp/audit-walk-2").join(format!("{name}-{}-{nonce}", std::process::id()));
+        let path = std::env::temp_dir().join("axiom-walk/audit-walk-2").join(format!("{name}-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         let prior = std::env::var_os("AXIOM_HOME");
         std::env::set_var("AXIOM_HOME", &path);

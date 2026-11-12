@@ -405,18 +405,42 @@ pub fn append_check(
         if let Some((_, review)) = &carried {
             append_evidence_locked(store, unit, review)?;
         }
-        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-        save_unit_state(store, unit, &state)?;
+        update_unit_state_locked(store, unit)?;
         Ok(carried.map(|(ids, _)| ids))
     })
 }
 /// Derives and saves under one lock, so a state derived from older evidence cannot land last.
 pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
-    with_lock(store, false, || {
-        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-        save_unit_state(store, unit, &state)?;
-        Ok(state)
-    })
+    with_lock(store, false, || update_unit_state_locked(store, unit))
+}
+fn update_unit_state_locked(store: &Path, unit: &str) -> Res<String> {
+    let previous = read_units(store)?
+        .into_iter()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+    save_unit_state(store, unit, &state)?;
+    if previous.state != state {
+        super::events::append_event(
+            store,
+            super::events::UNIT_STATE,
+            Some(&previous.track),
+            Some(unit),
+            serde_json::json!({"state":state,"previous":previous.state}),
+        )?;
+        if previous.state != "verified"
+            && super::lifecycle::scheduler::module_verified(store, &previous.track)?
+        {
+            super::events::append_event(
+                store,
+                super::events::MODULE_VERIFIED,
+                Some(&previous.track),
+                None,
+                serde_json::json!({}),
+            )?;
+        }
+    }
+    Ok(state)
 }
 pub fn accept_output_path(store: &Path, module: &str) -> PathBuf {
     store.join("reports").join(format!("{module}.accept.txt"))

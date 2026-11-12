@@ -5,9 +5,9 @@ use crate::{
 };
 use serde_json::{json, Map, Value};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub struct RunRequest {
@@ -29,7 +29,15 @@ impl AppServer {
         self.run_capped(req, None)
     }
     pub fn run_with_env(&self, req: &RunRequest, env: &[(String, String)]) -> Res<Value> {
-        self.run_internal(req, None, None, env, true)
+        self.run_internal(req, None, None, env, true, &[])
+    }
+    pub fn run_with_scratch(
+        &self,
+        req: &RunRequest,
+        env: &[(String, String)],
+        writable_roots: &[PathBuf],
+    ) -> Res<Value> {
+        self.run_internal(req, None, None, env, true, writable_roots)
     }
     /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
     pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
@@ -41,7 +49,7 @@ impl AppServer {
         token_cap: Option<u64>,
         stop: Option<&AtomicBool>,
     ) -> Res<Value> {
-        self.run_internal(req, token_cap, stop, &[], false)
+        self.run_internal(req, token_cap, stop, &[], false, &[])
     }
     fn run_internal(
         &self,
@@ -50,6 +58,7 @@ impl AppServer {
         stop: Option<&AtomicBool>,
         env: &[(String, String)],
         set_env: bool,
+        writable_roots: &[PathBuf],
     ) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
@@ -95,6 +104,7 @@ impl AppServer {
             }
             Err(e) => return Err(e),
         };
+        let run_started_ms = unix_ms();
         _slot.model(&req.model)?;
         let with_wait = |mut e: Failure| {
             if let Some(note) = wait.note(limit) {
@@ -165,9 +175,18 @@ impl AppServer {
                 .collect();
             thread["config"]["shell_environment_policy"]["set"] = Value::Object(set);
         }
+        if req.sandbox == "workspace-write" && !writable_roots.is_empty() {
+            let roots: Vec<PathBuf> = writable_roots
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<_>>()
+                .map_err(|e| Failure::new("io", e.to_string()))?;
+            thread["config"]["sandbox_workspace_write"]["writable_roots"] = json!(roots);
+        }
         if let Err(e) = stopped() {
             let mut report = report_error(req, "", "", disabled, &e.kind, &e.kind, &e.message);
             slot_wait(&mut report, &wait, limit);
+            run_times(&mut report, run_started_ms);
             return Ok(report);
         }
         let started = self.request("thread/start", thread).map_err(&with_wait)?;
@@ -192,6 +211,7 @@ impl AppServer {
             let mut report =
                 report_error(req, &thread_id, "", disabled, &e.kind, &e.kind, &e.message);
             slot_wait(&mut report, &wait, limit);
+            run_times(&mut report, run_started_ms);
             return Ok(report);
         }
         let result = self.request("turn/start", turn).map_err(&with_wait);
@@ -211,6 +231,7 @@ impl AppServer {
                         &e.message,
                     );
                     slot_wait(&mut report, &wait, limit);
+                    run_times(&mut report, run_started_ms);
                     Ok(report)
                 } else {
                     Err(e)
@@ -371,10 +392,24 @@ impl AppServer {
                 _ => {}
             }
         }
+        run_times(&mut report, run_started_ms);
         self.unregister_turn(&thread_id, turn_id);
         self.unsubscribe(&thread_id);
         Ok(report)
     }
+}
+
+fn unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn run_times(report: &mut Value, started_ms: i64) {
+    report["run_started_ms"] = json!(started_ms);
+    report["run_ended_ms"] = json!(unix_ms().max(started_ms));
 }
 
 fn slot_wait(report: &mut Value, wait: &slots::Wait, limit: u64) {

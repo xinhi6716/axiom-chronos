@@ -12,7 +12,7 @@ fn contract_sentences_are_embedded() {
         ("DISPATCH.md", "VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME."),
         ("DISPATCH.md", unit_mode),
         ("DISPATCH.md", "SCOPE may span lines or bullets; every path counts."),
-        ("DISPATCH.md", "Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically."),
+        ("DISPATCH.md", "Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically; workers' scratch is a sandbox writable root."),
         ("DISPATCH.md", "Write all module briefs in one call: a single Bash heredoc, or Write for one unit."),
         ("agents/dispatcher.md", r#"`orch` `["module-context", <module>, "--repo", <dir>]`"#),
         ("agents/dispatcher.md", "For any `incomplete` section, Grep its named source file."),

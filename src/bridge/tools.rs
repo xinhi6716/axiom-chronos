@@ -221,14 +221,38 @@ pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
             if json_flag {
                 args.remove(0);
             }
-            let bounded = matches!(args.first().map(String::as_str), Some("verify" | "accept"));
+            let bounded = matches!(
+                args.first().map(String::as_str),
+                Some("verify" | "accept" | "schedule")
+            );
             let force = args.iter().any(|x| x == "--force");
             args.retain(|x| x != "--force");
             let r = orch::run(&path, &args, json_flag, force);
+            let schedule_kind = (args.first().map(String::as_str) == Some("schedule"))
+                .then(|| {
+                    r.stderr
+                        .strip_prefix("error: ")
+                        .and_then(|s| s.split_once(": "))
+                })
+                .flatten()
+                .map(|(kind, _)| kind)
+                .filter(|kind| {
+                    [
+                        "invalid_argument",
+                        "not_ready",
+                        "already_claimed",
+                        "already_verified",
+                        "held",
+                        "not_found",
+                        "not_claimed",
+                        "no_map",
+                    ]
+                    .contains(kind)
+                });
             let err = if r.exit_code == 0 {
                 Value::Null
             } else {
-                json!({"kind":"orch_failed","message":if r.stderr.is_empty(){&r.stdout}else{&r.stderr}.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()})
+                json!({"kind":schedule_kind.unwrap_or("orch_failed"),"message":if r.stderr.is_empty(){&r.stdout}else{&r.stderr}.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()})
             };
             let result = json!({"status":if r.exit_code==0 {"completed"}else{"failed"},"store":path,"exit_code":r.exit_code,"stdout":r.stdout,"stderr":r.stderr,"error":err});
             Ok(if bounded { bound_reply(result) } else { result })

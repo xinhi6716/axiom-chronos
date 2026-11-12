@@ -850,10 +850,33 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                     .and_then(|h| goal::load(h, session).ok().flatten())
                     .is_some_and(|g| g.status == "active")
             {
-                return deny(&format!(
-                    "Run {} in the foreground; waiting needs no polling.",
-                    subagent.unwrap_or("this agent")
-                ));
+                let allowed = subagent == Some("chronos:dispatcher")
+                    && home
+                        .and_then(|h| {
+                            goal::load(h, session)
+                                .ok()
+                                .flatten()
+                                .and_then(|g| store_of_goal(h, &g))
+                        })
+                        .is_some_and(|store| {
+                            if !store.join("modules.md").is_file() {
+                                return false;
+                            }
+                            let pending = crate::orch::pending_handoffs(&store).unwrap_or_default();
+                            match target(&store, input, &pending) {
+                                Target::Module(m) => {
+                                    crate::orch::lifecycle::scheduler::claimed_modules(&store)
+                                        .is_ok_and(|claims| claims.contains(&m))
+                                }
+                                _ => false,
+                            }
+                        });
+                if !allowed {
+                    return deny(&format!(
+                        "Run {} in the foreground; waiting needs no polling.",
+                        subagent.unwrap_or("this agent")
+                    ));
+                }
             }
             if agent
                 && matches!(tool, "Agent" | "Task")
@@ -871,6 +894,17 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
                 let args = input.get("args").and_then(Value::as_array);
                 let first = args.and_then(|a| a.first()).and_then(Value::as_str);
                 let second = args.and_then(|a| a.get(1)).and_then(Value::as_str);
+                let (first_command, subcommand) = if first == Some("--json") {
+                    (second, args.and_then(|a| a.get(2)).and_then(Value::as_str))
+                } else {
+                    (first, second)
+                };
+                if first_command == Some("setup")
+                    || (first_command == Some("schedule")
+                        && matches!(subcommand, Some("next" | "claim")))
+                {
+                    return deny("Only the core session schedules modules and runs setup.");
+                }
                 if first == Some("waive") || (first == Some("--json") && second == Some("waive")) {
                     return deny("Only the core session may waive findings; report back instead.");
                 }

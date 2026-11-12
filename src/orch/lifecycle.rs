@@ -1,3 +1,4 @@
+pub mod scheduler;
 use super::*;
 use crate::base::{self, Failure, Res};
 use serde_json::Value;
@@ -465,13 +466,25 @@ pub fn release_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
                     "claim not found or attempt does not match",
                 )
             })?;
-        disk.remove(index);
+        let removed = disk.remove(index);
         save_claims(store, &disk)?;
         if active
             .get(&key(store, unit))
             .is_some_and(|c| c.attempt_id == attempt_id)
         {
             active.remove(&key(store, unit));
+        }
+        if store.join("modules.md").is_file()
+            && !removed.module.is_empty()
+            && scheduler::module_verified(store, &removed.module)?
+        {
+            super::events::append_event(
+                store,
+                super::events::MODULE_VERIFIED,
+                Some(&removed.module),
+                None,
+                serde_json::json!({}),
+            )?;
         }
         Ok(())
     })

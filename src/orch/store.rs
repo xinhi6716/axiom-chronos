@@ -10,7 +10,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>, schedule next [--cursor N] [--timeout S] | claim <module> | release <module> --reason <text>, activity start|finish --module <m> --actor core|dispatcher --phase brief|review|decide [--id <id>], setup start --repo <dir> | status | keep <id>... | cancel [<id>...]";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -67,7 +67,7 @@ pub fn store_for(home: &Path, project: &str) -> Res<PathBuf> {
     base::require_slug("project", project)?;
     wish_store(home, project, current_wish(home, project)?.as_deref())
 }
-fn valid_wish_id(id: &str) -> bool {
+pub fn is_wish_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     bytes.len() == 22
         && &bytes[..2] == b"w-"
@@ -81,10 +81,24 @@ pub fn wish_store(home: &Path, project: &str, wish_id: Option<&str>) -> Res<Path
     base::require_slug("project", project)?;
     let store = home.join("orchestrate").join(project);
     match wish_id {
-        Some(id) if valid_wish_id(id) => Ok(store.join(id)),
+        Some(id) if is_wish_id(id) => Ok(store.join(id)),
         Some(id) => Err(fail(format!("invalid wish id: {id:?}"))),
         None => Ok(store),
     }
+}
+pub fn wish_stores(project_store: &Path) -> Vec<PathBuf> {
+    let mut stores: Vec<_> = std::fs::read_dir(project_store)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry.file_name().to_str().is_some_and(is_wish_id)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    stores.sort();
+    stores
 }
 pub fn current_wish(home: &Path, project: &str) -> Res<Option<String>> {
     base::require_slug("project", project)?;
@@ -428,8 +442,8 @@ pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Re
 pub fn lock_store(store: &Path) -> Res<StoreLock> {
     acquire(store, false, &mut String::new(), LOCK_WAIT)
 }
-#[derive(Clone)]
-pub(crate) struct DiskClaim {
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskClaim {
     pub unit: String,
     pub attempt: String,
     pub scope: Vec<String>,
@@ -439,6 +453,38 @@ pub(crate) struct DiskClaim {
     pub pid: String,
     pub peers: Vec<String>,
 }
+pub fn claims_columns(header: &str) -> Option<usize> {
+    match header.strip_suffix('\r').unwrap_or(header) {
+        "unit\tattempt\tscope\tstarted" => Some(4),
+        "unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers" => Some(8),
+        _ => None,
+    }
+}
+pub fn parse_claim_row(line: &str, columns: usize) -> Option<DiskClaim> {
+    let c: Vec<_> = line
+        .strip_suffix('\r')
+        .unwrap_or(line)
+        .split('\t')
+        .collect();
+    if !matches!(columns, 4 | 8) || c.len() != columns || c[0].is_empty() || c[1].is_empty() {
+        return None;
+    }
+    Some(DiskClaim {
+        unit: c[0].into(),
+        attempt: c[1].into(),
+        scope: c[2].split_whitespace().map(str::to_owned).collect(),
+        started: c[3].into(),
+        module: c.get(4).unwrap_or(&"").to_string(),
+        wish: c.get(5).unwrap_or(&"").to_string(),
+        pid: c.get(6).unwrap_or(&"").to_string(),
+        peers: c
+            .get(7)
+            .unwrap_or(&"")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    })
+}
 pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
     let text = match std::fs::read_to_string(store.join("claims.tsv")) {
         Ok(s) => s.replace('\r', ""),
@@ -446,33 +492,14 @@ pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
         Err(e) => return Err(io(e)),
     };
     let mut lines = text.lines();
-    let columns = match lines.next() {
-        Some("unit\tattempt\tscope\tstarted") => 4,
-        Some("unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers") => 8,
-        _ => return Err(fail("claims.tsv has an invalid header")),
-    };
+    let columns = lines
+        .next()
+        .and_then(claims_columns)
+        .ok_or_else(|| fail("claims.tsv has an invalid header"))?;
     lines
         .filter(|l| !l.is_empty())
         .map(|line| {
-            let c: Vec<_> = line.split('\t').collect();
-            if c.len() != columns || c[0].is_empty() || c[1].is_empty() {
-                return Err(fail("claims.tsv has a malformed row"));
-            }
-            Ok(DiskClaim {
-                unit: c[0].into(),
-                attempt: c[1].into(),
-                scope: c[2].split_whitespace().map(str::to_owned).collect(),
-                started: c[3].into(),
-                module: c.get(4).unwrap_or(&"").to_string(),
-                wish: c.get(5).unwrap_or(&"").to_string(),
-                pid: c.get(6).unwrap_or(&"").to_string(),
-                peers: c
-                    .get(7)
-                    .unwrap_or(&"")
-                    .split_whitespace()
-                    .map(str::to_owned)
-                    .collect(),
-            })
+            parse_claim_row(line, columns).ok_or_else(|| fail("claims.tsv has a malformed row"))
         })
         .collect()
 }

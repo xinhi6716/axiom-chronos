@@ -37,6 +37,68 @@ pub fn command(argv: &[String]) -> Command {
     }
     c
 }
+pub fn spawn_group(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    if no_window(has_console()) {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.spawn()
+}
+pub fn kill_pid_tree(pid: u32) -> Res<()> {
+    #[cfg(unix)]
+    if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(Failure::new(
+                "kill_failed",
+                format!("pid {pid}: {error} (errno {:?})", error.raw_os_error()),
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let result = cmd("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
+        match result {
+            Ok(output) if !output.status.success() && pid_alive(pid) => {
+                return Err(taskkill_failure(
+                    pid,
+                    output.status.code(),
+                    &output.stdout,
+                    &output.stderr,
+                ));
+            }
+            Err(error) if pid_alive(pid) => {
+                return Err(Failure::new(
+                    "kill_failed",
+                    format!("pid {pid}: taskkill failed to start: {error}"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+pub fn wait_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !pid_alive(pid) {
+            return true;
+        }
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
 pub fn terminate_tree(child: &mut Child) -> Result<(), Failure> {
     let pid = child.id();
     match child.try_wait() {
@@ -246,7 +308,11 @@ impl Drain {
             }
             let _ = tx.send(Instant::now());
         });
-        Self { kept, done, ended: Cell::new(None) }
+        Self {
+            kept,
+            done,
+            ended: Cell::new(None),
+        }
     }
     /// True once the stream has ended.
     fn ended_by(&self, deadline: Instant) -> bool {
@@ -370,6 +436,65 @@ pub fn capture(mut child: Child, timeout: Duration) -> Res<Captured> {
 
 #[cfg(test)]
 mod tests {
+    use super::{cmd, kill_pid_tree, pid_alive, spawn_group, wait_pid_exit};
+    use std::{
+        process::{Child, Stdio},
+        time::Duration,
+    };
+
+    fn sleeping_child() -> Child {
+        #[cfg(unix)]
+        let mut command = cmd("sh");
+        #[cfg(unix)]
+        command.args(["-c", "sleep 30"]);
+        #[cfg(windows)]
+        let mut command = cmd("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 30 127.0.0.1"]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        spawn_group(&mut command).unwrap()
+    }
+
+    fn kill_or_reap(child: &mut Child) {
+        if let Err(error) = kill_pid_tree(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("kill_pid_tree failed: {error:?}");
+        }
+    }
+
+    #[test]
+    fn kills_spawned_process_group() {
+        let mut child = sleeping_child();
+        let pid = child.id();
+        assert!(pid_alive(pid));
+        kill_or_reap(&mut child);
+        // Unix reports an exited child as alive until it has been reaped.
+        let reaper = std::thread::spawn(move || child.wait().unwrap());
+        assert!(wait_pid_exit(pid, Duration::from_secs(10)));
+        reaper.join().unwrap();
+    }
+
+    #[test]
+    fn wait_times_out_for_running_process() {
+        let mut child = sleeping_child();
+        let pid = child.id();
+        assert!(pid_alive(pid));
+        let exited = wait_pid_exit(pid, Duration::from_millis(300));
+        kill_or_reap(&mut child);
+        child.wait().unwrap();
+        assert!(!exited);
+    }
+
+    #[test]
+    fn killing_reaped_pid_succeeds() {
+        let mut child = sleeping_child();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(kill_pid_tree(pid).is_ok());
+    }
+
     #[test]
     fn window_is_hidden_only_without_a_console() {
         assert!(super::no_window(false));
@@ -383,15 +508,24 @@ mod tests {
                 if p.is_dir() {
                     walk(&p, bad);
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("base/proc.rs") {
-                    if std::fs::read_to_string(&p).unwrap().contains("Command::new(") {
+                    if std::fs::read_to_string(&p)
+                        .unwrap()
+                        .contains("Command::new(")
+                    {
                         bad.push(p.display().to_string());
                     }
                 }
             }
         }
         let mut bad = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
-        assert!(bad.is_empty(), "use base::proc::cmd instead of Command::new in: {bad:?}");
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut bad,
+        );
+        assert!(
+            bad.is_empty(),
+            "use base::proc::cmd instead of Command::new in: {bad:?}"
+        );
     }
     #[cfg(windows)]
     #[test]

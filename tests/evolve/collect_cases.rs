@@ -89,6 +89,98 @@ fn dedup_keeps_keys_differing_in_one_field() {
         vec![first, second]
     );
 }
+
+#[test]
+fn collect_legacy_and_wish_stores_without_mutating_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut input = inputs(tmp.path(), now());
+    let project = input.home.join("orchestrate").join("p");
+    let wish_a = project.join("w-1700000000000-abcdef");
+    let wish_b = project.join("w-1700000000001-123456");
+    let ts = axiom::base::now_iso();
+    let row = format!("kind\tcommand\texit_code\tcommit\tts\nverify\ttest\t1\ta\t{ts}\n");
+    for store in [&project, &wish_a, &wish_b] {
+        put(&store.join("reports/u1.evidence.tsv"), &row);
+    }
+    put(
+        &wish_a.join("reports/old.evidence.tsv"),
+        "kind\tcommand\texit_code\tcommit\tts\nverify\told\t1\ta\t2000-01-01T00:00:00Z\nmalformed\n",
+    );
+    let verdict = wish_a.join("reports").join("u1.verdict.json");
+    put(
+        &verdict,
+        &json!({"findings":[{"severity":"MAJOR", "evidence":"bad"}]}).to_string(),
+    );
+    let wish_handoff = wish_a.join("handoffs").join("wish.json");
+    put(
+        &wish_handoff,
+        &json!({"module":null, "ts":ts, "next":"work", "taken":false}).to_string(),
+    );
+    let module_handoff = wish_b.join("handoffs").join("module").join("m.json");
+    put(
+        &module_handoff,
+        &json!({"module":"m", "ts":ts, "next":"work", "taken":true}).to_string(),
+    );
+    for name in ["scratch", "w-bad"] {
+        put(&project.join(name).join("reports/u1.evidence.tsv"), &row);
+    }
+    input.now_ms = now();
+    let before = tree(tmp.path());
+    let result = collect(&input).unwrap();
+    assert_eq!(tree(tmp.path()), before);
+
+    let failures: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.problem == "orch.verify-failed")
+        .cloned()
+        .collect();
+    assert_eq!(failures.len(), 3, "{result:?}");
+    assert_eq!(dedup(failures.clone()).len(), 3);
+    for store in [&project, &wish_a, &wish_b] {
+        let location = format!(
+            "{}:2",
+            store.join("reports").join("u1.evidence.tsv").display()
+        );
+        let event = failures
+            .iter()
+            .find(|e| e.source.location == location)
+            .unwrap();
+        assert!(event.source.key.contains(&location));
+        assert_eq!(event.source.project.as_deref(), Some("p"));
+        assert_eq!(event.source.unit.as_deref(), Some("u1"));
+    }
+    for path in [
+        wish_a.join("reports/old.evidence.tsv"),
+        project.join("scratch/reports/u1.evidence.tsv"),
+        project.join("w-bad/reports/u1.evidence.tsv"),
+    ] {
+        let location = format!("{}:2", path.display());
+        assert!(!result.events.iter().any(|e| e.source.location == location));
+    }
+    for (problem, path) in [
+        ("review.finding/major", verdict),
+        ("handoff.pending", wish_handoff),
+        ("handoff.taken", module_handoff),
+    ] {
+        let location = path.display().to_string();
+        let event = result
+            .events
+            .iter()
+            .find(|e| e.problem == problem && e.source.location == location)
+            .unwrap();
+        assert!(event.source.key.contains(&location));
+        assert_eq!(event.source.project.as_deref(), Some("p"));
+    }
+    let corrupt = format!(
+        "{}:3",
+        wish_a.join("reports").join("old.evidence.tsv").display()
+    );
+    assert!(result
+        .gaps
+        .iter()
+        .any(|g| g.family == "orch" && g.location == corrupt && g.reason.contains("malformed")));
+}
 #[test]
 fn snapshots_failures_gaps_and_read_only_tree() {
     let tmp = tempfile::tempdir().unwrap();
