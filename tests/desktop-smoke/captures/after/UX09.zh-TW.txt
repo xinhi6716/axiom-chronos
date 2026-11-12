@@ -1,0 +1,33 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/usage-scroll	用量
+gpui_component::window_border::WindowBorder/root/usage-scroll/usage-wish-picker/gpui_component::select::Select<gpui_component::searchable_list::vec::SearchableVec<axiom::desktop::usage::WishChoice>>/gpui_base::select::Select/select/input/inner/title	全部願望
+gpui_component::window_border::WindowBorder/root/usage-scroll/usage-compare/gpui_component::select::Select<gpui_component::searchable_list::vec::SearchableVec<axiom::desktop::usage::WishChoice>>/gpui_base::select::Select/select/input/inner/title	比較…
+gpui_component::window_border::WindowBorder/root/usage-scroll/usage-warning-tip/gpui_component::alert::Alert/usage-warning/gpui_component::text::compat::Text/usage-warning-text/usage-warning-text/text-view-scroll	累積到 965k token，是警戒線 500k 的 1.9 倍。每一步都會重讀整份上下文，所以越往後越貴。
+gpui_component::window_border::WindowBorder/root/usage-scroll/usage-warning-tip/gpui_component::alert::Alert/usage-warning/gpui_component::text::compat::Text/usage-warning-text/usage-warning-text/text-view-scroll	建議： 把願望拆成幾個較小的部分，讓每個部分由新的 agent 接手；大檔案用搜尋的，不要整份讀進來。
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/usage-scroll/gpui_component::button::button::Button/gpui_base::button::Button/evolve-open	自動演進
+gpui_component::window_border::WindowBorder/root/usage-scroll/gpui_component::tab::tab_bar::TabBar/gpui_base::tabs::Tabs/usage-scope/tabs/tabs-inner/gpui_component::tab::tab::Tab/gpui_base::tabs::Tab	這次執行
+gpui_component::window_border::WindowBorder/root/usage-scroll/gpui_component::tab::tab_bar::TabBar/gpui_base::tabs::Tabs/usage-scope/tabs/tabs-inner/gpui_component::tab::tab::Tab/gpui_base::tabs::Tab	全部執行
+gpui_component::window_border::WindowBorder/root/rail/gpui_component::button::button::Button/gpui_base::button::Button/new-wish	許願
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-run	執行
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-wishes	願望
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-memory	記憶
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-usage	用量
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-doctor	設定

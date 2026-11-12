@@ -525,6 +525,8 @@ pub struct AppState {
     pub reduce_motion: bool,
     pub composing: bool,
     pub backend: Option<Box<dyn Backend>>,
+    /// Identity of the service seam installed alongside the live backend.
+    pub(crate) service_background: Option<std::sync::Weak<dyn super::ux::seams::BackgroundService>>,
     /// Demo only: a scene name that a screen acts on at startup, so states can be captured.
     pub scene: Option<String>,
     /// Newest last. Ids only grow, so a screen can tell which ones it has already shown.
@@ -534,6 +536,9 @@ pub struct AppState {
     pub renames: HashMap<SharedString, SharedString>,
     /// Set by the details panel; the control bar takes it and opens its box with the text in it.
     pub address: Option<Address>,
+    // ux: begin state
+    pub ux: super::ux::UxState,
+    // ux: end
 }
 
 /// The run to open when none is selected: live work first, otherwise the newest.

@@ -79,3 +79,11 @@ mod tests {
         for (en,zh) in T { assert!(!zh.is_empty()); assert_eq!(en.matches("{}").count(),zh.matches("{}").count()); }
     }
 }
+
+// ux: begin run-view
+/// Find a watchable session only for this run and this worker's unit.
+pub fn worker_session<'a>(run: &str, unit: Option<&str>, sessions: &'a [super::ux::seams::sessions::WorkerSession]) -> Option<&'a str> {
+    let unit = unit?;
+    sessions.iter().find(|s| s.run == run && s.unit.as_deref() == Some(unit)).map(|s| s.id.as_str())
+}
+// ux: end

@@ -695,6 +695,8 @@ mod disk_tests {
             prompt: "x".into(),
             prior_status: "active".into(),
             prior_note: None,
+            id: None,
+            amendment_index: None,
         });
         save(home.path(), "one", &goal).unwrap();
         let paused = disk_pause(home.path(), "one", "low disk").unwrap().unwrap();

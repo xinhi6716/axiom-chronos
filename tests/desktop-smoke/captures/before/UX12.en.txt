@@ -1,0 +1,43 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	core
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	llm
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	pdftext
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	inventory
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	schema
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	validate
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	read
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	benchmark
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	dataset
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	features
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	protocol
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	causal
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	candidates
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	GOAL
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	Render every page of a paper to an image for the reader.
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	SCOPE
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	tools/pdftext.py
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	tests/test_pdftext.py
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	VERIFY
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	python -m pytest tests/test_pdftext.py -q
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	CONTEXT
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/doc-text/doc-text/text-view-scroll/text-view-bounce	Render at 300 dpi. Text stays on disk for citation checks and is never sent to the model.
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Enter
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Shift+Enter
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 hours
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex parallel 15 / 48

@@ -1,6 +1,10 @@
 //! The graph on the Run screen: Chronos on the left, then modules, then their units.
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
 mod logic;
+// ux-celestial begin
+mod council;
+mod dual_core;
+// ux-celestial end
 
 use super::i18n::{self, tr, Lang, Table};
 use logic::{glow_targets, menu_anchor_node, menu_target, mesh_view, node_center, scene_runs_needed, should_auto_refit, stage_role, MeshView};
@@ -2172,6 +2176,11 @@ impl Mesh {
         // The core's name needs room: a narrow panel or a far-out zoom would lay it over the cards.
         let wide = width >= 420.0 && view.zoom >= 0.6;
 
+        // ux-celestial begin
+        let lang = *cx.global::<Lang>();
+        let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), 0., lang, &t, d));
+        let research = state.ux.council.get(&run.session).map(|v| council::research_emblem(v.active, lang, &t, 92.));
+        // ux-celestial end
         let dragging = self.drag.is_some_and(|d| d.moved);
         div()
             .id("mesh-graph")
@@ -2216,6 +2225,10 @@ impl Mesh {
                         move |bounds, _, window, _| backdrop.paint(bounds, window),
                     ).absolute().w_full().h(px(view_h)))
                     .child(div().absolute().w_full().h(px(view_h)).children(cards).children(chips).children(ring))
+                    // ux-celestial begin
+                    .when_some(research, |this, emblem| this.child(div().absolute().left(px((core.x - core_r - 100.).max(0.))).top(px((core.y - 46.).max(0.))).child(emblem)))
+                    .when_some(dual, |this, dual| this.child(div().absolute().left(px((core.x - 90.).max(0.))).top(px((core.y - core_r - 90.).max(0.))).child(dual)))
+                    // ux-celestial end
                     .when(above, |this| this.child(edge_fade(t, true)))
                     .when(below, |this| this.child(edge_fade(t, false)))
                     .when(wide, |this| this.child(
@@ -2459,9 +2472,26 @@ impl Render for Mesh {
                 .child(theme::gold_leaf(Button::new("mesh-make-wish").label(tr(cx, TABLE, "Make a wish"))
                     .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))), &t))
                 .into_any_element(),
-            MeshView::Planning => return v_flex().size_full().items_center().justify_center()
-                .child(ornament::empty_state(&t, tr(cx, TABLE, planning_line(run.unwrap())).into(), tr(cx, TABLE, "Modules and units appear here once the plan is ready.").into()))
-                .into_any_element(),
+            // ux-celestial begin
+            MeshView::Planning => {
+                let run = run.unwrap();
+                let lang = *cx.global::<Lang>();
+                let council = state.ux.council.get(&run.session);
+                let mut frames = Driver::new(state.reduce_motion, cx).capped();
+                frames.keep(council.is_some_and(council::orbit_moving));
+                let phase = if state.reduce_motion { 0. } else { frames.now().saturating_duration_since(self.clock).as_secs_f32() * std::f32::consts::TAU / ORBIT_SECONDS };
+                frames.finish(window);
+                let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), phase, lang, &t, d));
+                return h_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
+                    .when_some(council, |this, v| this.child(h_flex().items_center().gap(theme::space(d, SpaceStep::Md))
+                        .when(v.active, |this| this.child(council::council_orbit(v, phase, lang, &t, d)))
+                        .when(!v.active, |this| this.child(council::astra_card(lang, &t, d)))
+                        .child(council::research_emblem(v.active, lang, &t, 92.))))
+                    .when(council.is_none(), |this| this.child(council::astra_card(lang, &t, d)))
+                    .when_some(dual, |this, dual| this.child(dual))
+                    .into_any_element();
+            },
+            // ux-celestial end
             MeshView::Failed(message) => return v_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
                 .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.text).child(message))
                 .child(retry()).into_any_element(),

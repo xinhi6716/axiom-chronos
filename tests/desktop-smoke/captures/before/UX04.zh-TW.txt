@@ -1,0 +1,34 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	core
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	llm
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	pdftext
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	inventory
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	schema
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	validate
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	read
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	benchmark
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	dataset
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	features
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	protocol
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	causal
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	candidates
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	意外中斷，已驗收 13 / 21，2 個進行中，1 個失敗，需要你處理。
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	工作進度已更新，接下來：繼續下一步。
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48

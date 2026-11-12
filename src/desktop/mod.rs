@@ -24,6 +24,9 @@ mod shell;
 mod superswitch;
 mod todo;
 pub mod theme;
+// ux: begin module
+pub mod ux;
+// ux: end
 mod usage;
 mod wishes;
 
@@ -71,6 +74,9 @@ fn initial_state(options: &Options) -> model::AppState {
         state.current = None;
         state.memory.clear();
         state.checks.clear();
+        // ux: begin initial state
+        state.ux = ux::UxState::default();
+        // ux: end
     }
     if !options.demo { state.quota = Default::default(); }
     state.feeds.quit_requested = options.confirm_quit;

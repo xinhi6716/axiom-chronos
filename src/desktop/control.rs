@@ -1,4 +1,10 @@
 //! The control bar at the foot of the Run screen: what this run offers right now, and its event log.
+// ux: begin interjection modules
+mod interjection;
+#[cfg(test)]
+mod interjection_accept;
+// ux: end
+
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::motion;
@@ -1088,6 +1094,11 @@ impl Control {
     }
 
     fn render_running(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // ux: begin seam interjection
+        if self.state.read(cx).ux.seams.interjections.is_some() {
+            return h_flex().size_full().justify_between().child(interjection::open_button(self.state.clone(), facts.session.clone(), cx)).child(h_flex().gap(theme::space(theme::density(cx), Step::Xs)).child(self.log_toggle(facts.log_lines, cx)).child(self.stop_button(cx))).into_any_element();
+        }
+        // ux: end
         let d = theme::density(cx);
         let blank = sendable(&self.input.read(cx).value()).is_none();
         let _ = window;
@@ -1104,6 +1115,9 @@ impl Control {
                     .child(
                         h_flex()
                             .gap(theme::space(d, Step::Xs))
+                            // ux: begin interjection panel
+                            .child(interjection::open_button(self.state.clone(), facts.session.clone(), cx))
+                            // ux: end
                             .child(self.log_toggle(facts.log_lines, cx))
                             .child(self.stop_button(cx)),
                     ),
@@ -1180,6 +1194,17 @@ impl Control {
     }
 
     fn render_blocked(&mut self, facts: &Facts, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // ux: begin seam interjection
+        if self.state.read(cx).ux.seams.interjections.is_some() {
+            let d = theme::density(cx);
+            let header = self.need_header(facts, IconName::TriangleAlert, "Needs you", "Chronos needs you before it can continue.", cx);
+            return h_flex().size_full().gap(theme::space(d, Step::Sm)).child(header)
+                .child(interjection::open_button(self.state.clone(), facts.session.clone(), cx))
+                .when(facts.offer.open_folder, |bar| bar.child(self.folder_button(cx)))
+                .child(self.log_toggle(facts.log_lines, cx))
+                .child(self.resume_button("control-resume", "Resume", window, cx)).into_any_element();
+        }
+        // ux: end
         let d = theme::density(cx);
         let header = self.need_header(facts, IconName::TriangleAlert, "Needs you", "Chronos needs you before it can continue.", cx);
         v_flex()
@@ -1193,6 +1218,9 @@ impl Control {
                     .child(
                         h_flex()
                             .gap(theme::space(d, Step::Xs))
+                            // ux: begin interjection panel
+                            .child(interjection::open_button(self.state.clone(), facts.session.clone(), cx))
+                            // ux: end
                             .when(facts.offer.open_folder, |this| this.child(self.folder_button(cx)))
                             .child(self.log_toggle(facts.log_lines, cx)),
                     ),
@@ -1539,6 +1567,9 @@ impl Render for Control {
                 Some(Primary::Resume) => self.render_blocked(f, window, cx),
                 Some(Primary::ResumeNow) => self.render_waiting(f, window, cx),
                 Some(Primary::AnotherWish) => self.render_done(f, cx),
+                // ux: begin remote interjection
+                None if f.status == RunStatus::Active && self.state.read(cx).ux.seams.interjections.is_some() => h_flex().size_full().justify_between().child(interjection::open_button(self.state.clone(), f.session.clone(), cx)).child(self.log_toggle(f.log_lines, cx)).into_any_element(),
+                // ux: end
                 None => self.render_view_only(f, cx),
             },
         };

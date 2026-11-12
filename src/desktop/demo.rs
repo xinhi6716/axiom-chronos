@@ -302,6 +302,10 @@ fn unix_now() -> i64 {
 pub fn state_at(now: i64) -> AppState {
     use crate::usage::quota::{ProviderQuota, Quotas, Window, WindowKind};
     let window = |kind, left: f32| Some(Window { kind, used: 1.0 - left, observed_at: now, resets_at: Some(now + match kind { WindowKind::FiveHour => 10_800, WindowKind::Weekly => 3 * 86_400 }), status: None });
+    // ux: begin demo runs
+    let runs = vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()];
+    let ux = super::ux::UxState::demo(&runs, now * 1000);
+    // ux: end
     let mut state = AppState {
         feeds: Feeds::default(),
         undo: UndoStack::default(),
@@ -318,7 +322,9 @@ pub fn state_at(now: i64) -> AppState {
         board: Default::default(),
         evolve: EvolveState::default(),
         view: Screen::Run,
-        runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()],
+        // ux: begin runs
+        runs,
+        // ux: end
         mesh_graph: Default::default(),
         current: Some(0),
         selection: Selection::None,
@@ -337,11 +343,15 @@ pub fn state_at(now: i64) -> AppState {
         reduce_motion: false,
         composing: false,
         backend: None,
+        service_background: None,
         scene: None,
         errors: vec![],
         next_error: 0,
         renames: Default::default(),
         address: None,
+        // ux: begin state
+        ux,
+        // ux: end
     };
     for kind in [FeedKind::Runs, FeedKind::Memory, FeedKind::Checks, FeedKind::Usage, FeedKind::Quota] {
         state.feeds.get_mut(kind).loaded = true;

@@ -19,6 +19,7 @@ const T: Table = &[
     ("{} wishes in progress", "{} 個願望進行中"),
     ("{}, {} needs you", "{}，{} 個需要你"),
     ("{}, {} need you", "{}，{} 個需要你"),
+    ("{}, {} unread", "{}，{} 個未讀"),
     ("Needs you", "需要你"),
     ("Back to full app", "返回完整應用程式"),
     ("Back to full app ({})", "返回完整應用程式（{}）"),
@@ -27,8 +28,8 @@ const T: Table = &[
 #[derive(Debug, PartialEq, Eq)]
 struct MiniRow { session: SharedString, needs_you: bool }
 
-fn rows(state: &AppState) -> Vec<MiniRow> {
-    model::board_runs(state).into_iter().map(|i| {
+fn rows(state: &AppState, prefs: &super::ux::prefs::UxPrefs) -> Vec<MiniRow> {
+    model::board_runs_with_prefs(state, prefs).into_iter().map(|i| {
         let run = &state.runs[i];
         MiniRow { session: run.session.clone(), needs_you: model::needs_you(run) }
     }).collect()
@@ -42,6 +43,11 @@ fn summary_line(open: usize, needs: usize, lang: Lang) -> String {
         let key = if needs == 1 { "{}, {} needs you" } else { "{}, {} need you" };
         i18n::fill(i18n::translate(lang, T, key), &[&line, &needs.to_string()])
     }
+}
+
+fn summary_with_unread(open: usize, needs: usize, unread: usize, lang: Lang) -> String {
+    let summary = summary_line(open, needs, lang);
+    if unread > 0 { i18n::fill(i18n::translate(lang, T, "{}, {} unread"), &[&summary, &unread.to_string()]) } else { summary }
 }
 
 fn back_tip_text(keys: &str, lang: Lang) -> String {
@@ -125,8 +131,11 @@ impl Render for MiniView {
         let d = theme::density(cx);
         let lang = *cx.global::<Lang>();
         let state = self.state.read(cx);
-        let list = rows(state);
-        let indices = model::board_runs(state);
+        let prefs = &settings::Store::current(cx).ux;
+        let list = rows(state, prefs);
+        let indices = model::board_runs_with_prefs(state, prefs);
+        let unread = indices.iter().filter(|&&i| wishes::read_state::is_unread(&state.runs[i], prefs)).count();
+        let summary = summary_with_unread(list.len(), list.iter().filter(|r| r.needs_you).count(), unread, lang);
         self.card_focus.retain(|session, _| list.iter().any(|row| row.session == *session));
         let on = settings::Store::current(cx).mini_on_top;
         let pin_tip = if on { tr(cx, T, "Stop keeping on top") } else { tr(cx, T, "Keep on top") };
@@ -135,7 +144,7 @@ impl Render for MiniView {
         let back_state = self.state.clone();
         let mut content = v_flex().w_full().gap(theme::space(d, Step::Sm))
             .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted)
-                .child(summary_line(list.len(), list.iter().filter(|r| r.needs_you).count(), lang)));
+                .child(summary));
         for (position, index) in indices.into_iter().enumerate() {
             let run = &state.runs[index];
             let focus = self.card_focus.entry(run.session.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
@@ -158,7 +167,7 @@ impl Render for MiniView {
                     .child(div().text_color(ink).text_size(theme::font(d, TypeSize::Caption)).child(tr(cx, &[], run.status_label()).test_text(tr(cx, &[], run.status_label())))))
                 .child(div().w_full().text_color(t.muted).text_size(theme::font(d, TypeSize::Caption)).child(line.clone().test_text(line))));
         }
-        let strip = quota::compact_strip(state, window, cx);
+        let strip = quota::compact_strip_with(&self.state, 0.0, window, cx);
         let back_tip = back_tip_text(palette::keys_of(palette::Global::ToggleMini), lang);
         let pin_ring = self.pin_focus.is_focused(window);
         let back_ring = self.back_focus.is_focused(window);
@@ -198,8 +207,9 @@ mod tests {
     #[test]
     fn rows_only_unfinished_needing_you_first() {
         let mut state = demo::state();
+        let prefs = super::super::ux::prefs::UxPrefs::default();
         demo::apply_data_scene(&mut state, "at-rest");
-        assert!(rows(&state).is_empty());
+        assert!(rows(&state, &prefs).is_empty());
         let template = state.runs[0].clone();
         state.runs = (0..6).map(|i| { let mut r = template.clone(); r.session = format!("{i}").into(); r.needs.clear(); r }).collect();
         state.runs[0].status = RunStatus::Active;
@@ -208,10 +218,27 @@ mod tests {
         state.runs[3].status = RunStatus::LimitWait;
         state.runs[4].status = RunStatus::Waiting;
         state.runs[5].status = RunStatus::Active;
-        let list = rows(&state);
+        let list = rows(&state, &prefs);
         assert_eq!(list.iter().map(|r| (r.session.as_ref(), r.needs_you)).collect::<Vec<_>>(), [("2", true), ("4", true), ("0", false), ("3", false), ("5", false)]);
         state.runs[2].status = RunStatus::Done;
-        assert_eq!(rows(&state).iter().map(|r| (r.session.as_ref(), r.needs_you)).collect::<Vec<_>>(), [("4", true), ("0", false), ("3", false), ("5", false)]);
+        assert_eq!(rows(&state, &prefs).iter().map(|r| (r.session.as_ref(), r.needs_you)).collect::<Vec<_>>(), [("4", true), ("0", false), ("3", false), ("5", false)]);
+    }
+
+    #[test]
+    fn rows_follow_read_and_archive_state_unless_attention_needed() {
+        use wishes::read_state::{change_mark, ReadAction};
+        let mut state = demo::state();
+        let mut run = demo::sample_run();
+        run.status = RunStatus::Active; run.needs.clear();
+        let mut unread = run.clone(); unread.session = "unread".into();
+        let mut archived = run.clone(); archived.session = "archived".into();
+        let mut needed = run.clone(); needed.session = "needed".into(); needed.status = RunStatus::Blocked;
+        state.runs = vec![run, unread, archived, needed];
+        let mut prefs = super::super::ux::prefs::UxPrefs::default();
+        change_mark(&state.runs[0], &mut prefs, ReadAction::MarkRead);
+        change_mark(&state.runs[2], &mut prefs, ReadAction::Archive);
+        change_mark(&state.runs[3], &mut prefs, ReadAction::MarkRead);
+        assert_eq!(rows(&state, &prefs).iter().map(|r| r.session.as_ref()).collect::<Vec<_>>(), ["needed", "unread"]);
     }
 
     #[test]
@@ -226,6 +253,19 @@ mod tests {
         ] {
             assert_eq!(summary_line(open, needs, Lang::En), en);
             assert_eq!(summary_line(open, needs, Lang::ZhTw), zh);
+        }
+    }
+
+    #[test]
+    fn unread_summaries_in_both_languages() {
+        for (open, needs, unread, en, zh) in [
+            (0, 0, 0, "Nothing is in progress", "目前沒有進行中的願望"),
+            (2, 1, 0, "2 wishes in progress, 1 needs you", "2 個願望進行中，1 個需要你"),
+            (1, 0, 1, "1 wish in progress, 1 unread", "1 個願望進行中，1 個未讀"),
+            (2, 1, 2, "2 wishes in progress, 1 needs you, 2 unread", "2 個願望進行中，1 個需要你，2 個未讀"),
+        ] {
+            assert_eq!(summary_with_unread(open, needs, unread, Lang::En), en);
+            assert_eq!(summary_with_unread(open, needs, unread, Lang::ZhTw), zh);
         }
     }
 
