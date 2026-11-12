@@ -2,7 +2,9 @@
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
 mod logic;
 // ux-celestial begin
-mod council;
+// p8: begin
+pub(crate) mod council;
+// p8: end
 mod dual_core;
 // ux-celestial end
 
@@ -26,6 +28,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const TABLE: Table = &[
+    // p8: begin
+    ("Write paper", "撰寫論文"),
+    // p8: end
     ("Loading the plan…", "正在載入計畫…"),
     ("Try again", "重試"),
     ("Running: a unit is being worked on now", "執行中：單元目前正在處理。"),
@@ -2181,6 +2186,14 @@ impl Mesh {
         let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), 0., lang, &t, d));
         let research = state.ux.council.get(&run.session).map(|v| council::research_emblem(v.active, lang, &t, 92.));
         // ux-celestial end
+        // p8: begin
+        let paper_button = if state.ux.seams.paper.is_some() && research.is_some() {
+            let state = self.state.clone();
+            let session = run.session.clone();
+            Some(Button::new("write-paper").child(tr(cx, TABLE, "Write paper").test_text(tr(cx, TABLE, "Write paper")))
+                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.open_page(crate::desktop::ux::Page::Paper(session.clone()), cx))))
+        } else { None };
+        // p8: end
         let dragging = self.drag.is_some_and(|d| d.moved);
         div()
             .id("mesh-graph")
@@ -2226,7 +2239,9 @@ impl Mesh {
                     ).absolute().w_full().h(px(view_h)))
                     .child(div().absolute().w_full().h(px(view_h)).children(cards).children(chips).children(ring))
                     // ux-celestial begin
-                    .when_some(research, |this, emblem| this.child(div().absolute().left(px((core.x - core_r - 100.).max(0.))).top(px((core.y - 46.).max(0.))).child(emblem)))
+                    // p8: begin
+                    .when_some(research, |this, emblem| this.child(v_flex().absolute().left(px((core.x - core_r - 100.).max(0.))).top(px((core.y - 46.).max(0.))).child(emblem).children(paper_button)))
+                    // p8: end
                     .when_some(dual, |this, dual| this.child(div().absolute().left(px((core.x - 90.).max(0.))).top(px((core.y - core_r - 90.).max(0.))).child(dual)))
                     // ux-celestial end
                     .when(above, |this| this.child(edge_fade(t, true)))
@@ -2482,11 +2497,22 @@ impl Render for Mesh {
                 let phase = if state.reduce_motion { 0. } else { frames.now().saturating_duration_since(self.clock).as_secs_f32() * std::f32::consts::TAU / ORBIT_SECONDS };
                 frames.finish(window);
                 let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), phase, lang, &t, d));
+                // p8: begin
+                let paper_button = if state.ux.seams.paper.is_some() && council.is_some() {
+                    let state = self.state.clone();
+                    let session = run.session.clone();
+                    Some(Button::new("write-paper").child(tr(cx, TABLE, "Write paper").test_text(tr(cx, TABLE, "Write paper")))
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.open_page(crate::desktop::ux::Page::Paper(session.clone()), cx))))
+                } else { None };
+                // p8: end
                 return h_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
                     .when_some(council, |this, v| this.child(h_flex().items_center().gap(theme::space(d, SpaceStep::Md))
                         .when(v.active, |this| this.child(council::council_orbit(v, phase, lang, &t, d)))
                         .when(!v.active, |this| this.child(council::astra_card(lang, &t, d)))
-                        .child(council::research_emblem(v.active, lang, &t, 92.))))
+                        .child(council::research_emblem(v.active, lang, &t, 92.))
+                        // p8: begin
+                        .children(paper_button)))
+                        // p8: end
                     .when(council.is_none(), |this| this.child(council::astra_card(lang, &t, d)))
                     .when_some(dual, |this, dual| this.child(dual))
                     .into_any_element();

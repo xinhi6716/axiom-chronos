@@ -296,7 +296,7 @@ fn top_rank_not_preselected(cx: &mut TestAppContext) {
     for lang in [Lang::En, Lang::ZhTw] {
         let mut s = status();
         s.shortlist = Some(shortlist(true));
-        let (window, fake, session) = setup(cx, lang, s);
+        let (window, fake, session) = setup(cx, lang, s.clone());
         let lines = capture(cx, window);
         for name in ["First Journal", "Second Journal"] {
             assert!(shows(&lines, "paper-row", name));
@@ -308,6 +308,29 @@ fn top_rank_not_preselected(cx: &mut TestAppContext) {
             .any(|c| matches!(c, PaperCall::ChooseJournal(..))));
         click(cx, window, ("paper-choose", 0_usize));
         assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::ChooseJournal(s, id, hash) if s == &session && id == "first" && hash == "shortlist-hash")));
+        s.choice = Some(choice());
+        fake.set_status(&session, s);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        capture(cx, window);
+        let chosen_rows = cx
+            .update_window(window, |_, w, _| {
+                gpui_kit::base::test_support::texts(w)
+                    .into_iter()
+                    .filter(|t| t.visible() && t.text() == label(lang, "Chosen", "已選擇"))
+                    .map(|t| t.path().to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(chosen_rows.len(), 1, "{chosen_rows:?}");
+        assert!(
+            chosen_rows[0].contains(&ElementId::from(("paper-row-slot", 0_usize))),
+            "{chosen_rows:?}"
+        );
+        assert!(
+            !chosen_rows[0].contains(&ElementId::from(("paper-row-slot", 1_usize))),
+            "{chosen_rows:?}"
+        );
     }
 }
 
@@ -339,6 +362,130 @@ fn sources_and_unknowns_visible(cx: &mut TestAppContext) {
         assert!(
             shows(&lines, "paper-metric", label(lang, "Unknown", "未知")),
             "{lines:?}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn buckets_exclusions_and_jcr_source(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    for lang in [Lang::En, Lang::ZhTw] {
+        let mut list = shortlist(true);
+        list.ranked[0].bucket = Bucket::Passes;
+        list.ranked[0].journal.quartiles.push(Sourced {
+            value: QuartileValue {
+                quartile: Quartile::Q1,
+                scheme: QuartileScheme::Jcr,
+                category: "Medicine".into(),
+                year: 2024,
+            },
+            source: SourceTag {
+                kind: SourceKind::JcrImport,
+                url: None,
+                fetched_at: "2025-03-04".into(),
+                data_year: Some(2024),
+                raw: "JCR".into(),
+            },
+        });
+        list.excluded.push(Excluded {
+            journal: journal("excluded", "Excluded Journal", false).journal,
+            filters: vec![FilterResult {
+                name: "APC".into(),
+                status: ReqStatus::Unmet,
+                detail: "exceeds limit".into(),
+                source: None,
+            }],
+        });
+        let mut s = status();
+        s.shortlist = Some(list);
+        let (window, _, _) = setup(cx, lang, s);
+        let lines = capture(cx, window);
+        for (id, text) in [
+            ("paper-row", label(lang, "Passes", "符合")),
+            ("paper-row", label(lang, "Needs check", "需確認")),
+            (
+                "paper-excluded",
+                label(
+                    lang,
+                    "Excluded · Excluded Journal",
+                    "已排除 · Excluded Journal",
+                ),
+            ),
+            (
+                "paper-excluded",
+                label(
+                    lang,
+                    "APC: Unmet · exceeds limit",
+                    "APC: 不符合 · exceeds limit",
+                ),
+            ),
+            ("paper-metric", "SJR: 1.5 · SJR · 2025-03-04"),
+            (
+                "paper-metric",
+                label(
+                    lang,
+                    "Quartile: JCR Q1 (Medicine, 2024) · JCR · 2025-03-04",
+                    "分區: JCR Q1 (Medicine, 2024) · JCR · 2025-03-04",
+                ),
+            ),
+        ] {
+            assert!(shows(&lines, id, text), "missing {id} / {text}: {lines:?}");
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn edited_form_and_cancel(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    for lang in [Lang::En, Lang::ZhTw] {
+        let mut s = status();
+        s.shortlist = None;
+        let (window, fake, session) = setup(cx, lang, s.clone());
+        for (index, value) in [
+            (0_usize, "Research abstract"),
+            (1, "alpha, beta"),
+            (2, "123"),
+            (3, "USD"),
+            (4, "medicine, biology"),
+            (5, "fast review"),
+        ] {
+            click(cx, window, ("paper-input", index));
+            cx.update_window(window, |_, w, cx| w.input(value, cx))
+                .unwrap();
+            capture(cx, window);
+        }
+        click(cx, window, ("paper-tier", 2_usize));
+        click(cx, window, ("paper-scheme", 1_usize));
+        click(cx, window, ("paper-access", 1_usize));
+        click(cx, window, "paper-no-fee");
+        click(cx, window, "paper-shortlist");
+        let expected = Requirements {
+            abstract_text: "Research abstract".into(),
+            keywords: vec!["alpha".into(), "beta".into()],
+            max_quartile: Some(Quartile::Q2),
+            tier_scheme: QuartileScheme::Jcr,
+            access: AccessWanted::Subscription,
+            apc_limit: Some(Money {
+                amount_minor: 123,
+                currency: "USD".into(),
+            }),
+            require_no_fee: true,
+            categories: vec!["medicine".into(), "biology".into()],
+            free_text: vec!["fast review".into()],
+        };
+        assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected)), "{:?}", fake.calls());
+        s.running = true;
+        fake.set_status(&session, s);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        capture(cx, window);
+        click(cx, window, "paper-cancel");
+        assert!(
+            fake.calls()
+                .iter()
+                .any(|c| matches!(c, PaperCall::Cancel(id) if id == &session)),
+            "{:?}",
+            fake.calls()
         );
     }
 }
@@ -487,9 +634,130 @@ fn zh_tw_and_english(cx: &mut TestAppContext) {
         let lines = capture(cx, window);
         assert!(shown(cx, window, "paper-page"));
         assert!(shown(cx, window, "paper-form"));
+        for text in [
+            label(lang, "Write paper", "撰寫論文"),
+            label(lang, "Start", "開始"),
+            label(lang, "Back", "返回"),
+        ] {
+            assert!(shows(&lines, "paper-page", text), "{lines:?}");
+        }
         assert!(
             shows(&lines, "paper-metric", label(lang, "Unknown", "未知")),
             "{lines:?}"
         );
     }
+}
+
+#[gpui_kit::test]
+fn shortlist_button_sends_form_payload(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    for lang in [Lang::En, Lang::ZhTw] {
+        let mut s = status();
+        let expected = Requirements {
+            abstract_text: "Research abstract".into(),
+            keywords: vec!["alpha".into(), "beta".into()],
+            max_quartile: Some(Quartile::Q2),
+            tier_scheme: QuartileScheme::Jcr,
+            access: AccessWanted::Subscription,
+            apc_limit: Some(Money {
+                amount_minor: 123,
+                currency: "USD".into(),
+            }),
+            require_no_fee: true,
+            categories: vec!["medicine".into()],
+            free_text: vec!["fast review".into()],
+        };
+        s.requirements = Some(expected.clone());
+        let (window, fake, session) = setup(cx, lang, s);
+        click(cx, window, "paper-shortlist");
+        assert!(fake.calls().iter().any(|call| matches!(call, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected)), "{:?}", fake.calls());
+    }
+}
+
+#[gpui_kit::test]
+fn late_evidence_and_cleared_estimate_are_applied(cx: &mut TestAppContext) {
+    let home = Home::new();
+    let mut s = status();
+    s.shortlist = Some(shortlist(true));
+    s.choice = Some(choice());
+    s.estimate = Some(estimate());
+    let (window, fake, session) = setup(cx, Lang::En, s.clone());
+    click(cx, window, "paper-ack");
+    let goal = axiom::goal::open(
+        &home.path,
+        &session,
+        "wish",
+        Some(home.path.to_str().unwrap()),
+    )
+    .unwrap();
+    let store = axiom::orch::store_for_goal(&home.path, &goal).unwrap();
+    evidence::save(
+        &store,
+        &EvidenceBundle {
+            version: 1,
+            program: "program".into(),
+            question: "Late evidence question".into(),
+            artifacts: vec![],
+            claims: vec![],
+            evidence: vec![],
+            quantities: vec![],
+            references: vec![],
+            hash: "evidence-hash".into(),
+        },
+    )
+    .unwrap();
+    s.evidence = Some("evidence-hash".into());
+    s.shortlist = None;
+    s.estimate = None;
+    fake.set_status(&session, s);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    capture(cx, window);
+    assert!(!shown(cx, window, "paper-estimate"));
+    click(cx, window, "paper-start");
+    assert!(!fake
+        .calls()
+        .iter()
+        .any(|c| matches!(c, PaperCall::Start(..))));
+    click(cx, window, "paper-shortlist");
+    assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::RequestShortlist(_, req, _) if req.abstract_text == "Late evidence question")), "{:?}", fake.calls());
+}
+
+#[gpui_kit::test]
+fn rejected_choice_preserves_estimate(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let mut s = status();
+    s.shortlist = Some(shortlist(true));
+    s.choice = Some(choice());
+    s.estimate = Some(estimate());
+    let (window, fake, _) = setup(cx, Lang::En, s);
+    fake.fail(
+        "choose_journal",
+        Failure::new("rejected", "choice rejected"),
+    );
+    click(cx, window, "paper-ack");
+    click(cx, window, ("paper-choose", 1_usize));
+    assert!(shown(cx, window, "paper-estimate"));
+    click(cx, window, "paper-start");
+    assert!(fake
+        .calls()
+        .iter()
+        .any(|c| matches!(c, PaperCall::Start(_, digest) if digest == "estimate-digest")));
+}
+
+#[gpui_kit::test]
+fn validation_and_enum_labels_are_localized(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let mut s = status();
+    let mut p = pass(PassId::AstraDraft, "astra", "reason");
+    p.validation.push("validation detail".into());
+    s.passes.push(p);
+    s.steps
+        .push((Step::Evidence, false, Some("step detail".into())));
+    let (window, _, _) = setup(cx, Lang::ZhTw, s);
+    let lines = capture(cx, window);
+    assert!(shows(&lines, "paper-validation", "validation detail"));
+    assert!(!shows(&lines, "paper-error", "validation detail"));
+    assert!(shows(&lines, "paper-changelog", "編輯"));
+    assert!(shows(&lines, "paper-error", "證據"));
 }
