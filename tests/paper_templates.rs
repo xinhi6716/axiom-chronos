@@ -7,7 +7,7 @@ use axiom::paper::{
     tables, tectonic,
     templates::{self, TemplateEntry, TemplateStatus},
 };
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{fs, path::Path, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 const REGISTRY: &str = include_str!("fixtures/paper/templates/registry.json");
@@ -35,7 +35,7 @@ fn data() -> DataTable {
     DataTable {
         columns: vec!["x".into(), "y".into()],
         units: vec![None, None],
-        rows: vec![vec!["1".into(), "2".into()], vec!["2".into(), "3".into()]],
+        rows: vec![vec!["0".into(), "2".into()], vec!["5".into(), "3".into()]],
     }
 }
 fn manuscript() -> Manuscript {
@@ -360,7 +360,7 @@ fn preset() -> Preset {
         id: "test".into(),
         width_mm: 90.0,
         height_mm: 65.0,
-        font_family: "Latin Modern Roman".into(),
+        font_family: "Arial".into(),
         font_files: vec![],
         cjk_font_family: None,
         cjk_font_files: vec![],
@@ -382,7 +382,11 @@ fn vector_figure(dir: &Path, ms: &Manuscript, t: &tectonic::Tectonic) -> std::pa
     .unwrap();
     let tex = dir.join("figure.tex");
     fs::write(&tex, tikz::standalone(&layout, &preset)).unwrap();
-    tectonic::compile_figure(t, &tex, true, TIMEOUT).unwrap()
+    tectonic::compile_figure(t, &tex, true, TIMEOUT).unwrap_or_else(|error| {
+        let log = fs::read_to_string(tex.with_extension("log"))
+            .unwrap_or_else(|e| format!("could not read figure log: {e}"));
+        panic!("{error:?}\nfigure.log:\n{log}")
+    })
 }
 #[test]
 #[cfg_attr(
@@ -393,9 +397,7 @@ fn compile_verified_classes_offline() {
     let t = tectonic::find_for_tests().expect("build probe found engine");
     for id in ["elsarticle", "IEEEtran"] {
         let dir = tempfile::tempdir().unwrap();
-        let mut ms = manuscript();
-        ms.sections[0].paragraphs[0].text =
-            "See {{fig:plot}}, {{tab:table}}, {{sec:results}} and [@key].".into();
+        let ms = manuscript();
         let figure = vector_figure(dir.path(), &ms, &t);
         assert!(figure.is_file());
         let project = latex::assemble(
@@ -424,6 +426,18 @@ fn compile_verified_classes_offline() {
                 && report.missing_files.is_empty()
                 && report.missing_chars.is_empty(),
             "{id}: {report:?}"
+        );
+        let bbl = fs::read_to_string(project.main.with_extension("bbl"))
+            .expect("BibTeX must produce a bibliography");
+        assert!(
+            bbl.contains("{key}") && bbl.contains("{other}"),
+            "{id}: {bbl}"
+        );
+        let blg = fs::read_to_string(project.main.with_extension("blg"))
+            .expect("BibTeX must produce a log");
+        assert!(
+            blg.contains(&format!("{}.bst", entry(id).bib_style)),
+            "{id}: {blg}"
         );
     }
 }
@@ -488,13 +502,68 @@ fn compile_blocks_missing_file() {
 fn compile_blocks_syntax_error() {
     let r = bad_compile(r"\thiscommanddoesnotexist");
     assert!(!r.ok, "{r:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let tex = dir.path().join("figure.tex");
+    fs::write(
+        &tex,
+        "\\documentclass{article}\n\\begin{document}\n\\thiscommanddoesnotexist\n\\end{document}\n",
+    )
+    .unwrap();
+    let error = tectonic::compile_figure(&tectonic::find_for_tests().unwrap(), &tex, true, TIMEOUT)
+        .unwrap_err();
+    assert!(
+        error.message.contains("exit status:")
+            && error.message.contains("last 40 log lines:")
+            && error.message.contains("thiscommanddoesnotexist"),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    not(paper_tectonic),
+    ignore = "no TeX engine: set AXIOM_TECTONIC_CMD or put tectonic on PATH"
+)]
+fn compile_detects_diagnostics_in_final_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.tex");
+    fs::write(
+        &main,
+        r"\documentclass{article}
+\renewcommand\bfdefault{m}
+\begin{document}
+\ref{absentlabel} \cite{absentkey}
+\end{document}",
+    )
+    .unwrap();
+    let report =
+        tectonic::compile(&tectonic::find_for_tests().unwrap(), &main, true, TIMEOUT).unwrap();
+    assert!(
+        !report.ok && report.pdf.as_ref().is_some_and(|p| p.is_file()),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .undefined_refs
+            .iter()
+            .any(|s| s.contains("absentlabel")),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .unresolved_citations
+            .iter()
+            .any(|s| s.contains("absentkey")),
+        "{report:?}"
+    );
+    assert!(report.missing_files.is_empty(), "{report:?}");
 }
 
 fn isolated(name: &str) -> bool {
     if std::env::var_os("PAPER_TEMPLATE_CHILD").is_some() {
         return true;
     }
-    let status = Command::new(std::env::current_exe().unwrap())
+    let status = axiom::base::proc::cmd(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])
         .env("PAPER_TEMPLATE_CHILD", "1")
         .env_remove("AXIOM_TECTONIC_CMD")
