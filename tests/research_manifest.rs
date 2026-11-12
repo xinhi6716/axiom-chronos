@@ -404,3 +404,268 @@ fn errors_paging_and_path_guards() {
         assert_eq!(guard(d.path(), "junction/file").unwrap_err().kind, "escape");
     }
 }
+
+#[test]
+fn declared_missing_paging_limits_and_cursor_validation() {
+    let d = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("rawonly"), d.path());
+    let l = locate(d.path(), &Default::default()).unwrap();
+    let p = d.path().join("runs/device_A.csv");
+    fs::remove_file(&p).unwrap();
+    assert_eq!(verify(&l, "run_a").unwrap_err().kind, "missing_artifact");
+    assert_eq!(
+        read_rows(&l, "run_a", None, 1, &Limits::default())
+            .unwrap_err()
+            .kind,
+        "missing_artifact"
+    );
+
+    let content = format!(
+        "key,value\n{}",
+        (0..510).map(|i| format!("k{i},{i}\n")).collect::<String>()
+    );
+    fs::write(&p, &content).unwrap();
+    let page = read_rows(&l, "run_a", None, 1000, &Limits::default()).unwrap();
+    assert_eq!(page.rows.len(), 500);
+    let cursor = page.next.unwrap();
+    let rest = read_rows(&l, "run_a", Some(&cursor), 1000, &Limits::default()).unwrap();
+    assert_eq!(rest.rows.len(), 10);
+    assert!(rest.next.is_none());
+    for offset in [0, cursor.bytes + 1] {
+        let mut invalid = cursor.clone();
+        invalid.offset = offset;
+        let invalid = Cursor::from_token(&invalid.to_token()).unwrap();
+        assert_eq!(
+            read_rows(&l, "run_a", Some(&invalid), 1, &Limits::default())
+                .unwrap_err()
+                .kind,
+            "stale_cursor"
+        );
+    }
+    let modified = fs::metadata(&p).unwrap().modified().unwrap();
+    fs::write(&p, &content).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(10)))
+        .unwrap();
+    let current = version(&p).unwrap();
+    assert_eq!(current.bytes, cursor.bytes);
+    assert_ne!(current.modified_ns, cursor.modified_ns);
+    assert_eq!(
+        read_rows(&l, "run_a", Some(&cursor), 1, &Limits::default())
+            .unwrap_err()
+            .kind,
+        "stale_cursor"
+    );
+
+    fs::write(&p, "key,value\nlongvalue,123456\n").unwrap();
+    let lim = Limits {
+        max_record_bytes: 12,
+        ..Default::default()
+    };
+    assert_eq!(
+        read_rows(&l, "run_a", None, 1, &lim).unwrap_err().kind,
+        "oversized_record"
+    );
+}
+
+#[test]
+fn location_and_public_path_guards() {
+    let d = tempfile::tempdir().unwrap();
+    assert_eq!(
+        locate(d.path(), &Default::default()).unwrap_err().kind,
+        "no_manifest"
+    );
+    fs::write(
+        d.path().join(MANIFEST_FILE),
+        r#"{"manifest_version":1,"settings":[]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        locate(d.path(), &Default::default()).unwrap_err().kind,
+        "invalid_manifest"
+    );
+
+    let project = d.path().join("project");
+    copy_tree(&fixture("rram").join("project"), &project);
+    let home = d.path().join("orch");
+    let store = home.join("rram_fixture");
+    fs::create_dir_all(&store).unwrap();
+    fs::create_dir_all(project.join(".git/refs/heads")).unwrap();
+    fs::write(project.join(".git/HEAD"), "ref: refs/heads/test\n").unwrap();
+    let revision = "0123456789abcdef0123456789abcdef01234567";
+    fs::write(
+        project.join(".git/refs/heads/test"),
+        format!("{revision}\n"),
+    )
+    .unwrap();
+    let l = locate(
+        &project,
+        &LocateOptions {
+            store: None,
+            orch_home: Some(home),
+        },
+    )
+    .unwrap();
+    assert_eq!(l.store.as_deref(), Some(store.as_path()));
+    assert_eq!(l.manifest.versions.code.as_deref(), Some(revision));
+
+    let outside = tempfile::tempdir().unwrap();
+    let link = project.join("pdfs").join("junction");
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(outside.path())
+        .status()
+        .unwrap()
+        .success());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    let mut a = l.artifact("inventory").unwrap().clone();
+    for path in ["../escape", "/absolute", "C:/absolute", "junction/file"] {
+        assert_eq!(l.document_path(path).unwrap_err().kind, "escape", "{path}");
+        a.root = Some("pdf".into());
+        a.path = path.into();
+        assert_eq!(l.artifact_path(&a).unwrap_err().kind, "escape", "{path}");
+    }
+}
+
+#[test]
+fn rram_fixture_special_cases() {
+    let r = fixture("rram");
+    let l = locate(
+        &r.join("project"),
+        &LocateOptions {
+            store: Some(r.join("store")),
+            orch_home: None,
+        },
+    )
+    .unwrap();
+    let inventory = rows(&l, "inventory");
+    let errors: BTreeSet<_> = inventory
+        .iter()
+        .filter(|x| !x.fields["read_error"].is_empty())
+        .map(|x| x.fields["path"].as_str())
+        .collect();
+    assert_eq!(
+        errors,
+        BTreeSet::from(["broken.pdf", "paper3.pdf", "paper4.pdf"])
+    );
+    for row in inventory
+        .iter()
+        .filter(|x| !x.fields["read_error"].is_empty())
+    {
+        assert_eq!(row.fields["read_error"], "read failed");
+    }
+    let exact = inventory
+        .iter()
+        .find(|x| x.fields["path"] == "paper3.pdf")
+        .unwrap();
+    let a = inventory
+        .iter()
+        .find(|x| x.fields["path"] == "a.pdf")
+        .unwrap();
+    let b = inventory
+        .iter()
+        .find(|x| x.fields["path"] == "b.pdf")
+        .unwrap();
+    assert_eq!(exact.fields["duplicate_type"], "exact");
+    assert_eq!(exact.fields["canonical"], "0");
+    assert_eq!(exact.fields["sha256"], a.fields["sha256"]);
+    assert_eq!(a.fields["doi"], "10.1234/same");
+    assert_eq!(a.fields["doi"], b.fields["doi"]);
+    assert_eq!(a.fields["duplicate_group"], "dup");
+    assert_eq!(a.fields["duplicate_group"], b.fields["duplicate_group"]);
+
+    let evidence = rows(&l, "evidence");
+    let geometry: Vec<_> = evidence
+        .iter()
+        .filter(|x| !x.fields["bbox"].is_empty())
+        .collect();
+    assert_eq!(geometry.len(), 5);
+    assert_eq!(
+        geometry
+            .iter()
+            .map(|x| x.fields["evidence_id"].as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["E1", "E2", "E3", "E4", "E5"])
+    );
+    for e in geometry {
+        for (key, value) in [
+            ("bbox", "10,20,100,40"),
+            ("page_width", "612"),
+            ("page_height", "792"),
+            ("coordinate_origin", "top_left"),
+            ("coordinate_units", "pt"),
+            ("rotation", "0"),
+        ] {
+            assert_eq!(e.fields[key], value, "{} {key}", e.fields["evidence_id"]);
+        }
+    }
+    // These minimal fixture PDFs each have one /Pages node with a /Count.
+    let counts: BTreeMap<_, u32> = [a, b]
+        .into_iter()
+        .map(|doc| {
+            let pdf = fs::read_to_string(l.document_path(&doc.fields["path"]).unwrap()).unwrap();
+            let count = pdf
+                .split("/Count ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(doc.fields["n_pages"].parse::<u32>().unwrap(), count);
+            (doc.fields["sha256"].clone(), count)
+        })
+        .collect();
+    let pdf_rows: Vec<_> = evidence
+        .iter()
+        .filter(|x| x.fields["locator_type"] == "pdf_page")
+        .collect();
+    assert_eq!(pdf_rows.len(), 100);
+    for e in pdf_rows {
+        let page: u32 = e.fields["physical_page"].parse().unwrap();
+        assert!((1..=counts[&e.fields["sha256"]]).contains(&page));
+        if e.fields["sha256"] == a.fields["sha256"] {
+            assert_eq!(e.fields["printed_page"].parse::<u32>().unwrap(), page + 10);
+        }
+    }
+    let driver = read_json(&l, "driver", &Limits::default()).unwrap();
+    assert_eq!(driver["state"], "paused");
+    assert_eq!(driver["reason"], "rate limited");
+    let completed = rows(&l, "completed");
+    let limited: Vec<_> = completed
+        .iter()
+        .filter(|x| x.fields["status"] == "rate_limited")
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].fields["retry_after"], ""); // JSON null maps to an empty field.
+    let completed_text = read_text(&l, "completed", &Limits::default()).unwrap();
+    let limited_json: Vec<serde_json::Value> = completed_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["status"] == "rate_limited")
+        .collect();
+    assert_eq!(limited_json.len(), 1);
+    assert_eq!(
+        limited_json[0].get("retry_after"),
+        Some(&serde_json::Value::Null)
+    );
+    for (id, sidecar) in [("acceptance", "acceptance_sha"), ("splits", "splits_sha")] {
+        assert_eq!(
+            read_text(&l, sidecar, &Limits::default()).unwrap().trim(),
+            verify(&l, id).unwrap()
+        );
+    }
+    assert_ne!(
+        read_json(&l, "validation", &Limits::default()).unwrap()["measurements_sha256"]
+            .as_str()
+            .unwrap(),
+        verify(&l, "measurements").unwrap()
+    );
+}
