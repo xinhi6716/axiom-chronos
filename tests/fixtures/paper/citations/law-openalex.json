@@ -1,0 +1,30 @@
+{
+  "id": "https://openalex.org/W6",
+  "doi": "https://doi.org/10.2307/1330360",
+  "display_name": "The Right to Privacy",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Samuel Warren"
+      }
+    },
+    {
+      "author": {
+        "display_name": "Louis Brandeis"
+      }
+    }
+  ],
+  "publication_year": 1890,
+  "primary_location": {
+    "source": {
+      "display_name": "Harvard Law Review"
+    }
+  },
+  "biblio": {
+    "volume": "1",
+    "issue": "2",
+    "first_page": "193",
+    "last_page": "220",
+    "article_number": null
+  }
+}

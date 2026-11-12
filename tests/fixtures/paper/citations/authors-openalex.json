@@ -1,0 +1,30 @@
+{
+  "id": "https://openalex.org/W3",
+  "doi": "https://doi.org/10.1038/nature12374",
+  "display_name": "A published article",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Ada Lovelace"
+      }
+    },
+    {
+      "author": {
+        "display_name": "Alan Turing"
+      }
+    }
+  ],
+  "publication_year": 2013,
+  "primary_location": {
+    "source": {
+      "display_name": "Journal of Machine Learning Research"
+    }
+  },
+  "biblio": {
+    "volume": "1",
+    "issue": "2",
+    "first_page": "10",
+    "last_page": "20",
+    "article_number": null
+  }
+}

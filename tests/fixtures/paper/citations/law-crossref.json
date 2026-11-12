@@ -1,0 +1,31 @@
+{
+  "message": {
+    "DOI": "10.2307/1330360",
+    "title": [
+      "The Right to Privacy"
+    ],
+    "author": [
+      {
+        "given": "Samuel",
+        "family": "Warren"
+      },
+      {
+        "given": "Louis",
+        "family": "Brandeis"
+      }
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          1890
+        ]
+      ]
+    },
+    "container-title": [
+      "Harvard Law Review"
+    ],
+    "volume": "1",
+    "issue": "2",
+    "page": "193-220"
+  }
+}

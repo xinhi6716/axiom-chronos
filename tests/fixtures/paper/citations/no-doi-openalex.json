@@ -1,0 +1,22 @@
+{
+  "id": "https://openalex.org/W123",
+  "doi": null,
+  "display_name": "A Wórk Without a DOI",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Mária Novák"
+      }
+    }
+  ],
+  "publication_year": 2020,
+  "primary_location": {
+    "source": {
+      "display_name": "Journal of Machine Learning Research"
+    }
+  },
+  "biblio": {
+    "first_page": "1",
+    "last_page": "9"
+  }
+}
