@@ -100,5 +100,53 @@
     "status": 500,
     "file": "error.json",
     "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Forgtest1",
+    "status": 200,
+    "file": "org-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Forgtest1",
+    "status": 200,
+    "file": "org-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Forgtest2",
+    "status": 200,
+    "file": "org-mixed-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest0",
+    "status": 200,
+    "file": "dash-0-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest1",
+    "status": 200,
+    "file": "dash-1-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest2",
+    "status": 200,
+    "file": "dash-2-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest3",
+    "status": 200,
+    "file": "dash-3-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest4",
+    "status": 200,
+    "file": "dash-4-crossref.json",
+    "headers": {}
   }
 ]

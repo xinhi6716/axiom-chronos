@@ -1,0 +1,18 @@
+{
+  "message": {
+    "DOI": "10.1038/orgtest2",
+    "author": [
+      {
+        "given": "Ada",
+        "family": "Lovelace"
+      },
+      {
+        "name": "Analytical Engine Group"
+      },
+      {
+        "given": "Alan",
+        "family": "Turing"
+      }
+    ]
+  }
+}

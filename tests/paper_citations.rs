@@ -581,3 +581,121 @@ fn bibtex_writer_roundtrips_special_characters_and_field_order() {
     assert_eq!(emitted, fields);
     assert_eq!(bibliography::parse_bibtex(&text).unwrap(), bib);
 }
+
+#[test]
+fn page_dash_forms_verify_and_wrong_ranges_block() {
+    for pages in ["436--444", "436–444", "436—444", "436 - 444", "436−444"] {
+        let mut e = article();
+        e.pages = Some(pages.into());
+        let check = Rig::new().check(&e);
+        assert!(check.verified, "{pages}: {check:?}");
+    }
+    for pages in ["436--445", "900--901"] {
+        let mut e = article();
+        e.pages = Some(pages.into());
+        let r = Rig::new();
+        assert_mismatch(&r.check(&e), "pages");
+        let report = r.report(
+            &manuscript("[@article]", ""),
+            &Bibliography { entries: vec![e] },
+        );
+        assert!(
+            report
+                .blocking
+                .contains(&"unverified citation article".to_string()),
+            "{report:?}"
+        );
+    }
+}
+
+#[test]
+fn crossref_page_dash_forms_split() {
+    for i in 0..5 {
+        let w = Rig::new()
+            .crossref(&format!("10.1038/dashtest{i}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.first_page.as_deref(), Some("436"));
+        assert_eq!(w.last_page.as_deref(), Some("444"));
+    }
+}
+
+#[test]
+fn organisation_authors_verify_as_whole_names() {
+    let e = entry(
+        "org",
+        Some("10.1038/orgtest1"),
+        "Global health report",
+        &["World Health Organization"],
+        2020,
+        "WHO Bulletin",
+        None,
+    );
+    let check = Rig::new().check(&e);
+    assert!(check.verified, "{check:?}");
+    let parsed = bibliography::parse_bibtex(r#"@article{org, doi={10.1038/orgtest1}, title={Global health report}, author={{World Health Organization}}, year={2020}, journal={WHO Bulletin}}"#).unwrap();
+    assert_eq!(parsed.entries[0].authors, ["{World Health Organization}"]);
+    let check = Rig::new().check(&parsed.entries[0]);
+    assert!(check.verified, "{check:?}");
+    let mut wrong = e.clone();
+    wrong.authors = vec!["World Wildlife Fund".into()];
+    assert_mismatch(&Rig::new().check(&wrong), "authors");
+    wrong.authors = vec!["Other Organization".into()];
+    let r = Rig::new();
+    assert_mismatch(
+        &citations::verify_entry(&wrong, &|id| r.crossref(id), &|_| Ok(None)),
+        "authors",
+    );
+}
+
+#[test]
+fn crossref_retains_organisation_in_author_order() {
+    let w = Rig::new().crossref("10.1038/orgtest2").unwrap().unwrap();
+    assert_eq!(w.authors.len(), 3);
+    assert_eq!(w.authors[0], "Ada Lovelace");
+    assert_eq!(
+        w.authors[1].trim_matches(&['{', '}'][..]),
+        "Analytical Engine Group"
+    );
+    assert_eq!(w.authors[2], "Alan Turing");
+}
+
+#[test]
+fn particle_surnames_compare_with_negative_controls() {
+    for (record, forms, wrong) in [
+        (
+            "Ludwig van Beethoven",
+            vec![
+                "van Beethoven, Ludwig",
+                "Beethoven, Ludwig van",
+                "Ludwig van Beethoven",
+            ],
+            vec!["Mozart, Ludwig", "van Mozart, Ludwig", "Ludwig van Mozart"],
+        ),
+        (
+            "Maria de la Cruz",
+            vec!["de la Cruz, Maria", "Maria de la Cruz"],
+            vec![],
+        ),
+    ] {
+        for name in forms.into_iter().chain(wrong.iter().copied()) {
+            let mut e = article();
+            e.authors = vec![name.into()];
+            let r = Rig::new();
+            let check = citations::verify_entry(
+                &e,
+                &|id| {
+                    let mut w = r.crossref(id)?.unwrap();
+                    w.authors = vec![record.into()];
+                    Ok(Some(w))
+                },
+                &|_| Ok(None),
+            );
+            if wrong.contains(&name) {
+                assert_mismatch(&check, "authors");
+            } else {
+                assert!(check.verified, "{name}: {check:?}");
+            }
+        }
+    }
+}
