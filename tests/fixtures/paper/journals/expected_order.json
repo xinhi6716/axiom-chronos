@@ -1,0 +1,98 @@
+{
+  "ranked": [
+    {
+      "id": "a-pass",
+      "fit": 0.6791666666666667,
+      "terms": {
+        "abstract": {
+          "score": 0.75,
+          "evidence": "cancer, immune, therapy"
+        },
+        "keywords": {
+          "score": 0.6666666666666666,
+          "evidence": "biomarker, cancer"
+        },
+        "topics": {
+          "score": 0.3333333333333333,
+          "evidence": "cancer, therapy"
+        },
+        "related": {
+          "score": 1.0,
+          "evidence": "W-high, W-high-2"
+        }
+      }
+    },
+    {
+      "id": "b-free",
+      "fit": 0.49166666666666664,
+      "terms": {
+        "abstract": {
+          "score": 0.5,
+          "evidence": "immune, trial"
+        },
+        "keywords": {
+          "score": 0.6666666666666666,
+          "evidence": "biomarker, genomics"
+        },
+        "topics": {
+          "score": 0.3333333333333333,
+          "evidence": "biomarker, genomics"
+        },
+        "related": {
+          "score": 0.5,
+          "evidence": "W-free"
+        }
+      }
+    },
+    {
+      "id": "c-unknown",
+      "fit": 0.5791666666666667,
+      "terms": {
+        "abstract": {
+          "score": 0.75,
+          "evidence": "cancer, immune, therapy"
+        },
+        "keywords": {
+          "score": 0.6666666666666666,
+          "evidence": "cancer, genomics"
+        },
+        "topics": {
+          "score": 0.3333333333333333,
+          "evidence": "immune, therapy"
+        },
+        "related": {
+          "score": 0.5,
+          "evidence": "W-unknown"
+        }
+      }
+    },
+    {
+      "id": "d-currency",
+      "fit": 0.5583333333333333,
+      "terms": {
+        "abstract": {
+          "score": 0.5,
+          "evidence": "cancer, trial"
+        },
+        "keywords": {
+          "score": 1.0,
+          "evidence": "biomarker, cancer, genomics"
+        },
+        "topics": {
+          "score": 0.3333333333333333,
+          "evidence": "biomarker, genomics"
+        },
+        "related": {
+          "score": 0.5,
+          "evidence": "W-currency"
+        }
+      }
+    }
+  ],
+  "excluded": [
+    "e-tier",
+    "f-access",
+    "g-apc",
+    "h-hybrid"
+  ]
+}
