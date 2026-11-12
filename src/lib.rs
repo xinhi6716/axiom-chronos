@@ -15,6 +15,7 @@ pub mod hook;
 pub mod host;
 pub mod linux;
 pub mod memory;
+pub mod modes; // 2c modes
 pub mod orch;
 pub mod provenance;
 pub mod review;

@@ -1,4 +1,5 @@
 pub(crate) mod doctor;
+mod modes; // 2c modes
 use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
@@ -412,6 +413,8 @@ pub fn main(args: Vec<OsString>) -> i32 {
             0
         }
         "wish" | "research" => session_command(cmd, rest),
+        "do" => modes::do_command(rest), // 2c modes
+        "modes" => modes::modes_command(rest), // 2c modes
         "wait" => wait_command(rest),
         #[cfg(feature = "app")]
         "app" => match crate::desktop::parse_options(rest) {

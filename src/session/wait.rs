@@ -303,6 +303,9 @@ pub fn run_observing(
                 session = event["session_id"].as_str().map(str::to_owned);
                 if !reported {
                     if let Some(id) = session.as_deref() {
+                        // 2c modes
+                        crate::modes::runs::record_launch(&config.home, skill, id);
+                        // 2c modes
                         on_session(id);
                         reported = true;
                     }
