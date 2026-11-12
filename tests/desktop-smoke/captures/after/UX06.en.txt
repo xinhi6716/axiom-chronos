@@ -1,0 +1,69 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	core
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	llm
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	pdftext
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	inventory
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	schema
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	validate
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	read
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	benchmark
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	dataset
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	features
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	protocol
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	causal
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-module-node/mesh-module-label	candidates
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	Waiting on batch, 13 of 21 verified, 1 failed, needs you.
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	Work progress has been updated — Continue with the next step.
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Stateful<gpui::elements::div::Div>>/notice-scope-failure	Outside the allowed paths
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Stateful<gpui::elements::div::Div>>/notice-scope-failure	Allowed: ; outside (1): src/outside.rs; ignored: 
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Stateful<gpui::elements::div::Div>>/notice-scope-failure	The unit needs attention.
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Stateful<gpui::elements::div::Div>>/notice-scope-failure/gpui_component::button::button::Button/gpui_base::button::Button/notice-action/label	Open unit
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Enter
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Shift+Enter
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 hours
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex parallel 15 / 48
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/wish-toggle	Show the whole wish
+gpui_component::window_border::WindowBorder/root/rail/gpui_component::button::button::Button/gpui_base::button::Button/new-wish	New wish
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/open-folder	ml_hfo2
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-run	Run
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row/gpui_component::button::button::Button/gpui_base::button::Button/run-mark-read	Mark as read
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-wishes	Wishes
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-memory	Memory
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/gpui_component::list::list_item::ListItem/todo-goal	G1 盤點並精讀 PDF，保留原文頁碼: Running
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-usage	Usage
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 16777216)/gpui_component::list::list_item::ListItem/todo-module	Paths, hashing and shared I/O: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 16777217)/gpui_component::list::list_item::ListItem/todo-module	Model calls with a cache: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Stateful<gpui::elements::div::Div>>/notice-scope-failure/gpui_component::button::button::Button/gpui_base::button::Button/notice-action	Open unit
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 16777218)/gpui_component::list::list_item::ListItem/todo-module	Page text and page images: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 16777219)/gpui_component::list::list_item::ListItem/todo-module	Find and dedupe PDFs: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 16777222)/gpui_component::list::list_item::ListItem/todo-module	Screen and read papers: Running
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-unit", 281475094151176)/gpui_component::list::list_item::ListItem/todo-unit	Screen and read papers: read_allpages: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-unit", 281475094151177)/gpui_component::list::list_item::ListItem/todo-unit	Screen and read papers: read_batch: Running
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/gpui_component::list::list_item::ListItem/todo-goal	G2 建立標示缺值與品質的資料集: Awaiting review
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 33554436)/gpui_component::list::list_item::ListItem/todo-module	Record schema: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 33554437)/gpui_component::list::list_item::ListItem/todo-module	Check citations against pages: Verified
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-view-controls/gpui_component::button::button::Button/gpui_base::button::Button/mesh-zoom-reset	77%
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/mesh-graph/mesh-view-controls/gpui_component::button::button::Button/gpui_base::button::Button/mesh-fit	Fit
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/todo-list/todo-rows/context-menu-NamedInteger("todo-module", 33554440)/gpui_component::list::list_item::ListItem/todo-module	Build the dataset: Awaiting review
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/open-interjection	Interjection
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-log	Event log 1
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-stop	Stop
+gpui_component::window_border::WindowBorder/root/gpui_component::input::textarea::Textarea/gpui_component::input::input::Input/input/input-state	Add to the work, ask a question, or say stop
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-doctor	Settings
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-send	Send

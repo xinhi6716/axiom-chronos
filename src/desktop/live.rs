@@ -16,6 +16,14 @@ use crate::{
 
 mod board;
 mod quota;
+// ux: begin live modules
+pub(in crate::desktop) mod activity;
+pub(in crate::desktop) mod events;
+pub(in crate::desktop) mod council;
+mod feed;
+#[cfg(test)]
+mod ux_accept;
+// ux: end
 #[cfg(test)]
 mod accept;
 use crate::usage::quota::{Provider, ProviderQuota, Quotas};
@@ -84,6 +92,9 @@ enum Command {
 }
 
 enum Update {
+    // ux: begin feed update
+    Ux(Vec<feed::Row>),
+    // ux: end
     Board { session: String, entry: BoardEntry },
     BoardSpent(crate::board::TokenUse),
     EvolveChecked(Res<(EvolvePreview, Vec<PastEvolve>)>),
@@ -347,7 +358,13 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
                 match runs { Ok(runs) => state.evolve.runs = runs, Err(failure) if state.evolve.error.is_none() => state.evolve.error = Some(failure.into()), Err(_) => {} }
             }
             Update::EvolveBusy => state.evolve.error = Some(Failure::new("busy", "an evolve run is already in progress").into()),
-            Update::Runs { runs, renamed, open } => state.replace_runs(runs, &renamed, open.as_deref()),
+            // ux: begin feed apply
+            Update::Ux(rows) => feed::apply(&mut state.ux, rows),
+            Update::Runs { runs, renamed, open } => {
+                feed::rename(&mut state.ux, &renamed);
+                state.replace_runs(runs, &renamed, open.as_deref());
+            },
+            // ux: end
             Update::Memory(memory) => state.memory = memory,
             Update::Quota(quotas) => {
                 state.quota = quotas;
@@ -461,6 +478,9 @@ type EvolveJob = dyn Fn(&evolve::Inputs, &Path, &Config) -> Res<evolve::StartOut
 
 /// Everything that is owned by the worker thread.
 struct Engine {
+    // ux: begin feed state
+    ux_feed: feed::Feed,
+    // ux: end
     board_scheduler: crate::board::Scheduler,
     board_cache: Arc<Mutex<crate::board::Cache>>,
     board_model: Option<Arc<dyn crate::board::Model>>,
@@ -525,6 +545,9 @@ impl Engine {
     ) -> Self {
         let codex = Arc::new(quota::SharedCodex::default());
         Self {
+            // ux: begin feed state init
+            ux_feed: feed::Feed::default(),
+            // ux: end
             board_scheduler: crate::board::Scheduler::new(Duration::from_secs(120)),
             board_cache: Arc::new(Mutex::new(crate::board::Cache::new())),
             board_model: None, board_worker: None,
@@ -633,6 +656,12 @@ impl Engine {
         self.schedule_ledger();
         self.schedule_memory();
         self.publish();
+        // ux: begin feed poll
+        if let Some(snapshot) = &self.snapshot {
+            let rows = self.ux_feed.poll(snapshot, &self.hosted, &self.ledgers);
+            self.inbox.push(Update::Ux(rows));
+        }
+        // ux: end
         self.schedule_quota(false);
     }
 
@@ -1288,7 +1317,10 @@ impl Engine {
         }
         if changed { self.runs_revision = self.runs_revision.wrapping_add(1); }
         self.sent = Some(runs.clone());
+        // ux: begin feed rename
+        self.ux_feed.rename(&self.renamed);
         self.inbox.push(Update::Runs { runs, renamed: std::mem::take(&mut self.renamed), open: self.open.take() });
+        // ux: end
         self.observe_board(Instant::now());
     }
 

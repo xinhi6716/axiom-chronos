@@ -508,6 +508,9 @@ pub struct AppState {
     pub renames: HashMap<SharedString, SharedString>,
     /// Set by the details panel; the control bar takes it and opens its box with the text in it.
     pub address: Option<Address>,
+    // ux: begin state
+    pub ux: super::ux::UxState,
+    // ux: end
 }
 
 /// The run to open when none is selected: live work first, otherwise the newest.

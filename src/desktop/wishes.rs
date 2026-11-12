@@ -4,6 +4,10 @@ use super::model::*;
 use super::{motion, ornament, palette, settings, theme};
 use super::theme::{Step, TypeSize};
 use super::motion::{Driver, Pace};
+// lists: begin read-state modules
+pub(in crate::desktop) mod read_state;
+#[cfg(test)] mod read_state_accept;
+// lists: end
 mod logic;
 #[cfg(test)] mod accept;
 use super::theme::Tokened as _;
@@ -34,6 +38,12 @@ use gpui_kit::base::ElementExt as _;
 gpui_kit::actions!(chronos_lists, [FocusSearch]);
 
 const T: Table = &[
+    // lists: begin translations
+    ("Unread", "未讀"),
+    ("Archived", "封存"),
+    ("Mark all read", "全部標為已讀"),
+    ("Usage", "用量"),
+    // lists: end
     ("Wishes", "願望"),
     ("Loading wishes", "正在載入願望"),
     ("Try again", "再試一次"),
@@ -437,6 +447,18 @@ impl ListDelegate for RunList {
         let cost = run.usage.total_usd;
         let warning = (!run.warnings.is_empty()).then(|| run.warnings.join("\n"));
         let session = run.session.clone();
+        // lists: begin wish usage
+        let usage_wish = self.state.read(cx).ux.wish_ids.get(&session)
+            .filter(|id| !id.is_empty()).cloned().unwrap_or_else(|| session.clone());
+        let usage_state = self.state.clone();
+        // lists: end
+        // lists: begin row attention
+        let unread = read_state::is_unread(run, &settings::Store::current(cx).ux);
+        let mark_state = self.state.clone();
+        let mark_session = session.clone();
+        let context_session = session.clone();
+        let dropdown_session = session.clone();
+        // lists: end
         let target = MenuTarget::Run(session.clone());
         let state = self.state.clone();
         let runner = menu_runner(state.clone());
@@ -470,7 +492,12 @@ impl ListDelegate for RunList {
                 .child(
                     // Keep popup state outside the card's changing array-index scope.
                     div().id(session).size_full()
-                        .context_menu(move |menu, _, cx| palette::menu::context_menu(menu, context_target.clone(), context_state.clone(), context_runner.clone(), cx))
+                        // lists: begin context menu
+                        .context_menu(move |menu, _, cx| {
+                            let menu = palette::menu::context_menu(menu, context_target.clone(), context_state.clone(), context_runner.clone(), cx);
+                            palette::menu::append_read_actions(menu, context_session.clone(), context_state.clone(), cx)
+                        })
+                        // lists: end
                         .child(
                             ornament::raised_card(&t, lift, glow)
                                 .id(("wish-row", index))
@@ -481,6 +508,9 @@ impl ListDelegate for RunList {
                                 .px(theme::space(d, Step::Md)).gap(theme::space(d, Step::Sm))
                                 .on_prepaint(move |rect, _, _| { bounds.borrow_mut().insert(bounds_session.clone(), rect); })
                                 .on_hover(cx.listener(move |list, inside: &bool, _, cx| { if *inside { list.delegate_mut().hovered.insert(hover_session.clone()); } else { list.delegate_mut().hovered.remove(&hover_session); } cx.notify(); }))
+                                // lists: begin unread indicator
+                                .when(unread, |this| this.child(div().id("unread-dot").size(px(7.)).rounded_full().bg(t.gold)))
+                                // lists: end
                                 .child(ornament::glyph(glyph_state(status, verified_end), f32::from(theme::font(d, TypeSize::Heading)), t.outcome(status, verified_end), 0.0))
                                 .child(cell(column_width(d, 3.0)).when_some(ornament::progress_ring(&t, verified, total, f32::from(theme::space(d, Step::Xl))), |this, ring| {
                                     let count: SharedString = progress_label(verified, total).into();
@@ -537,6 +567,15 @@ impl ListDelegate for RunList {
                                         .truncate()
                                         .child(started.clone()),
                                 )
+                                // lists: begin mark read button
+                                .when(unread, |this| this.child(Button::new("run-mark-read").ghost().small()
+                                    .label(read_state::action_label(read_state::ReadAction::MarkRead, lang))
+                                    .on_click(move |_, _, cx| { cx.stop_propagation(); mark_state.update(cx, |state, cx| state.mark_read(&mark_session, cx)); })))
+                                // lists: end
+                                // lists: begin wish usage button
+                                .child(Button::new("wish-usage").ghost().small().label(tr(cx, T, "Usage"))
+                                    .on_click(move |_, _, cx| { cx.stop_propagation(); usage_state.update(cx, |state, cx| state.show_usage_for(Some(usage_wish.clone()), cx)); }))
+                                // lists: end
                                 .child(
                                     cell(theme::TARGET_MIN).child(
                                         Button::new(("wish-menu", index))
@@ -546,7 +585,10 @@ impl ListDelegate for RunList {
                                             .tab_stop(selected)
                                             .accessibility_label(tr(cx, T, "More actions"))
                                             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                                                palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx)
+                                                // lists: begin dropdown actions
+                                                let menu = palette::menu::context_menu(menu, target.clone(), state.clone(), runner.clone(), cx);
+                                                palette::menu::append_read_actions(menu, dropdown_session.clone(), state.clone(), cx)
+                                                // lists: end
                                             }),
                                     ),
                                 ),
@@ -724,8 +766,15 @@ impl WishesView {
         let state = self.state.read(cx);
         let runs = &state.runs;
         let panel = panel_state(&state.feeds.runs, runs.is_empty());
-        self.counts = filter_counts(runs, &self.terms);
-        let visible = visible_runs(runs, self.filter, &self.terms, this_month());
+        // lists: begin read filtering
+        let prefs = &settings::Store::current(cx).ux;
+        self.counts = [0; 4];
+        for run in runs.iter().filter(|run| read_state::visible(run, prefs, prefs.read_filter) && run_matches(run, &self.terms)) {
+            for (count, filter) in self.counts.iter_mut().zip(Filter::ALL) { *count += usize::from(filter.admits(run.status)); }
+        }
+        let visible: Vec<_> = visible_runs(runs, self.filter, &self.terms, this_month()).into_iter()
+            .filter(|&i| read_state::visible(&runs[i], prefs, prefs.read_filter)).collect();
+        // lists: end
         let groups = group_runs(runs, &visible);
         let restoring = self.restore.take(&panel);
         let old = self.list.read(cx).delegate().selected_session.clone();
@@ -853,6 +902,32 @@ impl WishesView {
             ))
     }
 
+    // lists: begin attention controls
+    fn read_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use super::ux::ReadFilter;
+        let current = settings::Store::current(cx).ux.read_filter;
+        let state = self.state.clone();
+        h_flex().id("wishes-read-filter").gap_1().children([(ReadFilter::All, "All"), (ReadFilter::Unread, "Unread"), (ReadFilter::Archived, "Archived")].into_iter().enumerate().map(|(i, (filter, label))| {
+            let state = state.clone();
+            Button::new(("wishes-read-tab", i)).ghost().small().selected(current == filter).label(tr(cx, T, label))
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.set_read_filter(filter, cx)))
+        })).child({ let state = state.clone(); Button::new("wishes-mark-all-read").ghost().small().label(tr(cx, T, "Mark all read"))
+            .on_click(move |_, _, cx| state.update(cx, |state, cx| state.mark_all_read(cx))) })
+    }
+    fn read_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.list.read(cx).focus_handle(cx).is_focused(window) || event.keystroke.modifiers != Modifiers::default() { return; }
+        let Some(session) = self.list.read(cx).delegate().selected_session.clone() else { return; };
+        let action = {
+            let state = self.state.read(cx);
+            let Some(run) = state.runs.iter().find(|r| r.session == session) else { return; };
+            let actions = read_state::read_actions(run, &settings::Store::current(cx).ux);
+            match event.keystroke.key.as_str() { "r" => actions[0], "e" => actions[1], _ => return }
+        };
+        self.state.update(cx, |state, cx| state.apply_read_action(&session, action, cx));
+        cx.stop_propagation();
+    }
+    // lists: end
+
     fn nothing_yet(&self, cx: &mut Context<Self>) -> Empty {
         let state = self.state.clone();
         let blocker = wish_blocker(&self.state.read(cx).checks)
@@ -888,12 +963,18 @@ impl WishesView {
             let action = Button::new("wishes-show-all")
                 .label(tr(cx, T, "Show all"))
                 .on_click(cx.listener(|this, _, window, cx| {
+                    // lists: begin reset read filter
+                    this.state.update(cx, |state, cx| state.set_read_filter(super::ux::ReadFilter::All, cx));
+                    // lists: end
                     this.set_filter(Filter::All, window, cx);
                     this.focus_list(window, cx);
                 }))
                 .into_any_element();
             let hint = tr(cx, T, "Wishes that match this filter will appear here.");
-            empty_state(IconName::Inbox, self.filter.empty_title(), hint, Some(action), T, cx)
+            // lists: begin filtered empty title
+            let title = if settings::Store::current(cx).ux.read_filter == super::ux::ReadFilter::All { self.filter.empty_title() } else { "No matching wishes" };
+            empty_state(IconName::Inbox, title, hint, Some(action), T, cx)
+            // lists: end
         } else {
             let action = Button::new("wishes-clear-search")
                 .label(tr(cx, T, "Clear search"))
@@ -1022,11 +1103,17 @@ impl Render for WishesView {
                         .child(div().w(column_width(d, 9.0)).flex_shrink(1.)
                             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| { this.focus_list(window, cx); cx.stop_propagation(); }))
                             .child(Input::new(&self.search).small().cleanable(true).prefix(Icon::new(IconName::Search).size(theme::font(d, TypeSize::Body)).text_color(t.muted)))))
+                        // lists: begin attention filter controls
+                        .child(self.read_filter_bar(cx))
+                        // lists: end
                         .when(no_rows, |this| this.child(self.nothing_matches(cx)))
                         .when(!no_rows, |this| this.child(div().key_context("WishList")
                             .on_action(cx.listener(Self::first_row)).on_action(cx.listener(Self::last_row))
                             .on_action(cx.listener(Self::page_up)).on_action(cx.listener(Self::page_down))
                             .on_action(cx.listener(Self::open_cursor_menu))
+                            // lists: begin attention shortcuts
+                            .on_key_down(cx.listener(Self::read_key))
+                            // lists: end
                             // List-only guards must not swallow a descendant popup's keys.
                             .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
                                 if this.list.read(cx).focus_handle(cx).is_focused(window) { cx.stop_propagation(); }

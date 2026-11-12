@@ -1,0 +1,43 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/run-live-stage	Astra · Astra
+gpui_component::window_border::WindowBorder/root/run-heartbeat	最後活動：12 秒前
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/council-orbit	議會 · 第 1 輪（共 — 輪）· 同意 0 · 爭議 0 · 已用 $—／$—
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/research-emblem	進階研究
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	等待批次，已驗收 13 / 21，1 個失敗，需要你處理。
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row	工作進度已更新，接下來：繼續下一步。
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Div>/event/event-summary	無法辨識的事件：council
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/gpui_component::scroll::scrollable::Scrollable<gpui::elements::div::Div>/event/gpui_component::button::button::Button/gpui_base::button::Button/event-raw-toggle/label	顯示原始證據
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Enter
+gpui_component::window_border::WindowBorder/root/gpui_component::kbd::Kbd	Shift+Enter
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/wish-toggle	展開完整願望
+gpui_component::window_border::WindowBorder/root/rail/gpui_component::button::button::Button/gpui_base::button::Button/new-wish	許願
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/open-folder	ml_hfo2
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-run	執行
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-wishes	願望
+gpui_component::window_border::WindowBorder/root/gpui_base::resizable::panel::ResizablePanelGroup/run-columns/gpui_base::resizable::panel::ResizablePanel/resizable-panel/overview-board/board-row/gpui_component::button::button::Button/gpui_base::button::Button/run-mark-read	標為已讀
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-memory	記憶
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-usage	用量
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/open-interjection	插話
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-log	事件紀錄 1
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-stop	停止
+gpui_component::window_border::WindowBorder/root/gpui_component::input::textarea::Textarea/gpui_component::input::input::Input/input/input-state	補充要求、提問，或叫它停下來
+gpui_component::window_border::WindowBorder/root/rail/nav-glow/gpui_component::button::button::Button/gpui_base::button::Button/nav-doctor	設定
+gpui_component::window_border::WindowBorder/root/gpui_component::button::button::Button/gpui_base::button::Button/control-send	送出

@@ -5,6 +5,11 @@ use super::ornament;
 use super::settings::{self, BoardChoice, LanguageChoice, SettingPrior, Store, ThemeChoice};
 use super::theme::{self, Density, Step, TypeSize};
 
+// ux: begin modules
+pub(in crate::desktop) mod storage;
+pub(in crate::desktop) mod extreme;
+#[cfg(test)] mod ux_accept;
+// ux: end
 mod logic;
 use super::theme::{Tokened as _, Tokens};
 use crate::base;
@@ -36,6 +41,9 @@ const T: Table = &[
     ("Tokens and rounds must be positive whole numbers.", "Token 與輪數須為正整數。"),
     ("Saved for the next wish. Advanced research stays off until you turn it on.", "將套用於下一個願望；進階研究仍須自行開啟。"),
     ("Invalid budget: {} = {}. {}", "預算無效：{} = {}。{}"),
+    // ux: begin storage label
+    ("Storage…", "儲存空間…"),
+    // ux: end
     ("Settings", "設定"),
     ("English", "English"),
     ("繁體中文", "繁體中文"),
@@ -225,6 +233,9 @@ pub struct DoctorView {
     recheck: Option<Recheck>,
     budget_inputs: [Entity<InputState>;4],
     codex_limit: Entity<InputState>,
+    // ux: begin storage page
+    storage_page: Option<Entity<storage::StoragePage>>,
+    // ux: end
 }
 
 impl DoctorView {
@@ -264,7 +275,10 @@ impl DoctorView {
                 cx.notify();
             }
         }).detach();
-        Self { state, data_folder: base::axiom_home(), recheck: None, budget_inputs, codex_limit }
+        // ux: begin initialize policy
+        state.update(cx, |state, cx| extreme::install_policy(state, cx));
+        Self { state, data_folder: base::axiom_home(), recheck: None, budget_inputs, codex_limit, storage_page: None }
+        // ux: end
     }
 
     fn start_recheck(&mut self, cx: &mut Context<Self>) {
@@ -387,6 +401,14 @@ impl DoctorView {
         let folder: SharedString = self.data_folder.display().to_string().into();
         let error = Store::last_error(cx).map(|error| fill(tr(cx, T, "Settings could not be saved: {}"), &[&error]));
         card(&t, tr(cx, T, "Preferences"), None, d)
+            // ux: begin storage and extreme preferences
+            .child(extreme::settings_row(prefs.ux.extreme, self.state.read(cx).ux.seams.turn_policy.as_ref().and_then(|p| p.fast_cost()), *cx.global::<super::i18n::Lang>(), &t, d, {
+                let state = self.state.clone(); std::rc::Rc::new(move |on, _, cx| state.update(cx, |s, cx| s.set_extreme(on, cx)))
+            }))
+            .when(self.state.read(cx).ux.seams.storage.is_some(), |this| this.child(Button::new("settings-storage").accessibility_label(tr(cx, T, "Storage…")).child(tr(cx, T, "Storage…").test_text(tr(cx, T, "Storage…"))).on_click({
+                let state = self.state.clone(); move |_, _, cx| state.update(cx, |s, cx| s.open_page(super::ux::Page::Storage, cx))
+            })))
+            // ux: end
             .child(preference_row(&t, d, tr(cx, T, "Codex parallel limit"), None,
                 Input::new(&self.codex_limit).id("codex-parallel-limit").small().w_full()))
             .when_some(limit_error, |this, error| this.child(div().id("codex-parallel-error").text_size(theme::font(d, TypeSize::Caption)).text_color(t.fail).child(error.clone().test_text(error)).test_support()))
@@ -545,6 +567,13 @@ fn preference_row(t: &Tokens, d: Density, name: &'static str, description: Optio
 
 impl Render for DoctorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ux: begin storage routing
+        if self.state.read(cx).ux.page == Some(super::ux::Page::Storage) {
+            let page = self.storage_page.get_or_insert_with(|| cx.new(|cx| storage::StoragePage::new(self.state.clone(), cx)));
+            return page.clone().into_any_element();
+        }
+        self.storage_page = None;
+        // ux: end
         let t = cx.tokens();
         let state = self.state.read(cx);
         let checks = state.checks.clone();
@@ -569,6 +598,9 @@ impl Render for DoctorView {
                     .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).child(tr(cx, T, "Check the environment and choose how Chronos looks."))))
                 .child(h_flex().items_start().gap(theme::space(d, Step::Xl)).children(cards)),
         )
+        // ux: begin storage routing return
+        .into_any_element()
+        // ux: end
     }
 }
 

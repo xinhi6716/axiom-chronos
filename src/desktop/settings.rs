@@ -198,6 +198,9 @@ pub struct Settings {
     pub board_tokens: BoardTokens,
     pub council_budgets: BudgetInputs,
     pub codex_max_parallel: String,
+    // ux: begin preferences
+    pub ux: super::ux::prefs::UxPrefs,
+    // ux: end
 }
 
 impl Default for Settings {
@@ -220,6 +223,9 @@ impl Default for Settings {
             board_tokens: BoardTokens::default(),
             council_budgets: BudgetInputs::default(),
             codex_max_parallel: crate::codex::slots::DEFAULT.to_string(),
+            // ux: begin defaults
+            ux: Default::default(),
+            // ux: end
         }
     }
 }
@@ -230,6 +236,9 @@ impl Settings {
         let root: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or(Value::Null);
         let word = |key: &str| root.get(key).and_then(Value::as_str);
         Self {
+            // ux: begin parse
+            ux: root.get("ux").map(super::ux::prefs::UxPrefs::parse).unwrap_or_default(),
+            // ux: end
             language: value_of(&LANGUAGE_KEYS, word("language")).unwrap_or_default(),
             theme: value_of(&THEME_KEYS, word("theme")).unwrap_or_default(),
             plain_words: root.get("plain_words").and_then(Value::as_bool).unwrap_or(true),
@@ -284,6 +293,9 @@ impl Settings {
             "filter": v.filter, "sort": v.sort, "scroll": v.scroll, "selected": v.selected,
         }))).collect();
         let body = json!({
+            // ux: begin save
+            "ux": self.ux.to_json(),
+            // ux: end
             "codex_max_parallel": self.codex_max_parallel,
             "council_budgets":self.council_budgets,
             "language": key_of(&LANGUAGE_KEYS, self.language),
@@ -671,6 +683,9 @@ mod tests {
             board_tokens: BoardTokens { input: 123, output: 45, unreported: 2 },
             codex_max_parallel: "48".into(),
             council_budgets: BudgetInputs::default(),
+            // ux: begin test settings
+            ux: Default::default(),
+            // ux: end
         }
     }
 

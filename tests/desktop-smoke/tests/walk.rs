@@ -173,6 +173,10 @@ fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
 }
 
 fn open_with(cx: &mut TestAppContext, store: Store, change: impl FnOnce(&mut AppState)) -> (AnyWindowHandle, Entity<AppState>) {
+    open_with_height(cx, store, 900., change)
+}
+
+fn open_with_height(cx: &mut TestAppContext, store: Store, height: f32, change: impl FnOnce(&mut AppState)) -> (AnyWindowHandle, Entity<AppState>) {
     let prefs = store.settings.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -197,7 +201,7 @@ fn open_with(cx: &mut TestAppContext, store: Store, change: impl FnOnce(&mut App
     let state = cx.new(|_| initial);
     let bounds = Bounds {
         origin: Point::default(),
-        size: size(px(1440.), px(900.)),
+        size: size(px(1440.), px(height)),
     };
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -941,7 +945,7 @@ fn seed_pair(s: &mut AppState) {
     while s.take_undo().is_some() {}
 }
 
-const WISH_MENU: &[(&str, bool)] = &[("Open", false), ("Resume", false), ("Open folder", true), ("Copy session id", false)];
+const WISH_MENU: &[(&str, bool)] = &[("Open", false), ("Resume", false), ("Open folder", true), ("Copy session id", false), ("Mark as read", false), ("Archive", false)];
 const UNIT_MENU: &[(&str, bool)] = &[("Open details", false), ("Copy", false), ("Comment on this item", false)];
 const MEMORY_MENU: &[(&str, bool)] = &[("Copy", false), ("Correct…", false), ("Delete…", false)];
 
@@ -971,7 +975,7 @@ fn shift_f10_menu_on_a_wish(cx: &mut TestAppContext) {
     press(cx, window, "down"); // running Y follows needs-you X
     assert_eq!(selected_in_store(cx, "wishes").as_deref(), Some("walk-Y"));
     open_menu_keys(cx, window);
-    assert_menu(cx, window, &[("Open", false), ("Resume", true), ("Open folder", true), ("Copy session id", false)]);
+    assert_menu(cx, window, &[("Open", false), ("Resume", true), ("Open folder", true), ("Copy session id", false), ("Mark as read", false), ("Archive", false)]);
 }
 
 // Find the actual checklist/graph focus scope by tabbing, not by injecting a
@@ -1478,7 +1482,8 @@ fn saved_selection_missing_falls_back_memory(cx: &mut TestAppContext) { saved_me
 fn saved_usage(cx: &mut TestAppContext, missing: bool) {
     let home = TestHome::audit2(if missing { "saved-usage-missing" } else { "saved-usage" });
     let store = saved_view_store(&home, Screen::Usage, missing);
-    let (window, state) = open_with(cx, store, |s| { seed_pair(s); for run in &mut s.runs { run.usage = Default::default(); } });
+    // The expanded usage screen places the run table below the old viewport.
+    let (window, state) = open_with_height(cx, store, 1400., |s| { seed_pair(s); for run in &mut s.runs { run.usage = Default::default(); } });
     settle_restore(cx, window);
     assert_eq!(state.read_with(cx, |s, _| s.view), Screen::Usage);
     cx.update_window(window, |_, window, cx| {

@@ -4,6 +4,9 @@ use super::model::*;
 use super::{ornament, plain_text, theme};
 use super::theme::{Step, TypeSize, Tokened as _, Tokens};
 use gpui_kit::base::SelectableText;
+// ux: begin test text
+use gpui_kit::base::TestTextExt as _;
+// ux: end test text
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::notification::Notification;
@@ -22,6 +25,14 @@ use std::fs::File;
 use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+// ux: begin modules
+mod events;
+mod approvals;
+mod actions;
+mod sessions;
+pub use sessions::SessionPage;
+// ux: end modules
 
 /// How much of a file is shown. Anything longer is cut and says so.
 const SHOWN_BYTES: usize = 200 * 1024;
@@ -42,6 +53,9 @@ const STAGE_NAMES: [&str; 7] = ["Astra", "Critic", "Architect", "Build", "Full t
 const BRIEF_FIELDS: [&str; 4] = ["GOAL", "SCOPE", "VERIFY", "CONTEXT"];
 
 const TABLE: i18n::Table = &[
+    // ux: begin session translation
+    ("Watch session", "觀看工作階段"),
+    // ux: end session translation
     ("Overview", "總覽"),
     ("Back to overview", "返回總覽"),
     ("Open module", "開啟模組"),
@@ -1161,6 +1175,16 @@ impl Linked {
 
 pub struct Detail {
     state: Entity<AppState>,
+    // ux: begin event expansion
+    expanded_events: std::collections::HashSet<String>,
+    // ux: end event expansion
+    // ux: begin approvals state
+    approval_cards: Vec<super::ux::seams::ApprovalCard>,
+    approval_reasons: HashMap<(String, u64), Entity<gpui_kit::component::input::InputState>>,
+    action_panel: Option<Entity<actions::UnitActionsPanel>>,
+    worker_sessions: Vec<super::ux::seams::WorkerSession>,
+    approval_seen_stale: std::collections::HashSet<String>,
+    // ux: end approvals state
     linked: RefCell<Option<Linked>>,
     tab: DocTab,
     anchor: Option<Anchor>,
@@ -1178,11 +1202,40 @@ pub struct Detail {
 }
 
 impl Detail {
-    pub fn new(state: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    // ux: begin constructor
+    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // ux: end constructor
         cx.observe(&state, |this, _, cx| this.model_changed(cx)).detach();
+        // ux: begin approvals loading
+        if let Some(service) = state.read(cx).ux.seams.approvals.clone() {
+            let task = cx.background_spawn(async move { service.pending() });
+            cx.spawn(async move |this, cx| {
+                let cards = task.await;
+                this.update(cx, |this, cx| { this.approval_cards = cards; cx.notify(); }).ok();
+            }).detach();
+        }
+        if let Some(service) = state.read(cx).ux.seams.sessions.clone() {
+            let task = cx.background_spawn(async move { service.sessions() });
+            cx.spawn(async move |this, cx| { let sessions = task.await; this.update(cx, |this, cx| { this.worker_sessions = sessions; cx.notify(); }).ok(); }).detach();
+        }
+        let action_panel = state.read(cx).ux.seams.unit_actions.clone().map(|service| {
+            let state = state.clone();
+            cx.new(|cx| actions::UnitActionsPanel::new(state, service, window, cx))
+        });
+        // ux: end approvals loading
         let scene = state.read(cx).scene.clone();
         let mut this = Self {
             state,
+            // ux: begin event expansion
+            expanded_events: std::collections::HashSet::new(),
+            // ux: end event expansion
+            // ux: begin approvals state
+            approval_cards: Vec::new(),
+            approval_reasons: HashMap::new(),
+            action_panel,
+            worker_sessions: Vec::new(),
+            approval_seen_stale: std::collections::HashSet::new(),
+            // ux: end approvals state
             linked: RefCell::new(None),
             tab: DocTab::Brief,
             anchor: None,
@@ -1229,6 +1282,17 @@ impl Detail {
             .run()
             .map(|run| wanted_paths(run, pane_for(run, &app.selection)))
             .unwrap_or_default();
+        // ux: begin stale approval refresh
+        let stale: Vec<String> = app.ux.approvals.errors.iter().filter(|(key, error)| error.as_str() == "stale" && !self.approval_seen_stale.contains(*key)).map(|(key, _)| key.clone()).collect();
+        let approvals_service = app.ux.seams.approvals.clone();
+        if !stale.is_empty() {
+            self.approval_seen_stale.extend(stale);
+            if let Some(service) = approvals_service {
+                let task = cx.background_spawn(async move { service.pending() });
+                cx.spawn(async move |this, cx| { let cards = task.await; this.update(cx, |this, cx| { this.approval_cards = cards; cx.notify(); }).ok(); }).detach();
+            }
+        }
+        // ux: end stale approval refresh
         self.docs.retain(|path, _| wanted.contains(path));
         if !self.hold_reads {
             for path in wanted {
@@ -1346,6 +1410,12 @@ impl Detail {
             }))
             .child(self.running_section(run, cx))
             .when(!run.needs.is_empty(), |this| this.child(self.needs_section(run, cx)))
+            // ux: begin approval cards
+            .when(self.state.read(cx).ux.seams.approvals.is_some(), |this| this.children(
+                self.approval_cards.iter().filter(|card| card.session == run.session.as_ref())
+                    .filter_map(|card| self.approval_reasons.get(&(card.action_id.clone(), card.version)).map(|reason| approvals::approval_card(&self.state, card, reason, cx)))
+            ))
+            // ux: end approval cards
             .child(self.decisions_section(run, cx))
             .child(self.events_section(run, cx))
             .into_any_element()
@@ -1500,7 +1570,13 @@ impl Detail {
                 this.child(quiet_line(tr(cx, TABLE, "Nothing has been logged yet."), &t))
             })
             .children(run.log.iter().rev().take(RECENT_EVENTS).enumerate().map(|(i, line)| {
+                // ux: begin event identity
+                let event_key = format!("{}\0{}\0{}", line.time, line.source, line.text);
+                // ux: end event identity
                 h_flex()
+                    // ux: begin event scope
+                    .id(("event", i))
+                    // ux: end event scope
                     .gap(theme::space(theme::density(cx), Step::Sm))
                     .items_start()
                     .child(Icon::new(level_icon(line.level)).size(ICON_ROW).text_color(t.log(line.level)).mt(theme::space(theme::density(cx), Step::Xs)))
@@ -1516,13 +1592,17 @@ impl Detail {
                                     .child(div().flex_none().font_family(mono.clone()).child(line.time.clone()))
                                     .child(div().min_w_0().truncate().child(super::control::source_label(&line.source, cx))),
                             )
-                            .child(
-                                div()
-                                    .id(("event", i))
-                                    .line_clamp(3)
-                                    .tooltip(tooltip_of(line.text.clone()))
-                                    .child(line.text.clone()),
-                            ),
+                            // ux: begin recent event summaries
+                            .child(events::event_row(
+                                &super::live::events::summarize_text(&line.text),
+                                self.expanded_events.contains(&event_key),
+                                *cx.global::<i18n::Lang>(), &t, theme::density(cx),
+                                cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_events.insert(event_key.clone()) { this.expanded_events.remove(&event_key); }
+                                    cx.notify();
+                                }),
+                            )),
+                            // ux: end recent event summaries
                     )
             }))
     }
@@ -1728,6 +1808,17 @@ impl Detail {
                             }),
                     ),
             )
+            // ux: begin watch session
+            .when_some((unit.state == UnitState::Running).then(|| self.worker_sessions.iter().find(|s| s.run == run.session.as_ref() && s.unit.as_deref() == Some(unit.id.as_ref()))).flatten(), |this, session| {
+                let state = self.state.clone();
+                let id: SharedString = session.id.clone().into();
+                this.child(Button::new("watch-session").tooltip(tr(cx, TABLE, "Watch session")).child(tr(cx, TABLE, "Watch session").test_text(tr(cx, TABLE, "Watch session")))
+                    .on_click(move |_, _, cx| state.update(cx, |state, cx| state.open_page(super::ux::Page::Session(id.clone()), cx))))
+            })
+            // ux: end watch session
+            // ux: begin unit actions
+            .when_some(self.action_panel.clone(), |this, panel| this.child(panel))
+            // ux: end unit actions
             .child(
                 TabBar::new("unit-tabs")
                     .underline()
@@ -2152,7 +2243,29 @@ const SCENE_CITED: [&str; 5] = [
 const SCENE_REVIEW: &str = "{\"unit\":\"bridge-no-gemini\",\"verdict\":\"pass\",\"findings\":[{\"check\":\"untested\",\"severity\":\"minor\",\"location\":\"tests/bridge_tools.rs\",\"evidence\":\"bridge_status description not asserted\",\"fix\":\"assert description\"},{\"severity\":\"minor\",\"file\":\"tests/adoption_doc.rs\",\"text\":\"14/167 label not tied to figure\"}]}";
 
 impl Render for Detail {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.approval_cards = approvals::merge_cards(
+            std::mem::take(&mut self.approval_cards),
+            approvals::decided_cards(&self.state, cx),
+        );
+        for card in &self.approval_cards {
+            let id = (card.action_id.clone(), card.version);
+            if !self.approval_reasons.contains_key(&id) {
+                let reason = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx));
+                let card = card.clone();
+                let state = self.state.clone();
+                cx.subscribe(&reason, move |_, reason, event: &gpui_kit::component::input::InputEvent, cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { shift: false, .. }) {
+                        let reason = reason.read(cx).value().to_string();
+                        state.update(cx, |state, cx| {
+                            approvals::submit(state, &card, super::ux::seams::Verdict::Reject { reason }, cx)
+                        });
+                    }
+                    cx.notify();
+                }).detach();
+                self.approval_reasons.insert(id, reason);
+            }
+        }
         let cx: &Context<Self> = cx;
         let t = cx.tokens();
         let app = self.state.read(cx);
@@ -2174,6 +2287,16 @@ impl Render for Detail {
             .child(body)
     }
 }
+
+// ux: begin session tests
+#[cfg(test)]
+mod sessions_accept;
+// ux: end
+
+// ux: begin acceptance tests
+#[cfg(test)]
+mod ux_accept;
+// ux: end acceptance tests
 
 #[cfg(test)]
 mod accept;

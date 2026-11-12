@@ -1,6 +1,6 @@
 //! A factual overview and the latest model-written summary for each open run.
 use super::super::i18n::{fill, tr, translate, Lang, Table};
-use super::super::model::{board_facts, board_runs, needs_you, AppState, BoardEntry, BoardFacts, BoardStatus, Run};
+use super::super::model::{board_facts, board_runs_with_prefs, needs_you, AppState, BoardEntry, BoardFacts, BoardStatus, Run};
 use super::super::ornament;
 use super::super::plain_text;
 use super::super::theme::{self, Step, Tokened as _, TypeSize};
@@ -200,7 +200,7 @@ pub(super) fn board_strip(state: &AppState, cx: &App) -> AnyElement {
     let t = cx.tokens();
     let d = theme::density(cx);
     let lang = *cx.global::<Lang>();
-    let runs = board_runs(state);
+    let runs = board_runs_with_prefs(state, &super::super::settings::Store::current(cx).ux);
     let projects: Vec<&str> = runs.iter().map(|&i| &state.runs[i]).filter(|run| needs_you(run)).map(|run| run.project.as_ref()).collect();
     let Some(text) = needs_text(&projects, lang) else { return div().into_any_element(); };
     let tip = SharedString::from(text.clone());
@@ -209,11 +209,19 @@ pub(super) fn board_strip(state: &AppState, cx: &App) -> AnyElement {
 }
 
 pub(super) fn board_with_hover(state: &AppState, compact: bool, limit: Option<usize>, lift: &dyn Fn(&SharedString) -> f32, hover: std::rc::Rc<dyn Fn(SharedString, bool, &mut App)>, cx: &App) -> AnyElement {
+    let mark_read = std::rc::Rc::new(|run: Run, cx: &mut App| {
+        super::super::settings::Store::edit(cx, |settings| super::super::wishes::read_state::change_mark(&run, &mut settings.ux, super::super::wishes::read_state::ReadAction::MarkRead));
+        cx.refresh_windows();
+    });
+    board_with_hover_and_mark_read(state, compact, limit, lift, hover, mark_read, cx)
+}
+
+pub(super) fn board_with_hover_and_mark_read(state: &AppState, compact: bool, limit: Option<usize>, lift: &dyn Fn(&SharedString) -> f32, hover: std::rc::Rc<dyn Fn(SharedString, bool, &mut App)>, mark_read: std::rc::Rc<dyn Fn(Run, &mut App)>, cx: &App) -> AnyElement {
     let t = cx.tokens();
     let d = theme::density(cx);
     let lang = *cx.global::<Lang>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| i64::try_from(time.as_secs()).unwrap_or(i64::MAX));
-    let runs = board_runs(state);
+    let runs = board_runs_with_prefs(state, &super::super::settings::Store::current(cx).ux);
     let mut list = v_flex().gap(theme::space(d, Step::Sm)).w_full()
         .when(!compact, |this| this.max_w(theme::READ_WIDTH));
     if runs.is_empty() {
@@ -239,6 +247,9 @@ pub(super) fn board_with_hover(state: &AppState, compact: bool, limit: Option<us
             .text_color(if muted { t.muted } else { t.text }).when(compact, |this| this.truncate().line_height(px(16.0))).child(text.clone().test_text(text));
         let key = run.session.clone();
         let on_hover = hover.clone();
+        let mark_run = run.clone();
+        let on_mark_read = mark_read.clone();
+        let unread = super::super::wishes::read_state::is_unread(run, &super::super::settings::Store::current(cx).ux);
         let card = ornament::raised_card(&t, lift(&run.session), 0.0)
             .id(("board-row", index))
             .when_some(tip, |this, tip| this.tooltip(tooltip(tip)))
@@ -249,6 +260,9 @@ pub(super) fn board_with_hover(state: &AppState, compact: bool, limit: Option<us
                 .child(h_flex().gap(theme::space(d, Step::Sm)).items_center()
                     .child(div().flex_1().min_w_0().text_size(theme::font(d, TypeSize::Label)).text_color(t.text)
                         .when(compact, |this| this.truncate().line_height(px(16.0))).child(run.project.clone()))
+                    .when(unread, |this| this.child(gpui_kit::component::button::Button::new("run-mark-read")
+                        .label(super::super::wishes::read_state::action_label(super::super::wishes::read_state::ReadAction::MarkRead, lang))
+                        .on_click(move |_, _, cx| { cx.stop_propagation(); on_mark_read(mark_run.clone(), cx); })))
                     .child(div().id(("board-status", index)).tooltip(tooltip(card_tooltip(entry, lang)))
                         .child(Icon::new(icon).size(theme::font(d, TypeSize::Title)).text_color(color))))
                 .child(sentence(facts, false))

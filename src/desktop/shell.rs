@@ -2,6 +2,12 @@
 //! across screens: the window-wide shortcuts (Ctrl+N, Ctrl+K and ?), the command palette's jumps,
 //! Needs you notifications and the question asked before closing.
 mod logic;
+// ux: begin modules
+mod pages;
+mod background;
+mod modes;
+// ux: end
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use super::control::{ask, Ask};
 use super::i18n::{fill, tr, Lang, Table};
 use super::launch::{self, Launch, Square};
@@ -232,6 +238,9 @@ struct ErrorToast;
 
 pub struct Shell {
     state: Entity<AppState>,
+    // ux: begin page host
+    page_view: Option<(super::ux::Page, AnyView)>,
+    // ux: end
     run: Entity<RunView>,
     wishes: Entity<WishesView>,
     memory: Entity<MemoryView>,
@@ -300,6 +309,10 @@ impl Shell {
     }
 
     pub fn new(state: Entity<AppState>, may_flash: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // ux: begin startup
+        state.update(cx, |state, cx| super::doctor::extreme::install_policy(state, cx));
+        if let Some(bg) = state.read(cx).ux.seams.background.clone() { let _ = bg.reattach(); }
+        // ux: end
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &state.read(cx).runs);
         let subscriptions = vec![
@@ -314,6 +327,7 @@ impl Shell {
         ];
         // The window-wide keys come from the shortcut table, so the overlay can never disagree with them.
         cx.bind_keys(palette::global_bindings());
+        cx.bind_keys([pages::page_escape_binding()]);
         Self::on_global::<NewWish>(window, cx, Self::new_wish);
         Self::on_global::<OpenPalette>(window, cx, Self::toggle_palette);
         Self::on_global::<ShowShortcuts>(window, cx, Self::toggle_shortcuts);
@@ -362,6 +376,9 @@ impl Shell {
             doctor: cx.new(|cx| DoctorView::new(state.clone(), window, cx)),
             composer: cx.new(|cx| Composer::new(state.clone(), window, cx)),
             palette,
+            // ux: begin page host
+            page_view: None,
+            // ux: end
             state,
             may_flash,
             seen,
@@ -658,7 +675,7 @@ impl Shell {
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             Command::NewWish => self.new_wish(window, cx),
-            Command::Open(screen) => self.state.update(cx, |state, cx| state.set_view(screen, cx)),
+            Command::Open(screen) => self.state.update(cx, |state, cx| { state.close_page(cx); state.set_view(screen, cx) }),
             Command::ToggleTheme => {
                 let choice = if cx.theme().is_dark() { ThemeChoice::Light } else { ThemeChoice::Dark };
                 settings::set_theme(choice, window, cx);
@@ -699,6 +716,27 @@ impl Shell {
                 record_change(&self.state, prior, SettingPrior::MiniOnTop(on), cx);
             }
             Command::Undo => self.undo(window, cx),
+            // ux: begin commands
+            Command::Storage => self.state.update(cx, |s,cx| s.open_page(super::ux::Page::Storage,cx)),
+            Command::Chat | Command::QuickTask | Command::Plaza => {
+                use super::ux::seams::ModeKind;
+                let mode = match command { Command::Chat => ModeKind::Chat, Command::QuickTask => ModeKind::QuickTask, _ => ModeKind::Plaza };
+                self.state.update(cx, |s,cx| { s.ux.composer_prefill = None; s.open_mode(mode,None,cx); });
+            }
+            Command::UsageForWish => self.state.update(cx, |s,cx| {
+                let wish = s.run().map(|r| s.ux.wish_ids.get(&r.session).unwrap_or(&r.session).clone());
+                s.close_page(cx); s.show_usage_for(wish,cx);
+            }),
+            Command::CompareUsage => self.state.update(cx, |s,cx| {
+                let mut ids = s.ux.usage_sessions.iter().map(|u| u.wish.clone());
+                if let Some(first) = ids.next() { if let Some(second) = ids.find(|id| id != &first) {
+                    settings::Store::edit(cx, |prefs| { prefs.ux.usage_wish = Some(first.to_string()); prefs.ux.usage_compare = Some(second.to_string()); });
+                }}
+                s.close_page(cx); s.set_view(Screen::Usage,cx);
+            }),
+            Command::MarkAllRead => self.state.update(cx, |s,cx| s.mark_all_read(cx)),
+            Command::ExtremeOn | Command::ExtremeOff => self.state.update(cx, |s,cx| s.set_extreme(command == Command::ExtremeOn,cx)),
+            // ux: end
         }
     }
 
@@ -734,14 +772,56 @@ impl Shell {
         if self.stopping {
             return false;
         }
-        if running_here(&self.state.read(cx).runs).is_empty() {
-            self.end_engine(cx);
-            settings::remember_window(window.window_bounds(), cx);
-            return true;
+        // ux: begin background close
+        let state = self.state.read(cx);
+        let running = running_here(&state.runs);
+        let sessions: Vec<String> = running.iter().map(|r| r.session.to_string()).collect();
+        let wishes: Vec<String> = running.iter().map(|r| r.wish.to_string()).collect();
+        let plan = background::close_plan(&sessions, state.ux.seams.background.as_deref());
+        match plan {
+            background::ClosePlan::CloseNow => {
+                self.end_engine(cx);
+                settings::remember_window(window.window_bounds(), cx);
+                return true;
+            }
+            background::ClosePlan::AskStop { .. } => self.ask_before_close(window, cx),
+            background::ClosePlan::Continue { .. } => self.ask_background_close(plan, wishes, window, cx),
         }
-        self.ask_before_close(window, cx);
+        // ux: end
         false
     }
+
+    // ux: begin background close
+    fn ask_background_close(&mut self, plan: background::ClosePlan, wishes: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.asking_close && window.has_active_dialog(cx) { return; }
+        let background::ClosePlan::Continue { ref sessions } = plan else { return };
+        let sessions = sessions.clone();
+        let Some(bg) = self.state.read(cx).ux.seams.background.clone() else { self.ask_before_close(window,cx); return };
+        let copy = background::close_copy(&plan, &wishes, *cx.global::<Lang>()).unwrap();
+        self.asking_close = true;
+        let shell = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let t = cx.tokens();
+            let closed = shell.clone(); let confirm = shell.clone(); let cancel = shell.clone();
+            let bg = bg.clone(); let sessions = sessions.clone();
+            let description = copy.description.clone();
+            alert.entrance(motion::DIALOG_ENTRANCE).title(copy.title.clone())
+                .description(div().id("close-keeps-working").test_support().child(description.clone().test_text(description)))
+                .centered().on_close(move |_,_,cx| { let _ = closed.update(cx, |s,_| s.asking_close = false); })
+                .footer(DialogFooter::new()
+                    .child(Button::new("keep-open").label(copy.cancel.clone()).on_click(move |_,window,cx| { let _ = cancel.update(cx,|s,_| s.asking_close=false); window.close_dialog(cx); }))
+                    .child(theme::gold_leaf(Button::new("close-window"), &t).label(copy.confirm.clone()).on_click(move |_,window,cx| {
+                        if bg.detach(&sessions).is_ok() {
+                            settings::remember_window(window.window_bounds(),cx);
+                            window.remove_window();
+                        } else {
+                            window.close_dialog(cx);
+                            let _ = confirm.update(cx, |s,cx| { s.asking_close=false; s.ask_before_close(window,cx); });
+                        }
+                    })))
+        });
+    }
+    // ux: end
 
     fn ask_before_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.asking_close && window.has_active_dialog(cx) {
@@ -977,7 +1057,7 @@ impl Shell {
                     .accessibility_label(tr(cx, &[], label))
                     .tooltip(hint)
                     .tooltip_placement(Placement::Right)
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_view(view, cx)))
+                    .on_click(move |_, _, cx| state.update(cx, |s, cx| { s.close_page(cx); s.set_view(view, cx) }))
                     .child(
                         v_flex()
                             .items_center()
@@ -1113,13 +1193,20 @@ impl Render for Shell {
         let ticking = quota::repaint_after(&self.state.read(cx).quota).is_some();
         self.ticker.sync(ticking, cx);
         let state = self.state.read(cx);
-        let strip = quota::strip(state, cx);
         let reduce = state.reduce_motion;
         let view = if chrome.force_run { Screen::Run } else { state.view };
         let composing = state.composing;
         let waiting = state.runs.iter().filter(|run| needs_user(run)).count();
         let mut motion = Driver::new(reduce, cx);
         let now = motion.now();
+        // ux: begin extreme strip
+        let flash_started = state.ux.extreme_flash;
+        let flash = super::doctor::extreme::flash_level(flash_started, now, reduce);
+        motion.keep(flash > 0.0);
+        if flash_started.is_some() && flash == 0.0 { self.state.update(cx, |s,_| s.ux.extreme_flash = None); }
+        // quota::strip(...) is replaced here so the strip can receive interaction and flash.
+        let strip = quota::strip_with(&self.state, flash, cx);
+        // ux: end
         motion.track(&self.launch);
         let launching = self.launch.seconds(now).filter(|_| !reduce);
 
@@ -1148,9 +1235,13 @@ impl Render for Shell {
             let value = self.glows.value(&i, &mut motion);
             glows[i] = ((value * 2.0 - 1.0).max(0.0), (value * 2.0).min(1.0));
         }
-        let content = self.screen(view);
+        // ux: begin page host
+        let page = self.page(window,cx);
+        let page_open = page.is_some();
+        let content = page.unwrap_or_else(|| self.screen(view));
+        // ux: end
         // The screen being left stays underneath while the new one fades in over it.
-        let leaving = self.leaving.map(|screen| self.screen(screen));
+        let leaving = if page_open { None } else { self.leaving.map(|screen| self.screen(screen)) };
         let wishes_hint: SharedString = if waiting == 0 {
             tr(cx, T, "Every wish, newest first").into()
         } else {
@@ -1201,6 +1292,7 @@ impl Render for Shell {
             .relative()
             .key_context("ChronosShell")
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::escape_page))
             .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
                 if this.skip_launch(cx) {
                     cx.stop_propagation();
@@ -1282,6 +1374,9 @@ impl Render for Shell {
     }
 }
 
+// ux: begin tests
+#[cfg(test)] mod ux_accept;
+// ux: end
 #[cfg(test)]
 mod accept;
 
