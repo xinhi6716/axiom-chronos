@@ -1,0 +1,20 @@
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-total	總數: 40
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-deduplicated	去重後: 39
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-duplicates	重複: 1
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_in	納入: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out	排除: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:out of scope	  out of scope: 6
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:wrong device	  wrong device: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-pending	待處理: 10
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-unprocessed	未處理: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read	已讀取: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed	讀取失敗: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed:read failed	  read failed: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-0	c0b3ff2c5cff · 10.1234/same · 群組: dup · 納入
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-1	8341ce564805 · 10.1234/same · 群組: dup · 排除: out of scope
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-2	f125c3f4685e · 10.1234/2 · 群組: dup · 失敗: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-3	c0b3ff2c5cff · 10.1234/3 · 群組: dup · 重複: dup
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-4	80ff5c683424 · 10.1234/4 · 群組:  · 失敗: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-5	e5288ff41ecc · 10.1234/5 · 群組:  · 排除: wrong device
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-page	1–40 / 40
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-sample	抽樣 5 筆進行抽查

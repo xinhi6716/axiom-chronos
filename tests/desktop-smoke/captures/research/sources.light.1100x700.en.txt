@@ -1,0 +1,18 @@
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-total	Total: 40
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-deduplicated	Deduplicated: 39
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-duplicates	Duplicates: 1
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_in	Screened in: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out	Screened out: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:out of scope	  out of scope: 6
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:wrong device	  wrong device: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-pending	Pending: 10
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-unprocessed	Unprocessed: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read	Read: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed	Read failed: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed:read failed	  read failed: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-0	c0b3ff2c5cff · 10.1234/same · Group: dup · Included
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-1	8341ce564805 · 10.1234/same · Group: dup · Excluded: out of scope
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-2	f125c3f4685e · 10.1234/2 · Group: dup · Failed: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-3	c0b3ff2c5cff · 10.1234/3 · Group: dup · Duplicate: dup
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-4	80ff5c683424 · 10.1234/4 · Group:  · Failed: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-5	e5288ff41ecc · 10.1234/5 · Group:  · Excluded: wrong device
