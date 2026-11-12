@@ -1,0 +1,3 @@
+evidence_id,paper_id,sha256,physical_page,printed_page,page_offset,locator_type,locator_id,quote,quote_verified,bbox,page_width,page_height,coordinate_origin,coordinate_units,rotation,raw_file,raw_root,raw_row,raw_key,raw_column
+RE1,,,,,,raw_field,,,,,,,,,,runs/device_A.csv,project,1,A1,value
+RE2,,,,,,raw_field,,,,,,,,,,runs/device_B.jsonl,project,1,B1,value

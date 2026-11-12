@@ -1,0 +1,3 @@
+row_id,source_file,source_row,source_key,source_column,device_id,condition_id,variable,entity_raw,entity_canonical,value_original,unit_original,value_canonical,unit_canonical,conversion_rule,missing_reason,quality_grade,evidence_id
+R1,runs/device_A.csv,1,A1,value,D1,C1,voltage,HfO₂,HfO2,0,V,0,V,,,A,RE1
+R2,runs/device_B.jsonl,1,B1,value,D1,C1,voltage,HfO₂,HfO2,1,V,1,V,,,A,RE2
