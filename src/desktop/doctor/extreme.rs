@@ -1,6 +1,6 @@
 use super::super::{
     i18n::{fill, translate, Lang, Table},
-    model::AppState,
+    model::{Action, AppState},
     motion,
     settings::Store,
     theme::{self, Density, Step, Tokens, TypeSize},
@@ -27,6 +27,7 @@ const T: Table = &[
     ),
     ("Fast usage: {}× Codex quota", "快速用量：Codex 額度 {} 倍"),
     ("Fast usage cost: —", "快速用量成本：—"),
+    ("Could not save extreme mode: {}", "無法儲存極限模式：{}"),
 ];
 #[derive(Default)]
 pub struct PrefsTurnPolicy(Mutex<TurnSettings>);
@@ -49,21 +50,35 @@ impl TurnPolicy for PrefsTurnPolicy {
         None
     }
 }
-pub fn install_policy(state: &mut AppState, cx: &App) {
-    let policy = state
-        .ux
-        .seams
-        .turn_policy
-        .get_or_insert_with(|| Arc::new(PrefsTurnPolicy::default()));
-    policy.set_extreme(Store::current(cx).ux.extreme);
+pub fn save_failure(lang: Lang, reason: &str) -> String {
+    fill(translate(lang, T, "Could not save extreme mode: {}"), &[reason])
+}
+pub fn install_policy(state: &mut AppState, cx: &mut App) {
+    match &state.ux.seams.turn_policy {
+        Some(policy) => {
+            let on = policy.current().extreme;
+            Store::edit(cx, |s| s.ux.extreme = on);
+        }
+        None => {
+            let policy = PrefsTurnPolicy::default();
+            policy.set_extreme(Store::current(cx).ux.extreme);
+            state.ux.seams.turn_policy = Some(Arc::new(policy));
+        }
+    }
 }
 impl AppState {
     pub fn set_extreme(&mut self, on: bool, cx: &mut Context<Self>) {
         let was_on = Store::current(cx).ux.extreme;
-        Store::edit(cx, |s| s.ux.extreme = on);
         if let Some(policy) = &self.ux.seams.turn_policy {
-            policy.set_extreme(on);
+            if let Err(e) = policy.try_set_extreme(on) {
+                let lang = cx.try_global::<Lang>().copied().unwrap_or(Lang::En);
+                self.report(Action::Engine, None, save_failure(lang, &e.message));
+                self.ux.extreme_flash = None;
+                cx.notify();
+                return;
+            }
         }
+        Store::edit(cx, |s| s.ux.extreme = on);
         self.ux.extreme_flash = if on && !was_on && !self.reduce_motion {
             Some(Instant::now())
         } else {

@@ -27,6 +27,7 @@ fn item(id: &str, reclaimable: bool) -> StorageItem {
         project: Some("project".into()),
         wish: Some("wish".into()),
         bytes: 1024,
+        measured: true,
         reclaimable,
     }
 }

@@ -1,0 +1,209 @@
+use super::interjections::{EngineInterjections, InterjectTransport};
+use crate::{
+    base::{Failure, Res},
+    desktop::ux::seams::{Draft, Interjections, ReceiptStage},
+    engine::interjections::{self, Links},
+};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+struct Transport {
+    home: PathBuf,
+    sent: Mutex<Vec<(String, String)>>,
+    fail_pause: bool,
+}
+impl InterjectTransport for Transport {
+    fn interject(&self, session: &str, text: &str) -> Res<()> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((session.into(), text.into()));
+        interjections::submit(&self.home, session, text)?
+            .ok_or_else(|| Failure::new("not_found", "submission refused"))?;
+        Ok(())
+    }
+    fn pause(&self, _: &str) -> Res<()> {
+        if self.fail_pause {
+            Err(Failure::new("pause_failed", "pause failed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+fn setup(
+    home: &std::path::Path,
+    sessions: &[&str],
+    fail_pause: bool,
+) -> (Arc<Transport>, EngineInterjections) {
+    for session in sessions {
+        crate::goal::open(home, session, "wish", Some(home.to_str().unwrap())).unwrap();
+    }
+    let transport = Arc::new(Transport {
+        home: home.into(),
+        sent: Mutex::new(vec![]),
+        fail_pause,
+    });
+    (
+        transport.clone(),
+        EngineInterjections::new(home.into(), transport),
+    )
+}
+fn draft(session: &str, id: &str, text: &str) -> Draft {
+    Draft {
+        session: session.into(),
+        client_id: id.into(),
+        text: text.into(),
+        pause_first: false,
+        replan: true,
+    }
+}
+#[test]
+fn sent_received_applied_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, adapter) = setup(dir.path(), &["one"], false);
+    let d = draft("one", "client", "change it");
+    assert_eq!(adapter.send(&d).unwrap().stage, ReceiptStage::Sent);
+    assert_eq!(
+        adapter.receipt("client").unwrap().stage,
+        ReceiptStage::Received
+    );
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::apply(
+        dir.path(),
+        "one",
+        "ij-1",
+        Links {
+            plan_revision: None,
+            units: vec!["u1".into()],
+            scope: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        adapter.receipt("client").unwrap().stage,
+        ReceiptStage::Applied {
+            first_action: "u1".into()
+        }
+    );
+    let history = adapter.history("one");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].affected, vec!["u1"]);
+    assert!(history[0].replan);
+}
+#[test]
+fn declined_and_reconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let (transport, adapter) = setup(dir.path(), &["one"], false);
+    let d = draft("one", "client", "decline it");
+    adapter.send(&d).unwrap();
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::decline(dir.path(), "one", "ij-1", "no thanks").unwrap();
+    let reconnected = EngineInterjections::new(dir.path().into(), transport.clone());
+    assert_eq!(
+        reconnected.send(&d).unwrap().stage,
+        ReceiptStage::Rejected {
+            reason: "no thanks".into()
+        }
+    );
+    assert_eq!(transport.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        crate::goal::load(dir.path(), "one")
+            .unwrap()
+            .unwrap()
+            .interjection_counter,
+        1
+    );
+}
+#[test]
+fn identical_text_is_isolated_and_unclaimed_history_is_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, adapter) = setup(dir.path(), &["one", "two"], false);
+    adapter.send(&draft("one", "c1", "same")).unwrap();
+    adapter.send(&draft("two", "c2", "same")).unwrap();
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::decline(dir.path(), "one", "ij-1", "one only").unwrap();
+    assert_eq!(
+        adapter.receipt("c1").unwrap().stage,
+        ReceiptStage::Rejected {
+            reason: "one only".into()
+        }
+    );
+    assert_eq!(adapter.receipt("c2").unwrap().stage, ReceiptStage::Received);
+    interjections::submit(dir.path(), "two", "outside").unwrap();
+    let history = adapter.history("two");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].client_id, None);
+    assert_eq!(history[1].text, "outside");
+    assert_eq!(adapter.history("one").len(), 1);
+}
+#[test]
+fn pause_failure_does_not_send_or_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let (transport, adapter) = setup(dir.path(), &["one"], true);
+    let mut d = draft("one", "client", "text");
+    d.pause_first = true;
+    assert_eq!(adapter.send(&d).unwrap_err().kind, "pause_failed");
+    assert!(transport.sent.lock().unwrap().is_empty());
+    assert_eq!(adapter.receipt("client"), None);
+    assert!(!dir.path().join("desktop").exists());
+}
+
+#[test]
+fn running_work_and_unclaimed_events_without_prior_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, adapter) = setup(dir.path(), &["one"], false);
+    interjections::submit(dir.path(), "one", "external").unwrap();
+    let history = adapter.history("one");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].client_id, None);
+    assert_eq!(history[0].text, "external");
+    let store = super::session_store(dir.path(), "one").unwrap();
+    std::fs::write(store.join("units.tsv"), "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tt\tactive\t\t\t\t\nu2\tt\tverified\t\t\t\t\nu3\tt\tsuperseded:u1\t\t\t\t\n").unwrap();
+    let batch = crate::goal::Batch {
+        progress_file: dir.path().join("progress").to_string_lossy().into_owned(),
+        marker_file: dir.path().join("marker").to_string_lossy().into_owned(),
+        pid: 1,
+    };
+    crate::goal::set_status_with_batch(
+        dir.path(),
+        "one",
+        "waiting",
+        Some("waiting for batch"),
+        Some(batch),
+    )
+    .unwrap();
+    let work = adapter.running_work("one");
+    assert_eq!(work.stage.as_deref(), Some("waiting"));
+    assert_eq!(work.units, vec!["u1"]);
+    assert_eq!(work.batch.as_deref(), dir.path().join("progress").to_str());
+}
+
+#[test]
+fn same_digest_claimed_once_per_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, adapter) = setup(dir.path(), &["one"], false);
+    adapter.send(&draft("one", "c1", "same")).unwrap();
+    adapter.send(&draft("one", "c2", "same")).unwrap();
+    assert_eq!(adapter.receipt("c2").unwrap().stage, ReceiptStage::Received);
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::apply(
+        dir.path(),
+        "one",
+        "ij-2",
+        Links {
+            plan_revision: None,
+            units: vec![],
+            scope: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        adapter.receipt("c2").unwrap().stage,
+        ReceiptStage::Applied {
+            first_action: "replan".into()
+        }
+    );
+    assert_eq!(adapter.receipt("c1").unwrap().stage, ReceiptStage::Received);
+}

@@ -26,6 +26,7 @@ fn item(
         wish: wish.map(str::to_owned),
         path: format!("/{id}"),
         bytes,
+        measured: true,
         reclaimable,
     }
 }

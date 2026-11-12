@@ -235,6 +235,7 @@ fn storage_confirmation_staleness_and_progress() {
         wish: None,
         path: id.into(),
         bytes: 10,
+        measured: true,
         reclaimable: true,
     };
     let f = FakeStorage::new(vec![item("a"), item("b")], None);
@@ -338,7 +339,8 @@ fn unit_actions_require_reasons_and_deduplicate() {
             "run",
             "u",
             &UnitActionKind::Waive {
-                reason: "  ".into()
+                reason: "  ".into(),
+                finding: None
             },
             "x"
         )
@@ -354,6 +356,7 @@ fn unit_actions_require_reasons_and_deduplicate() {
         "u",
         &UnitActionKind::Waive {
             reason: "Reviewed".into(),
+            finding: None,
         },
         "y",
     )

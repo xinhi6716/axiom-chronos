@@ -134,7 +134,7 @@ impl UnitActionsPanel {
         if self.in_flight || self.receipt.as_ref().is_some_and(|r| r.is_ok()) {
             return;
         }
-        if matches!(&kind, UnitActionKind::Waive { reason } if !can_waive(reason)) {
+        if matches!(&kind, UnitActionKind::Waive { reason, .. } if !can_waive(reason)) {
             return;
         }
         let Some((session, unit, _)) = self.selected.clone() else {
@@ -255,7 +255,13 @@ impl Render for UnitActionsPanel {
                         .disabled(done || !can_waive(&self.reason.read(cx).value()))
                         .on_click(cx.listener(|this, _, _, cx| {
                             let reason = this.reason.read(cx).value().to_string();
-                            this.act(UnitActionKind::Waive { reason }, cx);
+                            this.act(
+                                UnitActionKind::Waive {
+                                    reason,
+                                    finding: None,
+                                },
+                                cx,
+                            );
                         })),
                 );
         }

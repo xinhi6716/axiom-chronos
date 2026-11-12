@@ -3,6 +3,7 @@ pub mod approval;
 pub mod host;
 pub mod manifest;
 pub mod permissions;
+pub mod router;
 pub mod services;
 
 pub use manifest::{Manifest, Panel};

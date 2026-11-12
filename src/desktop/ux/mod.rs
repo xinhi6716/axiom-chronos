@@ -3,6 +3,7 @@ pub mod celestial;
 pub mod composer;
 pub mod events;
 pub mod prefs;
+pub mod real;
 pub mod seams;
 pub mod usage;
 use super::{
@@ -132,6 +133,7 @@ impl Seams {
             wish: runs.first().map(|r| r.session.to_string()),
             path: path.into(),
             bytes: 1024,
+            measured: true,
             reclaimable: true,
         })
         .collect();

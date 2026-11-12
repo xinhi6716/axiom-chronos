@@ -9,6 +9,9 @@ pub trait BackgroundService: Send + Sync + 'static {
     fn status(&self) -> KeepAlive;
     fn detach(&self, sessions: &[String]) -> Res<()>;
     fn reattach(&self) -> Res<Vec<String>>;
+    fn quit(&self, _stop_running: bool) -> Res<()> {
+        Err(Failure::new("unsupported", "Quitting is not supported"))
+    }
 }
 pub struct FakeBackground {
     available: bool,

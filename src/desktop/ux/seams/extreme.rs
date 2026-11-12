@@ -1,3 +1,4 @@
+use crate::base::Res;
 use std::sync::Mutex;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TurnSettings {
@@ -11,6 +12,9 @@ pub struct FastCost {
 pub trait TurnPolicy: Send + Sync + 'static {
     fn current(&self) -> TurnSettings;
     fn set_extreme(&self, on: bool) -> TurnSettings;
+    fn try_set_extreme(&self, on: bool) -> Res<TurnSettings> {
+        Ok(self.set_extreme(on))
+    }
     fn begin_turn(&self) -> TurnSettings;
     fn fast_cost(&self) -> Option<FastCost>;
 }

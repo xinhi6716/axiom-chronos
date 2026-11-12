@@ -5,9 +5,10 @@ use crate::{
     workshop::{
         api::Api,
         host::{Host, HostConfig, Status},
+        router::BackendRouter,
         services::{
             BackendHeldSlots, ClaudeBackend, CodexBackend, ModelBackend, ModelCall, ModelReply,
-            NoNetwork, NoRouter, Services,
+            NoNetwork, Services,
         },
     },
 };
@@ -56,13 +57,24 @@ fn host() -> Host {
             backend: Mutex::new(None),
         }) as Arc<dyn ModelBackend>
     };
+    let engine_home = codex::slots::home();
+    let laya_home = base::data_home().unwrap_or_else(|_| base::axiom_home());
+    let claude = backend(false);
+    let router = BackendRouter {
+        backend: claude.clone(),
+        model: std::env::var("AXIOM_WORKSHOP_ROUTER_MODEL").unwrap_or_else(|_| "sonnet".into()),
+        engine_home: engine_home.clone(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| base::axiom_home()),
+        laya_home,
+        timeout_s: 120,
+    };
     let services = Services {
-        engine_home: codex::slots::home(),
+        engine_home,
         // CodexBackend already acquires the global Codex slot.
         slots: Arc::new(BackendHeldSlots),
-        claude: backend(false),
+        claude,
         codex: backend(true),
-        router: Arc::new(NoRouter),
+        router: Arc::new(router),
         network: Arc::new(NoNetwork),
     };
     Host::new(

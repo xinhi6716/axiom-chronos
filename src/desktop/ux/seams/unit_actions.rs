@@ -11,7 +11,10 @@ pub struct UnitEvidence {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnitActionKind {
     Retry,
-    Waive { reason: String },
+    Waive {
+        reason: String,
+        finding: Option<usize>,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActionReceipt {
@@ -86,7 +89,7 @@ impl UnitActions for FakeUnitActions {
         }
         let action = match kind {
             UnitActionKind::Retry => "retry",
-            UnitActionKind::Waive { reason } if reason.trim().is_empty() => {
+            UnitActionKind::Waive { reason, .. } if reason.trim().is_empty() => {
                 return Err(Failure::new("reason_required", "A reason is required"))
             }
             UnitActionKind::Waive { .. } => "waive",

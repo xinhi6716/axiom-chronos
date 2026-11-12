@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, rc::Rc, sync::Arc, time::Duration};
 
 const T: Table = &[
     ("Storage", "儲存空間"),
+    ("unknown", "未知"),
     ("Category", "類別"),
     ("Project", "專案"),
     ("Wish", "願望"),
@@ -53,6 +54,13 @@ pub fn bytes_text(n: u64, lang: Lang) -> String {
     };
     fill(translate(lang, T, units[i]), &[&number])
 }
+pub(crate) fn item_size_text(item: &StorageItem, lang: Lang) -> String {
+    if item.measured {
+        bytes_text(item.bytes, lang)
+    } else {
+        translate(lang, T, "unknown").into()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupBy {
     Category,
@@ -69,8 +77,10 @@ pub fn group(items: &[StorageItem], by: GroupBy) -> Vec<(String, u64, u64)> {
         }
         .unwrap_or("");
         let entry = groups.entry(key.to_owned()).or_default();
-        entry.0 = entry.0.saturating_add(item.bytes);
-        if item.reclaimable {
+        if item.measured {
+            entry.0 = entry.0.saturating_add(item.bytes);
+        }
+        if item.measured && item.reclaimable {
             entry.1 = entry.1.saturating_add(item.bytes);
         }
     }
@@ -266,7 +276,7 @@ impl Render for StoragePage {
                         GroupBy::Wish => item.wish.as_deref().unwrap_or(""),
                     }) == name
                 }) {
-                    let label = format!("{} — {}", item.path, bytes_text(item.bytes, lang));
+                    let label = format!("{} — {}", item.path, item_size_text(item, lang));
                     if item.reclaimable {
                         let id = item.id.clone();
                         let checked = selected.contains(&id);
@@ -322,7 +332,7 @@ impl Render for StoragePage {
                 let list = plan
                     .items
                     .iter()
-                    .map(|i| format!("{} — {}", i.path, bytes_text(i.bytes, lang)))
+                    .map(|i| format!("{} — {}", i.path, item_size_text(i, lang)))
                     .collect::<Vec<_>>()
                     .join("\n");
                 let confirm = fill(

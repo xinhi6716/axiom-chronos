@@ -144,7 +144,15 @@ fn fake_unit_actions_deduplicate_and_reject_blank_waivers() {
     let service = FakeUnitActions::new();
     service.set_evidence("s", "u", UnitEvidence::default());
     assert!(service
-        .act("s", "u", &UnitActionKind::Waive { reason: " ".into() }, "w")
+        .act(
+            "s",
+            "u",
+            &UnitActionKind::Waive {
+                reason: " ".into(),
+                finding: None
+            },
+            "w"
+        )
         .is_err());
     service.act("s", "u", &UnitActionKind::Retry, "r").unwrap();
     service.act("s", "u", &UnitActionKind::Retry, "r").unwrap();

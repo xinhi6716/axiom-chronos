@@ -1,4 +1,5 @@
 pub mod client;
+pub mod launcher;
 pub mod lock;
 pub mod login;
 pub mod protocol;

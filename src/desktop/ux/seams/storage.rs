@@ -16,6 +16,7 @@ pub struct StorageItem {
     pub wish: Option<String>,
     pub path: String,
     pub bytes: u64,
+    pub measured: bool,
     pub reclaimable: bool,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -137,7 +138,7 @@ impl StorageService for FakeStorage {
         let plan = CleanupPlan {
             id: format!("plan-{}", s.next),
             version: s.revision,
-            bytes: items.iter().map(|i| i.bytes).sum(),
+            bytes: items.iter().filter(|i| i.measured).map(|i| i.bytes).sum(),
             items,
         };
         s.plans.insert(plan.id.clone(), plan.clone());
