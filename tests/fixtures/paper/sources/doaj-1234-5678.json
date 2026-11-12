@@ -1,0 +1,1 @@
+{"results": [{"bibjson": {"title": "Example Journal", "apc": {"has_apc": true, "max": [{"price": 1200, "currency": "USD"}]}, "publication_time_weeks": 12, "ref": {"journal": "https://example.org"}, "ai_policy": {"url": "https://example.org/ai"}}}]}
