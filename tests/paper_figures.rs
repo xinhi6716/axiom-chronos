@@ -529,3 +529,146 @@ fn fonts_measure_real_font_if_present() {
     assert!(m.covers("A", &p.font_family).unwrap().is_empty());
     assert!(!m.covers("\u{10FFFF}", &p.font_family).unwrap().is_empty());
 }
+
+
+fn copied_system_font() -> Option<(tempfile::TempDir, String)> {
+    let paths = [
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ];
+    let Some(path) = paths.iter().map(Path::new).find(|path| path.is_file()) else {
+        eprintln!("No candidate real font available; skipping font lookup checks");
+        return None;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let name = path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_ascii_uppercase();
+    std::fs::copy(path, dir.path().join(&name)).unwrap();
+    Some((dir, name))
+}
+
+#[test]
+fn fonts_lookup_cjk_whitespace_and_cache() {
+    let Some((dir, name)) = copied_system_font() else {
+        return;
+    };
+    let mut p = preset();
+    p.font_files = vec![name.to_ascii_lowercase()];
+    p.cjk_font_files = p.font_files.clone();
+    let m = FontMeasure::with_dirs(&p, vec![dir.path().into()]);
+    assert!(m.measure("Hello", &p.font_family, 8.0).unwrap().0 > 0.0);
+    assert_eq!(
+        m.measure("a", "unknown family", 8.0).unwrap_err().kind,
+        "font_missing"
+    );
+    assert!(m.covers("a b\t\n", &p.font_family).unwrap().is_empty());
+    let cjk = p.cjk_font_family.as_deref().unwrap();
+    assert!(m.measure("a", cjk, 8.0).unwrap().0 > 0.0);
+    std::fs::remove_file(dir.path().join(name)).unwrap();
+    assert!(m.covers("a", &p.font_family).unwrap().is_empty());
+    assert!(m.measure("a", cjk, 8.0).unwrap().0 > 0.0);
+}
+
+#[test]
+fn fonts_directory_listing_is_cached() {
+    let Some((dir, name)) = copied_system_font() else {
+        return;
+    };
+    let mut p = preset();
+    p.font_files = vec![name.to_ascii_lowercase()];
+    p.cjk_font_files = vec!["later.ttf".into()];
+    let m = FontMeasure::with_dirs(&p, vec![dir.path().into()]);
+    m.measure("a", &p.font_family, 8.0).unwrap();
+    std::fs::copy(dir.path().join(name), dir.path().join("LATER.TTF")).unwrap();
+    assert_eq!(
+        m.measure("a", p.cjk_font_family.as_deref().unwrap(), 8.0)
+            .unwrap_err()
+            .kind,
+        "font_missing"
+    );
+}
+
+#[test]
+fn fonts_coverage_unions_multiple_files() {
+    let Some((dir, name)) = copied_system_font() else {
+        return;
+    };
+    let mut bytes = std::fs::read(dir.path().join(&name)).unwrap();
+    let tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+    let cmap_offset = (0..tables)
+        .find_map(|i| {
+            let record = 12 + i * 16;
+            (&bytes[record..record + 4] == b"cmap").then(|| {
+                u32::from_be_bytes(bytes[record + 8..record + 12].try_into().unwrap()) as usize
+            })
+        })
+        .unwrap();
+    // Keep a valid font but remove every character mapping from its cmap table.
+    bytes[cmap_offset + 2..cmap_offset + 4].copy_from_slice(&0u16.to_be_bytes());
+    let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+    assert!(face.glyph_index('a').is_none());
+    std::fs::write(dir.path().join("EMPTY.TTF"), bytes).unwrap();
+    let mut p = preset();
+    p.font_files = vec!["empty.ttf".into(), name.to_ascii_lowercase()];
+    let m = FontMeasure::with_dirs(&p, vec![dir.path().into()]);
+    assert_eq!(
+        m.covers("a\u{10ffff}", &p.font_family).unwrap(),
+        vec!['\u{10ffff}']
+    );
+}
+
+#[test]
+fn tikz_draw_count_equals_paths() {
+    let p = preset();
+    for kind in [
+        PlotKind::Line,
+        PlotKind::Scatter,
+        PlotKind::ErrorBar,
+        PlotKind::Bar,
+    ] {
+        let mut s = spec(kind.clone());
+        if kind == PlotKind::ErrorBar {
+            s.error = "err".into();
+            s.y.truncate(1);
+        }
+        if kind == PlotKind::Bar {
+            s.x = "category".into();
+        }
+        let layout = plot::layout(&s, &data(), &p, &measure()).unwrap();
+        assert_eq!(
+            tikz::standalone(&layout, &p)
+                .lines()
+                .filter(|l| l.starts_with("\\draw"))
+                .count(),
+            layout.paths
+        );
+    }
+    let layout = blank_layout();
+    assert_eq!(layout.path_count(), 0);
+    assert_eq!(
+        tikz::standalone(&layout, &p)
+            .lines()
+            .filter(|l| l.starts_with("\\draw"))
+            .count(),
+        layout.paths
+    );
+}
+
+#[test]
+fn table_non_finite_cells_kept() {
+    let mut d = table_data();
+    d.rows = vec![
+        vec!["nan".into(), "inf".into(), "-inf".into()],
+        vec!["NaN".into(), "+inf".into(), "1.25".into()],
+    ];
+    let result = tables::booktabs(&table_spec(), &d, 100.0, &measure(), "Test Sans").unwrap();
+    assert_eq!(
+        result.cells,
+        vec![vec!["nan", "inf", "-inf"], vec!["NaN", "+inf", "1.25"]]
+    );
+}

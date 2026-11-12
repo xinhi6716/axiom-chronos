@@ -1,4 +1,4 @@
-use crate::base::Res;
+use crate::base::{Failure, Res};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,8 +21,19 @@ fn default_min_font_pt() -> f64 {
     6.0
 }
 pub fn presets() -> Res<Vec<Preset>> {
-    unimplemented!()
+    #[derive(Deserialize)]
+    struct Presets {
+        presets: Vec<Preset>,
+    }
+    let asset = crate::engine::asset("paper/presets/journals.json")
+        .ok_or_else(|| Failure::new("preset_asset", "journal presets asset is missing"))?;
+    serde_json::from_str::<Presets>(asset)
+        .map(|data| data.presets)
+        .map_err(|error| Failure::new("preset_asset", error.to_string()))
 }
-pub fn preset(_id: &str) -> Res<Preset> {
-    unimplemented!()
+pub fn preset(id: &str) -> Res<Preset> {
+    presets()?
+        .into_iter()
+        .find(|preset| preset.id == id)
+        .ok_or_else(|| Failure::new("unknown_preset", format!("unknown preset: {id}")))
 }

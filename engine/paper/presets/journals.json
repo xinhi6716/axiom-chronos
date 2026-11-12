@@ -1,1 +1,208 @@
-{"presets":[]}
+{
+  "presets": [
+    {
+      "id": "elsevier-single",
+      "width_mm": 90,
+      "height_mm": 67.5,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 1000
+    },
+    {
+      "id": "elsevier-double",
+      "width_mm": 190,
+      "height_mm": 142.5,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 1000
+    },
+    {
+      "id": "ieee-single",
+      "width_mm": 88.9,
+      "height_mm": 66.67500000000001,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 600
+    },
+    {
+      "id": "ieee-double",
+      "width_mm": 181.9,
+      "height_mm": 136.425,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 600
+    },
+    {
+      "id": "springer-single",
+      "width_mm": 84,
+      "height_mm": 63.0,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 600
+    },
+    {
+      "id": "acs-single",
+      "width_mm": 82.5,
+      "height_mm": 61.875,
+      "font_family": "Arial",
+      "font_files": [
+        "arial.ttf",
+        "Arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf"
+      ],
+      "cjk_font_family": "Noto Sans CJK SC",
+      "cjk_font_files": [
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJK-Regular.ttc",
+        "msyh.ttc",
+        "msyh.ttf",
+        "SourceHanSansSC-Regular.otf"
+      ],
+      "font_pt": 8,
+      "min_font_pt": 6,
+      "line_pt": 0.75,
+      "palette": [
+        "E69F00",
+        "56B4E9",
+        "009E73",
+        "F0E442",
+        "0072B2",
+        "D55E00",
+        "CC79A7",
+        "000000"
+      ],
+      "raster_dpi": 600
+    }
+  ]
+}
