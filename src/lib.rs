@@ -18,6 +18,10 @@ pub mod memory;
 pub mod orch;
 pub mod provenance;
 pub mod review;
+pub mod service;
 pub mod session;
 pub mod setup;
 pub mod usage;
+
+pub mod storage;
+

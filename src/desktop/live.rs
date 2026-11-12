@@ -1,14 +1,12 @@
-//! Connects the screens to the real engine. One worker thread owns the `Poller` and every hosted
-//! `host::Wish`; it takes commands over a channel and sends finished `Run`s back. The UI thread
-//! never reads the disk, starts a process or drops a `Wish` (dropping one waits for its process).
+//! Connects the screens to the service and local read-only data on a worker thread.
 use super::model::*;
 use crate::{
     app::{self, Poller, Snapshot},
     base::{self, Failure, Res},
     cli::doctor,
-    goal,
     evolve::{self, digest::{self, Digest}},
-    host::{self, Event},
+    host::Event,
+    service::{self, Client, Subscription},
     memory::{Memory, MemoryPriorRow},
     session::{self, Config},
     usage::{self, Ledger, Locations, Warning},
@@ -80,6 +78,7 @@ enum Command {
     Checks(Vec<Check>),
     CodexRead { result: Res<Value>, generation: u64, at: i64 },
     CodexUpdate { params: Value, at: i64 },
+    LoginStart(bool),
     Quit,
 }
 
@@ -93,6 +92,8 @@ enum Update {
     Memory(Vec<MemoryEntry>),
     Corrected { id: i64, prior: MemoryPrior },
     Feed { kind: FeedKind, error: Option<String> },
+    QuitRequested,
+    LoginStart(bool),
     Quota(Quotas),
     CodexSlots(Option<u64>),
     CodexModels(Vec<RunningModel>),
@@ -168,6 +169,7 @@ impl Drop for CloseOnExit {
 
 struct LiveBackend {
     commands: mpsc::Sender<Command>,
+    home: PathBuf,
     /// Receives one message, or disconnects, when the worker has finished and dropped everything it owned.
     finished: Mutex<mpsc::Receiver<()>>,
 }
@@ -225,9 +227,12 @@ impl Backend for LiveBackend {
         self.send(Command::Follow(session.into()))
     }
 
+    fn quit_service(&self, stop_running: bool) -> Res<()> { Client::connect(&self.home)?.quit(stop_running) }
+    fn set_login_start(&self, on: bool) -> Res<()> { self.send(Command::LoginStart(on)) }
+
     fn shutdown(&self, wait: Duration) {
         let _ = self.commands.send(Command::Quit);
-        // Dropping a hosted wish waits for its process tree, so the worker needs a moment.
+        // Wait only for the desktop worker to detach.
         let finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
         let _ = finished.recv_timeout(wait);
     }
@@ -242,24 +247,39 @@ impl Drop for LiveBackend {
 /// Runs `engine` on its own thread. The returned backend's `shutdown` ends it and waits.
 fn launch(engine: Engine, commands: mpsc::Sender<Command>, receiver: mpsc::Receiver<Command>) -> LiveBackend {
     let (done, finished) = mpsc::channel();
+    let home = engine.home.clone();
     std::thread::Builder::new()
         .name("chronos-engine".into())
         .spawn(move || {
-            // `run` owns the engine, so every hosted wish is gone when it returns.
+            // Wishes continue in the service when this worker exits.
             engine.run(receiver);
             let _ = done.send(());
         })
         .expect("could not start the engine worker");
-    LiveBackend { commands, finished: Mutex::new(finished) }
+    LiveBackend { commands, home, finished: Mutex::new(finished) }
 }
 
 /// Starts the worker and keeps `state` up to date from it. The task holds `state` weakly: the
 /// state owns the backend, and the worker only exits once the backend has told it to quit.
 pub fn connect(state: Entity<AppState>, cx: &mut App) {
+    let locations = Locations::from_env();
+    let spawn = match std::env::current_exe() {
+        Ok(exe) => Some(exe),
+        Err(error) => {
+            state.update(cx, |s, cx| { s.report(Action::Engine, None, error.to_string()); cx.notify(); });
+            None
+        }
+    };
+    connect_service(state, locations.home, spawn, cx);
+}
+
+pub fn connect_service(state: Entity<AppState>, home: PathBuf, spawn: Option<PathBuf>, cx: &mut App) {
     let (commands, receiver) = mpsc::channel();
     let inbox = Inbox::default();
-    let locations = Locations::from_env();
-    let engine = Engine::new(locations.home, locations.projects, Box::new(Config::from_env), commands.clone(), inbox.clone());
+    let projects = Locations::from_env().projects;
+    let mut engine = Engine::new(home, projects, Box::new(Config::from_env), commands.clone(), inbox.clone());
+    engine.service_enabled = true;
+    engine.service_spawn = spawn;
     let prefs = settings_board(cx);
     let mut prior = None;
     if board_settings_changed(&mut prior, prefs) {
@@ -357,6 +377,8 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
             Update::CodexModels(models) => state.codex_models = models,
             Update::LiveModels(models) => state.live_models = models,
             Update::Corrected { id, prior } => state.record_undo(Undoable::Memory { id, prior }),
+            Update::QuitRequested => state.feeds.quit_requested = true,
+            Update::LoginStart(on) => state.feeds.login_start = on,
             Update::Feed { kind, error } => {
                 let feed = state.feeds.get_mut(kind);
                 match error {
@@ -391,7 +413,8 @@ fn evolve_runs(home: &Path, digest: &Digest) -> Res<Vec<PastEvolve>> {
 /// A wish started from this app. Kept after it ends: its log exists nowhere else.
 struct Hosted {
     /// Only ever dropped on the worker, and only once its thread has finished.
-    wish: Option<host::Wish>,
+    running: bool,
+    handle: String,
     /// The session id is not known yet; the key is a stand-in until `Event::Started`.
     provisional: bool,
     text: String,
@@ -408,7 +431,8 @@ struct Hosted {
 impl Hosted {
     fn new(provisional: bool, text: String, cwd: PathBuf) -> Self {
         Self {
-            wish: None,
+            running: true,
+            handle: String::new(),
             provisional,
             text,
             cwd,
@@ -435,7 +459,7 @@ impl Hosted {
 
     fn view(&self) -> HostedView<'_> {
         HostedView {
-            running: self.wish.is_some() && self.ended_at.is_none(),
+            running: self.running && self.ended_at.is_none(),
             limit_until: self.limit_until,
             ended_at: self.ended_at.as_deref(),
             log: &self.log,
@@ -491,6 +515,12 @@ struct Engine {
     config: Box<dyn Fn() -> Config + Send>,
     poller: Poller,
     hosted: HashMap<String, Hosted>,
+    service_enabled: bool,
+    service_spawn: Option<PathBuf>,
+    service: Option<Client>,
+    subscription: Option<Subscription>,
+    service_instance: String,
+    next_service_retry: Instant,
     /// Provisional ids that have become real, for commands sent just before the switch.
     aliases: HashMap<String, String>,
     snapshot: Option<Snapshot>,
@@ -549,6 +579,8 @@ impl Engine {
             projects,
             config,
             hosted: HashMap::new(),
+            service_enabled: false, service_spawn: None, service: None, subscription: None,
+            service_instance: String::new(), next_service_retry: Instant::now(),
             aliases: HashMap::new(),
             snapshot: None,
             ledgers: HashMap::new(),
@@ -575,10 +607,12 @@ impl Engine {
     fn run(mut self, commands: mpsc::Receiver<Command>) {
         let _close = CloseOnExit(self.inbox.clone());
         self.recheck();
+        if self.service_enabled { self.sync_service(); }
         let mut next_poll = Instant::now();
         'running: loop {
             let now = Instant::now();
             let wake = next_wake(now, next_poll, self.board_scheduler.next_wake(now));
+            let wake = if self.service_enabled { wake.min(Duration::from_millis(200)) } else { wake };
             match commands.recv_timeout(wake) {
                 Ok(Command::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(command) => {
@@ -600,7 +634,10 @@ impl Engine {
                     if now >= next_poll {
                         self.tick();
                         next_poll = Instant::now() + self.interval();
-                    } else { self.board_due(now); }
+                    } else {
+                        if self.drain_events() { self.publish(); }
+                        self.board_due(now);
+                    }
                 }
             }
         }
@@ -763,6 +800,12 @@ impl Engine {
                 self.merge_quota(Provider::Codex, crate::usage::quota::parse_codex_update(&params, at));
                 false
             }
+            Command::LoginStart(on) => {
+                let result = self.client().and_then(|c| c.set_login_start(on));
+                if let Err(e) = result { self.fail(Action::Engine, None, e.message); }
+                else { self.sync_service(); }
+                false
+            }
             Command::Quit => false,
         }
     }
@@ -862,97 +905,75 @@ impl Engine {
     }
 
     fn start(&mut self, request: WishRequest) {
+        if request.council_budgets.is_some() {
+            self.fail(Action::StartWish, None, format!("The service cannot accept research budgets yet.\n\nYour wish: {}", request.wish));
+            return;
+        }
         self.provisional_count += 1;
         let key = format!("pending-{}", self.provisional_count);
         self.hosted.insert(key.clone(), Hosted::new(true, request.wish.clone(), request.cwd.clone()));
         self.open = Some(key.clone());
         // Starting a process takes a moment; the run should appear before it does.
         self.publish();
-        let options = host::Options { creative: request.creative, max_turns: request.max_turns, advanced_research: request.advanced_research, council_budgets:request.council_budgets, codex_max_parallel: request.codex_max_parallel };
-        match host::Wish::start((self.config)(), &request.cwd, &request.wish, &options) {
-            Ok(wish) => {
-                if let Some(entry) = self.hosted.get_mut(&key) {
-                    entry.wish = Some(wish);
-                }
+        let result = self.client().and_then(|c| c.start(service::StartRequest {
+            wish: request.wish.clone(), cwd: request.cwd.to_string_lossy().into_owned(),
+            creative: request.creative, max_turns: request.max_turns,
+            advanced_research: request.advanced_research, codex_max_parallel: request.codex_max_parallel,
+            need_bytes: None,
+        }));
+        match result {
+            Ok(handle) => {
+                if let Some(entry) = self.hosted.get_mut(&key) { entry.handle = handle; }
+                self.sync_service();
             }
             Err(failure) => {
                 self.hosted.remove(&key);
-                // The dialog has closed; the details are the only copy of what was typed.
                 self.fail(Action::StartWish, None, format!("{}\n\nYour wish: {}", failure.message, request.wish));
             }
         }
     }
 
+    fn client(&self) -> Res<&Client> {
+        self.service.as_ref().ok_or_else(|| Failure::new("service_unavailable", "service is not connected"))
+    }
+
+    fn service_key(&self, session: &str) -> String {
+        self.hosted.get(session).map(|h| if h.handle.is_empty() { session.to_owned() } else { h.handle.clone() }).unwrap_or_else(|| session.to_owned())
+    }
+
     fn interject(&mut self, session: &str, text: &str) {
         let session = self.resolve(session);
-        let result = match self.hosted.get(&session).and_then(|h| h.wish.as_ref()) {
-            Some(wish) => wish.interject(text),
-            None => Err(Failure::new("not_hosted", "this wish has finished, or was not started from this app")),
-        };
-        match result {
-            Ok(()) => {
-                if let Some(entry) = self.hosted.get_mut(&session) {
-                    entry.say(YOU, text, LogLevel::Info);
-                }
-            }
-            Err(failure) => {
-                self.fail(Action::Interject, Some(&session), format!("{}\n\nYour message: {text}", failure.message));
-                self.resend_runs();
-            }
+        let key = self.service_key(&session);
+        match self.client().and_then(|c| c.interject(&key, text)) {
+            Ok(()) => { if let Some(entry) = self.hosted.get_mut(&session) { entry.say(YOU, text, LogLevel::Info); } }
+            Err(failure) => { self.fail(Action::Interject, Some(&session), format!("{}\n\nYour message: {text}", failure.message)); self.resend_runs(); }
         }
     }
 
     fn stop(&mut self, session: &str) {
         let session = self.resolve(session);
-        match self.hosted.get_mut(&session) {
-            Some(entry) if entry.view().running => {
-                entry.quiet_end = true;
-                if let Some(wish) = &entry.wish {
-                    wish.stop();
-                }
-                entry.say("chronos", "Stopping; it can be resumed later", LogLevel::Info);
-            }
-            _ => self.fail(
-                Action::Stop,
-                Some(&session),
-                "this wish is not running from this app; stop it where it was started",
-            ),
+        let key = self.service_key(&session);
+        match self.client().and_then(|c| c.stop(&key)) {
+            Ok(()) => { if let Some(entry) = self.hosted.get_mut(&session) { entry.quiet_end = true; entry.say("chronos", "Stopping; it can be resumed later", LogLevel::Info); } }
+            Err(failure) => self.fail(Action::Stop, Some(&session), failure.message),
         }
     }
 
     fn resume(&mut self, session: &str, note: Option<&str>) {
         let session = self.resolve(session);
-        if self.hosted.get(&session).is_some_and(|h| h.view().running) {
-            self.fail(Action::Resume, Some(&session), "this wish is already running");
-            return;
-        }
+        let key = self.service_key(&session);
         let note = note.map(str::trim).filter(|n| !n.is_empty());
-        let config = (self.config)();
-        match host::Wish::resume(config, &session, note, None) {
-            Ok(wish) => {
+        match self.client().and_then(|c| c.resume(&key, note)) {
+            Ok(handle) => {
                 let entry = self.held(&session);
-                entry.wish = Some(wish);
-                entry.ended_at = None;
-                entry.limit_until = None;
-                entry.quiet_end = false;
-                if let Some(note) = note {
-                    entry.say(YOU, note, LogLevel::Info);
-                }
+                entry.handle = handle; entry.running = true; entry.ended_at = None;
+                entry.limit_until = None; entry.quiet_end = false;
+                if let Some(note) = note { entry.say(YOU, note, LogLevel::Info); }
                 entry.say("chronos", "Resumed", LogLevel::Info);
             }
             Err(failure) => {
-                // The goal may already be reopened with no process behind it.
-                let reopened = goal::load(&self.home, &session)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|g| g.status == "active");
-                if reopened {
-                    let entry = self.held(&session);
-                    entry.ended_at = Some(base::now_iso());
-                    entry.quiet_end = true;
-                }
-                let typed = note.map_or(String::new(), |note| format!("\n\nYour reply: {note}"));
-                self.fail(Action::Resume, Some(&session), format!("{}{typed}", failure.message));
+                let typed = note.map_or(String::new(), |n| format!("\n\nYour reply: {n}"));
+                self.fail(Action::Resume, Some(&session), format!("{} ({session}){typed}", failure.message));
                 self.resend_runs();
             }
         }
@@ -1069,18 +1090,128 @@ impl Engine {
         });
     }
 
-    fn drain_events(&mut self) {
-        let keys: Vec<String> = self.hosted.keys().cloned().collect();
-        for key in keys {
-            let events: Vec<Event> = match self.hosted.get(&key).and_then(|h| h.wish.as_ref()) {
-                Some(wish) => wish.events().try_iter().collect(),
-                None => continue,
+    fn sync_service(&mut self) {
+        if !self.service_enabled { return; }
+        let result = (|| -> Res<(Client, service::Snapshot, Subscription)> {
+            let client = match &self.service {
+                Some(client) => client.clone(),
+                None => match &self.service_spawn {
+                    Some(exe) => Client::connect_or_spawn(&self.home, exe, Duration::from_secs(10))?,
+                    None => Client::connect(&self.home)?,
+                },
             };
-            let mut key = key;
-            for event in events {
-                self.on_event(&mut key, event);
+            let snapshot = client.snapshot()?;
+            let subscription = client.subscribe(snapshot.cursor)?;
+            Ok((client, snapshot, subscription))
+        })();
+        match result {
+            Ok((client, snapshot, subscription)) => {
+                self.service_instance = snapshot.instance.clone();
+                self.rebuild_service(snapshot);
+                self.service = Some(client);
+                self.subscription = Some(subscription);
+            }
+            Err(e) => {
+                self.subscription = None; self.service = None;
+                self.next_service_retry = Instant::now() + if e.kind == "gap" { Duration::ZERO } else { Duration::from_secs(2) };
+                if e.kind != "gap" { self.warn_service(e.message); }
             }
         }
+    }
+
+    fn warn_service(&mut self, message: String) {
+        if self.reported.insert(format!("service: {message}")) { self.fail(Action::Engine, None, message); }
+    }
+
+    fn rebuild_service(&mut self, snapshot: service::Snapshot) {
+        self.inbox.push(Update::LoginStart(snapshot.login_start));
+        let mut hosted = HashMap::new();
+        for wish in snapshot.wishes {
+            let key = wish.session.clone().unwrap_or_else(|| wish.handle.clone());
+            if let Some(old) = self.hosted.iter().find(|(_, h)| h.handle == wish.handle).map(|(key, _)| key.clone()) {
+                if old != key {
+                    self.aliases.insert(old.clone(), key.clone());
+                    self.renamed.push((old.clone(), key.clone()));
+                    if self.open.as_deref() == Some(&old) { self.open = Some(key.clone()); }
+                }
+            }
+            let mut entry = Hosted::new(wish.session.is_none(), wish.text, PathBuf::from(wish.cwd));
+            entry.handle = wish.handle.clone(); entry.started = wish.started_unix;
+            entry.running = matches!(wish.state.as_str(), "starting" | "running" | "limit_wait");
+            entry.limit_until = wish.limit_until; entry.ended_at = wish.ended_at; entry.ending = wish.ending;
+            for line in wish.log {
+                entry.log.push(LogLine { time: clock_of(line.time_ms / 1000).into(), source: line.source.into(), text: line.text.into(), level: match line.level.as_str() { "warn" => LogLevel::Warn, "error" => LogLevel::Error, _ => LogLevel::Info } });
+            }
+            if let Some(line) = wish.disk_line {
+                entry.say("chronos", &line, LogLevel::Warn);
+                if self.reported.insert(format!("disk:{}:{line}", wish.handle)) { self.fail(Action::Session, Some(&key), line); }
+            }
+            hosted.insert(key, entry);
+        }
+        self.hosted = hosted;
+        self.sent = None;
+    }
+
+    fn drain_events(&mut self) -> bool {
+        if !self.service_enabled { return false; }
+        if self.subscription.is_none() {
+            if Instant::now() >= self.next_service_retry { self.sync_service(); return true; }
+            return false;
+        }
+        let mut changed = false;
+        loop {
+            let result = self.subscription.as_ref().unwrap().recv_timeout(Duration::ZERO);
+            match result {
+                Ok(Some(event)) if event.instance != self.service_instance => { self.sync_service(); changed = true; break; }
+                Ok(Some(event)) => { self.wire_event(event); changed = true; },
+                Ok(None) => break,
+                Err(e) => { self.subscription_failure(e); changed = true; break; }
+            }
+        }
+        changed
+    }
+
+    fn subscription_failure(&mut self, error: Failure) {
+        self.subscription = None;
+        if error.kind != "gap" { self.service = None; self.warn_service(error.message); }
+        self.next_service_retry = Instant::now();
+        self.sync_service();
+    }
+
+    fn wire_event(&mut self, event: service::WireEvent) {
+        if event.kind == "quit_requested" {
+            self.inbox.push(Update::QuitRequested);
+            return;
+        }
+        let Some(mut key) = self.hosted.iter().find(|(_, h)| h.handle == event.handle).map(|(k, _)| k.clone()) else {
+            self.sync_service();
+            return;
+        };
+        let data = &event.data;
+        let string = |name: &str| data[name].as_str().unwrap_or_default().to_owned();
+        let mapped = match event.kind.as_str() {
+            "started" => Some(Event::Started { session: event.session.unwrap_or_else(|| string("session")) }),
+            "text" => Some(Event::Text(string("text"))),
+            "tool_use" => Some(Event::ToolUse { name: string("name"), label: data["label"].as_str().map(str::to_owned) }),
+            "tool_result" => Some(Event::ToolResult { name: string("name"), summary: string("summary") }),
+            "result" => Some(Event::Result { text: string("text"), is_error: data["is_error"].as_bool().unwrap_or(false) }),
+            "waiting" => Some(Event::Waiting { until: data["until"].as_i64().unwrap_or(0) }),
+            "disk_paused" => Some(Event::DiskPaused { line: string("line") }),
+            "exited" => Some(Event::Exited { code: data["code"].as_i64().unwrap_or(1) as i32 }),
+            "failed" => Some(Event::Failed(Failure::new(data["kind"].as_str().unwrap_or("service"), data["message"].as_str().unwrap_or("wish failed")))),
+            "rate_limit" => {
+                use crate::usage::quota::{Window, WindowKind};
+                let window = |name: &str, kind| {
+                    let w = &data[name];
+                    Some(Window { kind, used: w["used"].as_f64()? as f32, resets_at: w["resets_at"].as_i64(), observed_at: w["observed_at"].as_i64()?, status: w["status"].as_str().map(str::to_owned) })
+                };
+                Some(Event::RateLimit(ProviderQuota { observed_at: data["observed_at"].as_i64(),
+                    present: [data["present"][0].as_bool().unwrap_or(false), data["present"][1].as_bool().unwrap_or(false)],
+                    five_hour: window("five_hour", WindowKind::FiveHour), weekly: window("weekly", WindowKind::Weekly) }))
+            }
+            _ => None,
+        };
+        if let Some(event) = mapped { self.on_event(&mut key, event); }
     }
 
     fn on_event(&mut self, key: &mut String, event: Event) {
@@ -1102,6 +1233,8 @@ impl Engine {
         let Some(entry) = self.hosted.get_mut(key.as_str()) else { return };
         match event {
             Event::Started { .. } => {
+                entry.running = true;
+                entry.ended_at = None;
                 entry.limit_until = None;
                 entry.say("chronos", "Session started", LogLevel::Info);
             }
@@ -1123,7 +1256,14 @@ impl Engine {
                 entry.say("chronos", format!("Usage limit reached; continuing at {}", clock_of(until)), LogLevel::Warn);
             }
             Event::RateLimit(quota) => self.merge_quota(Provider::Claude, quota),
+            Event::DiskPaused { line } => {
+                entry.running = false;
+                entry.say("chronos", &line, LogLevel::Warn);
+                let session = key.clone();
+                self.fail(Action::Session, Some(&session), line);
+            }
             Event::Exited { code } => {
+                entry.running = false;
                 entry.ended_at = Some(base::now_iso());
                 entry.limit_until = None;
                 entry.ending = format!("the session exited with code {code} before it recorded a goal");
@@ -1135,6 +1275,7 @@ impl Engine {
                 entry.say("chronos", text, level);
             }
             Event::Failed(failure) => {
+                entry.running = false;
                 entry.ended_at = Some(base::now_iso());
                 entry.limit_until = None;
                 entry.quiet_end = true;
@@ -1147,15 +1288,13 @@ impl Engine {
 
     /// Lets go of finished wishes, and forgets ones that ended before recording any goal.
     fn reap(&mut self) {
+        if self.service_enabled { return; }
         let Some(snapshot) = &self.snapshot else { return };
         let known: HashSet<&str> = snapshot.wishes.iter().map(|w| w.session.as_str()).collect();
         let mut gone = vec![];
         for (key, entry) in &mut self.hosted {
             if entry.ended_at.is_some() {
-                if entry.wish.as_ref().is_some_and(|wish| !wish.is_running()) {
-                    entry.wish = None;
-                }
-                if !known.contains(key.as_str()) && entry.wish.is_none() {
+                if !known.contains(key.as_str()) && !entry.running {
                     gone.push(key.clone());
                 }
             }
@@ -2075,7 +2214,7 @@ fn early_run(key: &str, entry: &Hosted) -> Run {
         project: entry.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().into(),
         cwd: Some(entry.cwd.clone()).filter(|cwd| !cwd.as_os_str().is_empty()),
         wish: clean_wish(&entry.text).into(),
-        status: if entry.ended_at.is_some() { RunStatus::Interrupted } else { RunStatus::Active },
+        status: if entry.limit_until.is_some() { RunStatus::LimitWait } else if !entry.running || entry.ended_at.is_some() { RunStatus::Interrupted } else { RunStatus::Active },
         hosted: true,
         started: started_text(&stamp_of(entry.started as i64)).into(),
         started_at: Some(entry.started),
@@ -2513,7 +2652,7 @@ mod tests {
     fn live_backend_enqueues_evolve_only_for_explicit_commands() {
         let (commands, receiver) = mpsc::channel();
         let (_done, finished) = mpsc::channel();
-        let backend = LiveBackend { commands, finished: Mutex::new(finished) };
+        let backend = LiveBackend { commands, home: PathBuf::new(), finished: Mutex::new(finished) };
         let repo = PathBuf::from("chosen-repo");
 
         Backend::evolve_check(&backend).unwrap();
@@ -3300,7 +3439,7 @@ mod tests {
     fn backend_sends_reload_and_restore_memory_commands() {
         let (commands, receiver) = mpsc::channel();
         let (_done, finished) = mpsc::channel();
-        let backend = LiveBackend { commands, finished: Mutex::new(finished) };
+        let backend = LiveBackend { commands, home: PathBuf::new(), finished: Mutex::new(finished) };
         let prior = MemoryPrior { body: "body".into(), summary: "summary".into(), corrected: Some(1.0), confirmed: 2.0 };
         backend.reload(FeedKind::Usage).unwrap();
         backend.restore_memory(42, &prior).unwrap();

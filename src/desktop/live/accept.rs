@@ -49,6 +49,8 @@ fn memory_failure_preserves_data_and_distinguishes_stale_and_failed() {
     let mut rig = rig();
     let home = rig.engine.home.clone();
     memory_entries(&home);
+    // These replies are supplied directly; do not launch a concurrent initial read.
+    rig.engine.memory_dirty = false;
     rig.engine.handle(Command::Memory(read_memory(&home)));
     let mut state = state_with(vec![]);
     state.feeds.memory = FeedStatus::default();
@@ -71,6 +73,16 @@ fn memory_failure_preserves_data_and_distinguishes_stale_and_failed() {
     assert_eq!(panel_state(&never.feeds.memory, true), PanelState::Failed(feed.into()));
     rig.engine.handle(Command::Memory(Err(failure)));
     assert!(!rig.updates().iter().any(|u| matches!(u, Update::Feed { kind: FeedKind::Memory, .. })));
+}
+
+#[test]
+fn quit_service_returns_connection_failure_synchronously() {
+    let home = tempfile::tempdir().unwrap();
+    let (commands, receiver) = mpsc::channel();
+    let (_done, finished) = mpsc::channel();
+    let backend = LiveBackend { commands, home: home.path().to_path_buf(), finished: Mutex::new(finished) };
+    assert!(backend.quit_service(true).is_err());
+    assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }
 
 #[test]
@@ -152,4 +164,98 @@ fn invalid_correction_and_failed_restore_leave_memory_and_undo_unchanged() {
     assert!(!updates.iter().any(|u| matches!(u, Update::Corrected { .. } | Update::Memory(_))));
     assert_eq!(memory.prior(id).unwrap(), prior);
     assert_eq!(rig.engine.memory, cached);
+}
+
+fn test_python() -> String {
+    if let Ok(python) = std::env::var("AXIOM_TEST_PYTHON") { return python; }
+    let names = if cfg!(windows) { ["python", "python3"] } else { ["python3", "python"] };
+    names.into_iter().find(|name| crate::base::proc::cmd(name).arg("--version").output().is_ok_and(|out| out.status.success())).expect("Python not found").into()
+}
+
+#[test]
+fn service_snapshot_rebuild_gap_resync_and_disk_pause() {
+    use crate::service::{login, tray, Server, ServerOptions};
+    let mut rig = rig();
+    let home = rig.engine.home.clone();
+    let config_home = home.clone();
+    let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_claude.py");
+    let record = home.join("fake-record.json");
+    let calls = || Arc::new(Mutex::new(Vec::new()));
+    let server = Server::start(ServerOptions {
+        home: home.clone(),
+        config: Arc::new(move || Config {
+            claude: Ok(vec![test_python(), "-I".into(), "-c".into(),
+                "import os,runpy,sys; os.environ['FAKE_CLAUDE_SCENARIO']='tick'; os.environ['FAKE_CLAUDE_RECORD']=sys.argv[2]; sys.argv=[sys.argv[1]]+sys.argv[3:]; runpy.run_path(sys.argv[0],run_name='__main__')".into(),
+                fake.to_string_lossy().into_owned(), record.to_string_lossy().into_owned()]),
+            home: config_home.clone(), bin: config_home.join("bin"), clock: session::Clock::system(),
+        }),
+        tray: Box::new(tray::Recording::new(calls())),
+        desktop: Box::new(tray::Recording::new(calls())),
+        login: Box::new(login::Recording::new(calls())), login_launch: false,
+    }).unwrap();
+    let client = Client::connect(&home).unwrap();
+    let handle = client.start(service::StartRequest { wish: "test wish".into(), cwd: home.to_string_lossy().into_owned(), ..Default::default() }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let snapshot = loop {
+        let snapshot = client.snapshot().unwrap();
+        if snapshot.wishes.iter().any(|w| w.handle == handle && !w.log.is_empty()) { break snapshot; }
+        assert!(Instant::now() < deadline, "service did not produce a log");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    rig.engine.service_enabled = true;
+    rig.engine.service = Some(client.clone());
+    rig.engine.rebuild_service(snapshot);
+    let run = rig.engine.compose().pop().unwrap();
+    assert!(run.hosted);
+    assert!(run.log.iter().any(|l| l.text.contains("tick")));
+    rig.engine.hosted.clear();
+    rig.engine.subscription_failure(Failure::new("gap", "events lost"));
+    assert_eq!(rig.engine.hosted.len(), 1);
+    assert!(rig.engine.subscription.is_some());
+    rig.engine.wire_event(service::WireEvent {
+        seq: 0, instance: rig.engine.service_instance.clone(), handle: handle.clone(), session: None,
+        kind: "disk_paused".into(), data: serde_json::json!({"line":"disk full"}),
+    });
+    rig.engine.publish();
+    let mut state = state_with(vec![]);
+    apply(&mut state, rig.updates());
+    assert!(state.runs.iter().flat_map(|r| &r.log).any(|l| l.level == LogLevel::Warn && l.text.contains("disk full")));
+    assert!(state.errors.iter().any(|e| e.message.contains("disk full")));
+    rig.engine.shutdown();
+    assert!(!client.snapshot().unwrap().wishes.is_empty());
+    server.quit(true).unwrap();
+    server.wait();
+}
+
+#[test]
+fn confirm_quit_option_is_recognized() {
+    assert!(super::super::parse_options(&["--confirm-quit".into()]).unwrap().confirm_quit);
+    assert!(!super::super::parse_options(&[]).unwrap().confirm_quit);
+}
+
+#[test]
+fn quit_requested_event_updates_state_without_a_hosted_wish() {
+    let mut rig = rig();
+    let mut state = state_with(vec![]);
+    assert!(!state.feeds.quit_requested);
+    rig.engine.wire_event(service::WireEvent {
+        seq: 1, instance: "instance".into(), handle: String::new(), session: None,
+        kind: "quit_requested".into(), data: serde_json::json!({"running": true}),
+    });
+    apply(&mut state, rig.updates());
+    assert!(state.feeds.quit_requested);
+}
+
+#[test]
+fn service_snapshots_set_and_clear_login_start() {
+    let mut rig = rig();
+    let mut state = state_with(vec![]);
+    assert!(!state.feeds.login_start);
+    for on in [true, false] {
+        rig.engine.rebuild_service(service::Snapshot {
+            instance: "instance".into(), cursor: 0, login_start: on, wishes: vec![],
+        });
+        apply(&mut state, rig.updates());
+        assert_eq!(state.feeds.login_start, on);
+    }
 }

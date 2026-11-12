@@ -510,7 +510,24 @@ pub fn run_with_events(
         return finish(&dir, &existing, true);
     }
     let work = dir.join("council");
-    std::fs::create_dir_all(&work).map_err(io)?;
+    let store =
+        dir.ancestors()
+            .take_while(|p| p.file_name().is_none_or(|name| name != "scratch"))
+            .find(|p| {
+                let project = if crate::orch::store::is_wish_id(
+                    &p.file_name().unwrap_or_default().to_string_lossy(),
+                ) {
+                    p.parent().unwrap_or(p)
+                } else {
+                    p
+                };
+                project.parent().is_some_and(|parent| {
+                    parent.file_name().is_some_and(|name| name == "orchestrate")
+                }) && (p.join("units.tsv").is_file() || p.join("reports").is_dir())
+            })
+            .unwrap_or(&dir);
+    let (home, owner) = crate::orch::store::storage_context(store);
+    crate::storage::ensure_dir(&home, &work, crate::storage::Class::ResearchCache, &owner)?;
     let mut meter = Meter::open(
         &dir.join("council-spend.json"),
         &sha256(request.brief.as_bytes()),

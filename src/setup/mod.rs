@@ -199,23 +199,6 @@ fn remove_file(path: &Path) -> Res<()> {
         Err(e) => Err(failure(e)),
     }
 }
-fn remove_scratch(path: &Path) -> Res<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match fs::remove_dir_all(path) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e)
-                if cfg!(windows)
-                    && e.kind() == io::ErrorKind::PermissionDenied
-                    && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(10))
-            }
-            Err(e) => return Err(failure(e)),
-        }
-    }
-}
 // A per-step filesystem lock serializes start, completion and cancellation across processes.
 struct Lock(PathBuf);
 impl Drop for Lock {
@@ -249,8 +232,15 @@ pub fn start(store: &Path, repo: &Path) -> Res<Vec<StepStatus>> {
     for step in steps {
         let _guard = lock(&store, &step.id)?;
         if let Some(state) = read_state(&store, &step.id)? {
-            result.push(state);
-            continue;
+            if state.state != "paused"
+                || !state
+                    .reason
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("disk_space: "))
+            {
+                result.push(state);
+                continue;
+            }
         }
         let scratch = scratch_dir(&store, &["setup", &step.id]);
         let mut state = StepStatus {
@@ -268,7 +258,64 @@ pub fn start(store: &Path, repo: &Path) -> Res<Vec<StepStatus>> {
             result.push(state);
             continue;
         }
-        let env = proc::scratch_env(&scratch).map_err(failure)?;
+        let (home, owner) = crate::orch::store::storage_context(&store);
+        let policy = crate::storage::Policy::load(&home)?;
+        let kind = if step.id == "cargo-fetch" || !step.cache_dirs.is_empty() {
+            crate::storage::preflight::Kind::CacheBuild
+        } else {
+            crate::storage::preflight::Kind::SetupStep
+        };
+        let need =
+            crate::storage::preflight::need(&policy, kind, None, Some(&repo), Some(&step.id))?;
+        let probe = crate::storage::preflight::os_probe();
+        let reservation = match crate::storage::preflight::reserve(
+            &home,
+            probe.as_ref(),
+            &policy,
+            &repo,
+            kind,
+            need,
+            std::process::id(),
+            &step.id,
+        )? {
+            Ok(reservation) => reservation,
+            Err(check) => {
+                state.state = "paused".into();
+                state.reason = Some(format!("disk_space: {}", check.line()));
+                write_state(&store, &state)?;
+                crate::storage::ensure_dir(
+                    &home,
+                    &store.join("reports"),
+                    crate::storage::Class::Evidence,
+                    &owner,
+                )?;
+                crate::storage::preflight::notify_paused(
+                    &store,
+                    crate::storage::preflight::EVENT_PREFLIGHT_PAUSED,
+                    &check,
+                    serde_json::json!({"step": step.id}),
+                )?;
+                result.push(state);
+                continue;
+            }
+        };
+        for cache in &step.cache_dirs {
+            let cache_path = resolved_path(&repo.join(cache))?;
+            if !cache_path.starts_with(&repo) {
+                return Err(invalid("cache dir resolves outside the repository"));
+            }
+            crate::storage::register_quiet(
+                &home,
+                &cache_path,
+                crate::storage::Class::BuildCache,
+                &owner,
+                serde_json::json!({"worktree": repo}),
+            );
+        }
+        crate::storage::ensure_dir(&home, &scratch, crate::storage::Class::Scratch, &owner)?;
+        let lease = crate::storage::Ledger::open(&home)?.lease(&scratch)?;
+        let mut env = proc::scratch_env(&scratch).map_err(failure)?;
+        env.extend(crate::storage::worktree::worker_env(&home, &repo, &owner)?);
         let mut command = proc::cmd(&step.argv[0]);
         command
             .args(&step.argv[1..])
@@ -318,6 +365,8 @@ pub fn start(store: &Path, repo: &Path) -> Res<Vec<StepStatus>> {
                 child,
                 step.timeout_s,
                 index_file,
+                lease,
+                reservation,
             )
         });
         result.push(state);
@@ -331,6 +380,8 @@ fn supervise(
     mut child: Child,
     timeout: u64,
     index_file: Option<fs::File>,
+    lease: crate::storage::Lease,
+    reservation: crate::storage::preflight::Reservation,
 ) {
     let drain = if let Some(mut file) = index_file {
         let mut out = child.stdout.take().unwrap();
@@ -369,6 +420,8 @@ fn supervise(
         .and_then(|d| d.join().ok())
         .and_then(Result::err)
         .map(|e| e.to_string());
+    drop(lease);
+    drop(reservation);
     if let Ok(_guard) = lock(&store, &state.id) {
         if let Ok(Some(mut current)) = read_state(&store, &state.id) {
             if current.state != "running" || current.pid != state.pid {
@@ -461,7 +514,57 @@ pub fn cancel(store: &Path, ids: Option<&[String]>, reason: &str) -> Res<Vec<Ste
             }
         }
         remove_file(&marker(store, &state.id))?;
-        remove_scratch(&state.scratch)?;
+        let (home, owner) = crate::orch::store::storage_context(store);
+        let expected = scratch_dir(store, &["setup", &state.id]);
+        if crate::storage::ledger::normalize(&state.scratch)
+            != crate::storage::ledger::normalize(&expected)
+        {
+            return Err(invalid("setup scratch path does not match the step"));
+        }
+        if state.scratch.is_dir()
+            && crate::storage::Ledger::open(&home)?
+                .get(&state.scratch)?
+                .map_or(true, |entry| {
+                    entry.state == crate::storage::EntryState::Deleted
+                })
+        {
+            crate::storage::Ledger::open(&home)?.register(
+                &state.scratch,
+                crate::storage::Class::Scratch,
+                &owner,
+                serde_json::json!({}),
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut cancellation_recorded = false;
+        loop {
+            if !cancellation_recorded {
+                let cancelled = crate::storage::retention::remove_scratch(
+                    &home, &state.scratch, &owner, "cancelled", true,
+                );
+                if cancelled.outcome != "cancelled" {
+                    return Err(Failure::new("storage", cancelled.outcome));
+                }
+                cancellation_recorded = true;
+            }
+            let outcome = crate::storage::retention::remove_scratch(
+                &home,
+                &state.scratch,
+                &owner,
+                "cancelled",
+                false,
+            );
+            if outcome.outcome == "done"
+                || (outcome.outcome == "skipped: entry is not present" && !state.scratch.exists())
+            {
+                break;
+            }
+            if outcome.outcome == "skipped: in use" && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            } else {
+                return Err(Failure::new("storage", outcome.outcome));
+            }
+        }
     }
     status(store)
 }

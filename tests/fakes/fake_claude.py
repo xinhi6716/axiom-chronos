@@ -46,6 +46,25 @@ first = incoming.get()
 if first is None:
     sys.exit(0)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'failed' if scenario == 'no-bridge' else 'connected'}]})
+if scenario == 'tick':
+    emit_lock = threading.Lock()
+    def emit_text(text):
+        with emit_lock:
+            emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+    def ticker():
+        n = 0
+        while True:
+            time.sleep(int(os.environ.get('FAKE_CLAUDE_TICK_MS', '200')) / 1000)
+            n += 1
+            emit_text(f'tick {n}')
+    threading.Thread(target=ticker, daemon=True).start()
+    while True:
+        message = incoming.get()
+        if message is None:
+            # Keep ticking until killed, even after stdin closes.
+            threading.Event().wait()
+        text = message.get('message', {}).get('content', [{}])[0].get('text', '')
+        emit_text(f'heard: {text}')
 if scenario == 'alive':
     time.sleep(int(os.environ.get('FAKE_CLAUDE_ALIVE_MS', '800')) / 1000)
     path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')

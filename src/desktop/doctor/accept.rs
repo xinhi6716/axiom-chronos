@@ -91,6 +91,41 @@ fn source_guard_has_negative_controls() {
         assert!(!has_frame_call(source));
     }
 }
+
+fn login_start_before_mini_on_top(source: &str) -> bool {
+    let code = source.split("#[cfg(test)]").next().unwrap();
+    let code = code.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    let Some((_, preferences)) = code.split_once("fn preferences(") else { return false; };
+    let Some((before_mini, _)) = preferences.split_once(".child(preference_row(&t, d, tr(cx, T, \"Mini window always on top\")") else { return false; };
+    before_mini.trim_end().ends_with(".child(settings::login_start_row(&self.state, cx))")
+}
+
+#[test]
+fn login_start_row_is_immediately_before_mini_on_top() {
+    let source = include_str!("../doctor.rs");
+    let row = ".child(settings::login_start_row(&self.state, cx))";
+    let mini = ".child(preference_row(&t, d, tr(cx, T, \"Mini window always on top\"), None, switch))";
+    assert!(login_start_before_mini_on_top(source));
+    for sample in [
+        source.replace(row, ""),
+        format!("fn preferences() {{\n{mini}\n{row}\n}}"),
+        format!("fn preferences() {{\n// {row}\n{mini}\n}}"),
+    ] {
+        assert!(!login_start_before_mini_on_top(&sample));
+    }
+}
+
+#[test]
+fn login_start_switch_uses_the_default_off_feed() {
+    // Root lib tests lack gpui-kit test-support; guard the existing row's binding.
+    assert!(!super::super::demo::state().feeds.login_start);
+    let source = include_str!("../settings.rs");
+    let row = source.split_once("pub fn login_start_row(").unwrap().1
+        .split("pub(super) fn set_login_start(").next().unwrap();
+    assert!(row.contains("let checked = state.read(cx).feeds.login_start;"));
+    assert!(row.contains("Switch::new(\"login-start\").checked(checked)"));
+}
+
 #[test]
 fn new_translations_are_present() {
     for key in ["Codex parallel limit", "Codex parallel limit must be a positive whole number.", "Invalid limit: {} = {}. {}", "Advanced research budgets", "Fable dollars", "Astra tokens", "Argon tokens (one review)", "Maximum council rounds", "Fable must be a positive dollar amount, at most $200; a larger cap is probably a typo.", "Tokens and rounds must be positive whole numbers.", "Saved for the next wish. Advanced research stays off until you turn it on.", "Invalid budget: {} = {}. {}", "Summary board", "luna", "Haiku", "Off", "luna uses Codex quota, Haiku uses Claude quota, off costs nothing.", "Density", "Comfortable", "Dense", "Mini window always on top", "Keeps the mini window above other windows.", "Checking the environment…", "Try again"] {

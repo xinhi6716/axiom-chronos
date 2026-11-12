@@ -113,7 +113,7 @@ fn invalid(s: impl Into<String>) -> Failure {
 }
 fn rows(store: &Path, name: &str) -> Res<Vec<Evidence>> {
     let path = store.join("reports").join(format!("{name}.evidence.tsv"));
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::storage::archive::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(io(e)),
@@ -157,6 +157,8 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
     if !["_full", "_stages"].contains(&unit) {
         base::require_slug("unit", unit)?;
     }
+    let path = store.join("reports").join(format!("{unit}.evidence.tsv"));
+    crate::storage::archive::restore(&path).map_err(io)?;
     let mut all = rows(store, unit)?;
     if unit == "_stages" {
         let dir = store.join("reports");
@@ -183,7 +185,12 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
             )
             .as_bytes(),
         );
-        std::fs::create_dir_all(&dir).map_err(io)?;
+        crate::storage::ensure_dir(
+            &super::store::storage_context(store).0,
+            &dir,
+            crate::storage::Class::Evidence,
+            &super::store::storage_context(store).1,
+        )?;
         return base::atomic_write(&path, &text).map_err(io);
     }
     all.push(row.clone());
@@ -200,7 +207,12 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
         ));
     }
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
 }
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -452,11 +464,21 @@ pub fn scratch_dir(store: &Path, parts: &[&str]) -> PathBuf {
         .fold(store.join("scratch"), |path, part| path.join(part))
 }
 
-fn run_scratch(command: &str, repo: &Path, dir: &Path) -> Res<ShellRun> {
-    let result = base::proc::scratch_env(dir)
-        .map_err(io)
-        .and_then(|env| base::proc::run_shell_env(command, repo, Duration::from_secs(1800), &env));
-    let _ = std::fs::remove_dir_all(dir);
+fn run_scratch(store: &Path, command: &str, repo: &Path, dir: &Path) -> Res<ShellRun> {
+    let (home, owner) = super::store::storage_context(store);
+    crate::storage::ensure_dir(&home, dir, crate::storage::Class::Scratch, &owner)?;
+    let lease = crate::storage::Ledger::open(&home)?.lease(dir)?;
+    let result = (|| {
+        let mut env = base::proc::scratch_env(dir).map_err(io)?;
+        env.extend(crate::storage::worktree::worker_env(&home, repo, &owner)?);
+        base::proc::run_shell_env(command, repo, Duration::from_secs(1800), &env)
+    })();
+    drop(lease);
+    let cleanup =
+        crate::storage::retention::remove_scratch(&home, dir, &owner, "unit_ended", false);
+    if cleanup.outcome != "done" {
+        return Err(Failure::new("storage", cleanup.outcome));
+    }
     result
 }
 
@@ -475,11 +497,17 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .map(|u| unit_brief(store, &u.id).map(|b| b.scope))
         .collect::<Res<Vec<_>>>()?;
     let result = run_scratch(
+        store,
         &m.accept_command,
         repo,
         &scratch_dir(store, &[&format!("accept-{module}"), &base::unique()]),
     )?;
-    std::fs::create_dir_all(store.join("reports")).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &store.join("reports"),
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     base::atomic_write(&accept_output_path(store, module), result.output.as_bytes()).map_err(io)?;
     for (u, scope) in units.into_iter().zip(scopes) {
         append_check(
@@ -513,12 +541,18 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
     }
     let brief = unit_brief(store, unit)?;
     let result = run_scratch(
+        store,
         &brief.verify,
         repo,
         &scratch_dir(store, &[unit, &format!("verify-{}", base::unique())]),
     )?;
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     base::atomic_write(
         &dir.join(format!("{unit}.verify.txt")),
         result.output.as_bytes(),
@@ -552,6 +586,7 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
         }
     };
     let result = run_scratch(
+        store,
         &command,
         repo,
         &scratch_dir(store, &["fulltest", &base::unique()]),
@@ -612,7 +647,12 @@ pub fn record_external_full(
         .rev()
         .collect();
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     let saved = format!("_full.external-{}.txt", base::unique());
     base::atomic_write(&dir.join(&saved), output.as_bytes()).map_err(io)?;
     append_evidence(

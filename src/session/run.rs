@@ -2,6 +2,7 @@ use super::{command, user_message, Config, Renderer};
 use crate::{
     base::{self, Failure, Res},
     codegraph, council, engine, goal, hook, orch, provenance, setup,
+    storage::{self, preflight, retention, Class, Owner, Policy},
 };
 use serde_json::{json, Value};
 use std::{
@@ -274,6 +275,7 @@ pub fn resume_target(
             )
         })?
         .to_path_buf();
+    goal::resume_disk_space(&config.home, session, &*preflight::os_probe())?;
     let prompt = match message {
         Some(text) => {
             goal::reopen(&config.home, session)?;
@@ -373,6 +375,12 @@ pub struct Spawned {
     codex_max_parallel: u64,
 }
 
+impl Spawned {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
 /// What a launch opts in to. The default is a launch exactly as it has always been.
 #[derive(Debug, Clone, Default)]
 pub struct Launch {
@@ -380,6 +388,7 @@ pub struct Launch {
     pub advanced_research: bool,
     pub council_budgets: Option<council::Budgets>,
     pub codex_max_parallel: Option<u64>,
+    pub need_bytes: Option<u64>,
 }
 
 pub fn spawn(
@@ -410,7 +419,62 @@ pub fn spawn_with(
     resume: Option<&str>,
     launch: &Launch,
 ) -> Res<Spawned> {
+    spawn_internal(
+        config, skill, text, project, max_turns, resume, launch, true,
+    )
+}
+
+fn spawn_internal(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    resume: Option<&str>,
+    launch: &Launch,
+    preflight_start: bool,
+) -> Res<Spawned> {
     base::require_slug("skill", skill)?;
+    if preflight_start && skill == "wish" {
+        let policy = Policy::load(&config.home)?;
+        let probe = preflight::os_probe();
+        let need = preflight::need(
+            &policy,
+            preflight::Kind::Wish,
+            launch.need_bytes,
+            Some(project),
+            None,
+        )?;
+        for path in [project, config.home.as_path()] {
+            let check = preflight::check(
+                &config.home,
+                &*probe,
+                &policy,
+                path,
+                preflight::Kind::Wish,
+                need,
+            )?;
+            if !check.ok {
+                let line = check.line();
+                if let Some(id) = resume {
+                    let _ = goal::disk_pause(&config.home, id, &line)?;
+                    if let Some(goal) = goal::load(&config.home, id)? {
+                        if let Ok(store) = orch::store_for_goal(&config.home, &goal) {
+                            if store.is_dir() {
+                                preflight::notify_paused(
+                                    &store,
+                                    preflight::EVENT_PREFLIGHT_PAUSED,
+                                    &check,
+                                    json!({"session": id}),
+                                )?;
+                            }
+                        }
+                    }
+                }
+                return Err(Failure::new(preflight::REASON, line));
+            }
+        }
+    }
     let codex_max_parallel = match launch.codex_max_parallel {
         Some(n) => crate::codex::slots::parse(Some(n.to_string())).map_err(Failure::from)?,
         None => crate::codex::slots::from_env()?,
@@ -444,7 +508,21 @@ pub fn spawn_with(
         argv.extend(["--resume".into(), id.into()]);
     }
     let logs = config.home.join("logs");
-    std::fs::create_dir_all(&logs).map_err(failure)?;
+    let system_owner = Owner {
+        project: storage::SYSTEM_PROJECT.into(),
+        wish: None,
+    };
+    storage::ensure_dir(&config.home, &logs, Class::Logs, &system_owner)?;
+    let owner = resume
+        .and_then(|id| goal::load(&config.home, id).ok().flatten())
+        .map(|g| Owner {
+            project: g.project.unwrap_or_else(|| storage::SYSTEM_PROJECT.into()),
+            wish: g.wish_id,
+        })
+        .unwrap_or(system_owner);
+    if storage::worktree::is_linked_worktree(project).unwrap_or(false) {
+        let _ = storage::worktree::register(&config.home, project, &owner);
+    }
     let now = (config.clock.now)();
     let stamp = log_stamp(now, local_offset_secs(now));
     let (log_path, mut log) = (0u64..)
@@ -593,9 +671,9 @@ pub(super) fn forward_input_keeping(
     });
 }
 
-fn wait_until(config: &Config, at: i64, stop: &AtomicBool) -> bool {
+fn wait_until(config: &Config, at: i64, stop: &AtomicBool, disk_stop: &AtomicBool) -> bool {
     loop {
-        if stop.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) || disk_stop.load(Ordering::SeqCst) {
             return false;
         }
         let remaining = at - (config.clock.now)();
@@ -618,15 +696,41 @@ pub fn drive(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
 ) -> Res<i32> {
-    let session = Arc::new(Mutex::new(None::<String>));
-    let heartbeat = Heartbeats::start(config.home.clone(), Arc::clone(&session));
-    let result = drive_inner(spawned, config, out, stop, observe, &session);
-    drop(heartbeat);
-    if let Some(store) = session_store(&config.home, &session) {
-        let _ = orch::events::close_open_activities(&store, None, "exit");
-        let _ = setup::cancel_all(&store, "session_end");
-    }
-    result
+    std::thread::scope(|scope| {
+        let session = Arc::new(Mutex::new(None::<String>));
+        let paused = Arc::new(Mutex::new(None::<(String, String)>));
+        let disk_error = Arc::new(Mutex::new(None::<Failure>));
+        let disk_stop = Arc::new(AtomicBool::new(false));
+        let heartbeat = Heartbeats::start(
+            scope,
+            config,
+            spawned.project.clone(),
+            Arc::clone(&session),
+            Arc::clone(&paused),
+            Arc::clone(&disk_error),
+            Arc::clone(&disk_stop),
+        );
+        let mut result = drive_inner(
+            spawned,
+            config,
+            out,
+            stop,
+            observe,
+            &session,
+            &paused,
+            &disk_error,
+            &disk_stop,
+        );
+        drop(heartbeat);
+        if disk_stop.load(Ordering::SeqCst) && !matches!(result, Ok(75) | Err(_)) {
+            result = disk_outcome(out, observe, &paused, &disk_error);
+        }
+        if let Some(store) = session_store(&config.home, &session) {
+            let _ = orch::events::close_open_activities(&store, None, "exit");
+            let _ = setup::cancel_all(&store, "session_end");
+        }
+        result
+    })
 }
 
 fn session_store(home: &Path, session: &Mutex<Option<String>>) -> Option<PathBuf> {
@@ -636,25 +740,102 @@ fn session_store(home: &Path, session: &Mutex<Option<String>>) -> Option<PathBuf
     store.is_dir().then_some(store)
 }
 
-struct Heartbeats {
-    stop: mpsc::Sender<()>,
-    thread: Option<std::thread::JoinHandle<()>>,
+// Checks both volumes, cleans once, then records the pause before returning its line.
+// The wait path only stops registered managed writers; a heartbeat also stops the goal batch.
+pub(super) fn pause_for_low_disk(
+    home: &Path,
+    project: &Path,
+    session: &str,
+    now_ms: i64,
+    kill_batch: bool,
+) -> Res<Option<String>> {
+    let policy = Policy::load(home)?;
+    let probe = preflight::os_probe();
+    let check = |path: &Path| preflight::low_disk(home, &*probe, &policy, path);
+    let project_low = check(project)?;
+    let home_low = check(home)?;
+    if project_low.is_none() && home_low.is_none() {
+        return Ok(None);
+    }
+    let outcome = retention::pressure_cleanup(home, &policy, now_ms)?;
+    let Some(low) = check(project)?.or(check(home)?) else {
+        return Ok(None);
+    };
+    let batch = if kill_batch {
+        goal::load(home, session)?.and_then(|g| g.batch)
+    } else {
+        None
+    };
+    super::launch::stop_managed(home, session)?;
+    if let Some(batch) = batch {
+        let _ = base::proc::kill_pid_tree(batch.pid);
+    }
+    let line = low.line();
+    if let Some(goal) = goal::disk_pause(home, session, &line)? {
+        if let Ok(store) = orch::store_for_goal(home, &goal) {
+            if store.is_dir() {
+                preflight::notify_paused(
+                    &store,
+                    preflight::EVENT_DISK_PAUSE,
+                    &low,
+                    json!({"freed_bytes": outcome.freed_bytes, "records": outcome.records.len()}),
+                )?;
+            }
+        }
+    }
+    Ok(Some(line))
 }
-impl Heartbeats {
-    fn start(home: PathBuf, session: Arc<Mutex<Option<String>>>) -> Self {
+
+struct Heartbeats<'scope> {
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::ScopedJoinHandle<'scope, ()>>,
+}
+impl<'scope> Heartbeats<'scope> {
+    fn start(
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        config: &'scope Config,
+        project: PathBuf,
+        session: Arc<Mutex<Option<String>>>,
+        paused: Arc<Mutex<Option<(String, String)>>>,
+        disk_error: Arc<Mutex<Option<Failure>>>,
+        disk_stop: Arc<AtomicBool>,
+    ) -> Self {
+        let home = config.home.clone();
         let interval = std::env::var("AXIOM_HEARTBEAT_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30_000)
             .max(100);
         let (stop, rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
+        let thread = scope.spawn(move || {
+            let mut last_announce: Option<std::time::Instant> = None;
             while matches!(
                 rx.recv_timeout(Duration::from_millis(interval)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
+                let now = (config.clock.now)().saturating_mul(1000);
+                if last_announce.is_none_or(|last| last.elapsed() >= Duration::from_secs(600)) {
+                    let _ = storage::worktree::announce_merged(&home, now);
+                    last_announce = Some(std::time::Instant::now());
+                }
                 if let Some(store) = session_store(&home, &session) {
                     let _ = orch::events::heartbeat(&store);
+                }
+                let id = session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(id) = id {
+                    match pause_for_low_disk(&home, &project, &id, now, true) {
+                        Ok(None) => {}
+                        Ok(Some(line)) => {
+                            *paused.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, line));
+                            disk_stop.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        Err(error) => {
+                            *disk_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+                            disk_stop.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -664,7 +845,7 @@ impl Heartbeats {
         }
     }
 }
-impl Drop for Heartbeats {
+impl Drop for Heartbeats<'_> {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
@@ -680,6 +861,9 @@ fn drive_inner(
     stop: &AtomicBool,
     observe: &mut dyn FnMut(&Value),
     session: &Arc<Mutex<Option<String>>>,
+    paused: &Mutex<Option<(String, String)>>,
+    disk_error: &Mutex<Option<Failure>>,
+    disk_stop: &AtomicBool,
 ) -> Res<i32> {
     let writer = Arc::clone(&spawned.writer);
     let (skill, project, max_turns) = (
@@ -690,7 +874,9 @@ fn drive_inner(
     let codex_max_parallel = spawned.codex_max_parallel;
     let mut spawned = spawned;
     loop {
-        let outcome = drive_once(spawned, config, out, stop, observe, max_turns, session)?;
+        let outcome = drive_once(
+            spawned, config, out, stop, observe, max_turns, session, paused, disk_error, disk_stop,
+        )?;
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
@@ -706,7 +892,10 @@ fn drive_inner(
         );
         let _ = out.flush();
         observe(&json!({"type":"chronos","subtype":"limit_wait","session":session,"until":at}));
-        if !wait_until(config, at, stop) {
+        if !wait_until(config, at, stop, disk_stop) {
+            if disk_stop.load(Ordering::SeqCst) {
+                return disk_outcome(out, observe, paused, disk_error);
+            }
             let _ = writeln!(out, "interrupted; resume: axiom wish --resume {session}");
             let _ = out.flush();
             return Ok(130);
@@ -716,7 +905,7 @@ fn drive_inner(
             codex_max_parallel: Some(codex_max_parallel),
             ..Launch::default()
         };
-        let mut next = spawn_with(
+        let mut next = spawn_internal(
             config,
             &skill,
             &prompt,
@@ -724,12 +913,29 @@ fn drive_inner(
             max_turns,
             Some(&session),
             &launch,
+            false,
         )?;
         *writer.lock().unwrap_or_else(|e| e.into_inner()) =
             next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
         next.writer = Arc::clone(&writer);
         spawned = next;
     }
+}
+fn disk_outcome(
+    out: &mut dyn Write,
+    observe: &mut dyn FnMut(&Value),
+    paused: &Mutex<Option<(String, String)>>,
+    error: &Mutex<Option<Failure>>,
+) -> Res<i32> {
+    if let Some(error) = error.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        return Err(error);
+    }
+    if let Some((id, line)) = paused.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+        observe(&json!({"type":"chronos", "subtype":"disk_pause", "session":id, "line":line}));
+    }
+    Ok(75)
 }
 struct Outcome {
     code: i32,
@@ -743,6 +949,9 @@ fn drive_once(
     observe: &mut dyn FnMut(&Value),
     max_turns: Option<u32>,
     shared_session: &Mutex<Option<String>>,
+    paused: &Mutex<Option<(String, String)>>,
+    disk_error: &Mutex<Option<Failure>>,
+    disk_stop: &AtomicBool,
 ) -> Res<Outcome> {
     let Spawned {
         mut child,
@@ -764,6 +973,10 @@ fn drive_once(
     let mut last_refusal = None::<String>;
     let idle_limit = goal::progress::idle_limit();
     let result: Res<i32> = loop {
+        if disk_stop.load(Ordering::SeqCst) {
+            base::proc::kill_tree(&mut child);
+            break disk_outcome(out, observe, paused, disk_error);
+        }
         if stop.load(Ordering::SeqCst) {
             base::proc::kill_tree(&mut child);
             cause = Some("interrupted by the user".to_string());

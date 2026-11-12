@@ -10,12 +10,32 @@ mod feed;
 mod undo;
 mod menu;
 mod board;
-pub use feed::*;
+pub use feed::{FeedKind, FeedStatus, PanelState, panel_state};
 pub use undo::*;
 pub use menu::*;
 pub use board::*;
 #[cfg(test)]
 mod accept;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Feeds {
+    pub runs: FeedStatus,
+    pub memory: FeedStatus,
+    pub checks: FeedStatus,
+    pub usage: FeedStatus,
+    pub quota: FeedStatus,
+    pub quit_requested: bool,
+    pub login_start: bool,
+}
+
+impl Feeds {
+    pub fn get(&self, kind: FeedKind) -> &FeedStatus {
+        match kind { FeedKind::Runs => &self.runs, FeedKind::Memory => &self.memory, FeedKind::Checks => &self.checks, FeedKind::Usage => &self.usage, FeedKind::Quota => &self.quota }
+    }
+    pub fn get_mut(&mut self, kind: FeedKind) -> &mut FeedStatus {
+        match kind { FeedKind::Runs => &mut self.runs, FeedKind::Memory => &mut self.memory, FeedKind::Checks => &mut self.checks, FeedKind::Usage => &mut self.usage, FeedKind::Quota => &mut self.quota }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -458,8 +478,10 @@ pub trait Backend: 'static {
     fn recheck(&self) -> Res<()>;
     /// The user is looking at this run: read its logs and usage in full.
     fn follow(&self, session: &str) -> Res<()>;
-    /// The window is closing: end the engine, which stops every wish this app hosts, and wait at
-    /// most `wait` for that to finish. Safe to call more than once.
+    fn quit_service(&self, _stop_running: bool) -> Res<()> { Err(Failure::new("unsupported", "service quit is not supported")) }
+    fn set_login_start(&self, _on: bool) -> Res<()> { Err(Failure::new("unsupported", "login start is not supported")) }
+    /// Detach from the service, waiting at most `wait`; wishes continue running.
+    /// Safe to call more than once.
     fn shutdown(&self, _wait: Duration) {}
 }
 

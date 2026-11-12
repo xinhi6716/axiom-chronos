@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+pub mod ipc;
 pub mod proc;
 pub mod schema;
 #[derive(Serialize, Debug, Clone, PartialEq)]

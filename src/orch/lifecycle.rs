@@ -783,13 +783,30 @@ pub fn finish_unit(
         (c.dirty.clone(), had_peers, c.base.clone())
     };
     let _release = Release(store, unit, attempt_id);
-    struct ScratchCleanup(PathBuf);
+    struct ScratchCleanup(PathBuf, PathBuf, crate::storage::Owner);
     impl Drop for ScratchCleanup {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let result = crate::storage::retention::remove_scratch(
+                &self.1,
+                &self.0,
+                &self.2,
+                "unit_ended",
+                false,
+            );
+            if result.outcome != "done" {
+                eprintln!("scratch cleanup: {}", result.outcome);
+            }
         }
     }
-    let _scratch = ScratchCleanup(scratch_dir(store, &[unit, attempt_id]));
+    let (home, owner) = super::store::storage_context(store);
+    let attempt_scratch = scratch_dir(store, &[unit, attempt_id]);
+    crate::storage::ensure_dir(
+        &home,
+        &attempt_scratch,
+        crate::storage::Class::Scratch,
+        &owner,
+    )?;
+    let _scratch = ScratchCleanup(attempt_scratch, home.clone(), owner.clone());
     let status = report
         .get("status")
         .and_then(Value::as_str)
@@ -812,7 +829,7 @@ pub fn finish_unit(
         ),
     )?;
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(|e| Failure::new("io", e.to_string()))?;
+    crate::storage::ensure_dir(&home, &dir, crate::storage::Class::Evidence, &owner)?;
     let md = dir.join(format!("{unit}.md"));
     base::atomic_write(
         &md,
@@ -903,11 +920,23 @@ pub fn finish_unit(
     let mut pack = None;
     let mut pack_error = None;
     if status == "completed" && outside_scope.is_empty() {
-        let verify_env =
-            base::proc::scratch_env(&scratch_dir(store, &[unit, attempt_id, "verify"]))
-                .map_err(|e| Failure::new("io", e.to_string()))?;
-        match base::proc::run_shell_env(&brief.verify, repo, Duration::from_secs(1800), &verify_env)
-        {
+        let verify_scratch = scratch_dir(store, &[unit, attempt_id, "verify"]);
+        crate::storage::ensure_dir(
+            &home,
+            &verify_scratch,
+            crate::storage::Class::Scratch,
+            &owner,
+        )?;
+        let verify_cleanup = ScratchCleanup(verify_scratch.clone(), home.clone(), owner.clone());
+        let lease = crate::storage::Ledger::open(&home)?.lease(&verify_scratch)?;
+        let mut verify_env = base::proc::scratch_env(&verify_scratch)
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        verify_env.extend(crate::storage::worktree::worker_env(&home, repo, &owner)?);
+        let verify_result =
+            base::proc::run_shell_env(&brief.verify, repo, Duration::from_secs(1800), &verify_env);
+        drop(lease);
+        drop(verify_cleanup);
+        match verify_result {
             Ok(result) => {
                 verify_exit = Some(result.exit_code);
                 let path = dir.join(format!("{unit}.verify.txt"));

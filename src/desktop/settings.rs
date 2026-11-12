@@ -3,7 +3,7 @@
 use super::i18n::{self, Lang};
 use super::model::{AppState, Screen};
 use super::theme;
-use super::theme::Density;
+use super::theme::{Density, Step, TypeSize};
 use std::collections::BTreeMap;
 
 mod mod_types;
@@ -12,11 +12,44 @@ pub use mod_types::*;
 mod accept;
 use crate::base;
 use gpui_kit::component::ThemeMode;
+use gpui_kit::component::{switch::Switch, v_flex};
 use gpui_kit::*;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const TEXT: i18n::Table = &[("Start at login", "登入時啟動")];
+
+/// A service-owned preference row for the settings panel.
+pub fn login_start_row(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let d = theme::density(cx);
+    let label = i18n::tr(cx, TEXT, "Start at login");
+    let checked = state.read(cx).feeds.login_start;
+    let state = state.clone();
+    v_flex()
+        .py(theme::space(d, Step::Xs))
+        .gap(theme::space(d, Step::Xs))
+        .child(v_flex().min_w_0().child(div().text_size(theme::font(d, TypeSize::Body)).child(label)))
+        .child(div().flex_shrink_0().child(
+            Switch::new("login-start").checked(checked).accessibility_label(label).on_click(move |on, _, cx| {
+                state.update(cx, |state, cx| {
+                    set_login_start(state, *on);
+                    cx.notify();
+                });
+            }),
+        ))
+}
+
+/// The service owns this setting; never persist it in the desktop preferences.
+pub(super) fn set_login_start(state: &mut AppState, on: bool) {
+    let result = state.backend.as_ref().map(|backend| backend.set_login_start(on));
+    match result {
+        Some(Ok(())) => (),
+        Some(Err(error)) => state.report(super::model::Action::Engine, None, error.message),
+        None => state.report(super::model::Action::Engine, None, "Not connected to the engine."),
+    }
+}
 
 const FILE_NAME: &str = "app-settings.json";
 const MAX_RECENT_PROJECTS: usize = 12;

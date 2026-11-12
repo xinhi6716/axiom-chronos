@@ -17,6 +17,34 @@ const MAX_COVERAGE: usize = 6_000;
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
 }
+fn report_evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
+    let path = store.join("reports").join(format!("{unit}.evidence.tsv"));
+    let text = match crate::storage::archive::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(io(e)),
+    };
+    let mut lines = text.lines();
+    if lines.next() != Some("kind\tcommand\texit_code\tcommit\tts") {
+        return Err(Failure::new("invalid_argument", "invalid evidence header"));
+    }
+    lines.filter(|line| !line.is_empty()).map(|line| {
+        let c: Vec<_> = line.split('\t').collect();
+        if c.len() != 5 { return Err(Failure::new("invalid_argument", "malformed evidence row")); }
+        Ok(Evidence {
+            kind: c[0].into(), command: c[1].into(),
+            exit_code: c[2].parse().map_err(|_| Failure::new("invalid_argument", "invalid evidence exit code"))?,
+            commit: c[3].into(), ts: c[4].into(),
+        })
+    }).collect()
+}
+fn evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
+    base::require_slug("unit", unit)?;
+    report_evidence(store, unit)
+}
+fn full_evidence(store: &Path) -> Res<Vec<Evidence>> {
+    report_evidence(store, "_full")
+}
 fn cut(text: &str, max: usize) -> (String, bool) {
     let mut chars = text.chars();
     let head: String = chars.by_ref().take(max).collect();
@@ -326,7 +354,7 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         }
     };
     let report = store.join("reports").join(format!("{unit}.json"));
-    let reported: BTreeSet<String> = match std::fs::read_to_string(&report) {
+    let reported: BTreeSet<String> = match crate::storage::archive::read_to_string(&report) {
         Ok(text) => serde_json::from_str::<Value>(&text)
             .map(|v| report_paths(&v, repo).into_iter().collect())
             .unwrap_or_default(),
@@ -376,7 +404,7 @@ fn unit_paths(
     notes: &mut Vec<String>,
 ) -> Res<BTreeSet<String>> {
     let mut paths: BTreeSet<String> =
-        match std::fs::read_to_string(store.join("reports").join(format!("{unit}.json"))) {
+        match crate::storage::archive::read_to_string(&store.join("reports").join(format!("{unit}.json"))) {
             Ok(text) => serde_json::from_str::<Value>(&text)
                 .map(|v| report_paths(&v, repo).into_iter().collect())
                 .unwrap_or_default(),

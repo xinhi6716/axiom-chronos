@@ -36,7 +36,7 @@ fn parse_runs(bytes: &[u8]) -> Res<(Vec<RunRecord>, usize)> {
     Ok((rows, offset))
 }
 fn load(store: &Path) -> Res<(Vec<RunRecord>, usize)> {
-    match fs::read(store.join("receipts/runs.jsonl")) {
+    match crate::storage::archive::read(&store.join("receipts/runs.jsonl")) {
         Ok(bytes) => parse_runs(&bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((vec![], 0)),
         Err(e) => Err(io(e)),
@@ -52,6 +52,7 @@ pub fn record_run(store: &Path, record: &RunRecord) -> Res<()> {
         .open(dir.join("runs.lock"))
         .map_err(io)?;
     lock.lock().map_err(io)?;
+    crate::storage::archive::restore(&dir.join("runs.jsonl")).map_err(io)?;
     let (_, len) = load(store)?;
     let mut file = OpenOptions::new()
         .read(true)

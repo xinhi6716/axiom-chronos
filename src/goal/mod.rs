@@ -198,6 +198,76 @@ pub fn interrupt(home: &Path, session: &str, cause: &str) -> Res<Option<Goal>> {
     save(home, session, &goal)?;
     Ok(Some(goal))
 }
+pub fn disk_pause(home: &Path, session: &str, line: &str) -> Res<Option<Goal>> {
+    let _lock = lock(home)?;
+    let Some(mut goal) = load(home, session)? else {
+        return Ok(None);
+    };
+    if !matches!(goal.status.as_str(), "active" | "waiting") {
+        return Ok(None);
+    }
+    leave_waiting(&mut goal, None);
+    goal.status = "blocked".into();
+    goal.reason = Some(crate::storage::preflight::REASON.into());
+    goal.note = Some(format!("{line} Resume with: axiom wish --resume {session}"));
+    goal.batch = None;
+    goal.interjection = None;
+    save(home, session, &goal)?;
+    Ok(Some(goal))
+}
+
+pub fn resume_disk_space(
+    home: &Path,
+    session: &str,
+    probe: &dyn crate::storage::preflight::Probe,
+) -> Res<()> {
+    use crate::storage::{preflight, Policy};
+
+    let _lock = lock(home)?;
+    let Some(mut goal) = load(home, session)? else {
+        return Ok(());
+    };
+    if goal.status != "blocked" || goal.reason.as_deref() != Some(preflight::REASON) {
+        return Ok(());
+    }
+    let cwd = goal
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .ok_or_else(|| Failure::new("invalid_argument", "goal has no working directory"))?;
+    let policy = Policy::load(home)?;
+    let need = preflight::need(&policy, preflight::Kind::Wish, None, Some(cwd), None)?;
+    let cwd_check = preflight::check(home, probe, &policy, cwd, preflight::Kind::Wish, need)?;
+    if !cwd_check.ok {
+        return Err(Failure::new(preflight::REASON, cwd_check.line()));
+    }
+    let check = preflight::check(home, probe, &policy, home, preflight::Kind::Wish, need)?;
+    if !check.ok {
+        return Err(Failure::new(preflight::REASON, check.line()));
+    }
+    let store = crate::orch::store_for_goal(home, &goal)?;
+    crate::orch::events::append_event(
+        &store,
+        preflight::EVENT_DISK_RESUMED,
+        None,
+        None,
+        serde_json::json!(check),
+    )?;
+    goal.reason = None;
+    save(home, session, &goal)
+}
+
+pub fn set_other(home: &Path, session: &str, key: &str, value: Value) -> Res<Goal> {
+    let _lock = lock(home)?;
+    let mut goal = required(home, session)?;
+    if value.is_null() {
+        goal.other.remove(key);
+    } else {
+        goal.other.insert(key.into(), value);
+    }
+    save(home, session, &goal)?;
+    Ok(goal)
+}
 pub fn cut_off(home: &Path, session: &str, turn_limit: u32) -> Res<Option<Goal>> {
     let _lock = lock(home)?;
     let Some(mut goal) = load(home, session)? else {
@@ -519,6 +589,10 @@ pub fn accept_hold(home: &Path, project: &str) -> Res<Option<String>> {
             Some("amend_pending".into())
         } else if goal.status == "blocked" && goal.reason.as_deref() == Some("user_stop") {
             Some("stopped".into())
+        } else if goal.status == "blocked"
+            && goal.reason.as_deref() == Some(crate::storage::preflight::REASON)
+        {
+            Some(crate::storage::preflight::REASON.into())
         } else if goal.status != "active" {
             Some(format!("goal_{}", goal.status))
         } else {
@@ -539,4 +613,179 @@ fn marker(goal: &Goal, wanted: &str) -> bool {
 }
 pub fn creative_requested(goal: &Goal) -> bool {
     marker(goal, "[creative]")
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+    use crate::storage::preflight::{self, Probe};
+    use serde_json::json;
+
+    struct FakeProbe {
+        home: PathBuf,
+        cwd_free: u64,
+        home_free: u64,
+    }
+    impl Probe for FakeProbe {
+        fn volume(&self, path: &Path) -> Res<String> {
+            Ok(path.display().to_string())
+        }
+        fn free_bytes(&self, path: &Path) -> Res<u64> {
+            Ok(if path == self.home {
+                self.home_free
+            } else {
+                self.cwd_free
+            })
+        }
+    }
+
+    #[test]
+    fn disk_pause_active_and_accept_hold() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut goal = open(
+            home.path(),
+            "one",
+            "wish",
+            Some(cwd.path().to_str().unwrap()),
+        )
+        .unwrap();
+        goal.interjection = Some(Interjection {
+            prompt: "x".into(),
+            prior_status: "active".into(),
+            prior_note: None,
+        });
+        save(home.path(), "one", &goal).unwrap();
+        let paused = disk_pause(home.path(), "one", "low disk").unwrap().unwrap();
+        assert_eq!(paused.status, "blocked");
+        assert_eq!(paused.reason.as_deref(), Some("disk_space"));
+        assert_eq!(
+            paused.note.as_deref(),
+            Some("low disk Resume with: axiom wish --resume one")
+        );
+        assert!(paused.interjection.is_none());
+        assert_eq!(
+            accept_hold(home.path(), paused.project.as_deref().unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("disk_space")
+        );
+        assert!(disk_pause(home.path(), "one", "again").unwrap().is_none());
+    }
+
+    #[test]
+    fn disk_pause_waiting_preserves_batch() {
+        let home = tempfile::tempdir().unwrap();
+        let mut goal = open(home.path(), "one", "wish", None).unwrap();
+        let batch = Batch {
+            progress_file: "progress".into(),
+            marker_file: "marker".into(),
+            pid: 42,
+        };
+        goal.status = "waiting".into();
+        goal.note = Some("waiting for batch".into());
+        goal.batch = Some(batch.clone());
+        save(home.path(), "one", &goal).unwrap();
+        let paused = disk_pause(home.path(), "one", "low disk").unwrap().unwrap();
+        assert_eq!(paused.status, "blocked");
+        assert!(paused.batch.is_none());
+        let waited = paused.waited.unwrap();
+        assert_eq!(waited.batch, Some(batch));
+        assert_eq!(waited.note, "waiting for batch");
+        assert_eq!(waited.end, None);
+    }
+
+    #[test]
+    fn interrupted_hold_is_not_disk_space() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let goal = open(
+            home.path(),
+            "one",
+            "wish",
+            Some(cwd.path().to_str().unwrap()),
+        )
+        .unwrap();
+        interrupt(home.path(), "one", "stopped").unwrap();
+        assert_eq!(
+            accept_hold(home.path(), goal.project.as_deref().unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("goal_blocked")
+        );
+    }
+
+    #[test]
+    fn resume_checks_both_paths_and_preserves_goal_on_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let goal = open(
+            home.path(),
+            "one",
+            "wish",
+            Some(cwd.path().to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.path().join("storage")).unwrap();
+        std::fs::write(
+            home.path().join("storage/policy.json"),
+            r#"{"reserve_bytes": 1, "estimates": {"wish": 10}}"#,
+        )
+        .unwrap();
+        disk_pause(home.path(), "one", "low disk").unwrap();
+        let before = std::fs::read(path(home.path(), "one").unwrap()).unwrap();
+        for (cwd_free, home_free) in [(0, 100), (100, 0)] {
+            let probe = FakeProbe {
+                home: home.path().into(),
+                cwd_free,
+                home_free,
+            };
+            let err = resume_disk_space(home.path(), "one", &probe).unwrap_err();
+            assert_eq!(err.kind, "disk_space");
+            assert!(err.message.contains("paused, free space then resume"));
+            assert_eq!(
+                std::fs::read(path(home.path(), "one").unwrap()).unwrap(),
+                before
+            );
+        }
+        let probe = FakeProbe {
+            home: home.path().into(),
+            cwd_free: 100,
+            home_free: 100,
+        };
+        resume_disk_space(home.path(), "one", &probe).unwrap();
+        let resumed = load(home.path(), "one").unwrap().unwrap();
+        assert_eq!(resumed.status, "blocked");
+        assert!(resumed.reason.is_none());
+        let store = crate::orch::store_for_goal(home.path(), &goal).unwrap();
+        let events = crate::orch::events::read_events(&store, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, preflight::EVENT_DISK_RESUMED);
+        assert_eq!(events[0].data["ok"], true);
+        assert_eq!(events[0].data["path"], json!(home.path()));
+        resume_disk_space(home.path(), "one", &probe).unwrap();
+        assert_eq!(
+            crate::orch::events::read_events(&store, 0).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn set_other_saves_and_removes_values() {
+        let home = tempfile::tempdir().unwrap();
+        open(home.path(), "one", "wish", None).unwrap();
+        let goal = set_other(home.path(), "one", "extra", json!({"x": 1})).unwrap();
+        assert_eq!(goal.other["extra"], json!({"x": 1}));
+        assert_eq!(
+            load(home.path(), "one").unwrap().unwrap().other["extra"],
+            json!({"x": 1})
+        );
+        let goal = set_other(home.path(), "one", "extra", Value::Null).unwrap();
+        assert!(!goal.other.contains_key("extra"));
+        assert!(!load(home.path(), "one")
+            .unwrap()
+            .unwrap()
+            .other
+            .contains_key("extra"));
+    }
 }

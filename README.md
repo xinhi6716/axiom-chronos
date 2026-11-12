@@ -135,3 +135,5 @@ Available: `chronos` (Windows desktop app), `axiom wish`, `axiom wait`, `axiom r
 ---
 
 [MIT License](LICENSE) · [Credits and licenses](licenses/) · [Asset notices](assets/ASSET_NOTICES.txt)
+
+See [storage](docs/storage.md) and the [background service](docs/app-design.md#closing-the-window).

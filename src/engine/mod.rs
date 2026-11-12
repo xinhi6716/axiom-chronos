@@ -102,7 +102,7 @@ pub fn binary_id(path: &Path) -> Option<String> {
         .map(|bytes| short_hash(&Sha256::digest(bytes)))
 }
 
-/// Each build gets its own directory and none is ever removed, so a build cannot change or delete
+/// Each build gets its own directory; installation never removes a copy, so it cannot change or delete
 /// the rules another running build is reading.
 #[doc(hidden)]
 pub fn install(home: &Path, version: &str, files: &[(&str, &str)]) -> std::io::Result<PathBuf> {
@@ -127,8 +127,183 @@ pub fn install(home: &Path, version: &str, files: &[(&str, &str)]) -> std::io::R
     Ok(dir)
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn system_owner() -> crate::storage::Owner {
+    crate::storage::Owner {
+        project: crate::storage::SYSTEM_PROJECT.into(),
+        wish: None,
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+fn log_storage_error(home: &Path, error: &impl std::fmt::Display) {
+    use std::io::Write;
+    let dir = crate::storage::dir(home);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("errors.log"))
+        {
+            let _ = writeln!(file, "{error}");
+        }
+    }
+}
+
+fn register_and_lease(home: &Path, dir: &Path, now: i64) -> base::Res<()> {
+    use crate::storage::{Class, Lease, Ledger};
+    use std::sync::{Mutex, OnceLock};
+    static LEASES: OnceLock<Mutex<Vec<(PathBuf, Lease)>>> = OnceLock::new();
+    let ledger = Ledger::open(home)?;
+    ledger.register(
+        dir,
+        Class::EngineCopy,
+        &system_owner(),
+        serde_json::json!({}),
+    )?;
+    ledger.touch(dir, now)?;
+    let path = crate::storage::ledger::normalize(dir);
+    let mut leases = LEASES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map_err(|e| base::Failure::new("storage", e.to_string()))?;
+    if !leases.iter().any(|(p, _)| same_path(p, &path)) {
+        leases.push((path, ledger.lease(dir)?));
+    }
+    Ok(())
+}
+
+/// Retain this binary's copy, the most recently used other copy, and leased copies.
+pub fn prune_engine_copies(
+    home: &Path,
+    now_ms: i64,
+) -> base::Res<Vec<crate::storage::retention::AuditRecord>> {
+    use crate::storage::{self, Class, EntryState, Ledger};
+    let ledger = Ledger::open(home)?;
+    let engine_dir = home.join("engine");
+    let root = storage::ledger::normalize(&engine_dir);
+    let current = storage::ledger::normalize(&engine_dir.join(format!(
+        "{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        build_id()
+    )));
+    let children = match std::fs::read_dir(&engine_dir) {
+        Ok(children) => children,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(base::Failure::new("storage", e.to_string())),
+    };
+    for child in children {
+        let child = child.map_err(|e| base::Failure::new("storage", e.to_string()))?;
+        if !child
+            .file_type()
+            .map_err(|e| base::Failure::new("storage", e.to_string()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = child.path();
+        let normalized = storage::ledger::normalize(&path);
+        if !normalized
+            .parent()
+            .is_some_and(|parent| same_path(parent, &root))
+        {
+            continue;
+        }
+        if ledger
+            .get(&path)?
+            .is_none_or(|entry| entry.state == EntryState::Deleted)
+        {
+            ledger.register(
+                &path,
+                Class::EngineCopy,
+                &system_owner(),
+                serde_json::json!({}),
+            )?;
+            // Adoption must preserve the filesystem's age rather than making it look newly used.
+            ledger.touch(&path, 0)?;
+        }
+    }
+    let entries: Vec<_> = ledger
+        .entries()?
+        .into_iter()
+        .filter(|entry| {
+            entry.class == Class::EngineCopy
+                && entry
+                    .path
+                    .parent()
+                    .is_some_and(|parent| same_path(parent, &root))
+                && std::fs::symlink_metadata(&entry.path).is_ok_and(|m| m.file_type().is_dir())
+        })
+        .collect();
+    let previous = entries
+        .iter()
+        .filter(|e| !same_path(&e.path, &current))
+        .max_by_key(|e| {
+            if e.last_used_ms != 0 {
+                e.last_used_ms
+            } else {
+                std::fs::metadata(&e.path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                    .unwrap_or(0)
+            }
+        })
+        .map(|e| e.id);
+    let mut records = Vec::new();
+    for entry in entries {
+        if same_path(&entry.path, &current)
+            || Some(entry.id) == previous
+            || ledger.in_use(&entry.path)?
+        {
+            continue;
+        }
+        records.push(storage::retention::remove_entry(
+            home,
+            &entry.path,
+            "engine_retention",
+            now_ms,
+        ));
+    }
+    Ok(records)
+}
+
 pub fn plugin_dir(home: &Path) -> std::io::Result<PathBuf> {
-    install(home, env!("CARGO_PKG_VERSION"), FILES)
+    let dir = install(home, env!("CARGO_PKG_VERSION"), FILES)?;
+    let now = now_ms();
+    match register_and_lease(home, &dir, now) {
+        Ok(()) => match prune_engine_copies(home, now) {
+            Ok(records) => {
+                for record in records {
+                    if record.outcome.starts_with("failed:") {
+                        log_storage_error(home, &format!("{}: {}", record.path, record.outcome));
+                    }
+                }
+            }
+            Err(error) => log_storage_error(home, &error),
+        },
+        Err(error) => log_storage_error(home, &error),
+    }
+    Ok(dir)
 }
 
 pub fn plugin_version(root: &Path) -> Result<String, String> {

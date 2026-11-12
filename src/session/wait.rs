@@ -141,22 +141,53 @@ fn check_resumable(config: &Config, session: &str, goal: &Goal) -> Res<()> {
         ))
     }
 }
-fn watch(batch: &Batch, out: &mut dyn Write) -> Option<BatchEnd> {
-    say(
-        out,
-        &format!(
-            "waiting on batch pid {} until {} appears; no model runs meanwhile, and Ctrl-C leaves the batch running",
-            batch.pid, batch.marker_file
-        ),
-    );
-    until_interrupted(|stop| {
+fn watch(
+    config: &Config,
+    session: &str,
+    goal: &Goal,
+    batch: &Batch,
+    out: &mut dyn Write,
+) -> Res<(Option<BatchEnd>, bool)> {
+    say(out, &format!("waiting on batch pid {} until {} appears; no model runs meanwhile, and Ctrl-C leaves the batch running", batch.pid, batch.marker_file));
+    let project = goal.cwd.as_deref().map(Path::new).unwrap_or(&config.home);
+    let poll = || {
+        run::pause_for_low_disk(
+            &config.home,
+            project,
+            session,
+            (config.clock.now)().saturating_mul(1000),
+            false,
+        )
+    };
+    if let Some(line) = poll()? {
+        say(out, &line);
+        return Ok((None, true));
+    }
+    let mut disk_result = Ok(None);
+    let local_stop = AtomicBool::new(false);
+    let end = until_interrupted(|stop| {
         goal::wait_for_batch(
             batch,
-            stop,
-            &mut |pause| goal::sleep_unless_stopped(stop, pause),
+            &local_stop,
+            &mut |pause| {
+                goal::sleep_unless_stopped(stop, pause);
+                if stop.load(Ordering::SeqCst) {
+                    local_stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+                disk_result = poll();
+                if !matches!(disk_result, Ok(None)) {
+                    local_stop.store(true, Ordering::SeqCst);
+                }
+            },
             &mut |text| say(out, &format!("batch: {text}")),
         )
-    })
+    });
+    if let Some(line) = disk_result? {
+        say(out, &line);
+        return Ok((None, true));
+    }
+    Ok((end, false))
 }
 
 fn resume_run(
@@ -187,13 +218,20 @@ fn follow(
     lines: &mut SharedInput,
     out: &mut dyn Write,
 ) -> Res<i32> {
+    if code == 75 {
+        return Ok(code);
+    }
     while let Some((goal, batch)) = waiting_on_batch(config, session) {
         lines.end_run();
         let end = if code == INTERRUPTED_EXIT {
             None
         } else {
             check_resumable(config, session, &goal)?;
-            watch(&batch, out)
+            let (end, paused) = watch(config, session, &goal, &batch, out)?;
+            if paused {
+                return Ok(75);
+            }
+            end
         };
         let Some(end) = end else {
             say(

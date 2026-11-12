@@ -139,3 +139,5 @@ Claude 回報用量上限並附上重置時間時，`axiom wish` 會印出接續
 ---
 
 [MIT 授權](LICENSE) · [來源與授權](licenses/) · [素材聲明](assets/ASSET_NOTICES.txt)
+
+參閱[儲存空間](docs/storage.md)與[背景服務](docs/app-design.md#closing-the-window)。
