@@ -40,6 +40,11 @@ impl Shell {
                     Page::Session(id) => cx
                         .new(|cx| SessionPage::new(self.state.clone(), id.clone(), window, cx))
                         .into(),
+                    // p8: begin stub
+                    Page::Paper(id) => cx
+                        .new(|cx| crate::desktop::paper::PaperPage::new(self.state.clone(), id.clone(), window, cx))
+                        .into(),
+                    // p8: end stub
                 };
                 (page, view)
             });

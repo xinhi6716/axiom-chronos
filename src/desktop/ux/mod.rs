@@ -28,6 +28,9 @@ pub enum Page {
     QuickTask,
     Plaza,
     Session(SharedString),
+    // p8: begin stub
+    Paper(SharedString),
+    // p8: end stub
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReadFilter {
