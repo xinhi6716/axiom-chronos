@@ -453,16 +453,48 @@ fn long_header_that_fits_is_not_charged_for_unused_markers() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path();
     init(p);
-    let purpose = "x".repeat(15800);
-    write(
-        p,
-        "modules.md",
-        &section("m", "p", "none", "", "test")
-            .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
-    );
-    let c = module_context(p, "m", p).unwrap();
+    let ctx = |len: usize| {
+        let purpose = "x".repeat(len);
+        write(
+            p,
+            "modules.md",
+            &section("m", "p", "none", "", "test")
+                .replace("PURPOSE purpose", &format!("PURPOSE {purpose}")),
+        );
+        module_context(p, "m", p).map(|c| (purpose, c))
+    };
+    assert!(matches!(ctx(1), Ok((_, c)) if c.incomplete.is_empty()));
+    assert!(ctx(20000).is_err());
+    // Source-path bytes depend on the temp path: find the largest purpose
+    // whose full context fits without incomplete sections.
+    let (mut lo, mut hi) = (1usize, 20000usize);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if matches!(ctx(mid), Ok((_, c)) if c.incomplete.is_empty()) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let f = lo;
+    let (purpose, c) = ctx(f).unwrap();
     assert_eq!(c.purpose, purpose);
     assert!(c.incomplete.is_empty());
+    // Find the header-only limit separately: Ok can have incomplete sections.
+    let (mut lo, mut hi) = (1usize, 20000usize);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if ctx(mid).is_err() {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let e = hi;
+    // Negative control: one byte over the limit is still refused.
+    let err = ctx(e).unwrap_err();
+    assert!(err.message.contains("module context header exceeds byte limit"));
+    assert!(ctx(e - 1).is_ok());
 }
 
 #[test]
