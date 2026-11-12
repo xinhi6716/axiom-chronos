@@ -226,15 +226,21 @@ fn second_write_is_busy() {
             return;
         };
         let script = r.home.path().join("curl.ps1");
-        fs::write(&script, "param($ready, $release)\nSet-Content -LiteralPath $ready -Value ready\nwhile (!(Test-Path -LiteralPath $release)) { Start-Sleep -Milliseconds 50 }\nexit 1\n").unwrap();
+        fs::write(
+            &script,
+            format!(
+                "Set-Content -LiteralPath '{}' -Value ready\nwhile (!(Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 50 }}\nexit 1\n",
+                ready.to_string_lossy().replace('\'', "''"),
+                release.to_string_lossy().replace('\'', "''"),
+            ),
+        )
+        .unwrap();
         vec![
             shell,
             "-NoProfile".into(),
             "-NonInteractive".into(),
             "-File".into(),
             script.to_string_lossy().into_owned(),
-            ready.to_string_lossy().into_owned(),
-            release.to_string_lossy().into_owned(),
         ]
     };
     #[cfg(not(any(unix, windows)))]
