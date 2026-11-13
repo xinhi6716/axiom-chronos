@@ -2027,12 +2027,17 @@ mod tests {
     use crate::desktop::demo::sample_run;
     use std::prelude::v1::test;
 
+    fn production_source() -> &'static str {
+        // Test-only imports may precede production code; exclude only this test module.
+        include_str!("shell.rs")
+            .rsplit_once("\nmod tests {")
+            .expect("shell test module")
+            .0
+    }
+
     #[test]
     fn backdrop_stays_behind_the_crossfade() {
-        let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let source = production_source();
         let render = source
             .split("impl Render for Shell {")
             .nth(1)
@@ -2070,10 +2075,7 @@ mod tests {
 
     #[test]
     fn orbit_underline_uses_visibility_rule() {
-        let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let source = production_source();
         let rail_item = source
             .split("    fn nav_item(")
             .nth(1)
@@ -2081,20 +2083,17 @@ mod tests {
             .split("    fn new_wish_button(")
             .next()
             .unwrap();
-        let underline = rail_item
-            .lines()
-            .find(|line| line.contains("ornament::orbit_underline("))
-            .expect("orbit underline");
-        assert!(underline.contains(".when(shows_underline(lit)"));
+        let underline = regex::Regex::new(
+            r"\.when\(shows_underline\(lit\),\s*\|this\|\s*\{?[^{}]*ornament::orbit_underline\(",
+        )
+        .unwrap();
+        assert!(underline.is_match(rail_item));
         assert!(!rail_item.contains(".when(lit > 0.01, |this| this.child(div().absolute()"));
     }
 
     #[test]
     fn wish_and_keep_working_buttons_use_gold_leaf() {
-        let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let source = production_source();
         for (id, end) in [
             ("new-wish", "let Some((name, detail))"),
             ("keep-working", "fn stop_and_close("),
@@ -2411,9 +2410,11 @@ mod tests {
 
     #[test]
     fn every_nav_call_site_has_an_emblem() {
-        let source = include_str!("shell.rs");
-        let labels =
-            regex::Regex::new(r#"self\.nav_item\("nav-[\w-]+", Emblem::\w+, "(\w+)""#).unwrap();
+        let source = production_source();
+        let labels = regex::Regex::new(
+            r#"self\.nav_item\(\s*"nav-[\w-]+",\s*Emblem::\w+,\s*"(\w+)""#,
+        )
+        .unwrap();
         assert_eq!(labels.captures_iter(source).count(), 5);
     }
 }

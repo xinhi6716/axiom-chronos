@@ -29,12 +29,12 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 
 ## Prompt sizes
 
-- engine/agents/dispatcher.md: 9538 bytes
-- engine/DISPATCH.md: 3463 bytes
-- engine/skills/wish/SKILL.md: 7757 bytes
-- total: 20758 bytes (cap 20813)
+- engine/agents/dispatcher.md: 9568 bytes
+- engine/DISPATCH.md: 3402 bytes
+- engine/skills/wish/SKILL.md: 7786 bytes
+- total: 20756 bytes (cap 20813)
 
-Before this round: total 20768 bytes (cap 20813). After this round: dispatcher.md 9538, DISPATCH.md 3463, SKILL.md 7757; total 20758 bytes (cap 20813). Measured after normalizing CRLF to LF, as the test does.
+Before this round: total 20768 bytes (cap 20813). After this round: dispatcher.md 9568, DISPATCH.md 3402, SKILL.md 7786; total 20756 bytes (cap 20813). Measured after normalizing CRLF to LF, as the test does.
 
 ## Offline graph evaluation
 
@@ -102,21 +102,31 @@ Demo and tests keep fakes; an empty demo uses the default empty UX state. Produc
 ## Suites
 
 Suites text (final, sequential runs, Windows, CARGO_HOME=E:/codex/.toolchains/cargo, CARGO_BUILD_JOBS=2, CARGO_INCREMENTAL=0, the three suites run one after another and never overlapping):
-- `cargo test --locked --offline --no-fail-fast`: 1680 passed, 0 failed, 4 ignored (sum of per-binary results, nested child summaries excluded).
-- `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 870 passed, 0 failed, 0 ignored.
-- `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml`: 131 passed, 0 failed, 1 ignored (no -j 1 needed, no LNK1318).
+- `cargo test --locked --offline --no-fail-fast`: 2429 passed, 0 failed, 6 ignored (sum of per-binary results, nested child summaries excluded).
+- `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 960 passed, 0 failed, 0 ignored.
+- `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml -j 1`: 184 passed, 0 failed, 1 ignored.
+- Linux (WSL), `cargo test --locked --offline --no-fail-fast`: 2406 passed, 14 failed, 12 ignored; all failures are host limits, not product regressions (see below).
 
 Regressions fixed (each reproduced deterministically, then fixed under its module with VERIFY and review):
 1. engine text_cases::required_phrases_are_present and wish_flow a_long_batch_is_piloted_then_waited_on_without_a_model: engine prompt wording lost in the p2b merge, restored in engine/agents/dispatcher.md (unit fix-p2b-prompts-2, which supersedes fix-p2b-prompts).
 2. base::proc::tests::no_bare_command_new_outside_the_helper: a bare Command::new in src/desktop/ux/real/modes_accept.rs, routed through the helper (unit fix-modes-command).
 3. r10_integration prompt_total_matches_files: the recorded dispatcher.md size was 9862, the file is 9872; the record now reads 9872 and total 20768 (unit gates-prompt-sizes).
+4. Four prompt/doc phrase tests: required wording restored (unit fin-prompts-1).
+5. CRLF renormalisation of tests/fixtures/paper: LF bytes restored, protected by `.gitattributes` `-text` and tests/paper_fixture_bytes.rs (unit fin-paper-eol-2).
+6. Host test Python lookup corrected (unit fin-python-1).
+7. Desktop shell source-guard tests, startup seams and live reload corrected (unit fin-desktop-1).
+8. Desktop pool publishing wired through `live::quota::publish_pools`, called from src/desktop/live.rs (unit fin-pools-1).
+9. `base::proc::pid_alive` treated PIDs above i32::MAX as alive on Linux; corrected (unit fin-pidalive-1).
+10. Doctor-page walk tests clicked a Preferences switch below a 900 px window after pool rows grew the Budgets card; the test window is now taller (unit fin-walk-1).
 
-Environmental, not regressions (each passed when re-run alone, 2 to 3 times, and failed only while other builds loaded the machine):
+Environmental and load-sensitive, not regressions:
 - Under overlapped suites the first pass showed 134 main, 3 desktop and 6 desktop-smoke failures, mostly named-pipe os error 5 and os error 1455 and process-tree timing; none remain when the suites run sequentially.
 - tests/setup_steps.rs cancel_from_thread_preserves_other_step_repo_and_cache: the "other" step sleeps 3 seconds and had finished when cancel returned on a loaded machine (1 failure in 5 runs; 4 passes alone).
 - tests/disk_guard.rs low_disk_cleans_then_pauses_with_distinct_reason: failed once in a full run (the binary took 20 s instead of 2 s); passed alone twice.
 - desktop-smoke ux_interjection: one STATUS_ACCESS_VIOLATION in one full run; passed alone 3 of 3 and in the other full run.
 - tests/scheduler_wall_clock.rs failed in one full run and passed in the next.
+- Orch lifecycle_cases ci_failure_opens_sol_like_a_local_failure ("database is locked"), lifecycle_cases sol_and_extra_commands, and program_role_budgets mid_run_exhaustion_stops_later_requests failed once in an earlier full run (2425 passed, 3 failed); all passed alone and in the clean full re-run (2429 passed, 0 failed).
+- WSL host limits: ONNX Runtime is not installed (laya_infer, laya_ort and laya_router); laya_ort laya_runtime_directory_is_git_ignored, paper_fixture_bytes and scratch_outside_repo call `git` in a worktree whose `.git` file points to a Windows path; storage_ledger measure_walk_does_not_hold_write_lock has a Linux timing failure because the 12000-file walk finishes before register returns.
 
 ## Limitations
 
@@ -126,7 +136,6 @@ Environmental, not regressions (each passed when re-run alone, 2 to 3 times, and
 - Optimizer and github seams stay on their fallbacks.
 - Astra read-only tools are enforced only by the prompt (`src/codex/run.rs`).
 - The Claude runner charges no usage on unparseable replies (`council/member.rs`).
-- `live::quota::publish_pools` has no caller in this tree.
 - connect_service still installs the private ServiceBackground in desktop::live.
 - Short CJK graph queries s02 and s04 get no seeds.
 - Windows named-pipe os error 5 flakiness under parallel service tests.

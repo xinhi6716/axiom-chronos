@@ -27,7 +27,17 @@ impl StartPath for FakeStart {
     }
 }
 
+fn write_storage_policy(home: &std::path::Path) {
+    std::fs::create_dir_all(home.join("storage")).unwrap();
+    std::fs::write(
+        home.join("storage/policy.json"),
+        r#"{"reserve_bytes": 0, "estimates": {"wish": 1}}"#,
+    )
+    .unwrap();
+}
+
 fn launcher(home: &std::path::Path) -> (ServiceLauncher, Arc<FakeStart>) {
+    write_storage_policy(home);
     let start = Arc::new(FakeStart::default());
     (
         ServiceLauncher {
@@ -36,6 +46,33 @@ fn launcher(home: &std::path::Path) -> (ServiceLauncher, Arc<FakeStart>) {
         },
         start,
     )
+}
+
+fn check_storage_policy(home: &std::path::Path) -> std::io::Result<()> {
+    let data = std::fs::read(home.join("storage/policy.json"))?;
+    let policy: axiom::storage::Policy = serde_json::from_slice(&data)?;
+    assert_eq!(policy.reserve_bytes, 0);
+    assert_eq!(policy.estimates.wish, 1);
+    Ok(())
+}
+
+// Before the fixture policy helper: this test failed with NotFound (OS error 3).
+#[test]
+fn fixture_home_has_zero_reserve_storage_policy() {
+    let home = common::temp();
+    let _ = launcher(home.path());
+    check_storage_policy(home.path()).unwrap();
+}
+
+#[test]
+fn fixture_storage_policy_check_reports_missing_policy() {
+    let home = common::temp();
+    let _ = launcher(home.path());
+    std::fs::remove_file(home.path().join("storage/policy.json")).unwrap();
+    assert_eq!(
+        check_storage_policy(home.path()).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
 }
 
 #[test]

@@ -299,7 +299,8 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let python = std::env::var_os("AXIOM_PYTHON")
+        let python = std::env::var_os("AXIOM_TEST_PYTHON")
+            .or_else(|| std::env::var_os("AXIOM_PYTHON"))
             .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_claude.py");
         let mut child = KillOnDrop(

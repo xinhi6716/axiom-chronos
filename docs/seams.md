@@ -27,7 +27,7 @@ Other seams and integrations:
 - **Research-program role budgets — wired:** `Role::CouncilMember`, call name `program`, is checked before the program and before each member call; spend is recorded after each reply.
 - **Graph feedback from 2b events — wired:** plan item C15. Events are ingested with the correlation id recorded in `FeedbackEvent.source` (`<events.jsonl locator>#<correlation id>`); the struct is unchanged and dedup by source holds.
 - **Workbench paper slot — wired:** `PaperHandoff` is a snapshot consumer that feeds phase 8 evidence.
-- **Hydrogen/Flash and Argon pools — wired:** pool membership by model-id prefix; an exhausted pool is recorded with `until_ms` (provider reset time, else now plus 60 minutes). Argon takes part in every council round (setting `argon_every_round`, default on).
+- **Hydrogen/Flash and Argon pools — wired:** pool membership by model-id prefix; an exhausted pool is recorded with `until_ms` (provider reset time, else now plus 60 minutes). Argon takes part in every council round (setting `argon_every_round`, default on). The desktop publishes pool state through `live::quota::publish_pools`.
 - **Vault and memory slot — unwired, not in this version:** phase 6 is shelved; the slot shows "not in this version".
 - **Optimizer (`ClaudeOptimizer`) and github (`RealGh`) — unwired:** left on the fallbacks from the earlier round; no real adapter was in scope this round.
 
@@ -37,4 +37,3 @@ Demo and tests keep fakes; an empty demo uses the default empty UX state. Produc
 
 - Astra read-only tools are enforced only by the prompt (`src/codex/run.rs`), not by the sandbox.
 - The Claude runner charges no usage on unparseable replies (`council/member.rs`).
-- `live::quota::publish_pools` (`src/desktop/live/quota.rs`) has no caller in this tree, so the desktop does not yet publish pool state from it.
