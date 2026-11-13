@@ -148,6 +148,165 @@ impl RenderOnce for SplitHandle {
             })
     }
 }
+/// A split group. The static key must be exactly `<target>.<split.id>`.
+/// Construct through `SplitHandle::resizable`; store the returned group between renders.
+#[derive(IntoElement)]
+pub struct Resizable {
+    id: ElementId,
+    key: &'static str,
+    split: crate::desktop::layout::split::Split,
+    available: f32,
+    sizes: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
+    tokens: Tokens,
+    children: Vec<gpui_kit::AnyElement>,
+    axis: Axis,
+    persist: bool,
+}
+impl Resizable {
+    pub fn new(
+        id: impl Into<ElementId>,
+        key: &'static str,
+        target: &str,
+        split: crate::desktop::layout::split::Split,
+        available: f32,
+        saved: Option<&[f32]>,
+        tokens: &Tokens,
+    ) -> Option<Self> {
+        if key != format!("{}.{}", target, split.id)
+            || target.is_empty()
+            || key.len() > 48
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        {
+            return None;
+        }
+        let sizes = split.sizes(available, saved);
+        Some(Self {
+            id: id.into(),
+            key,
+            split,
+            available,
+            sizes: std::rc::Rc::new(std::cell::RefCell::new(sizes)),
+            tokens: *tokens,
+            children: Vec::new(),
+            axis: Axis::Vertical,
+            persist: false,
+        })
+    }
+    pub fn key(&self) -> &'static str {
+        self.key
+    }
+    pub fn sizes(&self) -> Vec<f32> {
+        self.sizes.borrow().clone()
+    }
+    pub fn resize(&mut self, handle: usize, delta: Pixels) {
+        let next = self
+            .split
+            .resize(&self.sizes.borrow(), handle, delta.as_f32(), self.available);
+        *self.sizes.borrow_mut() = next;
+    }
+    pub fn child(mut self, child: impl IntoElement) -> Self {
+        self.children.push(child.into_any_element());
+        self
+    }
+    pub fn horizontal(mut self) -> Self {
+        self.axis = Axis::Horizontal;
+        self
+    }
+}
+fn restore_from_store(
+    id: impl Into<ElementId>,
+    key: &'static str,
+    target: &str,
+    split: crate::desktop::layout::split::Split,
+    available: f32,
+    tokens: &Tokens,
+    store: Option<&crate::desktop::layout::persist::LayoutState>,
+) -> Option<Resizable> {
+    let store = store?;
+    let saved = crate::desktop::layout::persist::sizes_of(store, key);
+    let mut group = Resizable::new(id, key, target, split, available, saved.as_deref(), tokens)?;
+    group.persist = true;
+    Some(group)
+}
+fn apply_resize(
+    persist: bool,
+    store: Option<&mut crate::desktop::layout::persist::LayoutState>,
+    key: &'static str,
+    split: &crate::desktop::layout::split::Split,
+    sizes: &std::cell::RefCell<Vec<f32>>,
+    index: usize,
+    delta: Pixels,
+    available: f32,
+) {
+    let next = split.resize(&sizes.borrow(), index, delta.as_f32(), available);
+    *sizes.borrow_mut() = next.clone();
+    if let (true, Some(store)) = (persist, store) {
+        crate::desktop::layout::persist::remember_state(store, key, next);
+    }
+}
+impl SplitHandle {
+    /// Restore and persist sizes using the store previously installed with `layout::persist::init`.
+    /// Returns None when no store has been initialized.
+    pub fn resizable(
+        id: impl Into<ElementId>,
+        key: &'static str,
+        target: &str,
+        split: crate::desktop::layout::split::Split,
+        available: f32,
+        tokens: &Tokens,
+        cx: &mut App,
+    ) -> Option<Resizable> {
+        let store = cx.try_global::<crate::desktop::layout::persist::LayoutState>();
+        restore_from_store(id, key, target, split, available, tokens, store)
+    }
+}
+impl RenderOnce for Resizable {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let mut group = div().id(self.id.clone()).flex();
+        if self.axis == Axis::Horizontal {
+            group = group.flex_col();
+        }
+        let len = self.split.panes.len();
+        for (index, child) in self.children.into_iter().take(len).enumerate() {
+            let size = self.sizes.borrow().get(index).copied().unwrap_or_default();
+            let pane = match self.axis {
+                Axis::Vertical => div().w(gpui_kit::px(size)),
+                Axis::Horizontal => div().h(gpui_kit::px(size)),
+            }
+            .child(child);
+            group = group.child(pane);
+            if index + 1 < len {
+                let sizes = self.sizes.clone();
+                let split = self.split.clone();
+                let available = self.available;
+                let key = self.key;
+                let persist = self.persist;
+                let mut handle =
+                    SplitHandle::new((self.id.clone(), index.to_string()), &self.tokens);
+                if self.axis == Axis::Horizontal {
+                    handle = handle.horizontal();
+                }
+                group = group.child(handle.on_resize(move |delta, _, cx| {
+                    let store = if persist
+                        && cx
+                            .try_global::<crate::desktop::layout::persist::LayoutState>()
+                            .is_some()
+                    {
+                        Some(cx.global_mut::<crate::desktop::layout::persist::LayoutState>())
+                    } else {
+                        None
+                    };
+                    apply_resize(persist, store, key, &split, &sizes, index, delta, available);
+                    cx.refresh_windows();
+                }));
+            }
+        }
+        group
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +378,235 @@ mod tests {
             assert_eq!(key_delta(Axis::Horizontal, "up"), Some(-SPLIT_KEY_STEP));
             assert_eq!(key_delta(handle.axis, "down"), Some(SPLIT_KEY_STEP));
             assert_eq!(key_delta(handle.axis, "left"), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    #[test]
+    fn injected_store_validation_and_keyboard_resize() {
+        use crate::desktop::layout::{
+            persist,
+            split::{Pane, Split},
+        };
+        for t in crate::desktop::theme::both() {
+            let home = tempfile::tempdir().unwrap();
+            let mut store = persist::init_state(home.path(), None);
+            let split = Split {
+                id: "main",
+                panes: vec![
+                    Pane {
+                        min: 10.,
+                        max: 90.,
+                        default: 50.,
+                        collapsible: false
+                    };
+                    2
+                ],
+            };
+            for (key, target) in [
+                ("wrong.main", "run"),
+                ("run.Main", "run"),
+                ("run_main.main", "run_main"),
+                (
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.main",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+            ] {
+                assert!(
+                    Resizable::new("group", key, target, split.clone(), 100., None, &t).is_none()
+                );
+            }
+            let sizes = std::cell::RefCell::new(vec![50., 50.]);
+            assert!(dispatch_key(
+                Axis::Vertical,
+                "right",
+                Some(|delta| {
+                    apply_resize(
+                        true,
+                        Some(&mut store),
+                        "run.main",
+                        &split,
+                        &sizes,
+                        0,
+                        delta,
+                        100.,
+                    );
+                })
+            ));
+            assert_eq!(persist::sizes_of(&store, "run.main"), Some(vec![58., 42.]));
+            assert_eq!(persist::sizes_of(&store, "main"), None);
+            let group = restore_from_store(
+                "group",
+                "run.main",
+                "run",
+                split.clone(),
+                100.,
+                &t,
+                Some(&store),
+            )
+            .unwrap();
+            assert_eq!(group.sizes(), vec![58., 42.]);
+            persist::flush_state(&store);
+            assert_eq!(
+                persist::load(home.path()).panels.get("run.main"),
+                Some(&vec![58., 42.])
+            );
+        }
+    }
+    #[test]
+    fn resize_store_branches() {
+        use crate::desktop::layout::{
+            persist,
+            split::{Pane, Split},
+        };
+        let home = tempfile::tempdir().unwrap();
+        let mut store = persist::init_state(home.path(), None);
+        let split = Split {
+            id: "main",
+            panes: vec![
+                Pane {
+                    min: 10.,
+                    max: 90.,
+                    default: 50.,
+                    collapsible: false
+                };
+                2
+            ],
+        };
+        let sizes = std::cell::RefCell::new(vec![50., 50.]);
+        apply_resize(
+            true,
+            Some(&mut store),
+            "run.main",
+            &split,
+            &sizes,
+            0,
+            gpui_kit::px(8.),
+            100.,
+        );
+        assert_eq!(*sizes.borrow(), vec![58., 42.]);
+        assert_eq!(persist::sizes_of(&store, "run.main"), Some(vec![58., 42.]));
+        apply_resize(
+            false,
+            Some(&mut store),
+            "run.main",
+            &split,
+            &sizes,
+            0,
+            gpui_kit::px(5.),
+            100.,
+        );
+        assert_eq!(*sizes.borrow(), vec![63., 37.]);
+        assert_eq!(persist::sizes_of(&store, "run.main"), Some(vec![58., 42.]));
+        apply_resize(
+            true,
+            None,
+            "run.main",
+            &split,
+            &sizes,
+            0,
+            gpui_kit::px(5.),
+            100.,
+        );
+        assert_eq!(*sizes.borrow(), vec![68., 32.]);
+        assert_eq!(persist::sizes_of(&store, "run.main"), Some(vec![58., 42.]));
+    }
+    #[test]
+    fn store_lookup_requires_store_and_matching_key() {
+        use crate::desktop::layout::{
+            persist,
+            split::{Pane, Split},
+        };
+        let home = tempfile::tempdir().unwrap();
+        let mut store = persist::init_state(home.path(), None);
+        let split = Split {
+            id: "main",
+            panes: vec![
+                Pane {
+                    min: 10.,
+                    max: 90.,
+                    default: 50.,
+                    collapsible: false
+                };
+                2
+            ],
+        };
+        let t = crate::desktop::theme::both().into_iter().next().unwrap();
+        persist::remember_state(&mut store, "run.main", vec![60., 40.]);
+        assert!(
+            restore_from_store("group", "run.main", "run", split.clone(), 100., &t, None).is_none()
+        );
+        assert!(restore_from_store(
+            "group",
+            "other.main",
+            "run",
+            split.clone(),
+            100.,
+            &t,
+            Some(&store)
+        )
+        .is_none());
+        let group =
+            restore_from_store("group", "run.main", "run", split, 100., &t, Some(&store)).unwrap();
+        assert!(group.persist);
+        assert_eq!(group.sizes(), vec![60., 40.]);
+    }
+    #[test]
+    fn key_resize_and_restore() {
+        for t in crate::desktop::theme::both() {
+            let split = crate::desktop::layout::split::Split {
+                id: "main",
+                panes: vec![
+                    crate::desktop::layout::split::Pane {
+                        min: 10.,
+                        max: 90.,
+                        default: 50.,
+                        collapsible: false
+                    };
+                    2
+                ],
+            };
+            let mut group = Resizable::new(
+                "group",
+                "run.main",
+                "run",
+                split,
+                100.,
+                Some(&[60., 40.]),
+                &t,
+            )
+            .unwrap();
+            assert_eq!(group.key(), "run.main");
+            assert_eq!(group.sizes(), &[60., 40.]);
+            group.resize(0, SPLIT_KEY_STEP);
+            assert_eq!(group.sizes(), &[68., 32.]);
+            let home =
+                std::env::temp_dir().join(format!("axiom-resizable-test-{}", std::process::id()));
+            let mut store = crate::desktop::layout::persist::init_state(&home, None);
+            assert!(crate::desktop::layout::persist::remember_state(
+                &mut store,
+                group.key(),
+                group.sizes()
+            ));
+            crate::desktop::layout::persist::flush_state(&store);
+            let stored = crate::desktop::layout::persist::load(&home);
+            let restored = Resizable::new(
+                "restored",
+                "run.main",
+                "run",
+                group.split.clone(),
+                100.,
+                stored.panels.get("run.main").map(Vec::as_slice),
+                &t,
+            )
+            .unwrap();
+            assert_eq!(restored.sizes(), &[68., 32.]);
+            let _ = std::fs::remove_file(home.join("desktop/layout.json"));
+            let _ = std::fs::remove_dir(home.join("desktop"));
+            let _ = std::fs::remove_dir(home);
         }
     }
 }

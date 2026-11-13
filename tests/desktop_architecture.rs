@@ -167,7 +167,9 @@ fn group(p: &str) -> Option<&'static str> {
 fn layer(p: &str) -> Option<Layer> {
     group(p)?;
     Some(
-        if file_or_dir(p, "theme")
+        if p.split('/').any(|segment| segment.starts_with("adapter")) {
+            Layer::Adapter
+        } else if file_or_dir(p, "theme")
             || ["components/tokens.rs", "motion/tokens.rs", "layout/grid.rs"].contains(&p)
         {
             Layer::Tokens
@@ -598,6 +600,7 @@ fn component_widget(path: &[&str]) -> bool {
 struct Scan<'a> {
     module: Vec<String>,
     layer: Layer,
+    group: &'static str,
     idx: &'a Index,
     aliases: BTreeMap<String, Vec<String>>,
     violations: Vec<Violation>,
@@ -659,7 +662,12 @@ impl Scan<'_> {
                 self.add(span, "foundation dependency");
             }
             if self.layer == Layer::View {
-                let permitted = foundation
+                let resolved_file = (2..=p.len())
+                    .rev()
+                    .find_map(|n| self.idx.modules.get(&p[..n]));
+                let same_group = resolved_file.is_some_and(|file| group(file) == Some(self.group));
+                let permitted = same_group && s.starts_with(&["crate", "desktop"])
+                    || foundation
                     || s.starts_with(&["crate", "base"])
                         && s.get(2).is_some_and(|x| ["Failure", "Res"].contains(x))
                     || s.starts_with(&["crate", "desktop"])
@@ -670,13 +678,9 @@ impl Scan<'_> {
                 if !permitted {
                     self.add(span, "view dependency");
                 }
-                for n in (2..=p.len()).rev() {
-                    if let Some(file) = self.idx.modules.get(&p[..n]) {
-                        if layer(file) == Some(Layer::View) && p[..n] != self.module[..] {
-                            self.add(span, "view imports view");
-                        }
-                        break;
-                    }
+                if resolved_file.is_some_and(|file| layer(file) == Some(Layer::View)) && !same_group
+                {
+                    self.add(span, "view imports view");
                 }
             }
         }
@@ -759,6 +763,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
             let mut nested = Scan {
                 module: self.module.clone(),
                 layer: self.layer,
+                group: self.group,
                 idx: self.idx,
                 aliases: self.aliases.clone(),
                 violations: Vec::new(),
@@ -867,6 +872,7 @@ fn scan(file: &str, source: &str, idx: &Index, token_rules: bool) -> Vec<Violati
     let mut scan = Scan {
         module,
         layer,
+        group: group(file).expect("unclassified file"),
         idx,
         aliases: BTreeMap::new(),
         violations: vec![],
@@ -958,6 +964,20 @@ mod classify {
         }
     }
     #[test]
+    fn adapter_segments() {
+        for (path, expected_group) in [
+            ("research/adapter.rs", "research"),
+            ("research/adapter/index.rs", "research"),
+            ("paper/adapter.rs", "paper"),
+            ("research/adapter_extra.rs", "research"),
+        ] {
+            assert_eq!(group(path), Some(expected_group), "{path}");
+            assert_eq!(layer(path), Some(Layer::Adapter), "{path}");
+        }
+        assert_eq!(group("research/map.rs"), Some("research"));
+        assert_eq!(layer("research/map.rs"), Some(Layer::View));
+    }
+    #[test]
     fn priorities() {
         assert_eq!(group("detail/sessions.rs"), Some("sessions_settings"));
         assert_eq!(group("shell/modes/chat.rs"), Some("modes"));
@@ -976,6 +996,126 @@ mod rules {
         scan(file, source, &idx, token)
             .iter()
             .any(|v| v.rule == rule)
+    }
+    fn scan_sources(files: &[(&str, &str)], file: &str) -> Vec<Violation> {
+        let fs: Vec<_> = files
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect();
+        let idx = index(&fs);
+        let source = files.iter().find(|(p, _)| *p == file).unwrap().1;
+        scan(file, source, &idx, false)
+    }
+    fn has_rule(violations: &[Violation], rule: &str) -> bool {
+        violations.iter().any(|v| v.rule == rule)
+    }
+    #[test]
+    fn intra_group_child_and_super() {
+        let files = [
+            ("research/mod.rs", "pub struct Tab;"),
+            ("research/sources.rs", "pub struct Row;"),
+            ("research/adapter.rs", "pub struct Bridge;"),
+            (
+                "research/map.rs",
+                "use super::Tab; use super::sources::Row; use super::adapter::Bridge;",
+            ),
+        ];
+        assert!(scan_sources(&files, "research/map.rs").is_empty());
+        assert!(check(
+            "mini.rs",
+            "use crate::orch::Bad;",
+            false,
+            "view dependency"
+        ));
+    }
+    #[test]
+    fn intra_group_sibling_file() {
+        let files = [
+            ("composer.rs", "use super::palette::fuzzy;"),
+            ("palette.rs", "pub fn fuzzy() {}"),
+        ];
+        assert!(scan_sources(&files, "composer.rs").is_empty());
+        assert!(check(
+            "composer.rs",
+            "use crate::orch::Bad;",
+            false,
+            "view dependency"
+        ));
+    }
+    #[test]
+    fn cross_group_still_flagged() {
+        let files = [
+            ("mini.rs", "use crate::desktop::wishes::Other;"),
+            ("wishes.rs", "pub struct Other;"),
+            ("composer.rs", "use super::superswitch::Switch;"),
+            ("superswitch.rs", "pub struct Switch;"),
+            ("palette.rs", "pub fn fuzzy() {}"),
+        ];
+        for file in ["mini.rs", "composer.rs"] {
+            assert!(
+                has_rule(&scan_sources(&files, file), "view imports view"),
+                "{file}"
+            );
+        }
+        let local = [("composer.rs", "use super::palette::fuzzy;"), files[4]];
+        assert!(!has_rule(
+            &scan_sources(&local, "composer.rs"),
+            "view imports view"
+        ));
+    }
+    #[test]
+    fn cross_group_reexport_expansion() {
+        let files = [
+            ("palette.rs", "pub use crate::desktop::wishes::Other;"),
+            ("composer.rs", "use super::palette::Other;"),
+            ("wishes.rs", "pub struct Other;"),
+        ];
+        for file in ["palette.rs", "composer.rs"] {
+            assert!(
+                has_rule(&scan_sources(&files, file), "view imports view"),
+                "{file}"
+            );
+        }
+        let local = [("palette.rs", "pub struct Other;"), files[1]];
+        assert!(scan_sources(&local, "composer.rs").is_empty());
+    }
+    #[test]
+    fn intra_group_reexport_of_engine() {
+        let files = [
+            ("research/mod.rs", "pub use crate::research_workspace::X;"),
+            ("research/map.rs", "use super::X;"),
+        ];
+        for file in ["research/mod.rs", "research/map.rs"] {
+            assert!(
+                has_rule(&scan_sources(&files, file), "view dependency"),
+                "{file}"
+            );
+        }
+        let local = [("research/mod.rs", "pub struct X;"), files[1]];
+        assert!(scan_sources(&local, "research/map.rs").is_empty());
+    }
+    #[test]
+    fn adapter_may_import_engine() {
+        let files = [
+            ("research/adapter.rs", "use crate::research_workspace::X;"),
+            ("research/map.rs", "use crate::research_workspace::X;"),
+        ];
+        assert!(scan_sources(&files, "research/adapter.rs").is_empty());
+        assert!(has_rule(
+            &scan_sources(&files, "research/map.rs"),
+            "view dependency"
+        ));
+        let cross_group = [
+            (
+                "research/map.rs",
+                "use crate::desktop::paper::adapter::Bridge;",
+            ),
+            ("paper/adapter.rs", "pub struct Bridge;"),
+        ];
+        assert!(has_rule(
+            &scan_sources(&cross_group, "research/map.rs"),
+            "view dependency"
+        ));
     }
     #[test]
     fn token_literals_and_clean() {

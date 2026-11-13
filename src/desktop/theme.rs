@@ -2,7 +2,7 @@
 use super::model::{CheckStatus, LogLevel, Phase, RunStatus, UnitState};
 use super::motion::mix;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{theme::ThemeToken, ActiveTheme as _, Theme, ThemeMode};
+use gpui_kit::component::{theme::ThemeToken, Theme, ThemeMode as KitThemeMode};
 use gpui_kit::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +24,63 @@ pub struct Tokens {
 }
 
 impl Global for Tokens {}
+
+/// Colour and geometry tokens for the superswitch artwork.
+pub(crate) mod superswitch_art {
+    pub const ZERO: f32 = 0.0;
+    pub const GLASS_STROKE: f32 = 1.15;
+    pub const ALPHA_0_0: f32 = 0.0;
+    pub const ALPHA_0_08: f32 = 0.08;
+    pub const ALPHA_0_10: f32 = 0.10;
+    pub const ALPHA_0_12: f32 = 0.12;
+    pub const ALPHA_0_18: f32 = 0.18;
+    pub const ALPHA_0_22: f32 = 0.22;
+    pub const ALPHA_0_25: f32 = 0.25;
+    pub const ALPHA_0_35: f32 = 0.35;
+    pub const ALPHA_0_45: f32 = 0.45;
+    pub const ALPHA_0_5: f32 = 0.5;
+    pub const ALPHA_0_6: f32 = 0.6;
+    pub const ALPHA_0_7: f32 = 0.7;
+    pub const ALPHA_0_75: f32 = 0.75;
+    pub const ALPHA_0_8: f32 = 0.8;
+    pub const ALPHA_0_92: f32 = 0.92;
+    pub const ALPHA_1_0: f32 = 1.0;
+}
+
+
+/// Explicit application theme, independent of the component library's mode type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub fn tokens(self) -> Tokens {
+        match self {
+            Self::Light => LIGHT,
+            Self::Dark => DARK,
+        }
+    }
+}
+
+impl From<KitThemeMode> for ThemeMode {
+    fn from(mode: KitThemeMode) -> Self {
+        match mode {
+            KitThemeMode::Light => Self::Light,
+            KitThemeMode::Dark => Self::Dark,
+        }
+    }
+}
+
+impl From<ThemeMode> for KitThemeMode {
+    fn from(mode: ThemeMode) -> Self {
+        match mode {
+            ThemeMode::Light => Self::Light,
+            ThemeMode::Dark => Self::Dark,
+        }
+    }
+}
 
 #[cfg(test)]
 mod accept;
@@ -376,9 +433,10 @@ pub const UI_FONT: Option<&str> = Some("Segoe UI");
 pub const UI_FONT: Option<&str> = None;
 
 /// Applies a mode to both the component library's theme and our tokens.
-pub fn apply(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
-    Theme::change(mode, window, cx);
-    let t = if cx.theme().is_dark() { DARK } else { LIGHT };
+pub fn apply(mode: impl Into<ThemeMode>, window: Option<&mut Window>, cx: &mut App) {
+    let mode = mode.into();
+    Theme::change(KitThemeMode::from(mode), window, cx);
+    let t = mode.tokens();
     cx.set_global(t);
     Theme::update(cx, |theme| {
         if let Some(font) = UI_FONT {

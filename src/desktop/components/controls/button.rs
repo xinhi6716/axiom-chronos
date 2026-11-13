@@ -4,13 +4,21 @@ use crate::desktop::motion::{self, Driver, Settling, Spring, SpringValue};
 use gpui_kit::component::button::{Button as KitButton, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::{
-    App, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, Styled, Window,
+    div, App, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use std::rc::Rc;
 use std::time::Instant;
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+pub(super) fn hover_container(
+    id: ElementId,
+    child: impl IntoElement,
+    listener: impl Fn(&bool, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div().id((id, "hover")).on_hover(listener).child(child)
+}
 
 pub(super) struct Interaction {
     pub(super) focus: FocusHandle,
@@ -214,21 +222,14 @@ impl RenderOnce for Button {
         let down_state = state.clone();
         let up_state = state.clone();
         let out_state = state;
-        let mut button = KitButton::new(self.id)
+        let id = self.id;
+        let mut button = KitButton::new(id.clone())
             .accessibility_label(self.label.clone())
             .rounded(radius(self.rounded))
             .custom(variant)
             .track_focus(&focus)
             .focus_ring(false)
             .shadow(style.ring)
-            .on_hover(move |on, _, cx| {
-                let now = motion::now(cx);
-                let reduce = cx.reduce_motion();
-                hover_state.update(cx, |state, cx| {
-                    state.hover(*on, now, reduce);
-                    cx.notify();
-                });
-            })
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let now = motion::now(cx);
                 let reduce = cx.reduce_motion();
@@ -270,7 +271,14 @@ impl RenderOnce for Button {
         if let Some(callback) = self.on_click {
             button = button.on_click(move |event, window, cx| callback(event, window, cx));
         }
-        button
+        hover_container(id, button, move |on, _, cx| {
+            let now = motion::now(cx);
+            let reduce = cx.reduce_motion();
+            hover_state.update(cx, |state, cx| {
+                state.hover(*on, now, reduce);
+                cx.notify();
+            });
+        })
     }
 }
 

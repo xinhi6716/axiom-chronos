@@ -30,6 +30,23 @@ mod tests {
     use crate::desktop::components::tokens::{button_colors, ButtonVariant};
     use gpui_kit::ElementId;
     #[test]
+    fn hover_and_tooltip_do_not_register_two_hover_listeners() {
+        use gpui_kit::{div, InteractiveElement, ParentElement, StatefulInteractiveElement};
+        for t in crate::desktop::theme::both() {
+            let mut parent = div();
+            for id in ["first", "second"] {
+                let button = Tooltip::new(Button::new(id, "Help", &t), "Details").into_trigger();
+                let trigger = div().id(button.id.clone()).on_hover(|_, _, _| {});
+                parent = parent.child(super::super::button::hover_container(
+                    button.id,
+                    trigger,
+                    |_, _, _| {},
+                ));
+            }
+            drop(parent);
+        }
+    }
+    #[test]
     fn forwards_text_to_child_button() {
         for t in crate::desktop::theme::both() {
             let trigger = Button::new("trigger", "Help", &t)

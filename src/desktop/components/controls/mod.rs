@@ -49,6 +49,47 @@ pub use status_dot::StatusDot;
 mod split_handle;
 pub use split_handle::SplitHandle;
 
+pub mod keys;
+pub use keys::*;
+
+mod popup_menu;
+#[allow(unused_imports)]
+pub use popup_menu::*;
+mod text_area;
+#[allow(unused_imports)]
+pub use text_area::*;
+mod select;
+#[allow(unused_imports)]
+pub use select::*;
+mod icon;
+#[allow(unused_imports)]
+pub use icon::*;
+mod kbd;
+#[allow(unused_imports)]
+pub use kbd::*;
+mod tag;
+#[allow(unused_imports)]
+pub use tag::*;
+mod alert;
+#[allow(unused_imports)]
+pub use alert::*;
+mod notification;
+#[allow(unused_imports)]
+pub use notification::*;
+mod text_view;
+#[allow(unused_imports)]
+pub use text_view::*;
+mod virtual_list;
+#[allow(unused_imports)]
+pub use virtual_list::*;
+mod list_item;
+#[allow(unused_imports)]
+pub use list_item::*;
+mod list;
+#[allow(unused_imports)]
+pub use list::*;
+pub mod superswitch;
+
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
