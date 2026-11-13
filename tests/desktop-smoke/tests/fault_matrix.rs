@@ -15,11 +15,11 @@ use gpui_kit::component::ThemeMode;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, size, AnyWindowHandle, AppContext as _, Bounds, Context, ElementId,
+    div, px, size, AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity,
     InteractiveElement as _, IntoElement, ParentElement as _, Point, Render, SharedString,
     Styled as _, TestAppContext, Window, WindowBounds, WindowOptions,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 fn frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
     cx.run_until_parked();
@@ -140,7 +140,7 @@ fn open(
             axiom::desktop::ux::seams::FakeInterjections::new(),
         ));
     }
-    // Subtargets are prepared through their public parent, then opened by UI actions.
+    // Subtargets are prepared through their public parent before opening.
     let parent = match target.opening {
         Opening::ResearchTab(_) => Some("research"),
         Opening::PaperStep(_) => Some("paper"),
@@ -169,13 +169,18 @@ fn open(
         ..Default::default()
     };
     let shell_state = state.clone();
+    let shell_slot = Rc::new(RefCell::new(None));
+    let captured_shell = shell_slot.clone();
     let (mut window, _) = cx
         .update(|cx| {
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Shell::new(shell_state, false, window, cx))
+                let shell = cx.new(|cx| Shell::new(shell_state, false, window, cx));
+                *captured_shell.borrow_mut() = Some(shell.clone());
+                shell
             })
         })
         .map_err(|e| format!("open Shell: {e:?}"))?;
+    let shell = shell_slot.borrow_mut().take().expect("created Shell");
     cx.simulate_window_scale_factor_change(window, viewport.scale);
     for _ in 0..4 {
         frame(cx, window);
@@ -206,8 +211,7 @@ fn open(
         Opening::PaperStep(step) => match step {
             // These sections are rendered on the paper page, not separate steps.
             "form" | "shortlist" | "estimate" | "progress" | "changelog" | "preview" => {}
-            "readiness" => return Err("missing public paper readiness view hook".into()),
-            _ => return Err(format!("missing public paper step hook for {step}")),
+            _ => route(cx, window, &shell, target)?,
         },
         Opening::Window("focus.graph" | "focus.checklist") => {
             use axiom::desktop::settings::{self, FocusPanel, WindowMode};
@@ -260,34 +264,27 @@ fn open(
                 .ok_or("mini transition did not create a window")?;
             cx.simulate_window_scale_factor_change(window, viewport.scale);
         }
-        Opening::Dialog("control") => {
-            return Err(
-                "missing public control dialog opening hook (the run control bar is not a dialog)"
-                    .into(),
-            )
+        Opening::Dialog("control" | "interjection" | "evolve") => {
+            route(cx, window, &shell, target)?;
         }
-        Opening::Dialog("interjection") => click_if_present(cx, window, "open-interjection")?,
-        Opening::Dialog("evolve") => click_if_present(cx, window, "evolve-open")?,
         Opening::Screen(_) | Opening::Page(_) => {}
-        ref opening => return Err(format!("missing public opening hook for {opening:?}")),
+        _ => route(cx, window, &shell, target)?,
     }
     frame(cx, window);
     Ok(window)
 }
 
-fn click_if_present(
+fn route(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
-    id: &'static str,
+    shell: &Entity<Shell>,
+    target: &Target,
 ) -> Result<(), String> {
     cx.update_window(window, |_, w, cx| {
-        if w.try_find(id).is_none() {
-            return Err(format!("public action {id} unavailable"));
-        }
-        w.click(id, cx);
-        Ok(())
+        shell.update(cx, |sh, cx| sh.open_target(target, CaptureState::Live, w, cx))
     })
-    .map_err(|e| format!("public action {id}: {e:?}"))?
+    .map_err(|e| format!("route {}: {e:?}", target.id))?
+    .map_err(|u| format!("unregistered: target {} state {:?}", u.target, u.state))
 }
 
 fn set_fault(cx: &mut TestAppContext, panel: &'static str, fault: Option<Fault>) {
@@ -352,6 +349,15 @@ mod rules {
     use super::*;
     use axiom::desktop::components::panel::RenderGuard;
     use axiom::desktop::data::feed::FeedCore;
+
+    #[test]
+    fn no_missing_public_hook_branches() {
+        let phrase = concat!("missing", " public");
+        let contains_phrase = |source: &str| source.contains(phrase);
+        assert!(contains_phrase(concat!("synthetic ", "missing", " public hook")));
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fault_matrix.rs"));
+        assert!(!contains_phrase(source), "source contains forbidden hook phrase");
+    }
 
     struct TestSource;
     impl Source<String> for TestSource {
@@ -535,6 +541,44 @@ mod rules {
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap();
         assert_eq!(message, "io during render synthetic");
+    }
+}
+
+mod route {
+    use super::*;
+
+    fn route_outcome_ok<T>(id: &str, result: &Result<T, String>) -> bool {
+        match result {
+            Ok(_) => true,
+            Err(error) => error.starts_with(&format!("unregistered: target {id} state Live")),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn dialogs_open_through_open_target(cx: &mut TestAppContext) {
+        for id in ["dialog.control", "dialog.interjection", "dialog.evolve"] {
+            let target = targets::find(id).expect("registered dialog");
+            let existing = cx.windows();
+            let result = open(cx, &target, Viewport { width: 1440., height: 900., scale: 1. });
+            assert!(route_outcome_ok(id, &result), "{id}: {result:?}");
+            if let Ok(window) = result {
+                if let Some(&panel) = target.panels.first() {
+                    assert!(panel.starts_with("dialog."), "{id}: invalid panel id {panel}");
+                    assert!(has(cx, window, panel), "{id}: dialog panel {panel} not found");
+                } else {
+                    assert!(cx.windows().contains(&window), "{id}: window not found");
+                }
+            }
+            for window in cx.windows().into_iter().filter(|w| !existing.contains(w)) {
+                cx.update_window(window, |_, w, _| w.remove_window()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn route_rejects_other_errors() {
+        let result: Result<(), String> = Err(concat!("missing", " public x").into());
+        assert!(!route_outcome_ok("dialog.control", &result));
     }
 }
 

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod feed;
+pub mod facade;
 mod undo;
 mod menu;
 mod board;
