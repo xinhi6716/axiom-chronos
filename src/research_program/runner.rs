@@ -49,6 +49,7 @@ impl CouncilStage for CouncilRunner<'_> {
         stop: &AtomicBool,
     ) -> Res<Value> {
         let setup = council::Setup {
+            argon_every_round: self.setup.argon_every_round,
             fable: self.setup.fable.clone(),
             argon: self.setup.argon.clone(),
             fable_cap_usd: cap_usd,
@@ -391,7 +392,8 @@ pub fn run(
         members.pre_mortem.name().to_owned(),
         members.synthesizer.name().to_owned(),
     ]);
-    let estimate_line = history::estimate(&cfg.home, PROGRAM_TYPE, &models)?.line();
+    super::budget::council_models(&mut models, &cfg.home)?;
+    let estimate_line = super::budget::estimate_line(&history::estimate(&cfg.home, PROGRAM_TYPE, &models)?, &models);
     let was_complete = state.complete;
     let all_valid = Stage::ALL.iter().all(|stage| {
         state.stages.iter().any(|e| {

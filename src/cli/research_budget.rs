@@ -10,10 +10,18 @@ use crate::{
 use std::path::{Path, PathBuf};
 
 pub fn default_models() -> Vec<String> {
+    default_models_for(&base::axiom_home()).unwrap_or_else(|_| base_models())
+}
+
+fn base_models() -> Vec<String> {
     ["argon", "argon", "astra", "astra", "fable", "fable"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+        .into_iter().map(str::to_owned).collect()
+}
+
+pub fn default_models_for(home: &Path) -> Res<Vec<String>> {
+    let mut models = base_models();
+    research_program::budget::council_models(&mut models, home)?;
+    Ok(models)
 }
 
 pub fn raise(store: &Path, cap: f64, approval: &dyn PersonApproval) -> Res<Option<RaiseReceipt>> {
@@ -33,7 +41,10 @@ pub(super) fn command(args: &[String]) -> i32 {
     match action {
         "estimate" => {
             let models = match &args[1..] {
-                [] => default_models(),
+                [] => match default_models_for(&base::axiom_home()) {
+                    Ok(models) => models,
+                    Err(e) => { eprintln!("axiom: {}", e.message); return 1; }
+                },
                 [flag, value]
                     if flag == "--models"
                         && !value.is_empty()
@@ -46,7 +57,7 @@ pub(super) fn command(args: &[String]) -> i32 {
             match base::data_home().and_then(|home| history::estimate(&home, PROGRAM_TYPE, &models))
             {
                 Ok(estimate) => {
-                    println!("{}", estimate.line());
+                    println!("{}", research_program::budget::estimate_line(&estimate, &models));
                     0
                 }
                 Err(e) => {

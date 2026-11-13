@@ -245,7 +245,7 @@ fn program(b: &Bridge, setup: &council::Setup, store: PathBuf, a: &Value) -> Res
         Some(_) => return Err(invalid("sources must be an array of strings")),
     };
     if let Err(e) = budgets::check(&store, Role::CouncilMember, "program") {
-        if e.kind == "budget_exceeded" {
+        if e.kind == "budget_exceeded" || e.kind == "pool_exhausted" {
             return Ok(json!({"status":"refused","error":e.to_json()}));
         }
         return Err(e);
@@ -340,8 +340,18 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
                 plan_path,
                 schema_path: PathBuf::from(text(a, "schema_path")?),
             };
-            if let Err(e) = budgets::check(&store, Role::CouncilMember, "council") {
-                if e.kind == "budget_exceeded" {
+            if let Err(e) = if setup.argon_every_round {
+                budgets::check_model(
+                    &store,
+                    b.home()?,
+                    Role::CouncilMember,
+                    "council",
+                    council::ARGON_MODEL,
+                )
+            } else {
+                budgets::check(&store, Role::CouncilMember, "council")
+            } {
+                if e.kind == "budget_exceeded" || e.kind == "pool_exhausted" {
                     return Ok(json!({"status":"refused","error":e.to_json()}));
                 }
                 return Err(e);
@@ -503,7 +513,7 @@ pub fn council(b: &Bridge, a: &Value) -> Res<Value> {
 pub fn descriptor() -> Value {
     json!({
         "name": "council",
-        "description": "Advanced research, available only because this session opted in. `program` runs the research program before planning and returns its bounded digest. After Astra has written its plan, `run` conducts an ordered Astra/Fable dialogue, one Argon review, and ordered Astra/Fable replies only to objections. Dialogue phases stop on agreement, budgets or their round cap; the digest identifies each phase and turn. The reply is a bounded digest; do not read the position files. `rule` records your rulings and its reply carries the next unruled claims until none remain.",
+        "description": "Advanced research, available only because this session opted in. `program` runs the research program before planning and returns its bounded digest. After Astra has written its plan, `run` conducts an ordered Astra/Fable/Argon dialogue and review, then replies to objections (or one Argon review when argon_every_round is off). Dialogue phases stop on agreement, budgets or their round cap; the digest identifies each phase and turn. The reply is a bounded digest; do not read the position files. `rule` records your rulings and its reply carries the next unruled claims until none remain.",
         "inputSchema": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["run", "rule", "program"], "default": "run"},
             "project": {"type": "string", "description": "Program slug."},

@@ -40,7 +40,9 @@ impl Case {
         Ok(v)
     }
     fn setup(&self, fable: &str, argon: &str) -> Setup {
-        Setup::new(self.member(fable), self.member(argon))
+        let mut setup = Setup::new(self.member(fable), self.member(argon));
+        setup.argon_every_round = false;
+        setup
     }
     fn run(&self, setup: &Setup) -> (Value, Vec<Value>) {
         let request = council::Request {
@@ -93,7 +95,8 @@ fn plan_schema_rejects_missing_or_invalid_routing() {
     let case = Case::new();
     let schema: Value = serde_json::from_slice(
         &fs::read(common::repo_root().join("engine/research/audit.schema.json")).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     let plan: Value = serde_json::from_slice(&fs::read(&case.plan).unwrap()).unwrap();
     base::schema::validate(&schema, &plan).unwrap();
     for (field, value, expected) in [
@@ -108,7 +111,10 @@ fn plan_schema_rejects_missing_or_invalid_routing() {
         } else {
             change.remove(field);
         }
-        assert_eq!(base::schema::validate(&schema, &invalid).unwrap_err(), expected);
+        assert_eq!(
+            base::schema::validate(&schema, &invalid).unwrap_err(),
+            expected
+        );
     }
 }
 

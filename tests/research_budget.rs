@@ -186,3 +186,22 @@ fn exceeding_cap_and_failed_persistence_are_visible() {
     assert!(budget.raise(20.0, &FakeApproval::approving()).is_err());
     assert_eq!(budget.cap_usd(), 10.0);
 }
+
+#[test]
+fn default_models_follow_council_setting() {
+    let home = tempdir().unwrap();
+    let on = axiom::cli::research_budget::default_models_for(home.path()).unwrap();
+    assert_eq!(on.iter().filter(|m| *m == "argon").count(), 11);
+    axiom::council::settings::save(home.path(), &axiom::council::settings::CouncilSettings { argon_every_round: false }).unwrap();
+    let off = axiom::cli::research_budget::default_models_for(home.path()).unwrap();
+    assert_eq!(off, models(&["argon", "argon", "astra", "astra", "fable", "fable"]));
+}
+
+#[test]
+fn estimate_mentions_argon_pool_only_when_present() {
+    let home = tempdir().unwrap();
+    let argon = models(&["argon"]);
+    let estimate = axiom::research_program::history::estimate(home.path(), "research", &argon).unwrap();
+    assert!(axiom::research_program::budget::estimate_line(&estimate, &argon).contains("Argon spend lands in the Argon pool"));
+    assert!(!axiom::research_program::budget::estimate_line(&estimate, &models(&["astra"])).contains("Argon spend lands in the Argon pool"));
+}

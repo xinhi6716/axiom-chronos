@@ -2,7 +2,7 @@ When the bridge `council` tool offers action `program`, read `${CLAUDE_PLUGIN_RO
 
 # Council
 
-The council is opt-in and remains off by default. The engine conducts three phases:
+The council is opt-in and remains off by default. The engine conducts three phases. The following describes the one-review protocol when `argon_every_round` is off:
 
 1. **A — Plan.** Astra speaks first in every round; its initial turn is the existing plan. Fable sees that turn, agrees or rebuts per claim, and explicitly approves or refuses the whole plan. Astra revises or defends, then Fable responds again. Approval closes the phase only when no rebuttal remains open.
 2. **B — One review.** Argon alone reviews exactly once after A, using neutral position labels. It sees the agreed plan or both final positions with open disputes, agrees or objects per claim, and may add claims. With no objection the discussion ends. Missing, failed or capped Argon means no review; a malformed review gets one repair ask in the same turn, otherwise there is no retry or phase C.
@@ -20,3 +20,5 @@ Call `council` with `project` the slug, `cwd` the project directory, `plan_path`
 After the Critic review:
 
 If the council sat, rule on each of its `open` claims too and record them with `council` `action: "rule"`, the same `project` and `plan_path`, and `rulings` of `id`, `decision` (`upheld`, `rejected` or `narrowed`) and `reason`; while the reply's `more_open` is true, rule its `next` claims too. Nothing goes back to the members.
+
+By default `argon_every_round` is true: Astra, Fable and Argon speak in each round of phases A and C and in the single round of phase B. Argon is a full member and its token cap applies across calls. Set `argon_every_round` in `<home>/settings/council.json`, or override it with `AXIOM_COUNCIL_ARGON_EVERY_ROUND=0` or `1`. When off, the one-review protocol above applies.

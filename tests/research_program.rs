@@ -1,3 +1,4 @@
+mod common;
 use axiom::{
     base::Res,
     council::{Status, DIGEST_MAX_CHARS},
@@ -319,4 +320,142 @@ fn fable_once_reports_missing_command() {
     );
     assert_eq!(reply.status, Status::Missing);
     assert!(reply.detail.unwrap().contains("not available"));
+}
+
+
+mod council_stage_integration {
+    use super::common;
+    use axiom::council::{self, CrossReply, CrossRequest, Setup, Status};
+    use axiom::research_program::runner::CouncilStage;
+    use regex::Regex;
+    use serde_json::{json, Value};
+    use std::{fs, path::PathBuf, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Mutex}};
+    const BRIEF: &str = "GOAL the changes that carry out the wish\nWISH make it faster";
+    struct Case {
+        temp: tempfile::TempDir,
+        plan: PathBuf,
+        schema: PathBuf,
+        log: PathBuf,
+    }
+    impl Case {
+        fn new() -> Self {
+            let temp = common::temp();
+            let dir = temp.path().join("orchestrate/project/astra");
+            fs::create_dir_all(&dir).unwrap();
+            fs::create_dir_all(temp.path().join("orchestrate/project/reports")).unwrap();
+            fs::create_dir_all(temp.path().join("storage")).unwrap();
+            fs::write(
+                temp.path().join("storage/policy.json"),
+                r#"{"reserve_bytes":0}"#,
+            )
+            .unwrap();
+            let plan = dir.join("plan.json");
+            fs::write(
+            &plan,
+            serde_json::to_vec(&json!({
+                "summary":"astra", "coverage":{"read":[],"not_read":[]}, "out_of_scope":[],
+                "changes":[
+                    {"id":"a1","area":"design","location":"src/a.py","evidence":"astra evidence one","problem":"slow","change":"cache it","verify":"time it","tier":"sol","effort":"high","risk":"standard","reason":"Bounded cache change"},
+                    {"id":"a2","area":"tests","location":"src/b.py","evidence":"astra evidence two","problem":"flaky","change":"pin it","verify":"run it","tier":"sol","effort":"high","risk":"standard","reason":"Bounded test change"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+            let schema = common::repo_root().join("engine/research/audit.schema.json");
+            let log = temp.path().join("calls.jsonl");
+            Self {
+                temp,
+                plan,
+                schema,
+                log,
+            }
+        }
+        fn member(&self, scenario: &str) -> axiom::base::Res<Vec<String>> {
+            let mut argv = common::fake("fake_member");
+            argv.push(format!("--fake-scenario={scenario}"));
+            argv.push(format!("--fake-log={}", self.log.display()));
+            Ok(argv)
+        }
+        fn setup(&self, fable: &str, argon: &str) -> Setup {
+            let mut setup = Setup::new(self.member(fable), self.member(argon));
+            setup.argon_every_round = false;
+            setup
+        }
+        fn calls(&self) -> Vec<Value> {
+            fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+        fn run(&self, setup: &Setup, astra: &Astra) -> axiom::base::Res<Value> {
+            let cross = |r: &CrossRequest| astra.answer(r);
+            axiom::research_program::runner::CouncilRunner { setup, astra: &cross }.debate(&self.plan, &self.schema, BRIEF, setup.fable_cap_usd, &AtomicBool::new(false))
+        }
+    }
+
+    struct Astra {
+        status: Status,
+        calls: AtomicUsize,
+        prompt: Mutex<String>,
+    }
+    impl Astra {
+        fn with(status: Status) -> Self {
+            Self {
+                status,
+                calls: AtomicUsize::new(0),
+                prompt: Mutex::new(String::new()),
+            }
+        }
+        fn ok() -> Self {
+            Self::with(Status::Ok)
+        }
+        fn answer(&self, request: &CrossRequest) -> CrossReply {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.prompt.lock().unwrap() = request.prompt.clone();
+            let ids = Regex::new(r"(?m)^(C\d+) \[Position").unwrap();
+            let stances: Vec<Value> = ids
+                .captures_iter(&request.prompt)
+                .map(|c| json!({"claim":c[1].to_string(),"stance":"agree","evidence":""}))
+                .collect();
+            CrossReply {
+                status: self.status,
+                raw: None,
+                output: (self.status == Status::Ok).then(|| json!({ "stances": stances })),
+                tokens: 321,
+                model: Some("gpt-6-astra".into()),
+                detail: (self.status != Status::Ok).then(|| "not this time".to_string()),
+            }
+        }
+    }
+
+
+    #[test]
+    fn program_council_argon_every_round_and_pool() {
+        use axiom::usage::pools::{self, Pool};
+        let case = Case::new();
+        let mut setup = case.setup("disagree,resolve-a", "disagree");
+        setup.argon_every_round = true;
+        let reply = case.run(&setup, &Astra::ok()).unwrap();
+        let rounds = reply["rounds"].as_array().unwrap();
+        for phase in ["A", "B", "C"] {
+            assert!(rounds.iter().any(|r| r["phase"] == phase), "phase {phase} ran");
+        }
+        let calls = case.calls();
+        for round in rounds {
+            assert!(calls.iter().any(|c| c["role"] == "argon" && c["phase"] == round["phase"] && c["round"] == round["n"]), "Argon called in every round: {round}");
+        }
+        let statuses = pools::status(case.temp.path(), 0).unwrap();
+        let used = |pool| statuses.iter().find(|s| s.pool == pool).unwrap().used_tokens.unwrap();
+        assert!(used(Pool::Argon) > 1234);
+        assert_eq!(used(Pool::HydrogenFlash), 0);
+    }
+    #[test]
+    fn program_council_off_calls_argon_once() {
+        let case = Case::new();
+        let setup = case.setup("disagree,resolve-a", "disagree");
+        case.run(&setup, &Astra::ok()).unwrap();
+        assert_eq!(case.calls().iter().filter(|c| c["role"] == "argon").count(), 1);
+    }
 }

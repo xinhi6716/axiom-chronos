@@ -94,7 +94,10 @@ impl Budgets {
         .map_err(Into::into)
     }
     pub fn notice(self) -> String {
-        format!("{}Fable is capped at ${:.2}, Astra at {} tokens, Argon at {} tokens for one review, up to {} rounds per phase", super::NOTICE, self.fable_cap_usd, tokens(self.astra_token_cap), tokens(self.argon_token_cap), self.rounds)
+        self.notice_for(false)
+    }
+    pub fn notice_for(self, argon_every_round: bool) -> String {
+        format!("{}Fable is capped at ${:.2}, Astra at {} tokens, Argon at {} tokens {}, up to {} rounds per phase", super::NOTICE, self.fable_cap_usd, tokens(self.astra_token_cap), tokens(self.argon_token_cap), if argon_every_round { "per call across rounds" } else { "for one review" }, self.rounds)
     }
 }
 pub fn env_value(key: &str) -> Option<String> {
@@ -126,6 +129,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(b.rounds, 5);
+        assert_eq!(b.notice(), b.notice_for(false));
+        assert!(b
+            .notice_for(true)
+            .contains("Argon at 400k tokens per call across rounds"));
         assert!(b.notice().contains("$20.00, Astra at 600k tokens, Argon at 400k tokens for one review, up to 5 rounds per phase"));
         assert!(Budgets::parse(|k| (k == FABLE_CAP).then(|| "200".into())).is_ok());
     }
