@@ -1,3 +1,11 @@
+// Failing-first record (rwc-f-tests):
+// stages and gates: expected 7 stages; the stage count assertion failed.
+// links and Python requirement: expected 4 links; the link count assertion failed.
+// revision and snapshots: expected snapshot version "wrong"; the newest-version assertion failed.
+// roots, roles and store precedence: expected no store; the explicit-store assertion failed.
+// declared artifacts: expected 19 artifacts; the artifact count assertion failed.
+// row strictness: expected 3 CSV rows; the row count assertion failed.
+
 use axiom::research_workspace::{manifest::*, read::*, rram};
 use sha2::{Digest, Sha256};
 use std::{
@@ -304,6 +312,7 @@ fn fixtures_and_adapter_are_read_only() {
     let err = m.require(Capability::PdfPages).unwrap_err();
     assert_eq!(err.kind, "not_capable");
     assert!(err.message.contains("PdfPages"));
+    assert!(err.message.contains("pdf_pages"));
     assert!(!m.has(Capability::Literature));
     assert!(!m.has(Capability::Screening));
     assert_eq!(rows(&m, "raw_measurements").len(), 2);
@@ -359,7 +368,7 @@ fn errors_paging_and_path_guards() {
     fs::write(d.path().join("runs/device_B.jsonl"), "{\"x\":1}\n{\"x\":").unwrap();
     let e = read_rows(&l, "run_b", None, 10, &Limits::default()).unwrap_err();
     assert_eq!(e.kind, "corrupt_artifact");
-    assert!(e.message.contains('2'));
+    assert!(e.message.contains("line 2"));
     let mut csv = CsvReader::new(
         &b"\xef\xbb\xbfa,b\n\"x,\"\"y\"\"\nz\",q\n"[..],
         Limits::default(),
@@ -668,4 +677,302 @@ fn rram_fixture_special_cases() {
             .unwrap(),
         verify(&l, "measurements").unwrap()
     );
+}
+
+fn copied_rram(d: &Path) -> PathBuf {
+    let project = d.join("project");
+    copy_tree(&fixture("rram").join("project"), &project);
+    project
+}
+
+#[test]
+fn restored_stages_and_gates() {
+    let d = tempfile::tempdir().unwrap();
+    let m = rram::manifest(&copied_rram(d.path()), &Default::default()).unwrap();
+    assert_eq!(m.stages.len(), 6);
+    assert_eq!(
+        m.stages.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        [
+            "inventory",
+            "screen",
+            "pilot",
+            "acceptance",
+            "extract",
+            "splits"
+        ]
+    );
+    let stage = |id: &str| m.stages.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(stage("inventory").outputs, ["inventory"]);
+    assert_eq!(stage("splits").outputs, ["splits"]);
+    let screen = stage("screen");
+    assert_eq!(screen.progress.as_deref(), Some("progress_screen"));
+    let gate = screen.gate.as_ref().unwrap();
+    assert_eq!(
+        (
+            &*gate.artifact,
+            &*gate.pointer,
+            &gate.op,
+            &gate.value,
+            &gate.setting
+        ),
+        (
+            "recall",
+            "/passed",
+            &GateOp::Eq,
+            &Some(serde_json::json!(true)),
+            &None
+        )
+    );
+    for id in ["pilot", "acceptance"] {
+        let gate = stage(id).gate.as_ref().unwrap();
+        assert_eq!(gate.artifact, "effort_lock");
+        assert_eq!(gate.pointer, format!("/{id}/accuracy"));
+        assert_eq!(gate.op, GateOp::Ge);
+        assert_eq!(gate.value, None);
+        assert_eq!(
+            gate.setting.as_deref(),
+            Some(format!("/{id}/accuracy_threshold").as_str())
+        );
+    }
+    let extract = stage("extract");
+    assert_eq!(extract.outputs, ["measurements", "evidence"]);
+    let gate = extract.gate.as_ref().unwrap();
+    assert_eq!(
+        (
+            &*gate.artifact,
+            &*gate.pointer,
+            &gate.op,
+            &gate.value,
+            &gate.setting
+        ),
+        (
+            "validation",
+            "/n_errors",
+            &GateOp::Eq,
+            &Some(serde_json::json!(0)),
+            &None
+        )
+    );
+}
+
+#[test]
+fn restored_links_and_python_requirement() {
+    let d = tempfile::tempdir().unwrap();
+    let project = copied_rram(d.path());
+    let python_requirement = ">=3.11, <4";
+    fs::write(
+        project.join("pyproject.toml"),
+        format!("[project]\nrequires-python = '{python_requirement}'\n"),
+    )
+    .unwrap();
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    assert_eq!(m.links.len(), 3);
+    assert_eq!(
+        m.links,
+        vec![
+            Link {
+                from: "evidence".into(),
+                to: "measurements".into(),
+                key: "evidence_id".into(),
+                separator: Some(";".into())
+            },
+            Link {
+                from: "inventory".into(),
+                to: "screening".into(),
+                key: "path".into(),
+                separator: None
+            },
+            Link {
+                from: "measurements".into(),
+                to: "splits".into(),
+                key: "paper_id".into(),
+                separator: None
+            },
+        ]
+    );
+    assert_eq!(
+        m.versions.environment["requires-python"],
+        python_requirement
+    );
+}
+
+#[test]
+fn restored_revision_and_snapshot_versions() {
+    let d = tempfile::tempdir().unwrap();
+    let project = copied_rram(d.path());
+    fs::create_dir_all(project.join(".git/refs/heads")).unwrap();
+    let revision = "0123456789abcdef0123456789abcdef01234567";
+    fs::write(project.join(".git/HEAD"), "ref: refs/heads/test\n").unwrap();
+    fs::write(
+        project.join(".git/refs/heads/test"),
+        format!("{revision}\n"),
+    )
+    .unwrap();
+    for stamp in ["20240101T000000Z", "20280101T000000Z", "20270101T000000Z"] {
+        fs::write(
+            project.join(format!("state/source_snapshot_{stamp}.json")),
+            "{}",
+        )
+        .unwrap();
+    }
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    assert_eq!(m.versions.code.as_deref(), Some(revision));
+    assert_eq!(m.research_version, "20280101T000000Z");
+    let detached = "abcdef0123456789abcdef0123456789abcdef01";
+    fs::write(project.join(".git/HEAD"), format!("{detached}\n")).unwrap();
+    for entry in fs::read_dir(project.join("state")).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("source_snapshot_")
+        {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    assert_eq!(m.versions.code.as_deref(), Some(detached));
+    assert_eq!(m.research_version, "unversioned");
+}
+
+#[test]
+fn restored_roots_roles_and_store_precedence() {
+    let d = tempfile::tempdir().unwrap();
+    let project = copied_rram(d.path());
+    let home = d.path().join("orch");
+    fs::create_dir_all(home.join("rram_fixture")).unwrap();
+    let store = d.path().join("explicit_store");
+    fs::create_dir_all(&store).unwrap();
+    let l = locate(
+        &project,
+        &LocateOptions {
+            store: Some(store.clone()),
+            orch_home: Some(home),
+        },
+    )
+    .unwrap();
+    assert_eq!(l.store.as_deref(), Some(store.as_path()));
+    let expected = BTreeSet::from([
+        l.root.clone(),
+        fs::canonicalize(project.join("pdfs")).unwrap(),
+        store,
+    ]);
+    assert_eq!(l.roots().into_iter().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(
+        l.by_role(Role::Inventory)
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        ["inventory"]
+    );
+    assert_eq!(
+        l.by_role(Role::Gate)
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        ["effort_lock"]
+    );
+    assert_eq!(
+        l.root_path(Some("unknown")).unwrap_err().kind,
+        "invalid_manifest"
+    );
+}
+
+#[test]
+fn restored_artifacts_follow_files() {
+    let d = tempfile::tempdir().unwrap();
+    let project = copied_rram(d.path());
+    let ids = |m: &Manifest| {
+        m.artifacts
+            .iter()
+            .map(|a| a.id.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    assert_eq!(m.artifacts.len(), 18);
+    let expected: BTreeSet<_> = [
+        "inventory",
+        "screening",
+        "aliases",
+        "evidence",
+        "measurements",
+        "raw_measurements",
+        "progress_screen",
+        "driver",
+        "completed",
+        "pilot",
+        "acceptance",
+        "acceptance_sha",
+        "splits",
+        "splits_sha",
+        "validation",
+        "effort_lock",
+        "raw_summary",
+        "protocol",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(ids(&m), expected);
+    assert!(m.capabilities.contains(&Capability::PdfPages));
+    fs::remove_file(project.join("data/evidence.csv")).unwrap();
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    let mut remaining = expected.clone();
+    remaining.remove("evidence");
+    assert_eq!(ids(&m), remaining);
+    assert!(!m.capabilities.contains(&Capability::PdfPages));
+    fs::copy(
+        fixture("rram").join("project/data/evidence.csv"),
+        project.join("data/evidence.csv"),
+    )
+    .unwrap();
+    fs::remove_file(project.join("data/literature_inventory.csv")).unwrap();
+    let m = rram::manifest(&project, &Default::default()).unwrap();
+    remaining = expected;
+    remaining.remove("inventory");
+    assert_eq!(ids(&m), remaining);
+    assert!(!m.capabilities.contains(&Capability::PdfPages));
+}
+
+#[test]
+fn restored_row_strictness() {
+    let d = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("rawonly"), d.path());
+    let l = locate(d.path(), &Default::default()).unwrap();
+    fs::write(
+        d.path().join("runs/device_A.csv"),
+        "key,value\nshort\nlong,2,discard\n",
+    )
+    .unwrap();
+    let csv = rows(&l, "run_a");
+    assert_eq!(csv.len(), 2);
+    assert_eq!(
+        csv[0].fields,
+        BTreeMap::from([("key".into(), "short".into()), ("value".into(), "".into())])
+    );
+    assert_eq!(
+        csv[1].fields,
+        BTreeMap::from([("key".into(), "long".into()), ("value".into(), "2".into())])
+    );
+    let jsonl = d.path().join("runs/device_B.jsonl");
+    fs::write(&jsonl, "{\"x\":1}\n  \n{\"x\":2}").unwrap();
+    let page = read_rows(&l, "run_b", None, 10, &Limits::default()).unwrap();
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.rows[0].fields["x"], "1");
+    assert_eq!(page.rows[1].fields["x"], "2");
+    assert_eq!(page.rows[1].number, 3);
+    assert!(page.next.is_none());
+    let limits = Limits {
+        max_record_bytes: 8,
+        ..Default::default()
+    };
+    fs::write(&jsonl, "{\"x\":12345}\n").unwrap();
+    assert_eq!(
+        read_rows(&l, "run_b", None, 10, &limits).unwrap_err().kind,
+        "oversized_record"
+    );
+    fs::write(&jsonl, "{\"x\":1}\n{\"x\":").unwrap();
+    let e = read_rows(&l, "run_b", None, 10, &Limits::default()).unwrap_err();
+    assert_eq!(e.kind, "corrupt_artifact");
+    assert!(e.message.contains("line 2"), "{}", e.message);
 }
