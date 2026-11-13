@@ -1,31 +1,112 @@
 //! The graph on the Run screen: Chronos on the left, then modules, then their units.
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
-mod logic;
+
 // ux-celestial begin
 // p8: begin
 pub(crate) mod council;
 // p8: end
-mod dual_core;
+
 // ux-celestial end
 
 use super::i18n::{self, tr, Lang, Table};
-use logic::{glow_targets, menu_anchor_node, menu_target, mesh_view, node_center, scene_runs_needed, should_auto_refit, stage_role, MeshView};
-use super::model::*;
-use super::palette;
+use super::model::{AppState, Run, RunStatus, UnitState, PanelState, MenuTarget, MenuAction, Module, Unit, Selection, Screen, Phase, Stage, TextSource, UnitFiles, FeedKind, panel_state};
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament;
-use super::plain_text;
 use super::theme::{self, Step as SpaceStep, TypeSize, Tokened as _, Tokens};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::PopupMenu;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use crate::desktop::components::{Button, IconButton};
+use crate::desktop::components::tokens::ButtonVariant;
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+
+/// Optional translation supplied by the desktop root.
+pub struct TitleSource(pub Rc<dyn Fn(&App, &SharedString) -> (SharedString, Option<SharedString>)>);
+impl Global for TitleSource {}
+
+struct PlainTitle { shown: SharedString, original: Option<SharedString> }
+fn plain_title(cx: &App, title: &SharedString) -> PlainTitle {
+    let (shown, original) = cx.try_global::<TitleSource>()
+        .map_or_else(|| (title.clone(), None), |source| (source.0)(cx, title));
+    PlainTitle { shown, original }
+}
+
+
+fn should_auto_refit(last: Option<(f32, f32)>, viewport: (f32, f32)) -> bool {
+    last.is_some_and(|last| last != viewport)
+}
+
+fn scene_runs_needed(name: &str) -> usize {
+    match name {
+        "mesh-partial" | "mesh-done" => 4,
+        "mesh-blocked" => 3,
+        "mesh-waiting" => 2,
+        _ => 1,
+    }
+}
+
+fn menu_target(run: &Run, node: Node) -> Option<MenuTarget> {
+    match node {
+        Node::Unit(i) => Some(MenuTarget::Unit { session: run.session.clone(), unit: run.units.get(i)?.id.clone() }),
+        Node::Module(i) => Some(MenuTarget::Module { session: run.session.clone(), module: run.modules.get(i)?.id.clone() }),
+        Node::Core | Node::Folded(..) => None,
+    }
+}
+
+fn menu_anchor_node(cursor: Option<Node>, selected: Option<Node>) -> Option<Node> {
+    let has_menu = |node: &Node| matches!(node, Node::Unit(_) | Node::Module(_));
+    cursor.filter(has_menu).or_else(|| selected.filter(has_menu))
+}
+
+fn node_center(origin: (f32, f32), rect: (f32, f32, f32, f32)) -> (f32, f32) {
+    (origin.0 + rect.0 + rect.2 / 2.0, origin.1 + rect.1 + rect.3 / 2.0)
+}
+
+fn glow_targets(selected: Option<Node>, hovered: Option<Node>, node: Node) -> (f32, f32) {
+    (if selected == Some(node) { 1.0 } else { 0.0 }, if hovered == Some(node) { 1.0 } else { 0.0 })
+}
+
+#[derive(Debug, PartialEq)]
+enum MeshView {
+    Loading,
+    Empty,
+    Planning,
+    Failed(SharedString),
+    Graph { stale: Option<SharedString> },
+}
+
+fn mesh_view(panel: &PanelState, has_run: bool, has_modules: bool) -> MeshView {
+    if !has_run {
+        return match panel {
+            PanelState::Loading => MeshView::Loading,
+            PanelState::Failed(message) => MeshView::Failed(message.clone()),
+            _ => MeshView::Empty,
+        };
+    }
+    if !has_modules { return MeshView::Planning; }
+    MeshView::Graph { stale: match panel { PanelState::Stale(message) => Some(message.clone()), _ => None } }
+}
+
+fn stage_role(stage: &str) -> Option<&'static str> {
+    match stage { "Astra" => Some("astra"), "Critic" => Some("critic"), "Architect" => Some("architect"), _ => None }
+}
+
+
+fn menu_label(action: MenuAction, lang: Lang) -> &'static str {
+    let key = match action {
+        MenuAction::OpenRun => "Open", MenuAction::Resume => "Resume", MenuAction::OpenFolder => "Open folder",
+        MenuAction::CopySessionId => "Copy session id", MenuAction::OpenDetail => "Open details",
+        MenuAction::CopyText | MenuAction::CopyMemory => "Copy", MenuAction::CommentOn => "Comment on this item",
+        MenuAction::CorrectMemory => "Correct…", MenuAction::DeleteMemory => "Delete…",
+    };
+    i18n::translate(lang, &[("Open", "開啟"), ("Resume", "接續"), ("Open folder", "開啟資料夾"),
+        ("Copy session id", "複製工作階段 ID"), ("Open details", "開啟詳細資料"), ("Copy", "複製"),
+        ("Comment on this item", "評論此項目"), ("Correct…", "修正…"), ("Delete…", "刪除…")], key)
+}
 
 const TABLE: Table = &[
     // p8: begin
@@ -79,6 +160,98 @@ const TABLE: Table = &[
     ("Frame everything (F)", "把整張圖放進畫面（F）"),
 ];
 
+// Graph geometry and visual alpha values without matching shared tokens.
+const WIRE_GLOW_ALPHA_2: f32 = 0.6;
+const PENDING_ORBIT_ALPHA_2: f32 = 0.75;
+const PENDING_ORBIT_ALPHA_3: f32 = 0.9;
+const ORBIT_ALPHA_2: f32 = 0.95;
+const ORBIT_ALPHA_3: f32 = 1.0;
+const WIRE_DASH_1: f32 = 3.0;
+const WIRE_DASH_2: f32 = 4.0;
+const DISC_DIAMETER_1: f32 = 2.0;
+const DISC_DIAMETER_2: f32 = 2.0;
+const GLOW_DIAMETER_1: f32 = 2.0;
+const GLOW_DIAMETER_2: f32 = 2.0;
+const GLOW_SPREAD: f32 = 0.0;
+const ORBIT_ENTRY_ALPHA_2: f32 = 0.8;
+const ARC_ALPHA_A_4: f32 = 0.7;
+const ARC_ALPHA_B_4: f32 = 0.7;
+const ARC_STROKE_1: f32 = 0.07;
+const ARC_STROKE_2: f32 = 1.1;
+const ARC_TEXT_ALPHA: f32 = 0.9;
+const ORBIT_DRAW_ALPHA_1: f32 = 0.55;
+const ORBIT_DRAW_ALPHA_2: f32 = 0.7;
+const HALO_ALPHA_1: f32 = 0.22;
+const HALO_ALPHA_2: f32 = 0.16;
+const HALO_ALPHA_3: f32 = 0.24;
+const PARTICLE_GLOW_ALPHA_3: f32 = 0.6;
+const PARTICLE_CORE_ALPHA_2: f32 = 0.9;
+const STATE_FADE_1: f32 = 1.0;
+const OPTION_FADE: f32 = 1.0;
+const SHADOW_OFFSET_1: f32 = 0.0;
+const SHADOW_OFFSET_2: f32 = 0.0;
+const SHADOW_SPREAD: f32 = 0.0;
+const PENDING_BORDER_ALPHA: f32 = 0.8;
+const BUILT_BORDER_ALPHA_1: f32 = 0.6;
+const VERIFIED_BORDER_ALPHA: f32 = 0.85;
+const VERIFIED_GLOW_ALPHA_1: f32 = 0.22;
+const VERIFIED_GLOW_ALPHA_2: f32 = 0.16;
+const FAILED_BORDER_ALPHA_1: f32 = 0.75;
+const FOCUS_LEFT_INSET: f32 = 4.0;
+const FOCUS_TOP_INSET: f32 = 4.0;
+const FOCUS_WIDTH_INSET: f32 = 8.0;
+const FOCUS_HEIGHT_INSET: f32 = 8.0;
+const FOCUS_BORDER_WIDTH: f32 = 1.5;
+const FOCUS_BORDER_ALPHA: f32 = 0.9;
+const CARD_HOVER_ALPHA: f32 = 0.7;
+const BODY_FADE_1: f32 = 1.0;
+const CARD_TEXT_SCALE_1: f32 = 13.0;
+const CARD_TEXT_SCALE_2: f32 = 12.0;
+const CARD_TEXT_SCALE_3: f32 = 20.0;
+const COUNT_TEXT_SCALE_1: f32 = 12.0;
+const COUNT_TEXT_SCALE_2: f32 = 12.0;
+const COUNT_TEXT_SCALE_3: f32 = 18.0;
+const CARD_GAP_SCALE_1: f32 = 3.0;
+const CARD_GAP_SCALE_2: f32 = 5.0;
+const CARD_LEFT_PADDING_SCALE_1: f32 = 4.0;
+const CARD_LEFT_PADDING_SCALE_2: f32 = 8.0;
+const CARD_RIGHT_PADDING_SCALE_1: f32 = 8.0;
+const CARD_RIGHT_PADDING_SCALE_2: f32 = 14.0;
+const CARD_CONTENT_GAP_SCALE_1: f32 = 5.0;
+const CARD_CONTENT_GAP_SCALE_2: f32 = 8.0;
+const PROGRESS_HEIGHT_SCALE_1: f32 = 2.0;
+const PROGRESS_HEIGHT_SCALE_2: f32 = 1.0;
+const PROGRESS_HEIGHT_SCALE_3: f32 = 4.0;
+const PROGRESS_TRACK_ALPHA: f32 = 0.6;
+const PROGRESS_QUIET_ALPHA: f32 = 0.55;
+const CHIP_HOVER_ALPHA: f32 = 0.7;
+const CHIP_RADIUS_SCALE_1: f32 = 3.0;
+const CHIP_RADIUS_SCALE_2: f32 = 3.0;
+const COMPACT_PADDING_SCALE_1: f32 = 6.0;
+const COMPACT_PADDING_SCALE_2: f32 = 4.0;
+const COMPACT_FILL_ALPHA: f32 = 0.18;
+const CHIP_TEXT_SCALE_1: f32 = 12.0;
+const CHIP_TEXT_SCALE_2: f32 = 12.0;
+const CHIP_TEXT_SCALE_3: f32 = 18.0;
+const CHIP_GAP_SCALE_1: f32 = 4.0;
+const CHIP_GAP_SCALE_2: f32 = 7.0;
+const CHIP_PADDING_SCALE_1: f32 = 6.0;
+const CHIP_PADDING_SCALE_2: f32 = 10.0;
+const RESEARCH_POSITION_1: f32 = 100.0;
+const RESEARCH_POSITION_2: f32 = 0.0;
+const RESEARCH_POSITION_3: f32 = 46.0;
+const RESEARCH_POSITION_4: f32 = 0.0;
+const DUAL_POSITION_1: f32 = 90.0;
+const DUAL_POSITION_2: f32 = 0.0;
+const DUAL_POSITION_3: f32 = 90.0;
+const DUAL_POSITION_4: f32 = 0.0;
+const CORE_LABEL_POSITION_1: f32 = 2.0;
+const CORE_LABEL_POSITION_2: f32 = 22.0;
+const CONTROL_SURFACE_ALPHA: f32 = 0.92;
+const FADE_TRANSPARENT_ALPHA_2: f32 = 0.0;
+const FRAME_STATUS_ALPHA_1: f32 = 0.55;
+const FRAME_STATUS_ALPHA_2: f32 = 0.6;
+
 /// Modules with more units than this fold away their quiet ones.
 const FOLD_ABOVE: usize = 6;
 const CARD_H: f32 = 40.0;
@@ -98,8 +271,6 @@ const SCROLLBAR_ROOM: f32 = 12.0;
 const REVEAL_MARGIN: f32 = 24.0;
 const OVERSCAN: f32 = 240.0;
 const PARTICLE_SPEED: f32 = 90.0;
-/// Seconds for the core's small planet to go once around the hourglass.
-const ORBIT_SECONDS: f32 = 3.0;
 /// A core wire disappears when its module is this far beyond the panel, so scrolling never leaves a bundle of lines.
 const WIRE_FADE_DISTANCE: f32 = 120.0;
 const FADE_H: f32 = 22.0;
@@ -118,7 +289,7 @@ const FIT_PAD: f32 = 24.0;
 /// The zoom controls' box at the panel's bottom-right, and its gap from the panel's edge. The width
 /// has a little slack for the longer English label.
 const CONTROLS_W: f32 = 200.0;
-const CONTROLS_H: f32 = 36.0;
+const CONTROLS_H: f32 = 44.0;
 const CONTROLS_INSET: f32 = 10.0;
 /// Clear space kept between the controls and anything else drawn near them.
 const CONTROLS_GAP: f32 = 12.0;
@@ -963,7 +1134,7 @@ fn wire_layers(t: &Tokens, state: UnitState, lit: Lit, dark: bool) -> Vec<(f32, 
         if dark {
             vec![(6.0, color.opacity(a)), (3.0, color.opacity(b)), (width, color.opacity(c))]
         } else {
-            vec![(3.0, color.opacity(b * 0.6)), (width, color.opacity(c))]
+            vec![(3.0, color.opacity(b * WIRE_GLOW_ALPHA_2)), (width, color.opacity(c))]
         }
     };
     match lit {
@@ -971,8 +1142,8 @@ fn wire_layers(t: &Tokens, state: UnitState, lit: Lit, dark: bool) -> Vec<(f32, 
         Lit::Selected => glow(t.gold, 0.08, 0.2, 1.0, 1.4),
         Lit::No => match state {
             UnitState::Running => glow(t.gold, 0.06, 0.16, 0.9, 1.2),
-            UnitState::Pending => vec![(1.0, t.orbit.opacity(if dark { 0.75 } else { 0.9 }))],
-            _ => vec![(1.0, t.orbit.opacity(if dark { 0.95 } else { 1.0 }))],
+            UnitState::Pending => vec![(1.0, t.orbit.opacity(if dark { PENDING_ORBIT_ALPHA_2 } else { PENDING_ORBIT_ALPHA_3 }))],
+            _ => vec![(1.0, t.orbit.opacity(if dark { ORBIT_ALPHA_2 } else { ORBIT_ALPHA_3 }))],
         },
     }
 }
@@ -989,7 +1160,7 @@ fn paint_wire(window: &mut Window, origin: Pt, wire: &Wire, state: UnitState, li
     for (width, color) in layers {
         let mut b = PathBuilder::stroke(px(*width));
         if dashed(state, lit) {
-            b = b.dash_array(&[px(3.0), px(4.0)]);
+            b = b.dash_array(&[px(WIRE_DASH_1), px(WIRE_DASH_2)]);
         }
         let [c1, c2, end] = wire.curve();
         b.move_to(pt(origin, wire.from));
@@ -1006,7 +1177,7 @@ fn paint_wire(window: &mut Window, origin: Pt, wire: &Wire, state: UnitState, li
 fn disc(window: &mut Window, center: Point<Pixels>, r: f32, color: Hsla) {
     let bounds = Bounds {
         origin: point(center.x - px(r), center.y - px(r)),
-        size: size(px(r * 2.0), px(r * 2.0)),
+        size: size(px(r * DISC_DIAMETER_1), px(r * DISC_DIAMETER_2)),
     };
     window.paint_quad(fill(bounds, color).corner_radii(px(r)));
 }
@@ -1015,12 +1186,12 @@ fn disc(window: &mut Window, center: Point<Pixels>, r: f32, color: Hsla) {
 fn soft_glow(window: &mut Window, center: Point<Pixels>, r: f32, blur: f32, color: Hsla) {
     let bounds = Bounds {
         origin: point(center.x - px(r), center.y - px(r)),
-        size: size(px(r * 2.0), px(r * 2.0)),
+        size: size(px(r * GLOW_DIAMETER_1), px(r * GLOW_DIAMETER_2)),
     };
     window.paint_drop_shadows(
         bounds,
         Corners::all(px(r)),
-        &[BoxShadow { color, offset: Point::default(), blur_radius: px(blur), spread_radius: px(0.), inset: false }],
+        &[BoxShadow { color, offset: Point::default(), blur_radius: px(blur), spread_radius: px(GLOW_SPREAD), inset: false }],
     );
 }
 
@@ -1050,7 +1221,7 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32,
             at(x, y)
         })
         .collect();
-    stroke_points(window, &orbit, true, 1.0, t.idle.opacity(0.8 * orbit_in));
+    stroke_points(window, &orbit, true, 1.0, t.idle.opacity(ORBIT_ENTRY_ALPHA_2 * orbit_in));
     disc(window, c, r + 0.5, t.surface);
     let arc = |from: f32, to: f32| -> Vec<Point<Pixels>> {
         (0..=24)
@@ -1063,11 +1234,11 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32,
     let ring = (r * 0.09).max(1.5);
     stroke_points(window, &arc(-150.0, -30.0), false, ring, t.gold);
     stroke_points(window, &arc(30.0, 150.0), false, ring, t.gold);
-    stroke_points(window, &arc(-30.0, 30.0), false, 1.0, t.idle.opacity(0.7));
-    stroke_points(window, &arc(150.0, 210.0), false, 1.0, t.idle.opacity(0.7));
+    stroke_points(window, &arc(-30.0, 30.0), false, 1.0, t.idle.opacity(ARC_ALPHA_A_4));
+    stroke_points(window, &arc(150.0, 210.0), false, 1.0, t.idle.opacity(ARC_ALPHA_B_4));
 
     let glass = |side: f32| -> PathBuilder {
-        let mut b = PathBuilder::stroke(px((r * 0.07).max(1.1)));
+        let mut b = PathBuilder::stroke(px((r * ARC_STROKE_1).max(ARC_STROKE_2)));
         b.move_to(at_glass(side * 0.36, -0.60));
         b.cubic_bezier_to(at_glass(side * 0.07, -0.05), at_glass(side * 0.36, -0.30), at_glass(side * 0.22, -0.16));
         b.line_to(at_glass(side * 0.07, 0.05));
@@ -1076,7 +1247,7 @@ fn paint_emblem(window: &mut Window, center: Pt, r: f32, t: &Tokens, phase: f32,
     };
     for side in [-1.0, 1.0] {
         if let Ok(path) = glass(side).build() {
-            window.paint_path(path, t.text.opacity(0.9));
+            window.paint_path(path, t.text.opacity(ARC_TEXT_ALPHA));
         }
     }
     let mut sand = PathBuilder::fill();
@@ -1138,7 +1309,7 @@ impl Backdrop {
         let view = &self.view;
         let core = graph.core(view_h, view);
         // The faint orbits stay centred on the core over the shared backdrop.
-        let arc_color = self.t.orbit.opacity((if self.dark { 0.55 } else { 0.7 }) * self.orbit_in);
+        let arc_color = self.t.orbit.opacity((if self.dark { ORBIT_DRAW_ALPHA_1 } else { ORBIT_DRAW_ALPHA_2 }) * self.orbit_in);
         for r in orbit_radii(graph) {
             ornament::paint_orbit_arc(window, origin.x + core.x, origin.y + core.y, r * view.zoom, -88.0, 88.0, arc_color);
         }
@@ -1178,9 +1349,9 @@ impl Backdrop {
         let center = Pt { x: origin.x + core.x, y: origin.y + core.y };
         let core_r = graph.core_radius(view);
         let breath = self.time.map_or(0.5, ornament::breath);
-        let halo = self.t.gold.opacity(if graph.live { 0.22 + 0.16 * breath } else { 0.24 });
+        let halo = self.t.gold.opacity(if graph.live { HALO_ALPHA_1 + HALO_ALPHA_2 * breath } else { HALO_ALPHA_3 });
         soft_glow(window, point(px(center.x), px(center.y)), core_r * 0.96, core_r * 1.1, halo);
-        let phase = self.time.map_or(0.0, |time| time * std::f32::consts::TAU / ORBIT_SECONDS);
+        let phase = 0.0;
         paint_emblem(window, center, core_r, &self.t, phase, self.orbit_in, self.turn);
     }
 
@@ -1192,8 +1363,8 @@ impl Backdrop {
             let t = particle_t(time, wire.length(), i, count);
             let fade = (t / 0.08).min((1.0 - t) / 0.08).clamp(0.0, 1.0) * fade_out;
             let center = pt(origin, wire.at(t));
-            soft_glow(window, center, 1.8, 6.0, self.t.gold.opacity(0.6 * fade));
-            disc(window, center, 1.5, core.opacity(0.9 * fade));
+            soft_glow(window, center, 1.8, 6.0, self.t.gold.opacity(PARTICLE_GLOW_ALPHA_3 * fade));
+            disc(window, center, 1.5, core.opacity(PARTICLE_CORE_ALPHA_2 * fade));
         }
     }
 }
@@ -1230,7 +1401,7 @@ fn mark_between(blend: Option<(UnitState, f32)>, state: UnitState, size_px: f32,
         .relative()
         .flex_none()
         .size(px(size_px))
-        .child(div().absolute().top_0().left_0().child(state_mark(from, size_px, t.unit(from).opacity(1.0 - k), 0.0)))
+        .child(div().absolute().top_0().left_0().child(state_mark(from, size_px, t.unit(from).opacity(STATE_FADE_1 - k), 0.0)))
         .child(div().absolute().top_0().left_0().child(state_mark(state, size_px, t.unit(state).opacity(k), breath)))
         .into_any_element()
 }
@@ -1239,7 +1410,7 @@ fn mark_between(blend: Option<(UnitState, f32)>, state: UnitState, size_px: f32,
 fn look_between(from: &NodeLook, to: &NodeLook, k: f32) -> NodeLook {
     let glow = match (from.glow, to.glow) {
         (None, None) => None,
-        (Some(a), None) => Some(a.opacity(a.a * (1.0 - k))),
+        (Some(a), None) => Some(a.opacity(a.a * (OPTION_FADE - k))),
         (None, Some(b)) => Some(b.opacity(b.a * k)),
         (Some(a), Some(b)) => Some(mix(a, b, k)),
     };
@@ -1249,9 +1420,9 @@ fn look_between(from: &NodeLook, to: &NodeLook, k: f32) -> NodeLook {
 fn glow(color: Hsla, blur: f32) -> Vec<BoxShadow> {
     vec![BoxShadow {
         color,
-        offset: point(px(0.), px(0.)),
+        offset: point(px(SHADOW_OFFSET_1), px(SHADOW_OFFSET_2)),
         blur_radius: px(blur),
-        spread_radius: px(0.),
+        spread_radius: px(SHADOW_SPREAD),
         inset: false,
     }]
 }
@@ -1269,16 +1440,16 @@ fn node_look(t: &Tokens, state: UnitState, base: Hsla, dark: bool) -> NodeLook {
     let color = t.unit(state);
     let tint = |c: Hsla, a: f32| base.blend(c.opacity(a));
     match state {
-        UnitState::Pending => NodeLook { border: t.orbit.opacity(0.8), fill: base, glow: None, text: t.muted },
+        UnitState::Pending => NodeLook { border: t.orbit.opacity(PENDING_BORDER_ALPHA), fill: base, glow: None, text: t.muted },
         UnitState::Verified => NodeLook { border: t.orbit, fill: base, glow: None, text: t.muted },
-        UnitState::Built => NodeLook { border: color.opacity(0.6), fill: tint(color, 0.05), glow: None, text: t.text },
+        UnitState::Built => NodeLook { border: color.opacity(BUILT_BORDER_ALPHA_1), fill: tint(color, 0.05), glow: None, text: t.text },
         UnitState::Running => NodeLook {
-            border: t.gold.opacity(0.85),
+            border: t.gold.opacity(VERIFIED_BORDER_ALPHA),
             fill: tint(t.gold, if dark { 0.06 } else { 0.08 }),
-            glow: Some(t.gold.opacity(if dark { 0.22 } else { 0.16 })),
+            glow: Some(t.gold.opacity(if dark { VERIFIED_GLOW_ALPHA_1 } else { VERIFIED_GLOW_ALPHA_2 })),
             text: t.text,
         },
-        UnitState::Failed => NodeLook { border: color.opacity(0.75), fill: tint(color, 0.07), glow: None, text: t.text },
+        UnitState::Failed => NodeLook { border: color.opacity(FAILED_BORDER_ALPHA_1), fill: tint(color, 0.07), glow: None, text: t.text },
     }
 }
 
@@ -1301,7 +1472,8 @@ enum SceneView {
 pub struct Mesh {
     state: Entity<AppState>,
     focus: FocusHandle,
-    menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
+    menu: Option<(MenuTarget, Point<Pixels>)>,
+    menu_index: usize,
     /// The current run's view; each opening starts fitted again.
     view: View,
     drag: Option<Drag>,
@@ -1341,11 +1513,11 @@ fn glyph_side(r: Rect, zoom: f32) -> f32 {
     (24.0 * zoom).clamp(8.0, 40.0).min(r.h - 4.0).max(4.0)
 }
 
-fn unit_chip_label(unit: &Unit, title: &plain_text::Plain) -> SharedString {
+fn unit_chip_label(unit: &Unit, title: &PlainTitle) -> SharedString {
     if unit.title.is_empty() { unit.id.clone() } else { title.shown.clone() }
 }
 
-fn unit_tooltip_lines(unit: &Unit, title: plain_text::Plain) -> Vec<SharedString> {
+fn unit_tooltip_lines(unit: &Unit, title: PlainTitle) -> Vec<SharedString> {
     let mut lines = Vec::new();
     if unit.title != unit.id || title.original.is_some() {
         lines.push(title.shown);
@@ -1426,6 +1598,7 @@ impl Mesh {
             state,
             focus: cx.focus_handle(),
             menu: None,
+            menu_index: 0,
             view: View::default(),
             drag: None,
             dragged: false,
@@ -1590,42 +1763,53 @@ impl Mesh {
     }
 
     fn open_menu(&mut self, node: Node, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.state.read(cx).run().and_then(|run| menu_target(run, node)) else {
-            if self.menu.take().is_some() { cx.notify(); }
-            return;
-        };
-        let weak = cx.weak_entity();
-        let runner: Rc<dyn Fn(MenuAction, MenuTarget, &mut Window, &mut App)> = Rc::new(move |action, target, _, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                let resolved = this.state.read(cx).run().and_then(|run| match &target {
-                    MenuTarget::Unit { session, unit } if &run.session == session => run.units.iter().position(|u| &u.id == unit)
-                        .map(|i| (Node::Unit(i), Selection::Unit(i), format!("{} — {}", run.units[i].id, run.units[i].title))),
-                    MenuTarget::Module { session, module } if &run.session == session => run.modules.iter().position(|m| &m.id == module)
-                        .map(|i| (Node::Module(i), Selection::Module(i), format!("{} — {}", run.modules[i].id, run.modules[i].purpose))),
-                    _ => None,
-                });
-                if let Some((node, selection, text)) = resolved {
-                    match action {
-                        MenuAction::CopyText => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                        MenuAction::OpenDetail | MenuAction::CommentOn => {
-                            this.cursor = Some(node);
-                            this.state.update(cx, |state, cx| state.select(selection, cx));
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
+        self.menu = self.state.read(cx).run().and_then(|run| menu_target(run, node)).map(|target| (target, position));
+        self.menu_index = self.menu.as_ref().and_then(|(target, _)| self.state.read(cx).menu_entries(target).iter().position(|(_, enabled)| *enabled)).unwrap_or(0);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((target, _)) = self.menu.clone() else { return false };
+        let entries = self.state.read(cx).menu_entries(&target);
+        match event.keystroke.key.as_str() {
+            "escape" => { self.menu = None; window.focus(&self.focus, cx); }
+            "up" | "down" => {
+                let forward = event.keystroke.key == "down";
+                for step in 1..=entries.len() {
+                    let i = if forward { (self.menu_index + step) % entries.len() } else { (self.menu_index + entries.len() - step) % entries.len() };
+                    if entries[i].1 { self.menu_index = i; break; }
                 }
-            });
+            }
+            "enter" | "space" => {
+                if let Some((action, true)) = entries.get(self.menu_index) { self.run_menu_action(*action, target, window, cx); }
+            }
+            _ => return false,
+        }
+        cx.notify(); cx.stop_propagation(); true
+    }
+
+    fn run_menu_action(&mut self, action: MenuAction, target: MenuTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        window.focus(&self.focus, cx);
+        if !self.state.read(cx).menu_allowed(&target, action) { cx.notify(); return; }
+        let resolved = self.state.read(cx).run().and_then(|run| match &target {
+            MenuTarget::Unit { session, unit } if &run.session == session => run.units.iter().position(|u| &u.id == unit)
+                .map(|i| (Node::Unit(i), Selection::Unit(i), format!("{} — {}", run.units[i].id, run.units[i].title))),
+            MenuTarget::Module { session, module } if &run.session == session => run.modules.iter().position(|m| &m.id == module)
+                .map(|i| (Node::Module(i), Selection::Module(i), format!("{} — {}", run.modules[i].id, run.modules[i].purpose))),
+            _ => None,
         });
-        let state = self.state.clone();
-        let menu = PopupMenu::build(window, cx, move |menu, _, cx| palette::menu::context_menu(menu, target, state, runner, cx));
-        let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
-            this.menu = None;
-            window.focus(&this.focus, cx);
-            cx.notify();
-        });
-        menu.focus_handle(cx).focus(window, cx);
-        self.menu = Some((menu, position, subscription));
+        if let Some((node, selection, text)) = resolved {
+            match action {
+                MenuAction::CopyText => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                MenuAction::OpenDetail | MenuAction::CommentOn => {
+                    self.cursor = Some(node);
+                    self.state.update(cx, |state, cx| state.select(selection, cx));
+                }
+                _ => {}
+            }
+        }
         cx.notify();
     }
 
@@ -1640,7 +1824,7 @@ impl Mesh {
         }
     }
 
-    fn open_cursor_menu(&mut self, _: &palette::ContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_cursor_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) { return; }
         let Some(node) = menu_anchor_node(self.cursor, selected_node(&self.state.read(cx).selection)) else { return };
         let Some(target) = self.state.read(cx).run().and_then(|run| menu_target(run, node)) else { return };
@@ -1752,6 +1936,7 @@ impl Mesh {
         if std::mem::take(&mut self.dragged) {
             return;
         }
+        if self.menu.take().is_some() { cx.notify(); return; }
         let node = self.hit(self.panel_point(position));
         self.auto_fit = None;
         self.cursor = node.filter(|&n| n != Node::Core);
@@ -1762,13 +1947,13 @@ impl Mesh {
     fn cursor_ring(&self, r: Rect, t: &Tokens) -> AnyElement {
         div()
             .absolute()
-            .left(px(r.x - 4.0))
-            .top(px(r.y - 4.0))
-            .w(px(r.w + 8.0))
-            .h(px(r.h + 8.0))
+            .left(px(r.x - FOCUS_LEFT_INSET))
+            .top(px(r.y - FOCUS_TOP_INSET))
+            .w(px(r.w + FOCUS_WIDTH_INSET))
+            .h(px(r.h + FOCUS_HEIGHT_INSET))
             .rounded(theme::RADIUS)
-            .border(px(1.5))
-            .border_color(t.gold.opacity(0.9))
+            .border(px(FOCUS_BORDER_WIDTH))
+            .border_color(t.gold.opacity(FOCUS_BORDER_ALPHA))
             .into_any_element()
     }
 
@@ -1777,7 +1962,7 @@ impl Mesh {
         let blend = self.blend_of(Node::Module(m.index), cx);
         let look = node_look(t, m.state, t.surface, dark);
         let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
-        let border = mix(mix(look.border, t.text.opacity(0.7), hover), t.gold, select);
+        let border = mix(mix(look.border, t.text.opacity(CARD_HOVER_ALPHA), hover), t.gold, select);
         let mut shadow = look.glow.map_or_else(Vec::new, |color| glow(color, 12.));
         shadow.extend(theme::selection_glow(t, select));
         let body_breath = if m.running { breath } else { 0.0 };
@@ -1788,7 +1973,7 @@ impl Mesh {
                 .relative()
                 .flex_none()
                 .size(px(side))
-                .child(div().absolute().top_0().left_0().child(ornament::body(from, side, t.unit(from).opacity(1.0 - k), t.orbit, look.fill, 0.0)))
+                .child(div().absolute().top_0().left_0().child(ornament::body(from, side, t.unit(from).opacity(BODY_FADE_1 - k), t.orbit, look.fill, 0.0)))
                 .child(div().absolute().top_0().left_0().child(ornament::body(
                     m.state,
                     side,
@@ -1802,8 +1987,8 @@ impl Mesh {
         let share = |n: usize| if m.total == 0 { 0.0 } else { n as f32 / m.total as f32 };
         let zoom = self.view.zoom;
         let worded = r.h >= 12.0;
-        let text_size = px((13.0 * zoom).clamp(12.0, 20.0));
-        let count_size = px((12.0 * zoom).clamp(12.0, 18.0));
+        let text_size = px((CARD_TEXT_SCALE_1 * zoom).clamp(CARD_TEXT_SCALE_2, CARD_TEXT_SCALE_3));
+        let count_size = px((COUNT_TEXT_SCALE_1 * zoom).clamp(COUNT_TEXT_SCALE_2, COUNT_TEXT_SCALE_3));
         let run_ref = &run.modules[m.index];
         let count = |state| run_ref.units.iter().filter(|&&u| run.units[u].state == state).count();
         let segments = [
@@ -1821,9 +2006,9 @@ impl Mesh {
             .w(px(r.w))
             .h(px(r.h))
             .justify_center()
-            .gap(px((3.0 * zoom).min(5.0)))
-            .pl(px((4.0 * zoom).min(8.0)))
-            .pr(px((8.0 * zoom).min(14.0)))
+            .gap(px((CARD_GAP_SCALE_1 * zoom).min(CARD_GAP_SCALE_2)))
+            .pl(px((CARD_LEFT_PADDING_SCALE_1 * zoom).min(CARD_LEFT_PADDING_SCALE_2)))
+            .pr(px((CARD_RIGHT_PADDING_SCALE_1 * zoom).min(CARD_RIGHT_PADDING_SCALE_2)))
             .overflow_hidden()
             .rounded(theme::RADIUS)
             .border_1()
@@ -1832,7 +2017,7 @@ impl Mesh {
             .shadow(shadow)
             .child(
                 h_flex()
-                    .gap(px((5.0 * zoom).min(8.0)))
+                    .gap(px((CARD_CONTENT_GAP_SCALE_1 * zoom).min(CARD_CONTENT_GAP_SCALE_2)))
                     .child(body)
                     .when(worded, |this| {
                         this.child(div().id(("mesh-module-label", m.index)).flex_1().min_w_0().truncate().text_size(text_size).line_height(text_size * 1.15).text_color(if m.state == UnitState::Verified { t.muted } else { t.text }).child(run_ref.id.clone().test_text(run_ref.id.clone())).test_support())
@@ -1843,13 +2028,13 @@ impl Mesh {
             )
             .child(
                 h_flex()
-                    .h(px((2.0 * zoom).clamp(1.0, 4.0)))
+                    .h(px((PROGRESS_HEIGHT_SCALE_1 * zoom).clamp(PROGRESS_HEIGHT_SCALE_2, PROGRESS_HEIGHT_SCALE_3)))
                     .w_full()
                     .overflow_hidden()
-                    .bg(t.orbit.opacity(0.6))
+                    .bg(t.orbit.opacity(PROGRESS_TRACK_ALPHA))
                     .children(segments.into_iter().filter(|(n, _)| *n > 0).map(|(n, color)| {
                         let quiet = m.state == UnitState::Verified;
-                        div().h_full().w(relative(share(n))).bg(if quiet { color.opacity(0.55) } else { color })
+                        div().h_full().w(relative(share(n))).bg(if quiet { color.opacity(PROGRESS_QUIET_ALPHA) } else { color })
                     })),
             )
             .test_support().into_any_element()
@@ -1860,14 +2045,14 @@ impl Mesh {
         let blend = self.blend_of(chip.node, cx);
         let look = node_look(t, chip.state, t.surface, dark);
         let look = blend.map_or(look, |(from, k)| look_between(&node_look(t, from, t.surface, dark), &look, k));
-        let border = mix(mix(look.border, t.text.opacity(0.7), hover), t.gold, select);
+        let border = mix(mix(look.border, t.text.opacity(CHIP_HOVER_ALPHA), hover), t.gold, select);
         let mut shadow = look.glow.map_or_else(Vec::new, |color| glow(color, 9.));
         shadow.extend(theme::selection_glow(t, select));
         let zoom = self.view.zoom;
         if r.h < LABEL_MIN_CHIP_H {
             // Too small for words: a tinted body in the state's color, its shape kept when it fits.
             let color = blend.map_or(t.unit(chip.state), |(from, k)| mix(t.unit(from), t.unit(chip.state), k));
-            let radius = px((3.0 * zoom).min(3.0));
+            let radius = px((CHIP_RADIUS_SCALE_1 * zoom).min(CHIP_RADIUS_SCALE_2));
             return div()
                 .id(("mesh-chip-node", index))
                 .opacity(self.presence_of(chip.node, cx))
@@ -1878,20 +2063,20 @@ impl Mesh {
                 .h(px(r.h))
                 .flex()
                 .items_center()
-                .px(px((6.0 * zoom).min(4.0)))
+                .px(px((COMPACT_PADDING_SCALE_1 * zoom).min(COMPACT_PADDING_SCALE_2)))
                 .rounded(radius)
                 .border_1()
                 .border_color(border)
                 .shadow(shadow)
-                .bg(look.fill.blend(color.opacity(0.18)))
+                .bg(look.fill.blend(color.opacity(COMPACT_FILL_ALPHA)))
                 .when(r.h >= 10.0, |this| this.child(mark_between(blend, chip.state, r.h - 4.0, t, breath)))
                 .test_support().into_any_element();
         }
-        let text_size = px((12.0 * zoom).clamp(12.0, 18.0));
+        let text_size = px((CHIP_TEXT_SCALE_1 * zoom).clamp(CHIP_TEXT_SCALE_2, CHIP_TEXT_SCALE_3));
         let label: SharedString = match chip.node {
             Node::Unit(u) => {
                 let unit = &run.units[u];
-                unit_chip_label(unit, &plain_text::plain(cx, &unit.title))
+                unit_chip_label(unit, &plain_title(cx, &unit.title))
             }
             Node::Folded(_, state) => {
                 let word = if state == UnitState::Verified { "verified" } else { "pending" };
@@ -1911,8 +2096,8 @@ impl Mesh {
             .top(px(r.y))
             .w(px(r.w))
             .h(px(r.h))
-            .gap(px((4.0 * zoom).min(7.0)))
-            .px(px((6.0 * zoom).min(10.0)))
+            .gap(px((CHIP_GAP_SCALE_1 * zoom).min(CHIP_GAP_SCALE_2)))
+            .px(px((CHIP_PADDING_SCALE_1 * zoom).min(CHIP_PADDING_SCALE_2)))
             .overflow_hidden()
             .rounded(theme::RADIUS_SMALL)
             .border_1()
@@ -1975,7 +2160,7 @@ impl Mesh {
             }
             Node::Unit(u) => {
                 let unit = run.units.get(u)?;
-                let lines = unit_tooltip_lines(unit, plain_text::plain(cx, &unit.title));
+                let lines = unit_tooltip_lines(unit, plain_title(cx, &unit.title));
                 let attempts = (unit.attempts > 0).then(|| fmt_a(tr(cx, TABLE, "Attempt {a}"), unit.attempts).into());
                 let module = run.modules.get(unit.module).map(|m| fmt_a(tr(cx, TABLE, "Module {a}"), m.id.as_ref()));
                 body.child(heading(unit.id.clone(), true))
@@ -2054,6 +2239,8 @@ impl Mesh {
         let dark = cx.theme().is_dark();
         let d = theme::density(cx);
         let (width, view_h) = (f32::from(panel.width), f32::from(panel.height));
+        self.view_w = width;
+        self.view_h = view_h;
         if width <= 0.0 || view_h <= 0.0 {
             return div().into_any_element();
         }
@@ -2089,6 +2276,8 @@ impl Mesh {
         self.view = clamp_view(self.view, graph.content(), width, view_h);
         self.track_blends(&graph, &run.session, state.reduce_motion, motion::now(cx));
         let mut frames = Driver::new(state.reduce_motion, cx);
+        frames.view_visible(width > 0.0 && view_h > 0.0 && window.is_visible());
+        frames.keep(moving || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
         frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
         let view = self.view;
         if self.cursor.is_some_and(|n| n != Node::Core && graph.rect_of(n).is_none()) {
@@ -2132,7 +2321,6 @@ impl Mesh {
             self.hover_glows.set(&node, over, frames.now(), reduced);
             levels.insert(node, (self.select_glows.value(&node, &mut frames), self.hover_glows.value(&node, &mut frames)));
         }
-        frames.finish(window);
         let cards: Vec<AnyElement> = graph
             .modules
             .iter()
@@ -2183,17 +2371,19 @@ impl Mesh {
 
         // ux-celestial begin
         let lang = *cx.global::<Lang>();
-        let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), 0., lang, &t, d));
-        let research = state.ux.council.get(&run.session).map(|v| council::research_emblem(v.active, lang, &t, 92.));
+        let dual = state.ux.seams.dual_core.as_ref().and_then(|source| source.state(&run.session).element(&mut frames, lang, &t, d));
+        let research = state.ux.council.get(&run.session).map(|v| v.research_emblem(lang, &t, d));
+        frames.finish(window);
         // ux-celestial end
         // p8: begin
         let paper_button = if state.ux.seams.paper.is_some() && research.is_some() {
             let state = self.state.clone();
             let session = run.session.clone();
-            Some(Button::new("write-paper").child(tr(cx, TABLE, "Write paper").test_text(tr(cx, TABLE, "Write paper")))
+            Some(Button::new("write-paper", tr(cx, TABLE, "Write paper"), &t)
                 .on_click(move |_, _, cx| state.update(cx, |s, cx| s.open_page(crate::desktop::ux::Page::Paper(session.clone()), cx))))
         } else { None };
         // p8: end
+        let menu_entries = self.menu.as_ref().map(|(target, _)| state.menu_entries(target)).unwrap_or_default();
         let dragging = self.drag.is_some_and(|d| d.moved);
         div()
             .id("mesh-graph")
@@ -2204,8 +2394,13 @@ impl Mesh {
             .overflow_hidden()
             .when(hover.is_some() && !dragging, |this| this.cursor_pointer())
             .when(dragging, |this| this.cursor_grabbing())
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key(event, cx)))
-            .on_action(cx.listener(Self::open_cursor_menu))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let m = &event.keystroke.modifiers;
+                if this.menu_key(event, window, cx) { return; }
+                if !m.control && !m.platform && !m.alt && ((m.shift && event.keystroke.key == "f10") || (!m.shift && event.keystroke.key == "menu")) {
+                    this.open_cursor_menu(window, cx);
+                } else { this.key(event, cx); }
+            }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| this.scrolled(event, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.pressed(event, window, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::right_pressed))
@@ -2240,14 +2435,14 @@ impl Mesh {
                     .child(div().absolute().w_full().h(px(view_h)).children(cards).children(chips).children(ring))
                     // ux-celestial begin
                     // p8: begin
-                    .when_some(research, |this, emblem| this.child(v_flex().absolute().left(px((core.x - core_r - 100.).max(0.))).top(px((core.y - 46.).max(0.))).child(emblem).children(paper_button)))
+                    .when_some(research, |this, emblem| this.child(v_flex().absolute().left(px((core.x - core_r - RESEARCH_POSITION_1).max(RESEARCH_POSITION_2))).top(px((core.y - RESEARCH_POSITION_3).max(RESEARCH_POSITION_4))).child(emblem).children(paper_button)))
                     // p8: end
-                    .when_some(dual, |this, dual| this.child(div().absolute().left(px((core.x - 90.).max(0.))).top(px((core.y - core_r - 90.).max(0.))).child(dual)))
+                    .when_some(dual, |this, dual| this.child(div().absolute().left(px((core.x - DUAL_POSITION_1).max(DUAL_POSITION_2))).top(px((core.y - core_r - DUAL_POSITION_3).max(DUAL_POSITION_4))).child(dual)))
                     // ux-celestial end
                     .when(above, |this| this.child(edge_fade(t, true)))
                     .when(below, |this| this.child(edge_fade(t, false)))
                     .when(wide, |this| this.child(
-                        v_flex().absolute().left(px(core.x - label_w / 2.0)).top(px(core.y + core_r + 22.0))
+                        v_flex().absolute().left(px(core.x - label_w / CORE_LABEL_POSITION_1)).top(px(core.y + core_r + CORE_LABEL_POSITION_2))
                             .w(px(label_w)).items_center()
                             .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.gold).child("C H R O N O S"))
                             .child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.status(status)).child(sub)),
@@ -2255,16 +2450,60 @@ impl Mesh {
             )
             .child(self.view_controls(zoom_label, &t, cx))
             .when_some(tooltip, |this, tip| this.child(tip))
-            .when_some(self.menu.as_ref(), |this, (menu, position, _)| {
-                this.child(deferred(anchored().position(*position).snap_to_window_with_margin(px(8.)).child(menu.clone())).with_priority(2))
+            .when_some(self.menu.as_ref(), |this, (target, position)| {
+                let mut menu = v_flex().id("mesh-context-menu").p(theme::space(d, SpaceStep::Xs))
+                    .rounded(theme::RADIUS).border_1().border_color(t.border).bg(t.raised).shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        if this.menu.take().is_some() { window.focus(&this.focus, cx); cx.notify(); }
+                    }));
+                for (index, (action, enabled)) in menu_entries.into_iter().enumerate() {
+                    let target = target.clone();
+                    let label = menu_label(action, *cx.global::<Lang>());
+                    menu = menu.child(div().id(("mesh-menu-item", index)).px(theme::space(d, SpaceStep::Md))
+                        .py(theme::space(d, SpaceStep::Sm)).text_color(if enabled { t.text } else { t.muted })
+                        .when(index == self.menu_index, |item| item.bg(t.surface))
+                        .when(enabled, |item| item.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation(); this.run_menu_action(action, target.clone(), window, cx);
+                        }))).child(label));
+                }
+                this.child(deferred(anchored().position(*position).snap_to_window_with_margin(theme::space(d, SpaceStep::Sm)).child(menu)).with_priority(2))
             })
             .into_any_element()
+    }
+
+    fn planning_view(&mut self, panel: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.view_w = f32::from(panel.width);
+        self.view_h = f32::from(panel.height);
+        let state = self.state.read(cx);
+        let Some(run) = state.run() else { return div().into_any_element() };
+        let t = cx.tokens();
+        let d = theme::density(cx);
+        let lang = *cx.global::<Lang>();
+        let has_council = state.ux.council.contains_key(&run.session);
+        let council = state.ux.council.get(&run.session).cloned().unwrap_or_default();
+        let mut frames = Driver::new(state.reduce_motion, cx);
+        frames.view_visible(self.view_w > 0.0 && self.view_h > 0.0 && window.is_visible());
+        const FLASH_MILLIS: u64 = 600;
+        const FLASH_WINDOW: Duration = Duration::from_millis(FLASH_MILLIS);
+        let flash = !state.reduce_motion && state.ux.extreme_flash.is_some_and(|at| frames.now().saturating_duration_since(at) < FLASH_WINDOW);
+        let orbit = council.element(&mut frames, lang, &t, d, flash);
+        let dual = state.ux.seams.dual_core.as_ref().and_then(|source| source.state(&run.session).element(&mut frames, lang, &t, d));
+        frames.finish(window);
+        let paper = if state.ux.seams.paper.is_some() && has_council {
+            let state = self.state.clone();
+            let session = run.session.clone();
+            Some(Button::new("write-paper", tr(cx, TABLE, "Write paper"), &t)
+                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.open_page(crate::desktop::ux::Page::Paper(session.clone()), cx))))
+        } else { None };
+        h_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
+            .child(orbit).children(paper).children(dual).into_any_element()
     }
 
     /// Zoom out, the zoom (which returns to true size), zoom in, and fit, at the panel's corner.
     fn view_controls(&self, zoom_label: SharedString, t: &Tokens, cx: &mut Context<Self>) -> impl IntoElement {
         let d = theme::density(cx);
-        let button = |id: &'static str| Button::new(id).ghost().small().h(theme::TARGET_MIN).min_w(theme::TARGET_MIN);
+
         h_flex()
             .id("mesh-view-controls")
             .absolute()
@@ -2275,47 +2514,49 @@ impl Mesh {
             .rounded(theme::RADIUS)
             .border_1()
             .border_color(t.border)
-            .bg(t.surface.opacity(0.92))
+            .bg(t.surface.opacity(CONTROL_SURFACE_ALPHA))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                button("mesh-zoom-out")
-                    .icon(IconName::Minus)
-                    .tooltip(tr(cx, TABLE, "Zoom out (Ctrl and the wheel)"))
+                div().id("mesh-zoom-out-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Zoom out (Ctrl and the wheel)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
+                .child(IconButton::new("mesh-zoom-out", IconName::Minus, tr(cx, TABLE, "Zoom out (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(1.0 / ZOOM_STEP, cx);
-                    })),
+                    }))),
             )
             .child(
-                button("mesh-zoom-reset")
-                    .label(zoom_label)
-                    .tooltip(tr(cx, TABLE, "Back to true size"))
+                div().id("mesh-zoom-reset-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Back to true size").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
+                .child(Button::new("mesh-zoom-reset", zoom_label, t).variant(ButtonVariant::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(1.0 / this.view.zoom, cx);
-                    })),
+                    }))),
             )
             .child(
-                button("mesh-zoom-in")
-                    .icon(IconName::Plus)
-                    .tooltip(tr(cx, TABLE, "Zoom in (Ctrl and the wheel)"))
+                div().id("mesh-zoom-in-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Zoom in (Ctrl and the wheel)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
+                .child(IconButton::new("mesh-zoom-in", IconName::Plus, tr(cx, TABLE, "Zoom in (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(ZOOM_STEP, cx);
-                    })),
+                    }))),
             )
             .child(
-                button("mesh-fit")
-                    .icon(IconName::Maximize)
-                    .label(tr(cx, TABLE, "Fit"))
-                    .tooltip(tr(cx, TABLE, "Frame everything (F)"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.fit();
-                        cx.notify();
-                    })),
+                div().id("mesh-fit-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Frame everything (F)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
+                    .child(Button::new("mesh-fit", tr(cx, TABLE, "Fit"), t).variant(ButtonVariant::Ghost).on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.fit(); cx.notify(); }))),
             )
             .test_support()
+    }
+}
+
+
+struct MeshTip(SharedString);
+impl Render for MeshTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.tokens();
+        let d = theme::density(cx);
+        div().p(theme::space(d, SpaceStep::Sm)).rounded(theme::RADIUS).border_1()
+            .border_color(t.border).bg(t.raised).text_color(t.text)
+            .text_size(theme::font(d, TypeSize::Caption)).child(self.0.clone())
     }
 }
 
@@ -2329,7 +2570,7 @@ fn edge_fade(t: Tokens, top: bool) -> impl IntoElement {
         .when(top, |this| this.top_0())
         .when(!top, |this| this.bottom_0())
         .h(px(FADE_H))
-        .bg(linear_gradient(angle, linear_color_stop(t.canvas, 0.0), linear_color_stop(t.canvas.opacity(0.0), 1.0)))
+        .bg(linear_gradient(angle, linear_color_stop(t.canvas, 0.0), linear_color_stop(t.canvas.opacity(FADE_TRANSPARENT_ALPHA_2), 1.0)))
 }
 
 fn legend(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
@@ -2355,7 +2596,7 @@ fn legend(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
             let n = run.count(state);
             h_flex()
                 .id(("mesh-legend", i))
-                .tooltip(move |window, cx| Tooltip::element({ let tip = tip.clone(); move |_, _| div().child(tip.clone()) }).build(window, cx))
+                .tooltip(move |_, cx| cx.new(|_| MeshTip(tip.clone())).into())
                 .gap(theme::space(d, SpaceStep::Sm))
                 .text_size(theme::font(d, TypeSize::Caption))
                 .text_color(if n > 0 { t.text } else { t.muted })
@@ -2400,7 +2641,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         Some(TextSource::Path(path)) => Some(path.clone()),
         _ => None,
     };
-    ornament::frame(t, if complete { t.ok.opacity(0.55) } else { t.review.opacity(0.6) }, t.surface)
+    ornament::frame(t, if complete { t.ok.opacity(FRAME_STATUS_ALPHA_1) } else { t.review.opacity(FRAME_STATUS_ALPHA_2) }, t.surface)
         .flex()
         .flex_col()
         .flex_none()
@@ -2431,11 +2672,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
         .when_some(report, |this, text| this.child(div().text_size(theme::font(d, TypeSize::Caption)).text_color(t.muted).line_clamp(2).child(text)))
         .when_some(report_path, |this, path| {
             this.child(
-                Button::new("mesh-open-report")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::FileText)
-                    .label(tr(cx, TABLE, "Open report"))
+                Button::new("mesh-open-report", tr(cx, TABLE, "Open report"), t).variant(ButtonVariant::Ghost)
                     .on_click(move |_, _, cx| cx.open_with_system(&path)),
             )
         })
@@ -2465,7 +2702,7 @@ fn summary(run: &Run, t: &Tokens, cx: &App) -> impl IntoElement {
 }
 
 impl Render for Mesh {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let d = theme::density(cx);
         let state = self.state.read(cx);
@@ -2475,7 +2712,7 @@ impl Render for Mesh {
         let state_entity = self.state.clone();
         let retry = || {
             let state = state_entity.clone();
-            Button::new("mesh-retry").label(tr(cx, TABLE, "Try again"))
+            Button::new("mesh-retry", tr(cx, TABLE, "Try again"), &t)
                 .on_click(move |_, _, cx| state.update(cx, |s, cx| s.retry(FeedKind::Runs, cx)))
         };
         match view {
@@ -2484,38 +2721,15 @@ impl Render for Mesh {
                 .child(tr(cx, TABLE, "Loading the plan…")).into_any_element(),
             MeshView::Empty => return v_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
                 .child(ornament::empty_state(&t, tr(cx, TABLE, "No wish to show").into(), tr(cx, TABLE, "Make a wish and its work appears here as a live graph.").into()))
-                .child(theme::gold_leaf(Button::new("mesh-make-wish").label(tr(cx, TABLE, "Make a wish"))
-                    .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))), &t))
+                .child(Button::new("mesh-make-wish", tr(cx, TABLE, "Make a wish"), &t)
+                    .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.set_composing(true, cx))))
                 .into_any_element(),
             // ux-celestial begin
             MeshView::Planning => {
-                let run = run.unwrap();
-                let lang = *cx.global::<Lang>();
-                let council = state.ux.council.get(&run.session);
-                let mut frames = Driver::new(state.reduce_motion, cx).capped();
-                frames.keep(council.is_some_and(council::orbit_moving));
-                let phase = if state.reduce_motion { 0. } else { frames.now().saturating_duration_since(self.clock).as_secs_f32() * std::f32::consts::TAU / ORBIT_SECONDS };
-                frames.finish(window);
-                let dual = state.ux.seams.dual_core.as_ref().and_then(|source| dual_core::dual_core(&source.state(&run.session), phase, lang, &t, d));
-                // p8: begin
-                let paper_button = if state.ux.seams.paper.is_some() && council.is_some() {
-                    let state = self.state.clone();
-                    let session = run.session.clone();
-                    Some(Button::new("write-paper").child(tr(cx, TABLE, "Write paper").test_text(tr(cx, TABLE, "Write paper")))
-                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.open_page(crate::desktop::ux::Page::Paper(session.clone()), cx))))
-                } else { None };
-                // p8: end
-                return h_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
-                    .when_some(council, |this, v| this.child(h_flex().items_center().gap(theme::space(d, SpaceStep::Md))
-                        .when(v.active, |this| this.child(council::council_orbit(v, phase, lang, &t, d)))
-                        .when(!v.active, |this| this.child(council::astra_card(lang, &t, d)))
-                        .child(council::research_emblem(v.active, lang, &t, 92.))
-                        // p8: begin
-                        .children(paper_button)))
-                        // p8: end
-                    .when(council.is_none(), |this| this.child(council::astra_card(lang, &t, d)))
-                    .when_some(dual, |this, dual| this.child(dual))
-                    .into_any_element();
+                let this = cx.entity();
+                return div().size_full().child(container_query(move |panel, window, cx| {
+                    this.update(cx, |this, cx| this.planning_view(panel, window, cx))
+                })).into_any_element();
             },
             // ux-celestial end
             MeshView::Failed(message) => return v_flex().size_full().items_center().justify_center().gap(theme::space(d, SpaceStep::Md))
@@ -2523,10 +2737,6 @@ impl Render for Mesh {
                 .child(retry()).into_any_element(),
             MeshView::Graph { stale } => {
                 let run = run.unwrap();
-                let mut frames = Driver::new(state.reduce_motion, cx).capped();
-                frames.keep(animates(run, state.reduce_motion) || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
-                frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
-                frames.finish(window);
                 let finished = (run.status == RunStatus::Done).then(|| summary(run, &t, cx));
                 let legend = legend(run, &t, cx);
                 let this = cx.entity();
@@ -2617,14 +2827,14 @@ mod tests {
         let mut unit = sample_run().units[0].clone();
         unit.id = "unit-1".into();
         unit.title = "Technical title".into();
-        let title = plain_text::Plain { shown: "Plain title".into(), original: Some("Technical title".into()) };
+        let title = PlainTitle { shown: "Plain title".into(), original: Some("Technical title".into()) };
 
         assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Plain title");
         assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Plain title"), "Technical title".into()]);
 
         // Even a title matching the ID needs both lines when it was translated.
         unit.title = unit.id.clone();
-        let title = plain_text::Plain { shown: "Plain ID".into(), original: Some(unit.id.clone()) };
+        let title = PlainTitle { shown: "Plain ID".into(), original: Some(unit.id.clone()) };
         assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Plain ID"), unit.id.clone()]);
     }
 
@@ -2633,17 +2843,17 @@ mod tests {
         let mut unit = sample_run().units[0].clone();
         unit.id = "unit-1".into();
         unit.title = "Technical title".into();
-        let title = plain_text::Plain { shown: unit.title.clone(), original: None };
+        let title = PlainTitle { shown: unit.title.clone(), original: None };
 
         assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Technical title");
         assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Technical title")]);
 
-        let title = plain_text::Plain { shown: "Supplied text".into(), original: None };
+        let title = PlainTitle { shown: "Supplied text".into(), original: None };
         assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Supplied text");
         assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Supplied text")]);
 
         unit.title = unit.id.clone();
-        let title = plain_text::Plain { shown: unit.title.clone(), original: None };
+        let title = PlainTitle { shown: unit.title.clone(), original: None };
         assert!(unit_tooltip_lines(&unit, title).is_empty());
     }
 
@@ -2652,11 +2862,11 @@ mod tests {
         let mut unit = sample_run().units[0].clone();
         unit.id = "unit-1".into();
         unit.title = "".into();
-        let title = plain_text::Plain { shown: "".into(), original: None };
+        let title = PlainTitle { shown: "".into(), original: None };
         assert_eq!(unit_chip_label(&unit, &title).as_ref(), "unit-1");
 
         unit.title = "Technical title".into();
-        let title = plain_text::Plain { shown: "Plain title".into(), original: Some(unit.title.clone()) };
+        let title = PlainTitle { shown: "Plain title".into(), original: Some(unit.title.clone()) };
         assert_eq!(unit_chip_label(&unit, &title).as_ref(), "Plain title");
     }
 

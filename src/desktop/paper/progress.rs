@@ -1,9 +1,8 @@
 use super::*;
 use crate::desktop::{
-    mesh::council::member,
+    model::facade::usage::{council_member, CouncilMember},
     ornament::{self, Celestial},
     theme::Tokens,
-    ux::Member,
 };
 use crate::paper::PassId;
 const TABLE: Table = &[
@@ -17,11 +16,11 @@ const TABLE: Table = &[
 ];
 pub(super) fn glyph(pass: PassId) -> (&'static str, Celestial) {
     let m = match pass {
-        PassId::AstraDraft => Member::Astra,
-        PassId::FableRevise | PassId::FableStyle => Member::Fable,
+        PassId::AstraDraft => CouncilMember::Astra,
+        PassId::FableRevise | PassId::FableStyle => CouncilMember::Fable,
         PassId::GeminiRevise => return ("Gemini", Celestial::Gemini),
     };
-    let (name, glyph, _) = member(m);
+    let (name, glyph, _) = council_member(m);
     (name, glyph)
 }
 pub fn render(status: Option<&PaperStatus>, lang: Lang, t: &Tokens) -> Vec<AnyElement> {

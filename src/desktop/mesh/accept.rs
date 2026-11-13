@@ -1,6 +1,24 @@
+fn handled_keys(source: &str) -> Vec<String> {
+    let Some((_, source)) = source.split_once("    fn key(") else { return vec![] };
+    let handler = source.split("\n    fn ").next().unwrap_or(source);
+    let arms = regex::Regex::new(r#"(?m)^\s*(\([^\n]*?\)|"[^"]+"(?:\s*\|\s*"[^"]+")*)(?:\s+if\s+[^=]+)?\s*=>"#).unwrap();
+    let literals = regex::Regex::new(r#""([^"]+)""#).unwrap();
+    arms.captures_iter(handler).flat_map(|arm| {
+        let pattern = arm.get(1).unwrap().as_str();
+        let prefix = if pattern.trim_end().ends_with(", true)") { "ctrl-" } else { "" };
+        literals.captures_iter(pattern).map(|key| format!("{prefix}{}", &key[1])).collect::<Vec<_>>()
+    }).collect()
+}
+
+fn missing_from_shortcuts(handled: &[String], listed: &[&str]) -> Vec<String> {
+    handled.iter().filter(|key| {
+        !listed.contains(&key.as_str()) && !key.strip_prefix("ctrl-").is_some_and(|rest| listed.contains(&format!("cmd-{rest}").as_str()))
+    }).cloned().collect()
+}
+
+
 use super::*;
 use super::super::demo::sample_run;
-use super::logic::{handled_keys, missing_from_shortcuts, should_auto_refit};
 use std::prelude::v1::test;
 
 #[test]
@@ -68,9 +86,8 @@ fn menu_anchor_and_center() {
 }
 
 fn has_context_menu(source: &str) -> bool {
-    source.contains(".on_action(cx.listener(Self::open_cursor_menu))")
-        && source.contains("_: &palette::ContextMenu")
-        && source.contains("context_menu(") && source.contains("MouseButton::Right")
+    source.contains("this.open_cursor_menu(window, cx)")
+        && source.contains("mesh-context-menu") && source.contains("MouseButton::Right")
 }
 
 #[test]
@@ -171,4 +188,70 @@ fn production_uses_scaled_text_and_radii() {
     assert!(has_literal_chrome_sizes("div().rounded(px(4.))"));
     let production = include_str!("../mesh.rs").split("#[cfg(test)]").next().unwrap();
     assert!(!has_literal_chrome_sizes(production));
+}
+
+#[test]
+fn mesh_has_no_foreign_view_dependencies() {
+    let source = include_str!("../mesh.rs");
+    for forbidden in ["palette::", "plain_text::", "superswitch::", "gpui_kit::component::button", "PopupMenu", ".capped()"] {
+        assert!(!source.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn planning_hidden_driver_does_not_request_frames() {
+    let mut driver = Driver::at(Instant::now(), false);
+    driver.view_visible(false);
+    let council = crate::desktop::ux::CouncilView {
+        active: true,
+        seats: vec![(crate::desktop::ux::Member::Astra, crate::desktop::ux::Seat::Speaking)],
+        ..Default::default()
+    };
+    let mut visible = Driver::at(Instant::now(), false);
+    let _ = council.element(&mut visible, Lang::En, &theme::night(), theme::Density::default(), false);
+    assert!(visible.wants_frame());
+    let _ = council.element(&mut driver, Lang::En, &theme::night(), theme::Density::default(), false);
+    assert_eq!(driver.ask(true), motion::frame_ask(true, true, false));
+    assert!(!driver.wants_frame());
+}
+
+#[test]
+fn title_source_supplies_chip_and_tooltip() {
+    std::thread::spawn(|| {
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let outcome = result.clone();
+        gpui_kit::platform::headless().run(move |cx| {
+            let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut unit = sample_run().units[0].clone();
+        unit.title = "Technical title".into();
+        let unchanged = plain_title(cx, &unit.title);
+        assert_eq!(unchanged.shown, unit.title);
+        assert!(unchanged.original.is_none());
+        cx.set_global(TitleSource(Rc::new(|_, title| ("Plain title".into(), Some(title.clone())))));
+        let title = plain_title(cx, &unit.title);
+        assert_eq!(unit_chip_label(&unit, &title), "Plain title");
+        assert_eq!(unit_tooltip_lines(&unit, title), vec![SharedString::from("Plain title"), unit.title]);
+            }));
+            *outcome.lock().unwrap() = Some(check);
+            cx.quit();
+        });
+        if let Err(error) = result.lock().unwrap().take().expect("app callback did not run") {
+            std::panic::resume_unwind(error);
+        };
+    }).join().unwrap();
+}
+
+#[test]
+fn layout_critical_geometry_preserves_original_values() {
+    assert_eq!((CARD_H, CHIP_H, CHIP_MIN_W, CHIP_MAX_W, CHIP_GAP), (40.0, 24.0, 112.0, 200.0, 10.0));
+    assert_eq!((STEP_SINGLE, STEP_DOUBLE, MIN_ZOOM, MAX_ZOOM), (30.0, 32.0, 0.1, 3.0));
+}
+
+#[test]
+fn mesh_has_no_registered_capture_targets() {
+    use crate::desktop::targets::{self, CaptureState, Opening, Target, Unregistered};
+    assert!(targets::all().iter().all(|target| target.group != "mesh"));
+    let target = Target { id: "mesh.unregistered", group: "mesh", opening: Opening::Page("unknown"), panels: &[], actions: &[], states: &[] };
+    let mut state = super::super::demo::state();
+    assert_eq!(targets::prepare(&target, CaptureState::Live, &mut state), Err(Unregistered { target: target.id.into(), state: CaptureState::Live }));
 }
