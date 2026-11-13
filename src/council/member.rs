@@ -407,7 +407,11 @@ pub(super) fn ask_fable(
     tools: &str,
     meter: &mut Meter,
 ) -> Answer {
-    ask_claude(command, ask, tools, meter, FABLE_MODEL)
+    ask_fable_model(command, ask, tools, meter, FABLE_MODEL)
+}
+
+pub(super) fn ask_fable_model(command: &Res<Vec<String>>, ask: Ask, tools: &str, meter: &mut Meter, model: &str) -> Answer {
+    ask_claude(command, ask, tools, meter, model)
 }
 
 /// Usage observed for a single Claude invocation. Input includes cache reads and writes.
@@ -653,7 +657,9 @@ fn envelope_candidates(value: &Value) -> Vec<Value> {
 
 /// The prompt goes last, after `--print`, so it reads correctly whether `--print` takes the
 /// prompt as its value or is a switch followed by the prompt.
-pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer {
+pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer { ask_agy(command, ask, schema_path, ARGON_MODEL) }
+
+pub(super) fn ask_agy(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path, model: &str) -> Answer {
     let mut argv = match command {
         Ok(argv) => argv.clone(),
         Err(e) => return Answer::bad(Status::Missing, 0, e.message.clone()),
@@ -663,7 +669,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
     }
     argv.extend([
         "--model".to_string(),
-        ARGON_MODEL.to_string(),
+        model.to_string(),
         "--output-format".to_string(),
         "json".to_string(),
         "--json-schema".to_string(),
@@ -863,13 +869,16 @@ mod claude_call_tests {
 }
 
 // p8: BEGIN paper-only Argon stream transport
-pub(super) fn ask_argon_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer {
+#[allow(dead_code)]
+pub(super) fn ask_argon_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer { ask_agy_stdin(command, ask, schema_path, ARGON_MODEL) }
+
+pub(super) fn ask_agy_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path, model: &str) -> Answer {
     let mut argv = match command {
         Ok(argv) => argv.clone(),
         Err(e) => return Answer::bad(Status::Missing, 0, e.message.clone()),
     };
     argv.extend([
-        "--model".to_owned(), ARGON_MODEL.to_owned(),
+        "--model".to_owned(), model.to_owned(),
         "--input-format".to_owned(), "stream-json".to_owned(),
         "--output-format".to_owned(), "stream-json".to_owned(),
         "--json-schema".to_owned(), schema_path.to_string_lossy().into_owned(),

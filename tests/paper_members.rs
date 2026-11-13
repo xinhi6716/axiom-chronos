@@ -4,10 +4,11 @@ use axiom::{
     base::Failure,
     council::{
         self,
-        paper_member::{PaperArgon, PaperFable},
-        Status, AGY_PROMPT_LIMIT, ARGON_MODEL, FABLE_MODEL,
+        paper_member::{PaperFable, PaperGemini},
+        Status, AGY_PROMPT_LIMIT, FABLE_MODEL,
     },
     research_program::investigation::{MemberCall, ResearchMember},
+    usage::pools::HYDROGEN_XHIGH,
 };
 use serde_json::{json, Value};
 use std::{fs, path::Path, sync::atomic::AtomicBool, time::Duration};
@@ -111,15 +112,15 @@ fn fable_errors() {
 }
 
 #[test]
-fn argon_short_and_long_transport() {
+fn gemini_short_and_long_transport() {
     let dir = common::temp();
-    let argon = PaperArgon::new(Ok(command(dir.path(), "ok")));
-    assert_eq!(argon.name(), "argon");
+    let gemini = PaperGemini::new(Ok(command(dir.path(), "ok")));
+    assert_eq!(gemini.name(), "gemini");
     let short = call(dir.path(), "short");
-    let reply = run(&argon, &short);
+    let reply = run(&gemini, &short);
     assert_eq!(reply.status, Status::Ok, "{:?}", reply.detail);
-    assert_eq!(reply.model.as_deref(), Some(ARGON_MODEL));
-    assert_eq!(reply.provider, "argon");
+    assert_eq!(reply.model.as_deref(), Some(HYDROGEN_XHIGH));
+    assert_eq!(reply.provider, "gemini");
     assert_eq!(reply.usd, None);
     assert!(reply.tokens > 0 && reply.raw.is_some());
     let first = logs(dir.path());
@@ -128,10 +129,10 @@ fn argon_short_and_long_transport() {
     assert!(!args.iter().any(|a| a == "--input-format"));
     let prompt = format!("{}\n末尾😀", "漢".repeat(40_000));
     assert!(prompt.encode_utf16().count() > AGY_PROMPT_LIMIT);
-    let reply = run(&argon, &call(dir.path(), &prompt));
+    let reply = run(&gemini, &call(dir.path(), &prompt));
     assert_eq!(reply.status, Status::Ok, "{:?}", reply.detail);
     assert_eq!(reply.output.unwrap()["echo_len"], prompt.chars().count());
-    assert_eq!(reply.model.as_deref(), Some(ARGON_MODEL));
+    assert_eq!(reply.model.as_deref(), Some(HYDROGEN_XHIGH));
     assert_eq!(reply.usd, None);
     assert!(reply.tokens > 0);
     let all = logs(dir.path());
@@ -142,7 +143,7 @@ fn argon_short_and_long_transport() {
     let args = all[1]["argv"].as_array().unwrap();
     assert!(args
         .windows(2)
-        .any(|a| a[0] == "--model" && a[1] == ARGON_MODEL));
+        .any(|a| a[0] == "--model" && a[1] == HYDROGEN_XHIGH));
     assert!(args
         .windows(2)
         .any(|a| a[0] == "--input-format" && a[1] == "stream-json"));
@@ -155,7 +156,7 @@ fn argon_short_and_long_transport() {
 }
 
 #[test]
-fn argon_errors_and_legacy_limit() {
+fn gemini_errors_and_legacy_limit() {
     for (scenario, expected) in [
         ("garbage", Status::Malformed),
         ("quota", Status::Quota),
@@ -165,14 +166,14 @@ fn argon_errors_and_legacy_limit() {
         let mut request = call(dir.path(), &"漢".repeat(AGY_PROMPT_LIMIT + 1));
         request.timeout_s = 1;
         let reply = run(
-            &PaperArgon::new(Ok(command(dir.path(), scenario))),
+            &PaperGemini::new(Ok(command(dir.path(), scenario))),
             &request,
         );
         assert_eq!(reply.status, expected, "{scenario}: {:?}", reply.detail);
     }
     let dir = common::temp();
     let request = call(dir.path(), "test");
-    let missing = PaperArgon::new(Err(Failure::new("not_installed", "not installed")));
+    let missing = PaperGemini::new(Err(Failure::new("not_installed", "not installed")));
     assert_eq!(run(&missing, &request).status, Status::Missing);
     let prompt = "漢".repeat(AGY_PROMPT_LIMIT + 1);
     let old = council::ask_agy(

@@ -59,7 +59,7 @@ pub fn generate_with_policies(
     let mut uses = Vec::new();
     for record in passes
         .iter()
-        .filter(|p| p.status == crate::council::Status::Ok)
+        .filter(|p| p.status == crate::council::Status::Ok && p.validation.is_empty())
     {
         let model = record.model.clone().ok_or_else(|| {
             Failure::new(
@@ -70,7 +70,7 @@ pub fn generate_with_policies(
         let purpose = match record.pass {
             PassId::AstraDraft => "drafting the manuscript from the evidence bundle",
             PassId::FableRevise => "substantive revision",
-            PassId::ArgonRevise => "critique and revision",
+            PassId::GeminiRevise => "critique and revision",
             PassId::FableStyle => "style editing of wording only",
         };
         uses.push(ModelUse {

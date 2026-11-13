@@ -181,6 +181,38 @@ fn start_rechecks_choice_and_estimate() {
     );
 }
 #[test]
+fn models_round_trip_and_changed_model_rejects_old_estimate() {
+    let r = Rig::new();
+    let paper = SessionPaper::with_data_home(r.home.path(), r.home.path());
+    let list = r.seed();
+    r.choose(&list);
+    let mut models = paper.models(SESSION).unwrap();
+    let old = paper.estimate(SESSION).unwrap();
+    models.gemini_revise = "gemini-custom".into();
+    paper.set_models(SESSION, models.clone()).unwrap();
+    let status = paper.status(SESSION).unwrap();
+    assert_eq!(status.choice.unwrap().journal_id, list.ranked[0].journal.id);
+    assert_eq!(status.estimate.unwrap().digest, old.digest);
+    assert_eq!(paper.models(SESSION).unwrap(), models);
+    let saved: paper::models::PassModels = serde_json::from_slice(
+        &fs::read(r.home.path().join("settings/paper-models.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved, models);
+    let updated = paper.estimate(SESSION).unwrap();
+    assert_ne!(old.digest, updated.digest);
+    assert_eq!(
+        paper.start(SESSION, &old.digest).unwrap_err().kind,
+        "estimate_changed"
+    );
+    models.gemini_revise = "invalid model".into();
+    assert_eq!(
+        paper.set_models(SESSION, models).unwrap_err().kind,
+        "invalid_model"
+    );
+    assert_eq!(paper.models(SESSION).unwrap(), saved);
+}
+#[test]
 fn second_write_is_busy() {
     let _guard = OPEN_ENV.lock().unwrap_or_else(|error| error.into_inner());
     let old = std::env::var_os("AXIOM_CURL_CMD");

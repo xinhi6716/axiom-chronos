@@ -1,9 +1,9 @@
 use axiom::{
-    council::{Status, AGY_PROMPT_LIMIT, ARGON_MODEL, FABLE_MODEL},
+    council::{Status, AGY_PROMPT_LIMIT, FABLE_MODEL},
     paper::{
         budget,
         evidence::{self, BundleInputs},
-        members::{expected_model, PaperMembers},
+        members::{expected_model, PaperMember, PaperMembers},
         runner::{run_passes, RunConfig},
         state, style, *,
     },
@@ -11,6 +11,7 @@ use axiom::{
         self, dossier,
         investigation::{MemberCall, MemberReply, ResearchMember},
     },
+    usage::pools::HYDROGEN_XHIGH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -67,6 +68,11 @@ impl ResearchMember for Fake {
             .expect("unexpected call / retry")
     }
 }
+impl PaperMember for Fake {
+    fn call_model(&self, call: &MemberCall, _model: &str, stop: &AtomicBool) -> MemberReply {
+        self.call(call, stop)
+    }
+}
 fn reply(pass: usize) -> MemberReply {
     MemberReply {
         status: Status::Ok,
@@ -75,8 +81,8 @@ fn reply(pass: usize) -> MemberReply {
         model: Some(
             match pass {
                 2 | 4 => FABLE_MODEL,
-                3 => ARGON_MODEL,
-                _ => "codex-model",
+                3 => HYDROGEN_XHIGH,
+                _ => "gpt-6-astra",
             }
             .into(),
         ),
@@ -89,7 +95,7 @@ fn reply(pass: usize) -> MemberReply {
 struct Members {
     astra: Fake,
     fable: Fake,
-    argon: Fake,
+    gemini: Fake,
     reviewer: Fake,
     trace: Trace,
 }
@@ -105,7 +111,7 @@ impl Members {
         Self {
             astra: fake("astra", vec![reply(1)]),
             fable: fake("fable", vec![reply(2), reply(4)]),
-            argon: fake("argon", vec![reply(3)]),
+            gemini: fake("gemini", vec![reply(3)]),
             reviewer: fake("reviewer", vec![]),
             trace,
         }
@@ -114,7 +120,7 @@ impl Members {
         PaperMembers {
             astra: &self.astra,
             fable: &self.fable,
-            argon: &self.argon,
+            gemini: &self.gemini,
             reviewer: &self.reviewer,
         }
     }
@@ -150,7 +156,7 @@ impl Members {
         let f = match member {
             "astra" => &self.astra,
             "fable" => &self.fable,
-            "argon" => &self.argon,
+            "gemini" => &self.gemini,
             _ => panic!(),
         };
         f.replies.lock().unwrap()[index] = r;
@@ -327,7 +333,8 @@ fn happy_path_records_prompts_events_files_and_state() {
     let m = Members::new();
     let expected_estimate = budget::estimate(
         &c.cfg.home,
-        &["astra".into(), "fable".into(), "argon".into()],
+        &["astra".into(), "fable".into(), "gemini".into()],
+        &models::PassModels::default(),
     )
     .unwrap();
     let records = c.run(&m).unwrap();
@@ -335,7 +342,7 @@ fn happy_path_records_prompts_events_files_and_state() {
     let calls = m.calls();
     assert_eq!(
         calls.iter().map(|x| x.member.as_str()).collect::<Vec<_>>(),
-        ["astra", "fable", "argon", "fable"]
+        ["astra", "fable", "gemini", "fable"]
     );
     let schema: Value =
         serde_json::from_str(include_str!("../engine/paper/pass.schema.json")).unwrap();
@@ -607,19 +614,16 @@ fn fable_wrong_model_rejected() {
     wrong_model(2);
 }
 #[test]
-fn argon_wrong_model_rejected() {
+fn gemini_wrong_model_rejected() {
     wrong_model(3);
 }
 #[test]
-fn astra_any_model_and_argon_expected_accepted() {
+fn astra_configured_model_and_gemini_expected_accepted() {
     let c = Case::new();
     let m = Members::new();
-    let mut r = reply(1);
-    r.model = Some("any-codex".into());
-    m.replace("astra", 0, r);
     let records = c.run(&m).unwrap();
-    assert_eq!(records[0].model.as_deref(), Some("any-codex"));
-    assert_eq!(records[2].model.as_deref(), Some(ARGON_MODEL));
+    assert_eq!(records[0].model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(records[2].model.as_deref(), Some(HYDROGEN_XHIGH));
 }
 
 #[test]
@@ -695,10 +699,10 @@ fn resume_current_passes_and_invalidate_on_changed_evidence() {
     let m = Members::new();
     let mut bad = reply(3);
     bad.output = Some(json!({"bad": true}));
-    m.replace("argon", 0, bad);
+    m.replace("gemini", 0, bad);
     assert_error(&c, &m, "rejected");
     assert_failed_pass(&c, &m, 3, Status::Ok, "malformed:");
-    m.argon.replies.lock().unwrap().push_back(reply(3));
+    m.gemini.replies.lock().unwrap().push_back(reply(3));
     let records = c.run(&m).unwrap();
     assert_eq!(records.len(), 4);
     assert_eq!(
@@ -733,7 +737,7 @@ fn resume_current_passes_and_invalidate_on_changed_evidence() {
     .unwrap();
     m.astra.replies.lock().unwrap().push_back(reply(1));
     m.fable.replies.lock().unwrap().extend([reply(2), reply(4)]);
-    m.argon.replies.lock().unwrap().push_back(reply(3));
+    m.gemini.replies.lock().unwrap().push_back(reply(3));
     let refreshed = c.run(&m).unwrap();
     assert_eq!(refreshed.len(), 4);
     assert!(refreshed.iter().all(|r| r.evidence_hash == b.hash));
@@ -752,7 +756,7 @@ fn resume_current_passes_and_invalidate_on_changed_evidence() {
     );
 }
 #[test]
-fn long_cjk_prompt_reaches_argon_intact() {
+fn long_cjk_prompt_reaches_gemini_intact() {
     let c = Case::new();
     let m = Members::new();
     let mut out: PassOutput = serde_json::from_str(PASSES[1]).unwrap();
@@ -765,7 +769,7 @@ fn long_cjk_prompt_reaches_argon_intact() {
     m.replace("fable", 0, r);
     let mut r3 = reply(3);
     r3.output = Some(serde_json::to_value(&out).unwrap());
-    m.replace("argon", 0, r3);
+    m.replace("gemini", 0, r3);
     let mut r4 = reply(4);
     r4.output = Some(serde_json::to_value(&out).unwrap());
     m.replace("fable", 1, r4);
@@ -781,12 +785,18 @@ fn long_cjk_prompt_reaches_argon_intact() {
 }
 #[test]
 fn model_expectations() {
-    assert_eq!(expected_model("fable"), Some(FABLE_MODEL));
-    assert_eq!(expected_model("argon"), Some(ARGON_MODEL));
-    for name in ["astra", "reviewer", "unknown", ""] {
-        assert_eq!(expected_model(name), None);
-    }
+    let models = models::PassModels::default();
+    assert_eq!(
+        expected_model(&models, PassId::FableRevise).as_deref(),
+        Some(FABLE_MODEL)
+    );
+    assert_eq!(
+        expected_model(&models, PassId::GeminiRevise).as_deref(),
+        Some(HYDROGEN_XHIGH)
+    );
+    assert_eq!(expected_model(&models, PassId::AstraDraft), None);
 }
+
 #[test]
 fn prompt_assets_have_allowed_wording() {
     for path in ["paper/prompts/draft.md", "paper/prompts/critique.md"] {

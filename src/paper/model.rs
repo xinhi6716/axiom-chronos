@@ -231,21 +231,21 @@ pub fn tokens(text: &str) -> Vec<(Range<usize>, Token)> {
 pub enum PassId {
     AstraDraft,
     FableRevise,
-    ArgonRevise,
+    GeminiRevise,
     FableStyle,
 }
 impl PassId {
     pub const ALL: [Self; 4] = [
         Self::AstraDraft,
         Self::FableRevise,
-        Self::ArgonRevise,
+        Self::GeminiRevise,
         Self::FableStyle,
     ];
     pub fn number(&self) -> u8 {
         match self {
             Self::AstraDraft => 1,
             Self::FableRevise => 2,
-            Self::ArgonRevise => 3,
+            Self::GeminiRevise => 3,
             Self::FableStyle => 4,
         }
     }
@@ -253,7 +253,7 @@ impl PassId {
         match self {
             Self::AstraDraft => "astra",
             Self::FableRevise | Self::FableStyle => "fable",
-            Self::ArgonRevise => "argon",
+            Self::GeminiRevise => "gemini",
         }
     }
 }

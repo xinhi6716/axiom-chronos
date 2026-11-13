@@ -11,6 +11,7 @@ use crate::{
         self,
         cache::FetchMode,
         http::{CurlTransport, HttpRequest, HttpResponse, Transport},
+        models::{self, PassModels},
         service::{PaperSession, PaperStatus},
         state, Requirements, SpendEstimate, Step,
     },
@@ -66,6 +67,13 @@ fn save_status(store: &Path, running: bool, error: Option<&Failure>) -> Res<()> 
         .map_err(|e| Failure::new("io", e.to_string()))
 }
 impl SessionPaper {
+    #[cfg(test)]
+    pub(super) fn with_data_home(home: &Path, data_home: &Path) -> Self {
+        Self {
+            home: home.into(),
+            data_home: Ok(data_home.into()),
+        }
+    }
     pub fn new(home: impl Into<PathBuf>) -> Self {
         Self {
             home: home.into(),
@@ -117,8 +125,14 @@ impl SessionPaper {
                 "chosen journal not in current shortlist",
             ));
         }
-        let models = ["astra", "fable", "argon"].map(str::to_owned);
-        if paper::budget::estimate(&session.home, &models)?.digest != digest {
+        if paper::budget::estimate(
+            &session.home,
+            &models::estimate_models(),
+            &models::load(&session.home)?,
+        )?
+        .digest
+            != digest
+        {
             return Err(Failure::new("estimate_changed", "estimate has changed"));
         }
         Ok(())
@@ -174,6 +188,16 @@ impl SessionPaper {
     }
 }
 impl PaperService for SessionPaper {
+    fn models(&self, session: &str) -> Res<PassModels> {
+        models::load(&self.session(session)?.home)
+    }
+    fn set_models(&self, session: &str, m: PassModels) -> Res<()> {
+        m.validate()?;
+        let session = self.session(session)?;
+        let map = lock_jobs()?;
+        busy(&map, &session.store)?;
+        models::save(&session.home, &m)
+    }
     fn status(&self, session: &str) -> Res<PaperStatus> {
         let session = self.session(session)?;
         let mut status = session.status()?;

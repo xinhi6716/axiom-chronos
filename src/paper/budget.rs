@@ -1,13 +1,13 @@
 use crate::base::{Failure, Res};
 use crate::engine::budgets::{self, Role};
-use crate::paper::{paper_dir, SpendEstimate};
+use crate::paper::{models::PassModels, paper_dir, SpendEstimate};
 use crate::research_program::{budget::Budget, history};
 use crate::seams::sha256_hex;
 use std::path::Path;
 
 pub const PAPER_PROGRAM_TYPE: &str = "paper_four_pass";
 
-pub fn estimate(home: &Path, models: &[String]) -> Res<SpendEstimate> {
+pub fn estimate(home: &Path, models: &[String], pass_models: &PassModels) -> Res<SpendEstimate> {
     let est = history::estimate(home, PAPER_PROGRAM_TYPE, models)?;
     let per_member = models
         .iter()
@@ -23,7 +23,11 @@ pub fn estimate(home: &Path, models: &[String]) -> Res<SpendEstimate> {
         .filter(|name| !est.per_provider.contains_key(*name))
         .cloned()
         .collect();
-    let line = est.line();
+    let line = format!(
+        "{}; pass models: {}",
+        est.line(),
+        PassModels::display(pass_models)
+    );
     let mut sorted_models = models.to_vec();
     sorted_models.sort();
     let digest = sha256_hex(format!("{line}\0{}", sorted_models.join(",")).as_bytes());
@@ -63,7 +67,7 @@ impl PaperBudget {
         })
     }
 
-    pub fn before_call(&self, store: &Path, member: &str) -> Res<()> {
+    pub fn before_call(&self, store: &Path, home: &Path, member: &str, model: &str) -> Res<()> {
         if self.latched {
             return Err(Failure::new("budget_exceeded", "budget recording failed"));
         }
@@ -80,19 +84,21 @@ impl PaperBudget {
                 ));
             }
         }
-        budgets::check(store, role(member), "paper")
+        budgets::check_model(store, home, role(member), "paper", model)
     }
 
     pub fn charge(
         &mut self,
         store: &Path,
+        home: &Path,
         member: &str,
         model: &str,
         usd: Option<f64>,
         tokens: u64,
     ) -> Res<()> {
         let result = self.budget.charge(member, usd, tokens).and_then(|()| {
-            budgets::record(store, role(member), model, usd, 0, tokens, "paper").map(|_| ())
+            budgets::record_model(store, home, role(member), model, usd, 0, tokens, "paper")
+                .map(|_| ())
         });
         if result.is_err() {
             self.latched = true;

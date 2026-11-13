@@ -174,10 +174,8 @@ pub fn run_passes(
         ));
     }
     let journal_hash = state.steps[&Step::Journal].output.clone();
-    let models: Vec<String> = ["astra", "fable", "argon"]
-        .iter()
-        .map(|s| (*s).into())
-        .collect();
+    let pass_models = models::load(&cfg.home)?;
+    let models = models::estimate_models();
     let mut budget = PaperBudget::open(&cfg.store, &state.run_id, cfg.fable_cap_usd)?;
     let result = (|| -> Res<Vec<PassRecord>> {
         let schema: Value =
@@ -194,6 +192,7 @@ pub fn run_passes(
         for (index, pass) in PassId::ALL.into_iter().enumerate() {
             let step = steps[index];
             let member_name = pass.member();
+            let model = pass_models.get(pass);
             let dir = paper_dir(&cfg.store)
                 .join("passes")
                 .join(format!("{}-{member_name}", pass.number()));
@@ -204,6 +203,10 @@ pub fn run_passes(
                 return Err(blocked(step, "cancelled", "paper run cancelled", on_event));
             }
             if state::current(&state, step)
+                && state.steps[&step]
+                    .inputs
+                    .get("model")
+                    .is_some_and(|v| v == model)
                 && dir.join("pass-record.json").is_file()
                 && dir.join("manuscript.json").is_file()
             {
@@ -212,7 +215,7 @@ pub fn run_passes(
                 continue;
             }
             state = state::invalidate(&cfg.store, step)?;
-            if let Err(e) = budget.before_call(&cfg.store, member_name) {
+            if let Err(e) = budget.before_call(&cfg.store, &cfg.home, member_name, model) {
                 record_unstarted(
                     &dir,
                     pass,
@@ -223,7 +226,11 @@ pub fn run_passes(
                 return Err(blocked(step, "budget_exceeded", e.message, on_event));
             }
             if !estimated {
-                on_event(&PaperEvent::Estimate(budget::estimate(&cfg.home, &models)?));
+                on_event(&PaperEvent::Estimate(budget::estimate(
+                    &cfg.home,
+                    &models,
+                    &pass_models,
+                )?));
                 estimated = true;
             }
             fs::create_dir_all(&dir).map_err(|e| Failure::new("io", e.to_string()))?;
@@ -232,7 +239,7 @@ pub fn run_passes(
                     .unwrap_or_default()
                     .to_owned(),
                 PassId::FableRevise => style::revise_instructions(),
-                PassId::ArgonRevise => crate::engine::asset("paper/prompts/critique.md")
+                PassId::GeminiRevise => crate::engine::asset("paper/prompts/critique.md")
                     .unwrap_or_default()
                     .to_owned(),
                 PassId::FableStyle => style::style_instructions(),
@@ -263,10 +270,10 @@ pub fn run_passes(
             let member = match pass {
                 PassId::AstraDraft => m.astra,
                 PassId::FableRevise | PassId::FableStyle => m.fable,
-                PassId::ArgonRevise => m.argon,
+                PassId::GeminiRevise => m.gemini,
             };
             on_event(&PaperEvent::PassStarted { pass });
-            let reply = member.call(&call, stop);
+            let reply = member.call_model(&call, model, stop);
             write(
                 &dir.join("raw.txt"),
                 reply.raw.as_deref().unwrap_or("").as_bytes(),
@@ -278,14 +285,22 @@ pub fn run_passes(
             if stop.load(Ordering::SeqCst) {
                 validation.push("cancelled".into());
                 failure = Some("cancelled");
+            } else if reply.detail.as_deref() == Some("wrong_model") {
+                validation.push("wrong_model".into());
+                failure = Some("rejected");
             } else if reply.status != Status::Ok {
                 validation.push(format!(
                     "member_failed: {}",
                     reply.detail.as_deref().unwrap_or(reply.status.word())
                 ));
                 failure = Some("member_failed");
-            } else if expected_model(member_name)
-                .is_some_and(|model| reply.model.as_deref() != Some(model))
+            } else if expected_model(&pass_models, pass)
+                .is_some_and(|expected| reply.model.as_deref() != Some(expected.as_str()))
+                || (pass == PassId::AstraDraft
+                    && match reply.model.as_deref() {
+                        Some(actual) => actual != model,
+                        None => model != models::DEFAULT_ASTRA_MODEL,
+                    })
             {
                 validation.push("wrong_model".into());
                 failure = Some("rejected");
@@ -340,7 +355,14 @@ pub fn run_passes(
             let mut record = PassRecord {
                 pass,
                 member: member_name.into(),
-                model: reply.model.clone(),
+                model: if pass == PassId::AstraDraft {
+                    reply.model.clone().or_else(|| {
+                        (model == models::DEFAULT_ASTRA_MODEL)
+                            .then(|| models::DEFAULT_ASTRA_MODEL.to_owned())
+                    })
+                } else {
+                    reply.model.clone()
+                },
                 provider: reply.provider.clone(),
                 status: reply.status,
                 evidence_hash: evidence_hash.clone(),
@@ -360,8 +382,9 @@ pub fn run_passes(
             write_json(&dir.join("pass-record.json"), &record)?;
             let charged = budget.charge(
                 &cfg.store,
+                &cfg.home,
                 member_name,
-                reply.model.as_deref().unwrap_or(member_name),
+                model,
                 reply.usd,
                 reply.tokens,
             );
@@ -380,6 +403,7 @@ pub fn run_passes(
             let mut inputs = BTreeMap::from([
                 ("evidence".into(), evidence_hash.clone()),
                 ("journal".into(), journal_hash.clone()),
+                ("model".into(), model.into()),
             ]);
             if index > 0 {
                 inputs.insert(

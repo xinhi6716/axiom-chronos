@@ -1,3 +1,4 @@
+pub mod models;
 pub mod model;
 pub mod csv;
 pub mod evidence;

@@ -1,6 +1,6 @@
 use crate::{
     base::{Failure, Res},
-    paper::{service::PaperStatus, Requirements, Shortlist, SpendEstimate},
+    paper::{models::PassModels, service::PaperStatus, Requirements, Shortlist, SpendEstimate},
 };
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
@@ -19,6 +19,8 @@ pub enum Preview {
 }
 pub trait PaperService: Send + Sync + 'static {
     fn status(&self, session: &str) -> Res<PaperStatus>;
+    fn models(&self, session: &str) -> Res<PassModels>;
+    fn set_models(&self, session: &str, m: PassModels) -> Res<()>;
     fn request_shortlist(&self, session: &str, req: Requirements, jcr: Option<PathBuf>) -> Res<()>;
     fn choose_journal(&self, session: &str, journal_id: &str, shortlist_hash: &str) -> Res<()>;
     fn estimate(&self, session: &str) -> Res<SpendEstimate>;
@@ -31,6 +33,8 @@ pub trait PaperService: Send + Sync + 'static {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaperCall {
     Status(String),
+    Models(String),
+    SetModels(String, PassModels),
     RequestShortlist(String, Requirements, Option<PathBuf>),
     ChooseJournal(String, String, String),
     Estimate(String),
@@ -44,6 +48,7 @@ struct State {
     statuses: HashMap<String, PaperStatus>,
     shortlists: HashMap<String, Shortlist>,
     estimates: HashMap<String, SpendEstimate>,
+    models: HashMap<String, PassModels>,
     previews: HashMap<String, Preview>,
     failures: HashMap<String, Failure>,
     calls: Vec<PaperCall>,
@@ -119,6 +124,25 @@ impl PaperService for FakePaper {
             Ok(())
         })?;
         result.ok_or_else(|| Failure::new("not_found", "no scripted status"))
+    }
+    fn models(&self, session: &str) -> Res<PassModels> {
+        let mut result = None;
+        self.record("models", PaperCall::Models(session.into()), |s| {
+            result = Some(s.models.get(session).cloned().unwrap_or_default());
+            Ok(())
+        })?;
+        Ok(result.unwrap())
+    }
+    fn set_models(&self, session: &str, m: PassModels) -> Res<()> {
+        self.record(
+            "set_models",
+            PaperCall::SetModels(session.into(), m.clone()),
+            |s| {
+                m.validate()?;
+                s.models.insert(session.into(), m);
+                Ok(())
+            },
+        )
     }
     fn request_shortlist(&self, session: &str, req: Requirements, jcr: Option<PathBuf>) -> Res<()> {
         self.record(

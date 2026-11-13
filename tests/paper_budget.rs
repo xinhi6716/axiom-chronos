@@ -4,7 +4,7 @@ use axiom::{
         kinds, policy,
     },
     orch::events,
-    paper::{budget::*, paper_dir},
+    paper::{budget::*, models::PassModels, paper_dir},
     research_program::history::{self, ProviderSpend, RunSummary},
     seams::sha256_hex,
 };
@@ -17,7 +17,10 @@ fn models(names: &[&str]) -> Vec<String> {
 
 fn assert_exceeded(budget: &PaperBudget, store: &Path, member: &str) {
     assert_eq!(
-        budget.before_call(store, member).unwrap_err().kind,
+        budget
+            .before_call(store, store, member, member)
+            .unwrap_err()
+            .kind,
         "budget_exceeded"
     );
 }
@@ -27,7 +30,7 @@ fn estimate_without_history_is_unpriced() {
     let dir = tempdir().unwrap();
     let names = models(&["zeta", "alpha"]);
     let expected = history::estimate(dir.path(), PAPER_PROGRAM_TYPE, &names).unwrap();
-    let estimate = estimate(dir.path(), &names).unwrap();
+    let estimate = estimate(dir.path(), &names, &PassModels::default()).unwrap();
     assert_eq!(PAPER_PROGRAM_TYPE, "paper_four_pass");
     assert_eq!(estimate.samples, 0);
     assert_eq!(estimate.priced_usd, None);
@@ -38,10 +41,10 @@ fn estimate_without_history_is_unpriced() {
     let mut unpriced = estimate.unpriced.clone();
     unpriced.sort();
     assert_eq!(unpriced, models(&["alpha", "zeta"]));
-    assert_eq!(estimate.line, expected.line());
+    assert!(estimate.line.starts_with(&expected.line()));
     assert_eq!(
         estimate.digest,
-        sha256_hex(format!("{}\0alpha,zeta", expected.line()).as_bytes())
+        sha256_hex(format!("{}\0alpha,zeta", estimate.line).as_bytes())
     );
 }
 
@@ -89,7 +92,7 @@ fn estimate_maps_matching_history_and_uses_sorted_models_for_digest() {
         .unwrap();
     }
     let expected = history::estimate(dir.path(), PAPER_PROGRAM_TYPE, &names).unwrap();
-    let actual = estimate(dir.path(), &names).unwrap();
+    let actual = estimate(dir.path(), &names, &PassModels::default()).unwrap();
     assert_eq!(
         actual.per_member,
         BTreeMap::from([
@@ -101,15 +104,19 @@ fn estimate_maps_matching_history_and_uses_sorted_models_for_digest() {
     assert_eq!(actual.unpriced, models(&["missing"]));
     assert_eq!(actual.samples, 2);
     assert_eq!(actual.priced_usd, expected.priced_usd);
-    assert_eq!(actual.line, expected.line());
+    assert!(actual.line.starts_with(&expected.line()));
     assert_eq!(
         actual.digest,
-        sha256_hex(format!("{}\0alpha,missing,zeta", expected.line()).as_bytes())
+        sha256_hex(format!("{}\0alpha,missing,zeta", actual.line).as_bytes())
     );
     assert_eq!(
-        estimate(dir.path(), &models(&["missing", "alpha", "zeta"]))
-            .unwrap()
-            .digest,
+        estimate(
+            dir.path(),
+            &models(&["missing", "alpha", "zeta"]),
+            &PassModels::default()
+        )
+        .unwrap()
+        .digest,
         actual.digest
     );
 }
@@ -118,9 +125,15 @@ fn estimate_maps_matching_history_and_uses_sorted_models_for_digest() {
 fn fresh_budget_allows_call_without_policy() {
     let dir = tempdir().unwrap();
     let budget = PaperBudget::open(dir.path(), "r", 1.0).unwrap();
-    assert!(budget.before_call(dir.path(), "fable").is_ok());
-    assert!(budget.before_call(dir.path(), "astra").is_ok());
-    assert!(budget.before_call(dir.path(), "reviewer").is_ok());
+    assert!(budget
+        .before_call(dir.path(), dir.path(), "fable", "fable")
+        .is_ok());
+    assert!(budget
+        .before_call(dir.path(), dir.path(), "astra", "astra")
+        .is_ok());
+    assert!(budget
+        .before_call(dir.path(), dir.path(), "reviewer", "reviewer")
+        .is_ok());
 }
 
 #[test]
@@ -146,18 +159,18 @@ fn fable_spend_accumulates_across_passes_without_blocking_other_members() {
     let store = dir.path();
     let mut budget = PaperBudget::open(store, "r", 1.0).unwrap();
     budget
-        .charge(store, "fable", "fable", Some(0.4), 10)
+        .charge(store, store, "fable", "fable", Some(0.4), 10)
         .unwrap();
     budget
-        .charge(store, "fable", "fable", Some(0.4), 20)
+        .charge(store, store, "fable", "fable", Some(0.4), 20)
         .unwrap();
     assert_eq!(budget.fable_spent(), 0.8);
-    assert!(budget.before_call(store, "fable").is_ok());
+    assert!(budget.before_call(store, store, "fable", "fable").is_ok());
     budget
-        .charge(store, "fable", "fable", Some(0.3), 30)
+        .charge(store, store, "fable", "fable", Some(0.3), 30)
         .unwrap();
     assert_exceeded(&budget, store, "fable");
-    assert!(budget.before_call(store, "argon").is_ok());
+    assert!(budget.before_call(store, store, "argon", "argon").is_ok());
 }
 
 #[test]
@@ -166,7 +179,9 @@ fn unknown_council_spend_blocks_and_records_reason() {
     let store = dir.path();
     policy::set(store, "budget.council_member", "10").unwrap();
     let mut budget = PaperBudget::open(store, "r", 10.0).unwrap();
-    budget.charge(store, "argon", "argon", None, 10).unwrap();
+    budget
+        .charge(store, store, "argon", "argon", None, 10)
+        .unwrap();
     assert_exceeded(&budget, store, "argon");
     assert!(events::read_events(store, 0).unwrap().iter().any(|e| e.kind
         == kinds::BUDGET_EXCEEDED
@@ -180,7 +195,9 @@ fn unknown_fable_spend_blocks_fable() {
     let dir = tempdir().unwrap();
     let store = dir.path();
     let mut budget = PaperBudget::open(store, "r", 10.0).unwrap();
-    budget.charge(store, "fable", "fable", None, 10).unwrap();
+    budget
+        .charge(store, store, "fable", "fable", None, 10)
+        .unwrap();
     assert_exceeded(&budget, store, "fable");
 }
 
@@ -190,10 +207,10 @@ fn charges_record_review_and_council_roles() {
     let store = dir.path();
     let mut budget = PaperBudget::open(store, "r", 10.0).unwrap();
     budget
-        .charge(store, "reviewer", "review-model", Some(0.2), 20)
+        .charge(store, store, "reviewer", "review-model", Some(0.2), 20)
         .unwrap();
     budget
-        .charge(store, "argon", "argon-model", Some(0.3), 30)
+        .charge(store, store, "argon", "argon-model", Some(0.3), 30)
         .unwrap();
     let rows: Vec<_> = events::read_events(store, 0)
         .unwrap()
@@ -220,12 +237,12 @@ fn reopening_preserves_fable_spend_and_original_cap_and_rejects_other_run() {
     let store = dir.path();
     let mut budget = PaperBudget::open(store, "r", 1.0).unwrap();
     budget
-        .charge(store, "fable", "fable", Some(0.4), 10)
+        .charge(store, store, "fable", "fable", Some(0.4), 10)
         .unwrap();
     drop(budget);
     let budget = PaperBudget::open(store, "r", 0.1).unwrap();
     assert_eq!(budget.fable_spent(), 0.4);
-    assert!(budget.before_call(store, "fable").is_ok());
+    assert!(budget.before_call(store, store, "fable", "fable").is_ok());
     assert_eq!(
         PaperBudget::open(store, "other", 10.0).unwrap_err().kind,
         "budget_mismatch"
@@ -241,7 +258,7 @@ fn failed_save_latches_all_later_calls() {
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
     assert!(budget
-        .charge(store, "argon", "argon", Some(0.1), 10)
+        .charge(store, store, "argon", "argon", Some(0.1), 10)
         .is_err());
     for member in ["fable", "argon", "reviewer"] {
         assert_exceeded(&budget, store, member);
@@ -256,12 +273,14 @@ fn finish_appends_summary_and_enables_future_estimates() {
         let names = models(&["fable", "argon"]);
         let mut budget = PaperBudget::open(store, "run-1", 10.0).unwrap();
         budget
-            .charge(store, "fable", "fable", Some(0.4), 12)
+            .charge(store, store, "fable", "fable", Some(0.4), 12)
             .unwrap();
         budget
-            .charge(store, "argon", "argon", Some(0.2), 23)
+            .charge(store, store, "argon", "argon", Some(0.2), 23)
             .unwrap();
-        budget.charge(store, "argon", "argon", None, 7).unwrap();
+        budget
+            .charge(store, store, "argon", "argon", None, 7)
+            .unwrap();
         budget.finish(store, &names, completed).unwrap();
         let records = history::read(store).unwrap();
         assert_eq!(records.len(), 1);
@@ -290,6 +309,11 @@ fn finish_appends_summary_and_enables_future_estimates() {
                 ),
             ])
         );
-        assert_eq!(estimate(store, &names).unwrap().samples, 1);
+        assert_eq!(
+            estimate(store, &names, &PassModels::default())
+                .unwrap()
+                .samples,
+            1
+        );
     }
 }

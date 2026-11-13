@@ -1,11 +1,11 @@
 use axiom::{
     bridge::{paper_tool::ProductionMembers, tools, Bridge, Config},
-    council::{self, Status, ARGON_MODEL, FABLE_MODEL},
+    council::{self, Status, FABLE_MODEL},
     paper::{
         cache::FetchMode,
         evidence::BundleInputs,
         http::CannedTransport,
-        members::PaperMembers,
+        members::{PaperMember, PaperMembers},
         readiness::{self, Condition},
         service::PaperSession,
         tectonic, *,
@@ -15,6 +15,7 @@ use axiom::{
         investigation::{MemberCall, MemberReply, ResearchMember},
     },
     seams::FakeClock,
+    usage::pools::HYDROGEN_XHIGH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -58,6 +59,11 @@ impl ResearchMember for Fake {
             .expect("unexpected model call")
     }
 }
+impl PaperMember for Fake {
+    fn call_model(&self, call: &MemberCall, _model: &str, stop: &AtomicBool) -> MemberReply {
+        self.call(call, stop)
+    }
+}
 fn reply(output: Value, model: &str) -> MemberReply {
     MemberReply {
         status: Status::Ok,
@@ -73,7 +79,7 @@ fn reply(output: Value, model: &str) -> MemberReply {
 struct Members {
     astra: Fake,
     fable: Fake,
-    argon: Fake,
+    gemini: Fake,
     reviewer: Fake,
     trace: Trace,
 }
@@ -87,9 +93,9 @@ impl Members {
         };
         let pass = |i: usize, model| reply(serde_json::from_str(PASSES[i]).unwrap(), model);
         Self {
-            astra: fake("astra", vec![pass(0, "codex-model")]),
+            astra: fake("astra", vec![pass(0, "gpt-6-astra")]),
             fable: fake("fable", vec![pass(1, FABLE_MODEL), pass(3, FABLE_MODEL)]),
-            argon: fake("argon", vec![pass(2, ARGON_MODEL)]),
+            gemini: fake("gemini", vec![pass(2, HYDROGEN_XHIGH)]),
             reviewer: fake(
                 "reviewer",
                 vec![reply(
@@ -104,7 +110,7 @@ impl Members {
         PaperMembers {
             astra: &self.astra,
             fable: &self.fable,
-            argon: &self.argon,
+            gemini: &self.gemini,
             reviewer: &self.reviewer,
         }
     }
@@ -665,10 +671,10 @@ fn bridge_members_and_tool_surface() {
         [
             m.astra.name(),
             m.fable.name(),
-            m.argon.name(),
+            m.gemini.name(),
             m.reviewer.name()
         ],
-        ["astra", "fable", "argon", "reviewer"]
+        ["astra", "fable", "gemini", "reviewer"]
     );
     let desc = tools();
     let names: BTreeSet<_> = desc
@@ -872,7 +878,7 @@ fn running_is_visible_during_callback_and_cleared_afterward() {
 }
 
 fn mutate_manuscripts(m: &Members, f: impl Fn(&mut Value)) {
-    for fake in [&m.astra, &m.fable, &m.argon] {
+    for fake in [&m.astra, &m.fable, &m.gemini] {
         for reply in fake.replies.lock().unwrap().iter_mut() {
             f(&mut reply.output.as_mut().unwrap()["manuscript"]);
         }

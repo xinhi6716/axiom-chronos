@@ -6,7 +6,7 @@ fn pass_mapping() {
     for (p, n, g) in [
         (PassId::AstraDraft, "Astra", Celestial::Star),
         (PassId::FableRevise, "Fable", Celestial::Jupiter),
-        (PassId::ArgonRevise, "Argon", Celestial::Gemini),
+        (PassId::GeminiRevise, "Gemini", Celestial::Gemini),
         (PassId::FableStyle, "Fable", Celestial::Jupiter),
     ] {
         let (name, glyph) = progress::glyph(p);

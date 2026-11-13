@@ -318,9 +318,9 @@ fn passes() -> Vec<PassRecord> {
             Status::Ok,
         ),
         pass(
-            PassId::ArgonRevise,
-            "argon",
-            Some("gemini-4-argon-high"),
+            PassId::GeminiRevise,
+            "gemini",
+            Some("gemini-4-hydrogen-xhigh"),
             "Google",
             Status::Ok,
         ),
@@ -366,7 +366,7 @@ fn policy_catalog_and_lookup() {
 fn disclosure_lists_only_successful_uses_and_policy() {
     let mut records = passes();
     records.push(pass(
-        PassId::ArgonRevise,
+        PassId::GeminiRevise,
         "failed",
         Some("never-ran-model"),
         "other",
@@ -379,6 +379,15 @@ fn disclosure_lists_only_successful_uses_and_policy() {
         "other",
         Status::Timeout,
     ));
+    let mut rejected = pass(
+        PassId::AstraDraft,
+        "astra",
+        Some("wrong-reported-model"),
+        "other",
+        Status::Ok,
+    );
+    rejected.validation.push("wrong_model".into());
+    records.push(rejected);
     let reviewer = ModelUse {
         pass: None,
         member: "reviewer".into(),
@@ -429,6 +438,11 @@ fn disclosure_lists_only_successful_uses_and_policy() {
     for item in &policy.required_items {
         assert!(result.text.contains(item), "missing {item}");
     }
+    assert!(!result.text.contains("wrong-reported-model"));
+    assert!(!result
+        .uses
+        .iter()
+        .any(|u| u.model == "wrong-reported-model"));
     assert!(!result.text.contains("never-ran-model"));
     assert!(!result.uses.iter().any(|u| u.model == "never-ran-model"));
     assert!(!result.text.contains("timed-out-model"));

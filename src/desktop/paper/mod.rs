@@ -16,7 +16,13 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     *,
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 #[cfg(test)]
 mod accept;
@@ -108,6 +114,9 @@ pub struct PaperPage {
     pending: bool,
     form: form::Form,
     initialized: bool,
+    models_loaded: bool,
+    ignore_status_estimate: bool,
+    estimate_epoch: Arc<AtomicU64>,
     _poll: Task<()>,
 }
 impl PaperPage {
@@ -121,64 +130,90 @@ impl PaperPage {
         let form = form::Form::new(window, cx);
         let service_poll = service.clone();
         let session_poll = session.to_string();
-        let poll = cx.spawn_in(window, async move |this, cx| loop {
-            let Some(service) = service_poll.clone() else {
-                break;
-            };
-            let session = session_poll.clone();
-            let task = cx.background_spawn(async move {
-                let status = service.status(&session);
-                let question = if status.as_ref().is_ok_and(|s| s.requirements.is_none()) {
-                    evidence_question(&crate::base::axiom_home(), &session)
-                        .ok()
-                        .flatten()
-                } else {
-                    None
+        let estimate_epoch = Arc::new(AtomicU64::new(0));
+        let poll_epoch = estimate_epoch.clone();
+        let poll = cx.spawn_in(window, async move |this, cx| {
+            let mut models_loaded = false;
+            loop {
+                let Some(service) = service_poll.clone() else {
+                    break;
                 };
-                (status, question)
-            });
-            let (status, question) = task.await;
-            if this
-                .update_in(cx, |this, window, cx| {
-                    match status {
-                        Ok(s) => {
-                            this.status_error = None;
-                            if !this.initialized && (s.requirements.is_some() || question.is_some())
-                            {
-                                this.form.initialize(
-                                    s.requirements.as_ref(),
-                                    question.as_deref(),
-                                    window,
-                                    cx,
-                                );
-                                this.initialized = true;
-                            }
-                            if this.estimate.as_ref().map(|e| &e.digest)
-                                != s.estimate.as_ref().map(|e| &e.digest)
-                            {
-                                this.ack = false;
-                            }
-                            this.estimate = s.estimate.clone();
-                            if s.pdf != this.preview_pdf {
-                                this.preview_pdf = s.pdf.clone();
-                                this.preview = None;
-                                if s.pdf.is_some() {
-                                    this.load_preview(1, cx);
+                let session = session_poll.clone();
+                let epoch = poll_epoch.load(Ordering::SeqCst);
+                let load_models = !models_loaded;
+                let task = cx.background_spawn(async move {
+                    let status = service.status(&session);
+                    let models = load_models.then(|| service.models(&session));
+                    let question = if status.as_ref().is_ok_and(|s| s.requirements.is_none()) {
+                        evidence_question(&crate::base::axiom_home(), &session)
+                            .ok()
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    (status, question, models)
+                });
+                let (status, question, models) = task.await;
+                if models.as_ref().is_some_and(Result::is_ok) {
+                    models_loaded = true;
+                }
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        match status {
+                            Ok(s) => {
+                                this.status_error = None;
+                                if !this.initialized
+                                    && (s.requirements.is_some() || question.is_some())
+                                {
+                                    this.form.initialize(
+                                        s.requirements.as_ref(),
+                                        question.as_deref(),
+                                        window,
+                                        cx,
+                                    );
+                                    this.initialized = true;
                                 }
+                                if !this.ignore_status_estimate
+                                    && epoch == this.estimate_epoch.load(Ordering::SeqCst)
+                                {
+                                    if this.estimate.as_ref().map(|e| &e.digest)
+                                        != s.estimate.as_ref().map(|e| &e.digest)
+                                    {
+                                        this.ack = false;
+                                    }
+                                    this.estimate = s.estimate.clone();
+                                }
+                                if s.pdf != this.preview_pdf {
+                                    this.preview_pdf = s.pdf.clone();
+                                    this.preview = None;
+                                    if s.pdf.is_some() {
+                                        this.load_preview(1, cx);
+                                    }
+                                }
+                                this.status = Some(s);
                             }
-                            this.status = Some(s);
+                            Err(e) => this.status_error = Some(e.to_string()),
                         }
-                        Err(e) => this.status_error = Some(e.to_string()),
-                    }
-                    cx.notify();
-                })
-                .is_err()
-            {
-                break;
+                        if let Some(models) = models {
+                            match models {
+                                Ok(models) if !this.models_loaded => {
+                                    this.form.initialize_models(&models, window, cx);
+                                    this.models_loaded = true;
+                                }
+                                Err(e) => this.status_error = Some(e.to_string()),
+                                _ => {}
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(800))
+                    .await;
             }
-            cx.background_executor()
-                .timer(Duration::from_millis(800))
-                .await;
         });
         Self {
             state,
@@ -194,6 +229,9 @@ impl PaperPage {
             pending: false,
             form,
             initialized: false,
+            models_loaded: false,
+            ignore_status_estimate: false,
+            estimate_epoch,
             _poll: poll,
         }
     }
@@ -218,6 +256,8 @@ impl PaperPage {
                 this.pending = false;
                 match result {
                     Ok(Some(e)) => {
+                        this.estimate_epoch.fetch_add(1, Ordering::SeqCst);
+                        this.ignore_status_estimate = false;
                         this.estimate = Some(e);
                         this.ack = false;
                     }
@@ -345,13 +385,16 @@ impl Render for PaperPage {
         } else {
             page = page.child(tr(lang, "Loading"));
         }
-        let form = self.form.render(lang, cx);
+        let form = self.form.render(lang, self.models_loaded, self.pending, cx);
         let list = shortlist::render(self.status.as_ref(), lang, cx);
         let passes = progress::render(self.status.as_ref(), lang, &t);
         let logs = changelog::render(self.status.as_ref(), lang);
         let preview = preview::render(self.preview.as_ref(), lang, cx);
         let estimate = self.estimate.clone();
-        let has_passes = self.status.as_ref().is_some_and(|s| !s.passes.is_empty());
+        let has_passes = self
+            .status
+            .as_ref()
+            .is_some_and(|s| !s.passes.is_empty() || s.pdf.is_some());
         let mut content =
             v_flex()
                 .flex_1()

@@ -494,7 +494,7 @@ fn passes() -> Vec<PassRecord> {
     vec![
         pass(PassId::AstraDraft, "astra", "Drafted introduction"),
         pass(PassId::FableRevise, "fable", "Clarified evidence"),
-        pass(PassId::ArgonRevise, "argon", "Checked quantities"),
+        pass(PassId::GeminiRevise, "gemini", "Checked quantities"),
         pass(PassId::FableStyle, "fable", "Polished style"),
     ]
 }
@@ -507,7 +507,7 @@ fn four_pass_glyphs_correct(cx: &mut TestAppContext) {
         s.passes = passes();
         let (window, _, _) = setup(cx, lang, s);
         let lines = capture(cx, window);
-        for text in ["Astra · Star", "Fable · Jupiter", "Argon · Gemini"] {
+        for text in ["Astra · Star", "Fable · Jupiter", "Gemini · Gemini"] {
             assert!(shows(&lines, "paper-pass", text), "{lines:?}");
         }
         assert_eq!(
@@ -520,6 +520,67 @@ fn four_pass_glyphs_correct(cx: &mut TestAppContext) {
             "{lines:?}"
         );
     }
+}
+
+#[gpui_kit::test]
+fn saving_edited_models_invalidates_estimate(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let mut s = status();
+    s.estimate = Some(estimate());
+    let (window, fake, session) = setup(cx, Lang::En, s);
+    capture(cx, window);
+    assert!(shown(cx, window, "paper-estimate"));
+    click(cx, window, "paper-ack");
+    cx.update_window(window, |_, w, cx| {
+        w.scroll(
+            ("paper-input", 0_usize),
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-320.))),
+            cx,
+        );
+    })
+    .unwrap();
+    capture(cx, window);
+    click(cx, window, ("paper-model", 2_usize));
+    cx.update_window(window, |_, w, cx| {
+        w.press(
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+            cx,
+        );
+        w.input("gemini-custom", cx);
+    })
+    .unwrap();
+    capture(cx, window);
+    click(cx, window, "paper-save-models");
+    let mut expected = models::PassModels::default();
+    expected.gemini_revise = "gemini-custom".into();
+    assert!(
+        fake.calls().iter().any(|call| matches!(call,
+            PaperCall::SetModels(id, models) if id == &session && models == &expected
+        )),
+        "{:?}",
+        fake.calls()
+    );
+    let polls = fake
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, PaperCall::Status(_)))
+        .count();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    capture(cx, window);
+    assert!(
+        fake.calls()
+            .iter()
+            .filter(|c| matches!(c, PaperCall::Status(_)))
+            .count()
+            > polls
+    );
+    assert!(!shown(cx, window, "paper-estimate"));
+    assert!(!shown(cx, window, "paper-ack"));
 }
 
 #[gpui_kit::test]

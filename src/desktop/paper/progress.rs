@@ -19,7 +19,7 @@ pub(super) fn glyph(pass: PassId) -> (&'static str, Celestial) {
     let m = match pass {
         PassId::AstraDraft => Member::Astra,
         PassId::FableRevise | PassId::FableStyle => Member::Fable,
-        PassId::ArgonRevise => Member::Argon,
+        PassId::GeminiRevise => return ("Gemini", Celestial::Gemini),
     };
     let (name, glyph, _) = member(m);
     (name, glyph)

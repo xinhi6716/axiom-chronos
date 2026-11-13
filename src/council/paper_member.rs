@@ -1,11 +1,13 @@
 //! Paper-specific research members, isolated from council calls.
 use super::{
-    member::{ask_argon, ask_argon_stdin, ask_fable, Answer, Ask, Meter},
-    Status, AGY_PROMPT_LIMIT, ARGON_MODEL, FABLE_MODEL,
+    member::{ask_agy, ask_agy_stdin, ask_fable_model, Answer, Ask, Meter},
+    Status, AGY_PROMPT_LIMIT, FABLE_MODEL,
 };
 use crate::{
     base::Res,
+    paper::members::PaperMember,
     research_program::investigation::{MemberCall, MemberReply, ResearchMember},
+    usage::pools::HYDROGEN_XHIGH,
 };
 use std::{
     path::PathBuf,
@@ -27,10 +29,10 @@ impl PaperFable {
         }
     }
 }
-pub struct PaperArgon {
+pub struct PaperGemini {
     command: Res<Vec<String>>,
 }
-impl PaperArgon {
+impl PaperGemini {
     pub fn new(command: Res<Vec<String>>) -> Self {
         Self { command }
     }
@@ -45,7 +47,21 @@ fn failed(detail: String) -> Answer {
         detail: Some(detail),
     }
 }
-fn reply(answer: Answer, provider: &str, model: &str, usd: Option<f64>) -> MemberReply {
+fn reply(mut answer: Answer, provider: &str, model: &str, usd: Option<f64>) -> MemberReply {
+    if answer.raw.as_deref().is_some_and(|raw| {
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|v| {
+                v.get("model")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| v.pointer("/message/model").and_then(|v| v.as_str()))
+                    .is_some_and(|actual| actual != model)
+            })
+    }) {
+        answer.status = Status::Malformed;
+        answer.output = None;
+        answer.detail = Some("wrong_model".into());
+    }
     MemberReply {
         status: answer.status,
         output: answer.output,
@@ -79,6 +95,11 @@ impl ResearchMember for PaperFable {
         "fable"
     }
     fn call(&self, call: &MemberCall, stop: &AtomicBool) -> MemberReply {
+        self.call_model(call, FABLE_MODEL, stop)
+    }
+}
+impl PaperMember for PaperFable {
+    fn call_model(&self, call: &MemberCall, model: &str, stop: &AtomicBool) -> MemberReply {
         // Serialize ledger read/modify/write across paper calls within this process.
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = LOCK
@@ -87,13 +108,13 @@ impl ResearchMember for PaperFable {
             .unwrap_or_else(|e| e.into_inner());
         let mut meter = match Meter::open(&self.ledger, "paper", self.cap_usd) {
             Ok(meter) => meter,
-            Err(e) => return reply(failed(e.message), "fable", FABLE_MODEL, None),
+            Err(e) => return reply(failed(e.message), "fable", model, None),
         };
         if let Err(e) = prepare(call) {
-            return reply(failed(e), "fable", FABLE_MODEL, None);
+            return reply(failed(e), "fable", model, None);
         }
         let before = meter.spent_usd();
-        let mut answer = ask_fable(&self.command, ask(call, stop), "", &mut meter);
+        let mut answer = ask_fable_model(&self.command, ask(call, stop), "", &mut meter, model);
         if answer.status == Status::Ok && !meter.observed() {
             answer.status = Status::BudgetCut;
             answer.output = None;
@@ -101,23 +122,29 @@ impl ResearchMember for PaperFable {
         }
         let usd = (meter.observed() && meter.unpriced_tokens() == 0)
             .then_some(meter.spent_usd() - before);
-        reply(answer, "fable", FABLE_MODEL, usd)
+        reply(answer, "fable", model, usd)
     }
 }
-impl ResearchMember for PaperArgon {
+impl ResearchMember for PaperGemini {
     fn name(&self) -> &str {
-        "argon"
+        "gemini"
     }
     fn call(&self, call: &MemberCall, stop: &AtomicBool) -> MemberReply {
+        self.call_model(call, HYDROGEN_XHIGH, stop)
+    }
+}
+impl PaperMember for PaperGemini {
+    fn call_model(&self, call: &MemberCall, model: &str, stop: &AtomicBool) -> MemberReply {
         let path = match prepare(call) {
             Ok(path) => path,
-            Err(e) => return reply(failed(e), "argon", ARGON_MODEL, None),
+            Err(e) => return reply(failed(e), "gemini", model, None),
         };
         let answer = if call.prompt.encode_utf16().count() <= AGY_PROMPT_LIMIT {
-            ask_argon(&self.command, ask(call, stop), &path)
+            ask_agy(&self.command, ask(call, stop), &path, model)
         } else {
-            ask_argon_stdin(&self.command, ask(call, stop), &path)
+            ask_agy_stdin(&self.command, ask(call, stop), &path, model)
         };
-        reply(answer, "argon", ARGON_MODEL, None)
+        // If the CLI echoes no model, argv proves the requested model, so it is the reply model.
+        reply(answer, "gemini", model, None)
     }
 }

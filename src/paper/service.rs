@@ -200,7 +200,11 @@ impl PaperSession {
         Ok(choice)
     }
     pub fn estimate(&self) -> Res<SpendEstimate> {
-        let estimate = budget::estimate(&self.home, &models())?;
+        let estimate = budget::estimate(
+            &self.home,
+            &super::models::estimate_models(),
+            &super::models::load(&self.home)?,
+        )?;
         write_json(
             &super::paper_dir(&self.store).join("estimate.json"),
             &estimate,
@@ -253,7 +257,14 @@ impl PaperSession {
                 .ok_or_else(|| {
                     Failure::new("no_journal", "chosen journal not in current shortlist")
                 })?;
-            if budget::estimate(&self.home, &models())?.digest != estimate_digest {
+            if budget::estimate(
+                &self.home,
+                &super::models::estimate_models(),
+                &super::models::load(&self.home)?,
+            )?
+            .digest
+                != estimate_digest
+            {
                 return Err(Failure::new("estimate_changed", "estimate has changed"));
             }
             let template = templates::for_journal(journal)?;
@@ -681,12 +692,6 @@ fn read_optional<T: DeserializeOwned>(path: &Path) -> Res<Option<T>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io(e)),
     }
-}
-fn models() -> Vec<String> {
-    ["astra", "fable", "argon"]
-        .iter()
-        .map(|s| (*s).into())
-        .collect()
 }
 fn write_status(store: &Path, running: bool, error: Option<&Failure>) -> Res<()> {
     write_json(

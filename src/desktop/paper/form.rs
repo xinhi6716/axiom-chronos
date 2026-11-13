@@ -1,4 +1,5 @@
 use super::*;
+use crate::paper::models::PassModels;
 use crate::paper::{AccessWanted, Money, Quartile, QuartileScheme, Requirements};
 use gpui_kit::component::input::{Input, InputState};
 use std::path::PathBuf;
@@ -21,12 +22,18 @@ const TABLE: Table = &[
     ("JCR file path (optional)", "JCR 檔案路徑（選填）"),
     ("Find journals", "尋找期刊"),
     ("Invalid APC amount or currency", "文章處理費金額或幣別無效"),
+    ("Pass 1 · Astra model", "第 1 輪 · Astra 模型"),
+    ("Pass 2 · Fable model", "第 2 輪 · Fable 模型"),
+    ("Pass 3 · Gemini model", "第 3 輪 · Gemini 模型"),
+    ("Pass 4 · Fable model", "第 4 輪 · Fable 模型"),
+    ("Save models", "儲存模型"),
 ];
 fn tr(l: Lang, k: &'static str) -> &'static str {
     i18n::translate(l, TABLE, k)
 }
 pub struct Form {
     inputs: Vec<Entity<InputState>>,
+    models: Vec<Entity<InputState>>,
     tier: Option<Quartile>,
     scheme: QuartileScheme,
     access: AccessWanted,
@@ -39,10 +46,34 @@ impl Form {
             .collect();
         Self {
             inputs,
+            models: (0..4)
+                .map(|_| cx.new(|cx| InputState::new(window, cx)))
+                .collect(),
             tier: None,
             scheme: QuartileScheme::Sjr,
             access: AccessWanted::Either,
             no_fee: false,
+        }
+    }
+    pub fn initialize_models(
+        &self,
+        models: &PassModels,
+        window: &mut Window,
+        cx: &mut Context<PaperPage>,
+    ) {
+        for (input, pass) in self.models.iter().zip(crate::paper::PassId::ALL) {
+            input.update(cx, |i, cx| {
+                i.set_value(models.get(pass).to_owned(), window, cx)
+            });
+        }
+    }
+    fn pass_models(&self, cx: &App) -> PassModels {
+        let value = |i: usize| self.models[i].read(cx).value().to_string();
+        PassModels {
+            astra_draft: value(0),
+            fable_revise: value(1),
+            gemini_revise: value(2),
+            fable_style: value(3),
         }
     }
     pub fn initialize(
@@ -92,7 +123,13 @@ impl Form {
             self.no_fee,
         )
     }
-    pub fn render(&self, lang: Lang, cx: &mut Context<PaperPage>) -> AnyElement {
+    pub fn render(
+        &self,
+        lang: Lang,
+        models_loaded: bool,
+        pending: bool,
+        cx: &mut Context<PaperPage>,
+    ) -> AnyElement {
         let mut fields =
             v_flex()
                 .id("paper-form")
@@ -196,7 +233,39 @@ impl Form {
                     cx.notify();
                 })),
         );
+        for (i, label) in [
+            "Pass 1 · Astra model",
+            "Pass 2 · Fable model",
+            "Pass 3 · Gemini model",
+            "Pass 4 · Fable model",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fields = fields.child(
+                gpui_kit::component::h_flex()
+                    .child(tr(lang, label))
+                    .child(Input::new(&self.models[i]).id(("paper-model", i))),
+            );
+        }
         fields
+            .child(
+                Button::new("paper-save-models")
+                    .label(tr(lang, "Save models"))
+                    .disabled(!models_loaded || pending)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.models_loaded || this.pending {
+                            return;
+                        }
+                        let models = this.form.pass_models(cx);
+                        this.estimate = None;
+                        this.ack = false;
+                        this.estimate_epoch
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        this.ignore_status_estimate = true;
+                        this.action(cx, move |s, id| s.set_models(&id, models).map(|_| None));
+                    })),
+            )
             .child(tiers)
             .child(access)
             .child(tr(lang, "JCR file path (optional)"))

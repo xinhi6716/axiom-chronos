@@ -2,11 +2,15 @@ use super::{council_tool::cross, Bridge};
 use crate::{
     council::{
         self,
-        paper_member::{PaperArgon, PaperFable},
+        paper_member::{PaperFable, PaperGemini},
         CrossRequest, Status,
     },
     engine::budgets::{self, Role},
-    paper::{members::PaperMembers, paper_dir},
+    paper::{
+        members::{PaperMember, PaperMembers},
+        models::DEFAULT_ASTRA_MODEL,
+        paper_dir,
+    },
     research_program::investigation::{MemberCall, MemberReply, ResearchMember},
 };
 use serde_json::Value;
@@ -22,6 +26,7 @@ struct CrossMember<'a> {
     setup: &'a council::Setup,
     store: PathBuf,
     cwd: PathBuf,
+    home: PathBuf,
 }
 
 impl ResearchMember for CrossMember<'_> {
@@ -29,8 +34,14 @@ impl ResearchMember for CrossMember<'_> {
         self.name
     }
 
-    fn call(&self, call: &MemberCall, _stop: &AtomicBool) -> MemberReply {
-        if let Err(e) = budgets::check(&self.store, self.role, "paper") {
+    fn call(&self, call: &MemberCall, stop: &AtomicBool) -> MemberReply {
+        self.call_model(call, DEFAULT_ASTRA_MODEL, stop)
+    }
+}
+
+impl PaperMember for CrossMember<'_> {
+    fn call_model(&self, call: &MemberCall, model: &str, _stop: &AtomicBool) -> MemberReply {
+        if let Err(e) = budgets::check_model(&self.store, &self.home, self.role, "paper", model) {
             return MemberReply {
                 status: Status::Failed,
                 output: None,
@@ -55,10 +66,11 @@ impl ResearchMember for CrossMember<'_> {
                 token_cap: self.setup.astra_token_cap,
             },
         );
-        let _ = budgets::record(
+        let _ = budgets::record_model(
             &self.store,
+            &self.home,
             self.role,
-            reply.model.as_deref().unwrap_or(self.name),
+            model,
             None,
             0,
             reply.tokens,
@@ -98,7 +110,7 @@ fn map_raw_output(mut reply: council::CrossReply) -> council::CrossReply {
 pub struct ProductionMembers<'a> {
     astra: CrossMember<'a>,
     fable: PaperFable,
-    argon: PaperArgon,
+    gemini: PaperGemini,
     reviewer: CrossMember<'a>,
 }
 
@@ -111,6 +123,11 @@ impl<'a> ProductionMembers<'a> {
             setup,
             store: store.to_owned(),
             cwd: cwd.to_owned(),
+            home: bridge
+                .config
+                .data_home
+                .clone()
+                .unwrap_or_else(|| store.to_owned()),
         };
         Self {
             astra: member("astra", Role::CouncilMember),
@@ -119,7 +136,7 @@ impl<'a> ProductionMembers<'a> {
                 paper_dir(store).join("fable-meter.json"),
                 setup.fable_cap_usd,
             ),
-            argon: PaperArgon::new(setup.argon.clone()),
+            gemini: PaperGemini::new(setup.argon.clone()),
             reviewer: member("reviewer", Role::Reviewer),
         }
     }
@@ -128,7 +145,7 @@ impl<'a> ProductionMembers<'a> {
         PaperMembers {
             astra: &self.astra,
             fable: &self.fable,
-            argon: &self.argon,
+            gemini: &self.gemini,
             reviewer: &self.reviewer,
         }
     }

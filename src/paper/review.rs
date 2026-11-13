@@ -1,5 +1,7 @@
 //! Independent paper review.
-use super::{budget::PaperBudget, readiness, runner::RunConfig, state, Step};
+use super::{
+    budget::PaperBudget, models::DEFAULT_ASTRA_MODEL, readiness, runner::RunConfig, state, Step,
+};
 use crate::{
     base::{atomic_write, now_iso, schema, Failure, Res},
     council::Status,
@@ -130,7 +132,7 @@ pub fn review(
             prompt.push_str(&format!("=== {name} ===\n{content}\n"));
         }
     }
-    budget.before_call(&cfg.store, "reviewer")?;
+    budget.before_call(&cfg.store, &cfg.home, "reviewer", DEFAULT_ASTRA_MODEL)?;
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../../engine/paper/reviewer.schema.json"))
             .expect("valid reviewer schema");
@@ -146,8 +148,9 @@ pub fn review(
     let reply = reviewer.call(&call, stop);
     let charged = budget.charge(
         &cfg.store,
+        &cfg.home,
         "reviewer",
-        reply.model.as_deref().unwrap_or("reviewer"),
+        DEFAULT_ASTRA_MODEL,
         reply.usd,
         reply.tokens,
     );
