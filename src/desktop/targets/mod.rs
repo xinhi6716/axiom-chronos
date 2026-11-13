@@ -12,18 +12,18 @@ pub enum Opening { Screen(Screen), Page(&'static str), ResearchTab(&'static str)
 pub struct Target { pub id: &'static str, pub group: &'static str, pub opening: Opening, pub panels: &'static [&'static str], pub actions: &'static [&'static str], pub states: &'static [CaptureState] }
 #[derive(Debug, PartialEq)]
 pub struct Unregistered { pub target: String, pub state: CaptureState }
-mod shell;
+pub(crate) mod shell;
 pub mod place;
-mod overlays;
-mod run;
-mod mesh;
-mod wishes;
-mod panels;
-mod mini;
-mod sessions_settings;
-mod research;
-mod paper;
-mod modes;
+pub(crate) mod overlays;
+pub(crate) mod run;
+pub(crate) mod mesh;
+pub(crate) mod wishes;
+pub(crate) mod panels;
+pub(crate) mod mini;
+pub(crate) mod sessions_settings;
+pub(crate) mod research;
+pub(crate) mod paper;
+pub(crate) mod modes;
 #[cfg(test)] mod accept;
 fn entry(id: &'static str, group: &'static str, opening: Opening) -> Target {
  let states: &'static [CaptureState] = match opening {
@@ -87,6 +87,29 @@ pub fn all() -> Vec<Target> { let mut v = Vec::new();
  v }
 pub fn find(id: &str) -> Option<Target> { all().into_iter().find(|t| t.id == id) }
 pub(crate) fn unavailable(t: &Target, s: CaptureState) -> Unregistered { Unregistered { target: t.id.into(), state: s } }
+type OpenHook = fn(&Target, CaptureState, &gpui_kit::Entity<AppState>, &mut gpui_kit::Window, &mut gpui_kit::App) -> Result<(), Unregistered>;
+fn hook(group: &str) -> Option<OpenHook> {
+ match group {
+  "shell" => Some(shell::open),
+  "overlays" => Some(overlays::open),
+  "run" => Some(run::open),
+  "mesh" => Some(mesh::open),
+  "wishes" => Some(wishes::open),
+  "panels" => Some(panels::open),
+  "mini" => Some(mini::open),
+  "sessions_settings" => Some(sessions_settings::open),
+  "research" => Some(research::open),
+  "paper" => Some(paper::open),
+  "modes" => Some(modes::open),
+  _ => None,
+ }
+}
+pub(crate) fn open(t: &Target, s: CaptureState, state: &gpui_kit::Entity<AppState>, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> Result<(), Unregistered> {
+ match hook(t.group) {
+  Some(h) => h(t, s, state, window, cx),
+  None => Err(unavailable(t, s)),
+ }
+}
 pub fn prepare(t: &Target, s: CaptureState, state: &mut AppState) -> Result<(), Unregistered> {
  match t.group {
   "shell" => shell::prepare(t, s, state),
@@ -130,4 +153,51 @@ fn prepare_basic(t: &Target, s: CaptureState, state: &mut AppState) -> Result<()
   _ => return Err(unavailable(t,s)),
  }
  Ok(())
+}
+
+#[cfg(test)]
+mod hook_tests {
+ use std::prelude::v1::test;
+ const GROUPS: [(&str, &str); 11] = [
+  ("shell", include_str!("shell.rs")), ("overlays", include_str!("overlays.rs")),
+  ("run", include_str!("run.rs")), ("mesh", include_str!("mesh.rs")),
+  ("wishes", include_str!("wishes.rs")), ("panels", include_str!("panels.rs")),
+  ("mini", include_str!("mini.rs")), ("sessions_settings", include_str!("sessions_settings.rs")),
+  ("research", include_str!("research.rs")), ("paper", include_str!("paper.rs")),
+  ("modes", include_str!("modes.rs")),
+ ];
+ fn has_declaration(source: &str, declaration: &str) -> bool {
+  source.lines().any(|line| line.trim().starts_with(declaration))
+ }
+ #[test]
+ fn groups_expose_open_hooks() {
+  let module = include_str!("mod.rs");
+  for (group, source) in GROUPS {
+   assert!(has_declaration(module, &format!("pub(crate) mod {group};")), "{group}");
+   assert!(has_declaration(source, "pub(crate) fn open("), "{group}");
+  }
+  assert!(!has_declaration("mod shell;", "pub(crate) mod shell;"));
+  assert!(!has_declaration("fn open() {}", "pub(crate) fn open("));
+ }
+ #[test]
+ fn dispatch_lookup_covers_targets_and_groups() {
+  let targets = super::all();
+  assert!(!targets.is_empty());
+  for t in &targets {
+   assert!(super::hook(t.group).is_some(), "{}: {}", t.id, t.group);
+  }
+  for (group, _) in GROUPS {
+   assert!(super::hook(group).is_some(), "{group}");
+  }
+  assert!(super::hook("unknown").is_none());
+  let mut fabricated = targets[0].clone();
+  fabricated.group = "nope";
+  let missing: Vec<_> = targets.into_iter().chain(std::iter::once(fabricated)).filter(|t| super::hook(t.group).is_none()).collect();
+  assert_eq!(missing.len(), 1);
+  assert_eq!(missing[0].group, "nope");
+ }
+ #[test]
+ fn session_page_constructs_a_session_view() {
+  let _: fn(gpui_kit::Entity<super::AppState>, gpui_kit::SharedString, &mut gpui_kit::Window, &mut gpui_kit::App) -> gpui_kit::AnyView = crate::desktop::targets::sessions_settings::session_page;
+ }
 }

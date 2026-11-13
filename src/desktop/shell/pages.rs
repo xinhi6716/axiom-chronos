@@ -2,7 +2,7 @@ use super::{
     modes::{ChatPage, PlazaPage, QuickTaskPage},
     Shell,
 };
-use crate::desktop::{detail::SessionPage, doctor::storage::StoragePage, ux::Page};
+use crate::desktop::{doctor::storage::StoragePage, targets::{CaptureState, Target, Unregistered}, ux::Page};
 use gpui_kit::*;
 
 pub(super) fn page_escape_binding() -> KeyBinding {
@@ -41,9 +41,7 @@ impl Shell {
                     Page::Plaza => cx
                         .new(|cx| PlazaPage::new(self.state.clone(), window, cx))
                         .into(),
-                    Page::Session(id) => cx
-                        .new(|cx| SessionPage::new(self.state.clone(), id.clone(), window, cx))
-                        .into(),
+                    Page::Session(id) => crate::desktop::targets::sessions_settings::session_page(self.state.clone(), id.clone(), window, cx),
                     // p8: begin stub
                     Page::Paper(id) => cx
                         .new(|cx| crate::desktop::paper::PaperPage::new(self.state.clone(), id.clone(), window, cx))
@@ -55,7 +53,20 @@ impl Shell {
         }
         self.page_view
             .as_ref()
-            .map(|(_, v)| v.clone().into_any_element())
+            .map(|(page, view)| {
+                let id = match page.kind() {
+                    "research" => "research.page",
+                    "storage" => "storage.page",
+                    "chat" => "chat.page",
+                    "quick" => "quick.page",
+                    "plaza" => "plaza.page",
+                    "session" => "session.page",
+                    "paper" => "paper.page",
+                    "routine" => return view.clone().into_any_element(),
+                    kind => unreachable!("unknown page kind: {kind}"),
+                };
+                div().id(id).test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(view.clone()).into_any_element()
+            })
     }
 
     pub(super) fn escape_page(&mut self, _: &gpui_kit::component::input::Escape, window: &mut Window, cx: &mut Context<Self>) {
@@ -69,6 +80,11 @@ impl Shell {
 }
 
 impl Shell {
+ /// Opens a target through the shell for the capture harness.
+ pub fn open_target(&mut self, t: &Target, s: CaptureState, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Unregistered> {
+  self.apply_target(t, s, window, cx)
+ }
+
  pub(crate) fn apply_target(&mut self, t: &crate::desktop::targets::Target, s: crate::desktop::targets::CaptureState, window: &mut Window, cx: &mut Context<Self>) -> Result<(), crate::desktop::targets::Unregistered> {
   use crate::desktop::targets::{CaptureState, Opening, unavailable};
   if s != CaptureState::Live && !(matches!(t.opening, Opening::Screen(crate::desktop::model::Screen::Run | crate::desktop::model::Screen::Wishes | crate::desktop::model::Screen::Memory | crate::desktop::model::Screen::Usage)) && matches!(s, CaptureState::Empty | CaptureState::Error)) { return Err(unavailable(t,s)); }
@@ -90,7 +106,63 @@ impl Shell {
    Opening::Overlay("composer") | Opening::Dialog("composer") => { self.state.update(cx, |s, cx| s.set_composing(true, cx)); Ok(()) },
    Opening::Overlay("palette") => { self.toggle_palette(window,cx); Ok(()) },
    Opening::Dialog("close") => { self.show_close_dialog(false,window,cx); Ok(()) },
-   _ => Err(unavailable(t,s)),
+   Opening::Dialog("control") => crate::desktop::targets::open(t, s, &self.state, window, cx),
+   Opening::Dialog("interjection") => crate::desktop::targets::open(t, s, &self.state, window, cx),
+   Opening::Dialog("evolve") => crate::desktop::targets::open(t, s, &self.state, window, cx),
+   _ => crate::desktop::targets::open(t, s, &self.state, window, cx),
   }
  }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::desktop::targets::{self, Opening};
+    use std::prelude::v1::test;
+
+    fn implementation() -> &'static str {
+        include_str!("pages.rs").split_once("#[cfg(test)]").unwrap().0
+    }
+
+    fn has_literal(source: &str, id: &str) -> bool {
+        source.contains(&format!("\"{id}\""))
+    }
+
+    #[test]
+    fn page_targets_have_panel_ids() {
+        let source = implementation();
+        for target in targets::all() {
+            if let Opening::Page(kind) = target.opening {
+                if kind == "routine" { continue; }
+                for id in target.panels.iter().filter(|id| id.ends_with(".page")) {
+                    assert!(has_literal(source, id), "missing panel ID {id}");
+                }
+            }
+        }
+        assert!(!has_literal(source, "invented.page"));
+    }
+
+    #[test]
+    fn session_page_uses_target_factory_and_routine_is_unwrapped() {
+        let source = implementation();
+        assert!(source.contains("targets::sessions_settings::session_page("));
+        assert!(!source.contains("detail::SessionPage"));
+        assert!(source.contains("page.kind()"));
+        assert!(source.contains("Page::Routine"));
+        assert!(!has_literal(source, "routine.page"));
+    }
+
+    fn routes_to_targets(source: &str, branch: &str) -> bool {
+        source.lines().find(|line| line.contains(branch))
+            .is_some_and(|line| line.contains("targets::open("))
+    }
+
+    #[test]
+    fn public_harness_route_delegates_dialogs_and_fallback() {
+        let source = implementation();
+        assert!(source.contains("pub fn open_target("));
+        for branch in ["Opening::Dialog(\"control\")", "Opening::Dialog(\"interjection\")", "Opening::Dialog(\"evolve\")", "_ =>"] {
+            assert!(routes_to_targets(source, branch), "missing dispatch for {branch}");
+            assert!(!routes_to_targets(&source.replace("targets::open(", "removed("), branch));
+        }
+    }
 }

@@ -12,7 +12,10 @@ use super::{
 };
 use crate::{
     base::Res,
-    desktop::ux::Seams,
+    desktop::ux::{
+        seams::{approval_outbox_for, interjection_outbox_for, unit_action_outbox_for},
+        Seams,
+    },
     modes::runners::{ModelProvider, ModelRouter},
     service::{
         launcher::{ServiceLauncher, StartPath},
@@ -36,14 +39,20 @@ pub fn production(home: &Path, slots_home: &Path) -> Seams {
         home: home.into(),
         start: Arc::new(LazyStart(home.into())),
     });
+    let interjections = Arc::new(EngineInterjections::new(
+        home.into(),
+        Arc::new(ServiceTransport::new(home.into())),
+    ));
+    let approvals = Arc::new(EngineApprovals::new(home.into()));
+    let unit_actions = Arc::new(OrchUnitActions::new(home.into()));
     Seams {
         dual_core: Some(Arc::new(EventDualCore::new(home.into()))),
         turn_policy: Some(Arc::new(CodexTurnPolicy::new(slots_home.into()))),
-        interjections: Some(Arc::new(EngineInterjections::new(
-            home.into(),
-            Arc::new(ServiceTransport::new(home.into())),
-        ))),
-        approvals: Some(Arc::new(EngineApprovals::new(home.into()))),
+        interjections: Some(interjections.clone()),
+        approvals: Some(approvals.clone()),
+        approval_outbox: Some(approval_outbox_for(approvals)),
+        interjection_outbox: Some(interjection_outbox_for(interjections)),
+        unit_action_outbox: Some(unit_action_outbox_for(unit_actions.clone())),
         storage: Some(Arc::new(LedgerStorage::new(home))),
         background: Some(Arc::new(ServiceBackground::new(home))),
         modes: Some(Arc::new(ModesEngine::new(
@@ -53,7 +62,7 @@ pub fn production(home: &Path, slots_home: &Path) -> Seams {
             wish,
             Arc::new(LazyQuick { home: home.into() }),
         ))),
-        unit_actions: Some(Arc::new(OrchUnitActions::new(home.into()))),
+        unit_actions: Some(unit_actions),
         sessions: Some(Arc::new(ServiceSessions::new(home.into()))),
         optimizer: None,
         github: None,

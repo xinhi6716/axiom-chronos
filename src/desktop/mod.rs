@@ -232,6 +232,10 @@ pub fn run(options: Options) -> i32 {
             plain_text::Source::Claude { cache: crate::base::axiom_home().join("desktop").join("plain-text.json") }
         };
         plain_text::install(cx, prefs.plain_words, source);
+        cx.set_global(crate::desktop::mesh::TitleSource(std::rc::Rc::new(|cx, title| {
+            let p = crate::desktop::plain_text::plain(cx, title);
+            (p.shown, p.original)
+        })));
         // The quit hook captures the system motion setting before the stored override is applied.
         settings::Store::save_on_quit(cx);
         if let Some(on) = prefs.reduce_motion {
@@ -392,6 +396,22 @@ pub fn run(options: Options) -> i32 {
 mod strip_startup_tests {
     use super::*;
     use std::prelude::v1::test;
+
+    fn title_source_follows_plain_text(source: &str) -> bool {
+        let install = source.find("plain_text::install(cx, prefs.plain_words, source);");
+        let title_source = source.find("cx.set_global(crate::desktop::mesh::TitleSource(");
+        matches!((install, title_source), (Some(a), Some(b)) if a < b)
+    }
+
+    #[test]
+    fn title_source_is_installed_after_plain_text() {
+        let source = include_str!("mod.rs");
+        let run = source.split("pub fn run(options: Options) -> i32 {").nth(1).unwrap()
+            .split("#[cfg(test)]").next().unwrap();
+        assert!(title_source_follows_plain_text(run));
+        let reordered = "cx.set_global(crate::desktop::mesh::TitleSource(\nplain_text::install(cx, prefs.plain_words, source);";
+        assert!(!title_source_follows_plain_text(reordered));
+    }
     #[test]
     fn placement_arguments_keep_intro_unless_legacy_offscreen() {
         for (value, expected) in [("secondary", targets::place::Place::Secondary), ("offscreen", targets::place::Place::Offscreen)] {

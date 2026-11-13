@@ -13,6 +13,7 @@ use super::{
 pub use activity::*;
 pub use celestial::*;
 pub use events::*;
+use crate::desktop::data::outbox::Outbox;
 use gpui_kit::{Context, SharedString};
 use seams::*;
 use std::{
@@ -37,6 +38,15 @@ pub enum Page {
     // p8: end stub
 }
 impl Page { pub fn kind(&self) -> &'static str { match self { Self::Research => "research", Self::Storage => "storage", Self::Chat => "chat", Self::QuickTask => "quick", Self::Plaza => "plaza", Self::Session(_) => "session", Self::Paper(_) => "paper", Self::Routine => "routine" } } }
+impl Page {
+    pub const KINDS: &'static [&'static str] = &[
+        "research", "storage", "chat", "quick", "plaza", "session", "paper", "routine",
+    ];
+
+    pub fn needs_subject(kind: &str) -> bool {
+        matches!(kind, "session" | "paper")
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReadFilter {
     #[default]
@@ -50,6 +60,9 @@ pub struct Seams {
     pub turn_policy: Option<Arc<dyn TurnPolicy>>,
     pub interjections: Option<Arc<dyn Interjections>>,
     pub approvals: Option<Arc<dyn ApprovalService>>,
+    pub approval_outbox: Option<Outbox<Decision>>,
+    pub interjection_outbox: Option<Outbox<Draft>>,
+    pub unit_action_outbox: Option<Outbox<UnitAction>>,
     pub storage: Option<Arc<dyn StorageService>>,
     pub background: Option<Arc<dyn BackgroundService>>,
     pub modes: Option<Arc<dyn ModeEngine>>,
@@ -147,13 +160,19 @@ impl Seams {
             reclaimable: true,
         })
         .collect();
+        let interjections = Arc::new(interjections);
+        let approvals = Arc::new(FakeApprovals::new(cards));
+        let units = Arc::new(units);
         Self {
             dual_core: Some(Arc::new(dual)),
             turn_policy: Some(Arc::new(FakeTurnPolicy::new(Some(FastCost {
                 multiplier: 2.0,
             })))),
-            interjections: Some(Arc::new(interjections)),
-            approvals: Some(Arc::new(FakeApprovals::new(cards))),
+            interjections: Some(interjections.clone()),
+            approvals: Some(approvals.clone()),
+            approval_outbox: Some(approval_outbox_for(approvals)),
+            interjection_outbox: Some(interjection_outbox_for(interjections)),
+            unit_action_outbox: Some(unit_action_outbox_for(units.clone())),
             storage: Some(Arc::new(FakeStorage::new(
                 items,
                 Some(DiskSpace {
@@ -164,7 +183,7 @@ impl Seams {
             background: Some(Arc::new(FakeBackground::new(true))),
             modes: Some(Arc::new(FakeModes::new())),
             sessions: Some(Arc::new(FakeSessions::new(sessions))),
-            unit_actions: Some(Arc::new(units)),
+            unit_actions: Some(units),
             optimizer: Some(Arc::new(FakeOptimizer::new(vec![Ok(Proposal {
                 goal: "Produce a verified research report".into(),
                 scope: "Reader and analysis pipeline".into(),
@@ -361,3 +380,54 @@ impl AppState {
 }
 #[cfg(test)]
 mod accept;
+
+#[cfg(test)]
+mod page_kind_tests {
+    use super::Page;
+    use std::prelude::v1::test;
+
+    fn expected_kind(page: &Page) -> &'static str {
+        match page {
+            Page::Research => "research",
+            Page::Storage => "storage",
+            Page::Chat => "chat",
+            Page::QuickTask => "quick",
+            Page::Plaza => "plaza",
+            Page::Session(_) => "session",
+            Page::Paper(_) => "paper",
+            Page::Routine => "routine",
+        }
+    }
+
+    fn missing_kinds<'a>(pages: &[Page], kinds: &[&'a str]) -> Vec<&'static str> {
+        pages.iter().map(expected_kind).filter(|kind| !kinds.contains(kind)).collect()
+    }
+
+    fn pages() -> Vec<Page> {
+        vec![Page::Research, Page::Storage, Page::Chat, Page::QuickTask, Page::Plaza,
+             Page::Session("subject".into()), Page::Paper("subject".into()), Page::Routine]
+    }
+
+    #[test]
+    fn kinds_cover_exactly_all_page_variants() {
+        let pages = pages();
+        for page in &pages {
+            assert_eq!(page.kind(), expected_kind(page));
+            assert!(Page::KINDS.contains(&page.kind()));
+        }
+        assert!(missing_kinds(&pages, Page::KINDS).is_empty());
+        assert_eq!(Page::KINDS.len(), pages.len());
+        assert!(Page::KINDS.iter().all(|kind| pages.iter().any(|page| page.kind() == *kind)));
+
+        let without_paper: Vec<_> = Page::KINDS.iter().copied().filter(|kind| *kind != "paper").collect();
+        assert_eq!(missing_kinds(&pages, &without_paper), vec!["paper"]);
+    }
+
+    #[test]
+    fn only_session_and_paper_need_subjects() {
+        for kind in Page::KINDS {
+            assert_eq!(Page::needs_subject(kind), *kind == "session" || *kind == "paper", "{kind}");
+        }
+        assert!(!Page::needs_subject("unknown"));
+    }
+}
