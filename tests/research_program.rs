@@ -55,7 +55,7 @@ impl ResearchMember for Fake {
             "malformed" => Status::Malformed,
             _ => Status::Ok,
         };
-        let output = match call.stage.as_str() {
+        let mut output = match call.stage.as_str() {
             "investigate" => {
                 json!({"items":[{"claim":"claim", "source":"src/a", "confidence":"high", "evidence":"proof"}]})
             }
@@ -66,10 +66,13 @@ impl ResearchMember for Fake {
                 json!({"failures":[{"scenario":"fails", "item":"C1", "likelihood":"medium", "mitigation":"test"}]})
             }
             "synthesis" => {
-                json!({"summary":"s", "conclusions":[{"id":"E1", "claim":"claim", "confidence":"high", "evidence":["E1"]}], "open_questions":[], "priority_checks":[], "plan":{"summary":"s", "coverage":{"read":["src/a"],"not_read":[]}, "changes":[{"id":"C1", "area":"tests", "location":"src/a", "evidence":"proof", "problem":"risk", "change":"add test", "verify":"run test"}], "out_of_scope":[]}})
+                json!({"summary":"s", "conclusions":[{"id":"E1", "claim":"claim", "confidence":"high", "evidence":["E1"]}], "open_questions":[], "priority_checks":[], "plan":{"summary":"s", "coverage":{"read":["src/a"],"not_read":[]}, "changes":[{"id":"C1", "area":"tests", "location":"src/a", "evidence":"proof", "problem":"risk", "change":"add test", "verify":"run test", "tier":"sol", "effort":"high", "risk":"standard", "reason":"Bounded test change"}], "out_of_scope":[]}})
             }
             _ => panic!("unknown stage"),
         };
+        if self.mode == "missing-tier" && call.stage == "synthesis" {
+            output["plan"]["changes"][0].as_object_mut().unwrap().remove("tier");
+        }
         MemberReply {
             status,
             output: Some(if self.mode == "invalid" {
@@ -130,7 +133,8 @@ struct Case {
 impl Case {
     fn new() -> Self {
         Self {
-            dir: tempfile::tempdir().unwrap(),
+            // Keep ancestor names in the system temp path out of readable-path assertions.
+            dir: tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap(),
             a: Fake::new("a"),
             b: Fake::new("b"),
             c: Fake::new("c"),
@@ -171,6 +175,18 @@ impl Case {
         )
     }
 }
+#[test]
+fn synthesis_rejects_a_plan_change_without_tier() {
+    let mut c = Case::new();
+    c.synth.mode = "missing-tier";
+    let error = c.run(10., &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(error.kind, "malformed");
+    assert_eq!(error.message, "$.plan.changes[0].tier: required");
+    assert_eq!(c.debate.0.load(Ordering::SeqCst), 1);
+    assert_eq!(c.judge.calls.load(Ordering::SeqCst), 0);
+    assert!(!c.cfg(10.).store.join("astra/plan.json").exists());
+}
+
 #[test]
 fn complete_gate_resume_and_tamper() {
     let c = Case::new();

@@ -65,6 +65,11 @@ impl Fixture {
         let store = home.join("orchestrate/demo");
         fs::create_dir_all(&repo).unwrap();
         fs::create_dir_all(store.join("inbox")).unwrap();
+        let accept_script = store.join("accept.py");
+        fs::write(&accept_script, format!(
+            "import pathlib, runpy, sys\nwith pathlib.Path(__file__).with_name(sys.argv[2] + '.accept-count').open('a') as count:\n    count.write('accept\\n')\nrunpy.run_path({:?}, run_name='__main__')\n",
+            common::repo_root().join("tests/fixtures/wall_clock/check.py").to_string_lossy()
+        )).unwrap();
         for args in [
             vec!["init", "-q"],
             vec![
@@ -93,7 +98,8 @@ impl Fixture {
         let mut map = String::new();
         for (module, count, is_slow, depends) in MODULES {
             let files: Vec<_> = (1..=count).map(|n| file(&unit(module, n))).collect();
-            map.push_str(&format!("## {module}\nPURPOSE fixture\nPATHS {}\nDEPENDS {depends}\nCONTRACT fixture\nACCEPT test `{}`\n", files.join(", "), command("accept", &files)));
+            let accept = format!("\"{}\" \"{}\" accept {}", common::python(), accept_script.display(), files.join(" "));
+            map.push_str(&format!("## {module}\nPURPOSE fixture\nPATHS {}\nDEPENDS {depends}\nCONTRACT fixture\nACCEPT test `{accept}`\n", files.join(", ")));
             for n in 1..=count {
                 let id = unit(module, n);
                 let path = file(&id);
@@ -167,6 +173,14 @@ impl Fixture {
             }).collect();
             for worker in workers {
                 worker.join().unwrap();
+            }
+            assert_eq!(fs::read_to_string(store.join(format!("{}.accept-count", file(&unit(&module, 1))))).unwrap().lines().collect::<Vec<_>>(), vec!["accept"], "{module}: ACCEPT must run exactly once");
+            // record_accept fans one module run out to every unit: each must
+            // have exactly one row, including the unit whose reply skipped it.
+            for n in 1..=count {
+                let id = unit(&module, n);
+                assert_eq!(orch::evidence(&store, &id).unwrap().iter()
+                    .filter(|e| e.kind == "accept").count(), 1, "{id}");
             }
             assert!(
                 orch::lifecycle::scheduler::module_verified(&store, &module).unwrap(),
@@ -386,11 +400,57 @@ fn wave_barrier() {
 #[test]
 fn scheduler_wall_clock_acceptance() {
     let _guard = setup();
-    compare(8000, 200, true);
+    // Keep simulated work dominant over durable resume/self-check bookkeeping.
+    compare(24000, 200, true);
 }
 #[test]
 #[ignore]
 fn scheduler_wall_clock_development() {
     let _guard = setup();
     compare(900, 60, false);
+}
+
+#[test]
+fn acceptance_retakes_finished_peer_but_not_running_owner() {
+    let _guard = setup();
+    let f = Fixture::new(0, 0);
+    let mut attempts = Vec::new();
+    for id in ["a1", "a2"] {
+        orch_call(&f.bridge, json!(["unit", "add", id, "--track", "A",
+            "--brief", f.store.join(format!("{id}.brief"))]));
+        let orch::Begin::Run { attempt_id, .. } =
+            orch::begin_unit(&f.store, id, "worker", &f.repo, false).unwrap()
+        else { panic!("expected new attempt"); };
+        attempts.push(attempt_id);
+        fs::write(f.repo.join(file(id)), "built").unwrap();
+        for kind in ["run", "scope", "verify"] {
+            orch::append_evidence(&f.store, id, &orch::Evidence {
+                kind: kind.into(), command: "fixture".into(), exit_code: 0,
+                commit: String::new(), ts: axiom::base::now_iso(),
+            }).unwrap();
+        }
+    }
+    // Both have VERIFY evidence, but a1's live checkpoint still owns work.
+    assert!(matches!(orch::accept_if_ready(&f.store, "a2", &f.repo).unwrap(),
+        orch::AutoAccept::Skipped { reason, detail } if reason == "claimed" && detail == "a1"));
+    assert!(orch::evidence(&f.store, "a2").unwrap().iter().all(|e| e.kind != "accept"));
+
+    let path = f.store.join("checkpoints/a1.json");
+    let mut cp: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    cp["stage"] = json!("selfchecked");
+    cp["finished"] = serde_json::to_value(orch::Finished {
+        state: "built".into(), verify_exit: Some(0), verify_tail: String::new(),
+        verify_output: None, outside_scope: vec![], ignored: vec![],
+        unattributed: vec![], changed: vec![], pack: None, pack_error: None,
+    }).unwrap();
+    fs::write(path, cp.to_string()).unwrap();
+    assert!(matches!(orch::accept_if_ready(&f.store, "a2", &f.repo).unwrap(),
+        orch::AutoAccept::Ran { exit_code: 0, .. }));
+    assert!(matches!(orch::accept_if_ready(&f.store, "a2", &f.repo).unwrap(),
+        orch::AutoAccept::Skipped { reason, .. } if reason == "already_accepted"));
+    for (id, attempt) in ["a1", "a2"].into_iter().zip(attempts) {
+        assert_eq!(orch::evidence(&f.store, id).unwrap().iter()
+            .filter(|e| e.kind == "accept").count(), 1, "{id}");
+        orch::release_claim(&f.store, id, &attempt).unwrap();
+    }
 }

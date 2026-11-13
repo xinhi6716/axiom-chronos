@@ -29,6 +29,56 @@ def emit(event):
 
 record['provenance_env'] = os.environ.get('AXIOM_PROVENANCE')
 
+if scenario == 'stages':
+    def argument(name, default):
+        return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+    session = argument('--resume', session)
+    model = argument('--model', 'claude-opus-5-5')
+    record_path = Path(os.environ['FAKE_CLAUDE_RECORD'])
+    if '--resume' in sys.argv and record_path.exists():
+        previous = json.loads(record_path.read_text(encoding='utf-8'))
+        record['turn_models'] = previous.get('turn_models', [])
+        record['control_requests'] = previous.get('control_requests', [])
+        record['results'] = previous.get('results', [])
+    else:
+        record['turn_models'] = []
+        record['control_requests'] = []
+    save()
+    initialized = False
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        record['messages'].append(message)
+        if not initialized:
+            emit({'type': 'system', 'subtype': 'init', 'session_id': session,
+                  'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'connected'}]})
+            initialized = True
+        if message.get('type') == 'control_request':
+            record['control_requests'].append(message)
+            request = message.get('request') or {}
+            accepted = request.get('subtype') == 'set_model' and os.getenv('FAKE_CLAUDE_SET_MODEL') == 'supported' and isinstance(request.get('model'), str) and bool(request['model'])
+            if accepted:
+                model = request['model']
+            response = {'subtype': 'success' if accepted else 'error', 'request_id': message.get('request_id')}
+            if not accepted:
+                response['error'] = 'unsupported control request'
+            save()
+            emit({'type': 'control_response', 'response': response})
+        elif message.get('type') == 'user':
+            record['turn_models'].append(model)
+            result = {'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': session,
+                      'uuid': f'{record_path.stem}-{len(record["turn_models"])}',
+                      'result': 'done', 'modelUsage': {model: {'inputTokens': 10, 'outputTokens': 5}}}
+            record.setdefault('results', []).append(result)
+            save()
+            emit(result)
+        else:
+            save()
+    sys.exit(0)
+
 incoming = queue.Queue()
 def read_input():
     for line in sys.stdin:

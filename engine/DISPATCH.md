@@ -20,7 +20,20 @@ Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) 
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
-For a cheaper registered brief, add optional lines between GOAL and CONTEXT: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Use only if the wish or plan asks. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Other values or positions are refused. Otherwise the unit keeps its role model and default effort. `TIER luna` alone keeps luna's default effort, possibly above terra's; set both for the cheapest run.
+Between GOAL and CONTEXT, `TIER terra|sol|astra` selects the tier; `EFFORT low|medium|high|xhigh|max` selects effort. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Legacy syntax: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Luna remains legacy for terra units only, never in maps.
+
+Put these worker-visible sections between GOAL and CONTEXT:
+
+```
+CONTRACT
+<observable promises>
+TEST_MATRIX
+<id> | <behaviour|edge|failure> | <file>::<case> | <assertion> | <command>
+```
+
+Test files must be in SCOPE. Both sections are mandatory in routed stores; a present matrix is always enforced. Write tests first: the engine records RED before implementation, and VERIFY runs the matrix. RED must report a failing test matching each row's case, not a compile error, missing command or bare nonzero exit. Do not change matrix test files during implementation (`red_tampered`).
+
+Register a fix with `unit add --fixes <old>`: orch climbs one routing step and writes TIER/EFFORT into its brief. A plan exception requires `--routing <tier>/<effort> --reason <text>` together; saturation without it gives `escalation_saturated`.
 
 In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste the upstream unit result as its HANDOFF block or the retrieved snippet itself, not a pointer.
 

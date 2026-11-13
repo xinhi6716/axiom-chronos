@@ -120,6 +120,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                             .filter(|s| !s.starts_with("--"))
                             .ok_or_else(|| invalid("missing module"))?;
                         scheduler::claim(store, module)?;
+                        clear_adjudication(store, module, true)?;
                         serde_json::json!({"claimed":module})
                     }
                     "release" => {
@@ -534,6 +535,9 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     &waive_row(number, reason, &review.commit, remaining == 0),
                 )?;
                 let state = update_unit_state(store, unit)?;
+                if remaining == 0 {
+                    clear_adjudication(store, unit, false)?;
+                }
                 Ok((
                     0,
                     format!("{unit}\twaived #{number}\t{state}\tremaining={remaining}"),

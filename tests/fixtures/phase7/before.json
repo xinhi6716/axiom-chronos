@@ -1,0 +1,26 @@
+{
+  "verified_units": 2,
+  "claude_calls_per_unit": 3.0,
+  "claude_tokens_per_unit": 45.0,
+  "by_model_role": {
+    "claude-opus-5-5|core": {
+      "calls": 2,
+      "tokens": 30
+    },
+    "claude-opus-5-5|dispatcher": {
+      "calls": 2,
+      "tokens": 30
+    },
+    "claude-opus-5-5|reviewer": {
+      "calls": 2,
+      "tokens": 30
+    },
+    "gpt-6.10-terra|dispatcher": {
+      "calls": 2,
+      "tokens": null
+    }
+  },
+  "rework": {},
+  "rework_rate": 0.0,
+  "fixture_usd": null
+}

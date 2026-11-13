@@ -1,4 +1,4 @@
-use super::{command, user_message, Config, Renderer};
+use super::{stage, command_with_model, user_message, Config, Renderer};
 use crate::engine::budgets::{self, Role};
 use crate::{
     base::{self, Failure, Res},
@@ -375,11 +375,15 @@ pub fn send(stdin: &mut BudgetStdin, text: &str) -> std::io::Result<()> {
 /// A running claude with its first message sent; `drive` takes it from here.
 pub struct Spawned {
     child: Child,
+    tree: ProcessTree,
     pub writer: Writer,
     lines: mpsc::Receiver<Vec<u8>>,
     log: File,
     pub log_path: PathBuf,
     pub provenance: provenance::Provenance,
+    live_model: String,
+    resumed: bool,
+    pending_switch: Option<stage::TurnRecord>,
     skill: String,
     project: PathBuf,
     max_turns: Option<u32>,
@@ -402,6 +406,7 @@ pub struct Launch {
     pub council_budgets: Option<council::Budgets>,
     pub codex_max_parallel: Option<u64>,
     pub need_bytes: Option<u64>,
+    pub model: Option<String>,
 }
 
 pub fn spawn(
@@ -507,7 +512,12 @@ fn spawn_internal(
         None
     };
     let plugin = engine::plugin_dir(&config.home).map_err(failure)?;
-    let mut argv = command(config, &plugin, max_turns, codegraph::enabled(project))?;
+    let live_model = match &launch.model {
+        Some(model) => model.clone(),
+        None => stage::model_for(&config.home, resume.unwrap_or(""),
+            resume.map_or(stage::Stage::Planning, |id| stage::current(&config.home, id)))?,
+    };
+    let mut argv = command_with_model(config, &plugin, max_turns, codegraph::enabled(project), &live_model)?;
     if advanced_research {
         if let Some(tools) = argv
             .iter()
@@ -593,6 +603,7 @@ fn spawn_internal(
     let mut child = child
         .spawn()
         .map_err(|e| Failure::new("process", e.to_string()))?;
+    let tree = ProcessTree::of(&child);
     let mut stdin = BudgetStdin {
         stdin: child.stdin.take().unwrap(),
         home: config.home.clone(),
@@ -612,7 +623,7 @@ fn spawn_internal(
         )
         .and_then(|_| stdin.stdin.flush())
     {
-        base::proc::kill_tree(&mut child);
+        tree.kill(&mut child);
         return Err(failure(e));
     }
     let stdout = child.stdout.take().unwrap();
@@ -634,11 +645,15 @@ fn spawn_internal(
     });
     Ok(Spawned {
         child,
+        tree,
         writer: Arc::new(Mutex::new(Some(stdin))),
         lines,
         log,
         log_path,
         provenance,
+        live_model,
+        resumed: resume.is_some(),
+        pending_switch: None,
         skill: skill.to_owned(),
         project: project.to_path_buf(),
         max_turns,
@@ -915,6 +930,21 @@ fn drive_inner(
             disk_error,
             disk_stop,
         )?;
+        if let Some(request) = outcome.switch {
+            if stop.load(Ordering::SeqCst) || disk_stop.load(Ordering::SeqCst) { return Ok(130); }
+            let launch = Launch { model: Some(request.want), codex_max_parallel: Some(codex_max_parallel), ..Launch::default() };
+            let mut next = match spawn_internal(config, &skill, &request.prompt, &project, max_turns, Some(&request.session), &launch, false) {
+                Ok(next) => next,
+                Err(error) => { stage::log_turn(&config.home, &request.session, &request.failed)?; return Err(error); }
+            };
+            next.pending_switch = Some(request.failed);
+            next.session = Arc::clone(shared_session);
+            if let Some(stdin) = next.writer.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { stdin.session = Arc::clone(shared_session); }
+            *writer.lock().unwrap_or_else(|e| e.into_inner()) = next.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
+            next.writer = Arc::clone(&writer);
+            spawned = next;
+            continue;
+        }
         let Some((session, reset)) = outcome.limit else {
             return Ok(outcome.code);
         };
@@ -987,6 +1017,7 @@ fn disk_outcome(
 struct Outcome {
     code: i32,
     limit: Option<(String, i64)>,
+    switch: Option<ModelSwitch>,
 }
 fn drive_once(
     spawned: Spawned,
@@ -1002,14 +1033,21 @@ fn drive_once(
 ) -> Res<Outcome> {
     let Spawned {
         mut child,
+        tree,
         writer,
         lines: rx,
         mut log,
         log_path,
         provenance,
         advanced_research,
+        mut live_model,
+        resumed,
+        mut pending_switch,
         ..
     } = spawned;
+    let mut switch = None;
+    let mut via = if resumed { stage::Via::Resume } else { stage::Via::Initial };
+    let mut initialized = false;
     let mut renderer = Renderer::new();
     let mut session = None::<String>;
     let mut final_result = false;
@@ -1023,18 +1061,18 @@ fn drive_once(
     let idle_limit = goal::progress::idle_limit();
     let result: Res<i32> = loop {
         if disk_stop.load(Ordering::SeqCst) {
-            base::proc::kill_tree(&mut child);
+            tree.kill(&mut child);
             break disk_outcome(out, observe, paused, disk_error);
         }
         if stop.load(Ordering::SeqCst) {
-            base::proc::kill_tree(&mut child);
+            tree.kill(&mut child);
             cause = Some("interrupted by the user".to_string());
             break Ok(130);
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(bytes) => {
                 if let Err(e) = log.write_all(&bytes) {
-                    base::proc::kill_tree(&mut child);
+                    tree.kill(&mut child);
                     break Err(failure(e));
                 }
                 let Ok(event) = serde_json::from_slice::<Value>(&bytes) else {
@@ -1047,6 +1085,13 @@ fn drive_once(
                     session = event["session_id"].as_str().map(str::to_owned);
                     if session.is_some() {
                         *shared_session.lock().unwrap_or_else(|e| e.into_inner()) = session.clone();
+                    }
+                    if !initialized {
+                        if let Some(id) = session.as_deref() {
+                            let control_error = pending_switch.take().and_then(|r| r.control_error);
+                            record_turn(config, id, if resumed { stage::current(&config.home, id) } else { stage::Stage::Planning }, &live_model, &via, control_error)?;
+                            initialized = true;
+                        }
                     }
                     if let (true, Some(id)) = (advanced_research, session.as_deref()) {
                         council::remember_switch(&config.home, id);
@@ -1101,7 +1146,7 @@ fn drive_once(
                             tokens("outputTokens", "output_tokens"),
                             "session",
                         ) {
-                            base::proc::kill_tree(&mut child);
+                            tree.kill(&mut child);
                             break Err(e);
                         }
                     }
@@ -1150,7 +1195,7 @@ fn drive_once(
                             let idle = match goal::progress::idle_continues(&config.home, id) {
                                 Ok(idle) => idle,
                                 Err(e) => {
-                                    base::proc::kill_tree(&mut child);
+                                    tree.kill(&mut child);
                                     cause = Some(format!("could not track goal progress: {e}"));
                                     break Err(e);
                                 }
@@ -1175,9 +1220,65 @@ fn drive_once(
                                     Err(e) => goal_error = Some(e),
                                 }
                             } else {
+                                let boundary_stage = stage::current(&config.home, id);
+                                let want = stage::model_for(&config.home, id, boundary_stage)?;
+                                let prompt = format!("{CONTINUE_TAG} {reason}");
                                 let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                                if want != live_model {
+                                    static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                                    let request = format!("model-{}-{}", std::process::id(), REQUEST.fetch_add(1, Ordering::SeqCst));
+                                    let sent = match guard.as_mut() {
+                                        Some(stdin) => stdin.stdin.write_all(stage::set_model_request(&request, &want).as_bytes()).and_then(|_| stdin.stdin.flush()).map_err(|e| e.to_string()),
+                                        None => Err("closed".into()),
+                                    };
+                                    let response = sent.and_then(|_| await_control_response_logged(&rx, &request, stage::CONTROL_TIMEOUT, stop, |bytes| log.write_all(bytes).map_err(|e| e.to_string())));
+                                    match response {
+                                        Ok(()) => { live_model = want; via = stage::Via::Control; }
+                                        Err(error) => {
+                                            guard.take();
+                                            drop(guard);
+                                            if disk_stop.load(Ordering::SeqCst) {
+                                                tree.kill(&mut child);
+                                                break disk_outcome(out, observe, paused, disk_error);
+                                            }
+                                            if stop.load(Ordering::SeqCst) {
+                                                tree.kill(&mut child);
+                                                cause = Some("interrupted by the user".into());
+                                                break Ok(130);
+                                            }
+                                            switch = Some(ModelSwitch { session: id.to_owned(), prompt, want,
+                                                failed: stage::TurnRecord { turn: stage::read_turns(&config.home, id)?.len() as u64 + 1,
+                                                    stage: boundary_stage.as_str().into(), model: live_model.clone(), via: stage::Via::Resume, ok: false, control_error: Some(error) } });
+                                            // Closing stdin lets the old process flush its final output before resume.
+                                            let deadline = std::time::Instant::now() + stage::CONTROL_TIMEOUT;
+                                            loop {
+                                                match rx.recv_timeout(Duration::from_millis(50)) {
+                                                    Ok(bytes) => { log.write_all(&bytes).map_err(failure)?; }
+                                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                                        if child.try_wait().map_err(failure)?.is_some() { break; }
+                                                        std::thread::sleep(Duration::from_millis(50));
+                                                    }
+                                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                                }
+                                                if stop.load(Ordering::SeqCst) || disk_stop.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+                                                    tree.kill(&mut child); break;
+                                                }
+                                            }
+                                            if disk_stop.load(Ordering::SeqCst) {
+                                                switch = None;
+                                                break disk_outcome(out, observe, paused, disk_error);
+                                            }
+                                            if stop.load(Ordering::SeqCst) {
+                                                switch = None;
+                                                cause = Some("interrupted by the user".into());
+                                                break Ok(130);
+                                            }
+                                            break Ok(0);
+                                        }
+                                    }
+                                }
                                 if let Some(stdin) = guard.as_mut() {
-                                    if let Err(e) = send(stdin, &format!("{CONTINUE_TAG} {reason}"))
+                                    if let Err(e) = send(stdin, &prompt)
                                     {
                                         if e.to_string().starts_with("budget_exceeded:") {
                                             let _ = writeln!(out, "{e}");
@@ -1186,12 +1287,14 @@ fn drive_once(
                                             continue;
                                         }
                                         if !pipe_closed(&e) {
-                                            base::proc::kill_tree(&mut child);
+                                            tree.kill(&mut child);
                                             break Err(failure(e));
                                         }
                                         // claude is already exiting; its end is handled below
                                         // when its output closes, as if the message had been read.
                                         guard.take();
+                                    } else {
+                                        record_turn(config, id, boundary_stage, &live_model, &via, None)?;
                                     }
                                 }
                                 continue;
@@ -1274,7 +1377,14 @@ fn drive_once(
         }
     }
     let _ = out.flush();
-    result.map(|code| Outcome { code, limit })
+    if !initialized {
+        if let Some(rec) = pending_switch {
+            if let Some(id) = shared_session.lock().unwrap_or_else(|e| e.into_inner()).as_deref() {
+                stage::log_turn(&config.home, id, &rec)?;
+            }
+        }
+    }
+    result.map(|code| Outcome { code, limit, switch })
 }
 
 #[cfg(test)]
@@ -1416,5 +1526,74 @@ mod tests {
             assert!(pipe_closed(&Error::from_raw_os_error(109)));
             assert!(!pipe_closed(&Error::from_raw_os_error(5)));
         }
+    }
+}
+
+struct ModelSwitch {
+    session: String,
+    prompt: String,
+    want: String,
+    failed: stage::TurnRecord,
+}
+fn record_turn(config: &Config, session: &str, stage: stage::Stage, model: &str, via: &stage::Via, control_error: Option<String>) -> Res<()> {
+    stage::log_turn(&config.home, session, &stage::TurnRecord {
+        turn: stage::read_turns(&config.home, session)?.len() as u64 + 1,
+        stage: stage.as_str().into(), model: model.into(),
+        via: match via { stage::Via::Initial => stage::Via::Initial, stage::Via::Control => stage::Via::Control, stage::Via::Resume => stage::Via::Resume },
+        ok: true, control_error,
+    })
+}
+pub fn await_control_response(rx: &mpsc::Receiver<Vec<u8>>, request_id: &str, timeout: Duration, stop: &AtomicBool) -> Result<(), String> {
+    await_control_response_logged(rx, request_id, timeout, stop, |_| Ok(()))
+}
+fn await_control_response_logged(rx: &mpsc::Receiver<Vec<u8>>, request_id: &str, timeout: Duration, stop: &AtomicBool, mut line: impl FnMut(&[u8]) -> Result<(), String>) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::SeqCst) { return Err("stopped".into()); }
+        let remaining = timeout.checked_sub(start.elapsed()).ok_or_else(|| "timeout".to_owned())?;
+        match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(bytes) => {
+                line(&bytes)?;
+                if let Ok(event) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(result) = stage::parse_control_response(&event, request_id) { return result; }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("closed".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+// Keep descendants reachable even where Windows denies taskkill's process enumeration.
+struct ProcessTree {
+    #[cfg(windows)]
+    job: Option<usize>,
+}
+impl ProcessTree {
+    fn of(_child: &Child) -> Self {
+        #[cfg(windows)]
+        let job = unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::{Foundation::CloseHandle, System::JobObjects::{CreateJobObjectW, AssignProcessToJobObject}};
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() { None }
+            else if AssignProcessToJobObject(handle, _child.as_raw_handle()) != 0 { Some(handle as usize) }
+            else { CloseHandle(handle); None }
+        };
+        Self { #[cfg(windows)] job }
+    }
+    fn kill(&self, child: &mut Child) {
+        #[cfg(windows)]
+        if self.job.is_some_and(|job| unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job as _, 1) != 0 }) {
+            let _ = child.wait();
+            return;
+        }
+        base::proc::kill_tree(child);
+    }
+}
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        if let Some(job) = self.job { unsafe { windows_sys::Win32::Foundation::CloseHandle(job as _); } }
     }
 }

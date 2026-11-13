@@ -264,3 +264,50 @@ pub fn write_receipts(store: &Path, cap: u64) -> Res<PathBuf> {
     base::atomic_write(&path, &data).map_err(io)?;
     Ok(path)
 }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RoutingReceipt {
+    pub unit: String,
+    pub attempt: String,
+    pub tier: Option<String>,
+    pub effort: Option<String>,
+    pub risk: Option<String>,
+    pub model_assigned: String,
+    pub model_used: Option<String>,
+    pub rule: String,
+    pub reason: String,
+    pub settings_version: Option<String>,
+}
+pub fn record_routing(store: &Path, record: &RoutingReceipt) -> Res<()> {
+    let dir = store.join("receipts");
+    fs::create_dir_all(&dir).map_err(io)?;
+    let mut line = serde_json::to_vec(record).map_err(|e| invalid(e.to_string()))?;
+    line.push(b'\n');
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(dir.join("routing.lock"))
+        .map_err(io)?;
+    lock.lock().map_err(io)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("routing.jsonl"))
+        .map_err(io)?;
+    file.write_all(&line).map_err(io)
+}
+pub fn read_routing(store: &Path) -> Res<Vec<RoutingReceipt>> {
+    let bytes = match fs::read(store.join("receipts/routing.jsonl")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(io(e)),
+    };
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|e| invalid(format!("invalid routing receipt: {e}")))
+        })
+        .collect()
+}

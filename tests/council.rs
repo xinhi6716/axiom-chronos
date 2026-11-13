@@ -23,6 +23,23 @@ use std::{
 const BRIEF: &str = "GOAL the changes that carry out the wish\nWISH make it faster";
 
 #[test]
+fn a_plan_change_without_tier_is_rejected_before_calling_members() {
+    let case = Case::new();
+    let mut plan: Value = serde_json::from_slice(&fs::read(&case.plan).unwrap()).unwrap();
+    plan["changes"][0].as_object_mut().unwrap().remove("tier");
+    fs::write(&case.plan, serde_json::to_vec(&plan).unwrap()).unwrap();
+    let astra = Astra::ok();
+    let error = case.run(&case.setup("ok", "ok"), &astra).unwrap_err();
+    assert_eq!(error.kind, "astra_missing");
+    assert_eq!(
+        error.message,
+        format!("{}: $.changes[0].tier: required", case.plan.display())
+    );
+    assert!(case.calls().is_empty());
+    assert_eq!(astra.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn phased_protocol_calls_argon_once_after_phase_a() {
     let case = Case::new();
     let reply = case.run(&case.setup("ok", "ok"), &Astra::ok()).unwrap();
@@ -89,8 +106,8 @@ impl Case {
             serde_json::to_vec(&json!({
                 "summary":"astra", "coverage":{"read":[],"not_read":[]}, "out_of_scope":[],
                 "changes":[
-                    {"id":"a1","area":"design","location":"src/a.py","evidence":"astra evidence one","problem":"slow","change":"cache it","verify":"time it"},
-                    {"id":"a2","area":"tests","location":"src/b.py","evidence":"astra evidence two","problem":"flaky","change":"pin it","verify":"run it"}
+                    {"id":"a1","area":"design","location":"src/a.py","evidence":"astra evidence one","problem":"slow","change":"cache it","verify":"time it","tier":"sol","effort":"high","risk":"standard","reason":"Bounded cache change"},
+                    {"id":"a2","area":"tests","location":"src/b.py","evidence":"astra evidence two","problem":"flaky","change":"pin it","verify":"run it","tier":"sol","effort":"high","risk":"standard","reason":"Bounded test change"}
                 ]
             }))
             .unwrap(),

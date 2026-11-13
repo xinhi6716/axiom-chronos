@@ -15,7 +15,7 @@ fn embedded_phase2b_contract() {
         (
             "agents/dispatcher.md",
             &[
-                "every review item's `reviewer`",
+                "The engine reviews inline",
                 "A `findings_rejected` reply is not a fix",
                 "do not dispatch one",
             ],

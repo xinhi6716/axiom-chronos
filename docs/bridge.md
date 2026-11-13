@@ -21,7 +21,7 @@
 
 Every wish runs Astra first; no option or marker skips it.
 
-Reviews go to Claude: `chronos:reviewer` reviews one whole unit per call and `chronos:critic` reviews the Astra plan; `chronos:narrator` (Haiku) writes the final report from the run digest and the core's rulings.
+Unit reviews go to the Astra reviewer (Codex) by default in routed stores when policy.json has no `reviewer` key; an explicit value wins. `chronos:reviewer` is the Claude policy option or fallback; `chronos:critic` reviews the Astra plan; `chronos:narrator` (Haiku) writes the final report from the run digest and the core's rulings.
 
 Every result carries `status`; anything other than `completed` carries `error.kind` (for example `usageLimitExceeded`, `timeout`, `codex_exited`, `codex_protocol`).
 
@@ -33,10 +33,10 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 - The `approval` bridge tool takes `project` and `op`: `request` also takes `action: {command: [program, ...args], cwd}` and `reason`, returning `id` and `digest`; `status` and `execute` take `id`. Approve and deny are person-only via `axiom approval approve|deny`: use `axiom approval approve|deny <id> --project <project> --digest <digest> [--wish <wish-id>]`, with `--reason <text>` required for denial. CLI approval immediately executes the exact approved command; a bridge `execute` is also available once approved, but an action can be claimed only once. A denial emits `approval_denied` with the action and reason; the attempted correction memory may be refused because its id is not a verified unit.
 - The `goal` tool accepts `session` and `classify` (`amend`, `answer`, `stop`, `replan`, or `pause_batch`). For a classified interjection, use the `interjection` key: pass `interjection: {id, applied: {plan_revision, units, scope}}` or `interjection: {id, declined: <reason>}`; exactly one of `applied` and `declined` is required, and `replan` requires a nonempty `plan_revision`. `answer` and `stop` are applied during classification; `pause_batch` holds the batch until resolved. The wish events include `interjection_sent`, `interjection_received`, `interjection_classified`, `interjection_applied` and `interjection_declined`.
 - `orch` accepts `policy set` as `policy set <key> <value>`, and `policy show` via its `args`. Keys include `adjudicator` (on/off), `adjudicator.max_adjudications`, `adjudicator.max_usd`, `pm_qa`, `dual_core`, `reviewer` (claude/astra-max/both), and `budget.<role>` (amount or none). Only the person or core may set policy. A role at its budget, or with unknown spend, emits `budget_exceeded` and the call is refused.
-- Review entries also carry `reviewer`: run each named agent with its unit and pack. PM/QA writes `<store>/reports/<unit>.pm-qa.verdict.json` with the usual verdict format. When the finding verification gate rejects a fix, `orch unit add --fixes` returns `findings_rejected`; no fix unit is created. Do not treat that reply as a fix.
+- The engine reviews inline; dispatchers do not spawn reviewers. Remaining review entries carry `reviewer` and the unit pack for the selected fallback. PM/QA writes `<store>/reports/<unit>.pm-qa.verdict.json` with the usual verdict format. When the finding verification gate rejects a fix, `orch unit add --fixes` returns `findings_rejected`; no fix unit is created. Do not treat that reply as a fix.
 - Goal and orch replies may include `adjudication` (id, decision, reason, evidence, answer) and `person_requests`; council replies use `adjudications` with rulings or a `person` reason. Respect the decision or surface the person request. A person can overturn a ruling with `axiom adjudication overturn <id> --project <project> --reason <text>` (store selection follows the CLI).
 - `axiom stats` reports review counts and finding, rejection and escape rates; use `--project <project>`, optionally `--wish <wish-id>` with a project, and `--json` for structured output.
-- A registered brief may carry `EFFORT` (`low`, `medium` or `high`) and `TIER` (`luna`, terra units only) as their own lines between GOAL and CONTEXT. The bridge applies them and removes them from the text the worker gets. Any other value, or either line anywhere else in the brief, is refused with `invalid_argument` by `orch unit add` and again at dispatch. Dispatch also refuses an `effort` argument in unit mode, and `TIER` with role `sol` or a `model` argument. With neither line a unit keeps its role's model and Codex's default effort. If the account lists no model for the tier, the call fails with `model_not_found`; it does not fall back.
+- A registered brief may carry `EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `TIER` (`terra`, `sol`, `astra`; legacy `luna` for terra units only) as their own lines between GOAL and CONTEXT. The bridge applies and strips these lines before sending the brief to the worker. Invalid values or positions are refused. TIER astra requires high, xhigh or max in routing; luna is never valid in a map. Unrouted briefs without settings keep legacy role defaults. Account model availability comes from model/list; missing models fail rather than falling back.
 - `orch` `["module-context", <module>, "--repo", <dir>]` returns bounded module context (16,384 bytes), with `missing` and `incomplete` sections naming sources to consult. `orch` `["map", "--repo", <dir>]` lints the map and reports all problems together, including `NEW_PATHS` and `SHARED_OWNER`.
 - A PostToolUse review hook records the reviewer verdict and says `Chronos recorded the review.`; if it says the review was not recorded, fix the cause and call `orch review` yourself.
 - When every unit of a module has passed VERIFY, the unit reply's `accept` carries the module ACCEPT result.
@@ -66,6 +66,40 @@ Every result carries `status`; anything other than `completed` carries `error.ki
 - A session that reaches its turn limit stops with exit code 3 and a `chronos` `max_turns` event; the goal is `blocked` with reason `max_turns`, and `axiom wish --resume <session>` continues it.
 - `"needs": null` in a verdict reads as omitted, and a brief's SCOPE may span lines or bullets; a repeated SCOPE or a note inside it is rejected at registration.
 - The council keeps each member's raw reply, repairs a malformed Argon review once, changes only attribution when anonymising, and records `degraded_members` and `member_degraded` events (progress notifications and `council-events.jsonl`).
+
+
+### Routing and test-first units
+
+A routed store has a ROUTING block with a default line in every module of modules.md. A map routes every module or none (`routing_partial`). Each block contains indented lines:
+
+```
+ROUTING
+  <default|unit-id> <tier>/<effort> <risk> <reason...>
+```
+
+A unit line overrides default. Precedence is fix record, map unit line, map default line, brief TIER/EFFORT, then legacy role model (D11); a brief that disagrees is refused (`routing_mismatch`). Routing is resolved once per attempt, saved in `routing/<unit>.attempt.json`, and reused on resume; `receipts/routing.jsonl` records assignments and reasons.
+
+Astra assigns units in the plan and the architect writes the map using this rubric: sol/high by default; risky state_machine, concurrency, migration, parser, security, privacy, cross_module and prior_failure units need sol/xhigh or max. Use TIER astra at high/xhigh/max for the hardest units: novel algorithms, subtle concurrency, deep cross-module refactors, or units that failed on sol/xhigh. Terra/medium is only for trivial docs, renames, mechanical edits and pure data. Choose stronger when unsure. Risk classes are trivial, standard, state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure and novel. The plan records the rubric and each assignment; receipts record resolved routing. The first-pass table summarised in Astra's brief groups historical results by model, effort and risk class; rates require at least three units, with at most 40 rows and 4,000 bytes, including a cutoff and truncation note.
+
+`unit add --fixes <old>` climbs one step: terra/any, legacy luna/any and sol/low or medium → sol/high; sol/high → sol/xhigh → astra/xhigh → astra/max; sol/max → astra/max; astra/high → astra/xhigh. Astra/max is saturated (`escalation_saturated`). A legacy missing effort is treated as terra/medium or sol/high. A plan exception uses `unit add ... --fixes <old> --routing <tier>/<effort> --reason <text>`; the last two flags require each other and a nonempty reason. Orch writes TIER/EFFORT after GOAL in the fix brief and rejects disagreement.
+
+CONTRACT and TEST_MATRIX are paired worker-visible sections between GOAL and CONTEXT. Each matrix row is:
+
+```
+<id> | <behaviour|edge|failure> | <file>::<case> | <assertion> | <command>
+```
+
+Test files must be in SCOPE. Both sections are mandatory in routed stores; a present matrix is always enforced, including in legacy stores. For a wish without a map, dispatchers write both in every brief. The worker writes tests first in a separate RED turn in the same attempt; the engine runs each row command and records RED evidence against the observed test-file tree before implementation. Valid RED reports a failing test whose name contains that row's case. Compile errors, missing commands (127/9009 or command-not-found), and bare nonzero exits without a failing test are not RED; stub signatures so assertions fail. Changing matrix test files in the implementation turn fails with `red_tampered`; self-check may strengthen them. VERIFY runs the matrix commands.
+
+After VERIFY and before review, the engine runs self-check (default sol/xhigh). It compares CONTRACT, TEST_MATRIX, tests and diff, may fix only inside SCOPE, and writes evidence kind `selfcheck` and `reports/<unit>.selfcheck.json`. Self-check reports contain `untested`, `vacuous_check` and `contract_mismatch` findings with their fixes. Review-pack limitation: the current `orch::report::review_pack` includes CONTRACT, TEST_MATRIX and RED/matrix results but does not embed the self-check report; findings are persisted in `reports/<unit>.selfcheck.json`, not automatically supplied to the reviewer. Reviewers are fresh and bound to the verified tree. Only blocker and major findings get one quick Claude verification; minor findings do not. Default routed-store reviewer mode is `astra-max`; explicit `reviewer` values (`claude`, `astra-max`, `both`) win.
+
+### Core models, settings and resume
+
+Core stages planning, build, escalation and close default to opus, sonnet, opus and opus. At turn boundaries the engine derives the stage from store state. Configure the `models` block in policy.json, then `<home>/settings/models.json`, then defaults. The block uses `core` keys `planning`, `build`, `escalation`, `close`; `worker` maps tiers to model ids; `self_check` and `reviewer` contain `tier` and `effort`. Global settings wrap `models` with `version`.
+
+The engine first switches via a `control_request` with subtype `set_model`; on error, unsupported subtype or a 10-second timeout, it resumes the same session id with `--model` at the next turn boundary. Confirmed turns are logged in `<home>/goals/<session>.turns.jsonl`.
+
+Settings need no restart: slot cap is read on each acquire, Codex command when constructing the bridge (next wish), and models at new turn boundaries. Started attempts retain their routing snapshot. Resume reruns no verified or built unit; an interrupted unit resumes its own attempt, without superseding it.
 
 Codex's base instructions (~3.5k tokens) stay in place because they teach the shell and patch tools.
 

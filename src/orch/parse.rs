@@ -11,9 +11,24 @@ pub struct Brief {
     pub effort: Option<String>,
     pub tier: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub contract: Vec<String>,
+    #[serde(default)]
+    pub test_matrix: Vec<MatrixRow>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixRow {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub case: String,
+    pub assertion: String,
+    pub command: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
+    #[serde(default)]
+    pub routing: Vec<RouteLine>,
     pub id: String,
     pub purpose: String,
     pub paths: Vec<String>,
@@ -29,6 +44,15 @@ pub struct Module {
     #[serde(default)]
     pub shared_owner: Option<String>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteLine {
+    pub key: String,
+    pub tier: String,
+    pub effort: String,
+    pub risk: String,
+    pub reason: String,
+}
+
 /// A plan item the map records as not built: `OUT OF SCOPE <id> <reason>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutOfScope {
@@ -49,8 +73,8 @@ pub struct Map {
     #[serde(default)]
     pub out_of_scope: Vec<OutOfScope>,
 }
-const EFFORTS: [&str; 3] = ["low", "medium", "high"];
-const TIERS: [&str; 1] = ["luna"];
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const TIERS: [&str; 4] = ["terra", "sol", "astra", "luna"];
 fn is_field(line: &str, name: &str) -> bool {
     line.strip_prefix(name)
         .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
@@ -108,7 +132,16 @@ fn is_valid_setting(line: &str) -> bool {
     };
     valid("EFFORT", &EFFORTS) || valid("TIER", &TIERS)
 }
-const SECTION_FIELDS: [&str; 6] = ["GOAL", "SCOPE", "VERIFY", "CONTEXT", "EFFORT", "TIER"];
+const SECTION_FIELDS: [&str; 8] = [
+    "GOAL",
+    "SCOPE",
+    "VERIFY",
+    "CONTEXT",
+    "EFFORT",
+    "TIER",
+    "CONTRACT",
+    "TEST_MATRIX",
+];
 /// The complete SCOPE section: its own line and every following line up to the next brief field,
 /// bullets and blank lines allowed. Line numbers in errors are 1-based in the whole brief.
 fn scope_section(text: &str, from: usize) -> Result<Vec<String>, String> {
@@ -133,7 +166,11 @@ fn scope_section(text: &str, from: usize) -> Result<Vec<String>, String> {
         if !inside {
             continue;
         }
-        let mut rest = if field.is_some() { &line["SCOPE".len()..] } else { line };
+        let mut rest = if field.is_some() {
+            &line["SCOPE".len()..]
+        } else {
+            line
+        };
         rest = rest.trim();
         for bullet in ["- ", "* ", "+ "] {
             if let Some(r) = rest.strip_prefix(bullet) {
@@ -152,6 +189,96 @@ fn scope_section(text: &str, from: usize) -> Result<Vec<String>, String> {
     }
     Ok(scope)
 }
+fn brief_sections(body: &str, scope: &[String]) -> Result<(Vec<String>, Vec<MatrixRow>), String> {
+    let (mut contract_seen, mut matrix_seen) = (false, false);
+    let mut active = "";
+    let mut contract = Vec::new();
+    let mut raw_rows = Vec::new();
+    for line in body.lines() {
+        if is_field(line, "CONTEXT") {
+            break;
+        }
+        let field = SECTION_FIELDS.iter().find(|name| is_field(line, name));
+        let value = if let Some(name) = field {
+            active = name;
+            if *name == "CONTRACT" {
+                if contract_seen {
+                    return Err("has CONTRACT twice".into());
+                }
+                contract_seen = true;
+            } else if *name == "TEST_MATRIX" {
+                if matrix_seen {
+                    return Err("has TEST_MATRIX twice".into());
+                }
+                matrix_seen = true;
+            }
+            &line[name.len()..]
+        } else {
+            line
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if active == "CONTRACT" {
+            contract.push(
+                value
+                    .strip_prefix("- ")
+                    .or_else(|| value.strip_prefix("* "))
+                    .unwrap_or(value)
+                    .trim()
+                    .to_string(),
+            );
+        } else if active == "TEST_MATRIX" {
+            raw_rows.push(value.to_string());
+        }
+    }
+    if contract_seen && !matrix_seen {
+        return Err("has CONTRACT without TEST_MATRIX".into());
+    }
+    if matrix_seen && !contract_seen {
+        return Err("has TEST_MATRIX without CONTRACT".into());
+    }
+    let mut rows: Vec<MatrixRow> = Vec::new();
+    for raw in raw_rows {
+        let parts: Vec<_> = raw.splitn(5, '|').map(str::trim).collect();
+        let target = parts.get(2).and_then(|s| s.split_once("::"));
+        if parts.len() != 5
+            || parts.iter().any(|s| s.is_empty())
+            || target.is_none_or(|(f, c)| f.trim().is_empty() || c.trim().is_empty())
+        {
+            return Err(format!("has an incomplete TEST_MATRIX row: {raw}"));
+        }
+        let id = parts[0];
+        let mut chars = id.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("has an invalid TEST_MATRIX id {id}"));
+        }
+        if rows.iter().any(|r| r.id == id) {
+            return Err(format!("has a duplicate TEST_MATRIX id {id}"));
+        }
+        let kind = parts[1];
+        if !["behaviour", "edge", "failure"].contains(&kind) {
+            return Err(format!("has an unknown TEST_MATRIX kind {kind}"));
+        }
+        let (file, case) = target.unwrap();
+        let (file, case) = (file.trim(), case.trim());
+        if !covers(scope, file) {
+            return Err(format!("has a TEST_MATRIX test outside SCOPE: {file}"));
+        }
+        rows.push(MatrixRow {
+            id: id.into(),
+            kind: kind.into(),
+            file: file.into(),
+            case: case.into(),
+            assertion: parts[3].into(),
+            command: parts[4].into(),
+        });
+    }
+    Ok((contract, rows))
+}
 pub fn parse_brief(text: &str) -> Result<Brief, String> {
     let start = text.lines().position(|line| is_field(line, "GOAL"));
     let body = start
@@ -168,6 +295,7 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
     if f.get("VERIFY").is_none_or(|s| s.trim().is_empty()) {
         return Err("is missing VERIFY".into());
     }
+    let (contract, test_matrix) = brief_sections(&body, &scope)?;
     let (mut effort, mut tier) = (None, None);
     let mut worker_text = String::with_capacity(text.len());
     let mut lines = text.split_inclusive('\n').peekable();
@@ -198,6 +326,8 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
         effort,
         tier,
         text: worker_text,
+        contract,
+        test_matrix,
     })
 }
 fn normalized(s: &str) -> String {
@@ -286,6 +416,52 @@ pub fn check_goals(map: &Map, plan: &[PlanItem]) -> Result<(), String> {
     }
     Ok(())
 }
+fn routing_lines(value: Option<&String>) -> Result<Vec<RouteLine>, (&'static str, String)> {
+    use crate::codex::routing::{self, Routing, Tier};
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut routes = Vec::new();
+    for line in value.lines().filter(|l| !l.trim().is_empty()) {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(("routing_value", format!("invalid routing line: {line}")));
+        }
+        if parts.len() == 3 {
+            return Err(("routing_reason", format!("missing reason: {line}")));
+        }
+        let (tier, effort) = parts[1]
+            .split_once('/')
+            .ok_or(("routing_value", format!("invalid tier/effort: {line}")))?;
+        let t = routing::parse_tier(tier).map_err(|e| ("routing_value", e))?;
+        let e = routing::parse_effort(effort).map_err(|e| ("routing_value", e))?;
+        let risk: routing::Risk =
+            serde_json::from_value(serde_json::Value::String(parts[2].into()))
+                .map_err(|e| ("routing_value", e.to_string()))?;
+        if t == Tier::Luna {
+            return Err(("routing_luna", "luna is not valid in maps".into()));
+        }
+        let reason = parts[3..].join(" ");
+        routing::check_rubric(&Routing {
+            tier: t,
+            effort: e,
+            risk: Some(risk),
+            reason: reason.clone(),
+        })
+        .map_err(|e| ("routing_rubric", e))?;
+        routes.push(RouteLine {
+            key: parts[0].into(),
+            tier: tier.into(),
+            effort: effort.into(),
+            risk: parts[2].into(),
+            reason,
+        });
+    }
+    if !routes.iter().any(|r| r.key == "default") {
+        return Err(("routing_default", "ROUTING needs a default".into()));
+    }
+    Ok(routes)
+}
 pub fn parse_map(text: &str) -> Result<Map, String> {
     let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
@@ -346,6 +522,7 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
                 "SERVES",
                 "NEW_PATHS",
                 "SHARED_OWNER",
+                "ROUTING",
             ],
         );
         if modules.iter().any(|m| m.id == id) {
@@ -418,7 +595,10 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
                 "module {id}: SERVES {s}, which is also OUT OF SCOPE"
             ));
         }
+        let routing = routing_lines(f.get("ROUTING"))
+            .map_err(|(kind, msg)| format!("module {id}: {kind}: {msg}"))?;
         modules.push(Module {
+            routing,
             id,
             serves,
             new_paths: words(f.get("NEW_PATHS").map_or("", String::as_str)),
@@ -430,6 +610,10 @@ pub fn parse_map(text: &str) -> Result<Map, String> {
             accept_file: first.into(),
             accept_command: command,
         });
+    }
+    let routed_count = modules.iter().filter(|m| !m.routing.is_empty()).count();
+    if routed_count > 0 && routed_count != modules.len() {
+        return Err("routing_partial: not every module has ROUTING".into());
     }
     Ok(Map {
         preamble,
@@ -497,6 +681,7 @@ pub fn lint_map(text: &str, plan: Option<&str>, repo: Option<&Path>) -> Vec<MapP
         "SERVES",
         "NEW_PATHS",
         "SHARED_OWNER",
+        "ROUTING",
     ];
     let fs: Vec<_> = sections
         .iter()
@@ -552,9 +737,10 @@ pub fn lint_map(text: &str, plan: Option<&str>, repo: Option<&Path>) -> Vec<MapP
     for i in 0..ids.len() {
         walk(i, i, &ids, &deps, &mut vec![i], &mut cycles);
     }
-    let env =
-        regex::Regex::new(r"(?i)(?:^|&&|\|\||[;|&(])\s*(?:export|set)(?:\s|$|[;|&(])|%[A-Za-z_][A-Za-z0-9_]*%")
-            .unwrap();
+    let env = regex::Regex::new(
+        r"(?i)(?:^|&&|\|\||[;|&(])\s*(?:export|set)(?:\s|$|[;|&(])|%[A-Za-z_][A-Za-z0-9_]*%",
+    )
+    .unwrap();
     let mut problems = Vec::new();
     for (i, (id, _)) in sections.iter().enumerate() {
         let mut add = |kind: &str, message: String| {
@@ -565,6 +751,15 @@ pub fn lint_map(text: &str, plan: Option<&str>, repo: Option<&Path>) -> Vec<MapP
             })
         };
         let f = &fs[i];
+        if fs.iter().any(|f| f.contains_key("ROUTING"))
+            && fs.iter().any(|f| !f.contains_key("ROUTING"))
+            && !f.contains_key("ROUTING")
+        {
+            add("routing_partial", "not every module has ROUTING".into());
+        }
+        if let Err((kind, message)) = routing_lines(f.get("ROUTING")) {
+            add(kind, message);
+        }
         if ids[..i].contains(&id.as_str()) {
             add("parse", format!("module {id}: duplicate id"));
         }

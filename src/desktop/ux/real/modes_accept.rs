@@ -373,7 +373,7 @@ fn lazy_quick_uses_engine_home_even_when_environment_home_differs() {
             .into_owned(),
     ])
     .unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::base::proc::cmd(std::env::current_exe().unwrap())
         .args(["--exact", "desktop::ux::real::modes_accept::lazy_quick_uses_engine_home_even_when_environment_home_differs", "--nocapture"])
         .env("AXIOM_TEST_LAZY_QUICK_ROOT", root.path())
         .env("AXIOM_HOME", root.path().join("other"))

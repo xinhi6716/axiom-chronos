@@ -253,7 +253,16 @@ fn unit_reply(mut value: Value, b: &Bridge, args: &Value) -> Value {
 pub fn dispatch(b: &Bridge, n: &str, a: &Value) -> Res<Value> {
     match n {
         "codex_run" => {
-            let result = super::codex_tool::codex_run(b, a);
+            let mut prefixed;
+            let args = if s(a, "role") == "astra" && a.get("save_to").is_some() && a.get("unit").is_none() {
+                let summary = crate::usage::review_stats::astra_summary(b.home()?, s(a, "project"));
+                if !summary.is_empty() && a["brief"].is_string() {
+                    prefixed = a.clone();
+                    prefixed["brief"] = json!(format!("{summary}\n{}", s(a, "brief")));
+                    &prefixed
+                } else { a }
+            } else { a };
+            let result = super::codex_tool::codex_run(b, args);
             if result["status"] == "completed" {
                 b.note_project_cwd(s(a, "project"), s(a, "cwd"));
             }

@@ -308,7 +308,7 @@ fn astra_rejects_destinations_outside_store() {
 #[test]
 fn unit_failures_release_claims_and_refuse_invalid_inputs() {
     let temp = common::temp();
-    let (repo, _) = fixture(
+    let (repo, store) = fixture(
         temp.path(),
         &[
             (
@@ -329,17 +329,24 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
     for (unit, kind) in [
         ("verifyunit", "verify_failed"),
         ("scopeunit", "outside_scope"),
-        ("limitunit", "usage_limit"),
+        ("limitunit", "usageLimitExceeded"),
     ] {
         let args = json!({"project":"demo","unit":unit,"cwd":repo,"role":"terra"});
         let response = call(&b, "codex_run", &args);
         let r = &response["structuredContent"];
         assert_eq!(response["isError"], true, "{response}");
-        assert_eq!(r["status"], "failed", "{r}");
         if unit != "limitunit" {
+            assert_eq!(r["status"], "failed", "{r}");
             assert_eq!(r["error"]["kind"], kind, "{r}");
         } else {
-            assert!(r["error"].is_object(), "{r}");
+            assert_eq!(r["status"], "interrupted", "{r}");
+            assert_eq!(r["error"]["kind"], kind, "{r}");
+            assert_eq!(r["next"], "wait", "{r}");
+            let claims = fs::read_to_string(store.join("claims.tsv")).unwrap();
+            let claim = claims.lines().skip(1)
+                .find(|line| line.split('\t').next() == Some(unit)).unwrap();
+            // Suspended attempts keep their claim row, but relinquish the live owner.
+            assert_eq!(claim.split('\t').nth(6), Some(""), "{claims}");
         }
         if unit == "verifyunit" {
             assert_eq!(r["verify_exit"], 1);
@@ -360,7 +367,12 @@ fn unit_failures_release_claims_and_refuse_invalid_inputs() {
             assert!(repo.join("outside.txt").exists());
         }
         let retry = invoke(&b, args);
-        assert_eq!(retry["attempt"], 2, "{retry}");
+        if unit == "limitunit" {
+            assert_eq!(retry["attempt"], r["attempt"], "{retry}");
+            assert_eq!(retry["attempt_id"], r["attempt_id"], "{retry}");
+        } else {
+            assert_eq!(retry["attempt"], 2, "{retry}");
+        }
     }
     for extra in [
         json!({"role":"terra","brief":"x"}),
@@ -760,19 +772,35 @@ fn bad_brief_settings_are_refused_before_any_turn() {
         &[
             (
                 "badeffort",
-                "GOAL build\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
+                "GOAL build\nEFFORT ultra\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
             (
                 "badtier",
+                "GOAL build\nTIER gpt-6-sol\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+            (
+                "xhigh",
+                "GOAL build\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+            (
+                "max",
+                "GOAL build\nEFFORT max\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+            (
+                "sol",
                 "GOAL build\nTIER sol\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            ),
+            (
+                "astra",
+                "GOAL build\nTIER astra\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
         ],
     );
     let log = home.join("codex.log");
     let b = logged_bridge(home, &log);
     for (unit, field, value, allowed) in [
-        ("badeffort", "EFFORT", "xhigh", "low, medium, high"),
-        ("badtier", "TIER", "sol", "luna"),
+        ("badeffort", "EFFORT", "ultra", "low, medium, high, xhigh, max"),
+        ("badtier", "TIER", "gpt-6-sol", "terra, sol, astra, luna"),
     ] {
         let r = invoke(
             &b,
@@ -792,6 +820,26 @@ fn bad_brief_settings_are_refused_before_any_turn() {
     }
     assert!(logged(&log, "turn/start").is_empty());
     assert_eq!(claim_count(&store), 0);
+    for (index, (unit, model, effort)) in [
+        ("xhigh", "gpt-6.10-terra", Some("xhigh")),
+        ("max", "gpt-6.10-terra", Some("max")),
+        ("sol", "gpt-6-sol", None),
+        ("astra", "gpt-6-astra", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = invoke(
+            &b,
+            json!({"project":"demo","unit":unit,"cwd":repo,"role":"terra"}),
+        );
+        assert_eq!(r["state"], "built", "{r}");
+        assert_eq!(r["model"], model, "{r}");
+        let turns = logged(&log, "turn/start");
+        assert_eq!(turns.len(), index + 1, "{r}");
+        assert_eq!(turns[index]["effort"].as_str(), effort);
+        assert_eq!(logged(&log, "thread/start")[index]["model"], model);
+    }
 }
 
 #[test]

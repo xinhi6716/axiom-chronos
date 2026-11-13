@@ -757,6 +757,15 @@ pub(crate) fn record_review_with_verdict(
     let mut commits = Vec::new();
     let mut stale = Vec::new();
     for unit in units {
+        if !matches!(
+            selfcheck_state(store, unit)?,
+            SelfCheckState::NotRequired | SelfCheckState::Passed
+        ) {
+            return Err(Failure::new(
+                "selfcheck_required",
+                format!("self-check required for {unit}"),
+            ));
+        }
         existing
             .iter()
             .find(|u| u.id == *unit)
@@ -865,13 +874,23 @@ fn review_event(
             Some(relative.to_string_lossy().replace('\\', "/"))
         })
         .collect();
+    let routing = super::receipts::read_routing(store)?
+        .into_iter()
+        .rev()
+        .find(|receipt| receipt.unit == unit);
     super::events::append_event(
         store,
         crate::engine::kinds::REVIEW_RECORDED,
         None,
         Some(unit),
         serde_json::json!({
-            "review_id": super::review_id(unit, n), "unit": unit, "role": role, "reviewer": reviewer, "model": model, "family": family, "tree": commit, "paths": paths, "findings": findings, "pass": row.exit_code == 0
+            "review_id": super::review_id(unit, n), "unit": unit, "role": role, "reviewer": reviewer, "model": model, "family": family, "tree": commit, "paths": paths, "findings": findings, "pass": row.exit_code == 0,
+            "worker_model": routing.as_ref().map(|r| r.model_used.as_ref().unwrap_or(&r.model_assigned)),
+            "worker_tier": routing.as_ref().and_then(|r| r.tier.as_ref()),
+            "worker_effort": routing.as_ref().and_then(|r| r.effort.as_ref()),
+            "risk": routing.as_ref().and_then(|r| r.risk.as_ref()),
+            "routing_rule": routing.as_ref().map(|r| &r.rule),
+            "attempt": routing.as_ref().map(|r| &r.attempt)
         }),
     )?;
     Ok(())
@@ -959,6 +978,74 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
             "not_done",
             "missing successful, current full test",
         ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfCheckState {
+    NotRequired,
+    Missing,
+    Stale,
+    Failed,
+    Passed,
+}
+pub fn selfcheck_state(store: &Path, unit: &str) -> Res<SelfCheckState> {
+    if unit_brief(store, unit)?.test_matrix.is_empty() {
+        return Ok(SelfCheckState::NotRequired);
+    }
+    let rows = evidence(store, unit)?;
+    let Some((index, check)) = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, r)| r.kind == "selfcheck")
+    else {
+        return Ok(SelfCheckState::Missing);
+    };
+    let verify = rows.iter().rev().find(|r| r.kind == "verify");
+    if rows[index + 1..].iter().any(|r| r.kind == "run")
+        || !verify.is_some_and(|v| !v.commit.is_empty() && v.commit == check.commit)
+    {
+        return Ok(SelfCheckState::Stale);
+    }
+    if let Some(snapshot) = crate::codex::routing::read_snapshot(store, unit)? {
+        if check.command.split('|').next() != Some(snapshot.attempt_id.as_str()) {
+            return Ok(SelfCheckState::Stale);
+        }
+    }
+    Ok(if check.exit_code == 0 {
+        SelfCheckState::Passed
+    } else {
+        SelfCheckState::Failed
+    })
+}
+
+pub fn record_matrix(store: &Path, unit: &str, repo: &Path, attempt: &str) -> Res<()> {
+    let brief = unit_brief(store, unit)?;
+    for entry in &brief.test_matrix {
+        let result = run_scratch(
+            store,
+            &entry.command,
+            repo,
+            &scratch_dir(store, &[unit, &format!("matrix-{}", base::unique())]),
+        )?;
+        append_evidence(
+            store,
+            unit,
+            &row(
+                "matrix",
+                &format!("{}|{}|{}", attempt, entry.id, entry.command),
+                result.exit_code,
+                snapshot(repo, &brief.scope),
+            ),
+        )?;
+        if result.exit_code != 0 {
+            return Err(Failure::new(
+                "matrix_failed",
+                format!("matrix row {} failed", entry.id),
+            ));
+        }
     }
     Ok(())
 }

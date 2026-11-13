@@ -11,6 +11,10 @@ pub struct Policy {
     pub reviewer: ReviewerMode,
     pub dual_core: bool,
     pub budgets: BTreeMap<Role, f64>,
+    #[serde(default)]
+    pub models: Option<Models>,
+    #[serde(default)]
+    pub version: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -43,6 +47,8 @@ impl Default for Policy {
             reviewer: ReviewerMode::Claude,
             dual_core: false,
             budgets: BTreeMap::new(),
+            models: None,
+            version: 0,
         }
     }
 }
@@ -56,15 +62,25 @@ fn validate(p: &Policy) -> Res<()> {
     {
         return Err(invalid("amount must be finite and nonnegative"));
     }
+    if let Some(models) = &p.models {
+        models.validate()?;
+    }
     Ok(())
 }
 pub fn load(store: &Path) -> Res<Policy> {
     let bytes = match std::fs::read(store.join("policy.json")) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Policy::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
         Err(e) => return Err(Failure::new("io", e.to_string())),
     };
-    let p: Policy = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+    let mut p: Policy = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+    let fields: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+    if fields.get("reviewer").is_none()
+        && crate::codex::routing::routed_store(store).unwrap_or(false)
+    {
+        p.reviewer = ReviewerMode::AstraMax;
+    }
     validate(&p)?;
     Ok(p)
 }
@@ -99,6 +115,58 @@ pub fn set(store: &Path, key: &str, value: &str) -> Res<Policy> {
                 "both" => ReviewerMode::Both,
                 _ => return Err(invalid("unknown reviewer")),
             }
+        }
+        _ if key.starts_with("models.") => {
+            let models = p.models.get_or_insert_with(Models::default);
+            match key {
+                "models.self_check" | "models.reviewer" => {
+                    let (tier, effort) = value
+                        .split_once('/')
+                        .ok_or_else(|| invalid("expected tier/effort"))?;
+                    let stage = CodexStage {
+                        tier: tier.into(),
+                        effort: effort.into(),
+                    };
+                    validate_stage(&stage)?;
+                    if key == "models.self_check" {
+                        models.self_check = stage;
+                    } else {
+                        models.reviewer = stage;
+                    }
+                }
+                "models.core.planning"
+                | "models.core.build"
+                | "models.core.escalation"
+                | "models.core.close" => {
+                    if !token(value) {
+                        return Err(invalid("expected a single token"));
+                    }
+                    match key {
+                        "models.core.planning" => &mut models.core.planning,
+                        "models.core.build" => &mut models.core.build,
+                        "models.core.escalation" => &mut models.core.escalation,
+                        _ => &mut models.core.close,
+                    }
+                    .clone_from(&value.to_string());
+                }
+                _ if key.starts_with("models.worker.") => {
+                    let tier = &key[14..];
+                    validate_tier(tier)?;
+                    if value == "none" {
+                        models.worker.remove(tier);
+                    } else {
+                        if !token(value) {
+                            return Err(invalid("expected a single token"));
+                        }
+                        models.worker.insert(tier.into(), value.into());
+                    }
+                }
+                _ => return Err(invalid("unknown policy key")),
+            }
+            p.version = p
+                .version
+                .checked_add(1)
+                .ok_or_else(|| invalid("version overflow"))?;
         }
         _ if key.starts_with("budget.") => {
             let role = key[7..].parse::<Role>()?;
@@ -161,4 +229,148 @@ mod tests {
             );
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexStage {
+    pub tier: String,
+    pub effort: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoreModels {
+    pub planning: String,
+    pub build: String,
+    pub escalation: String,
+    pub close: String,
+}
+impl Default for CoreModels {
+    fn default() -> Self {
+        Self {
+            planning: "opus".into(),
+            build: "sonnet".into(),
+            escalation: "opus".into(),
+            close: "opus".into(),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Models {
+    pub worker: BTreeMap<String, String>,
+    pub self_check: CodexStage,
+    pub reviewer: CodexStage,
+    pub core: CoreModels,
+}
+impl Default for Models {
+    fn default() -> Self {
+        Self {
+            worker: BTreeMap::new(),
+            self_check: CodexStage {
+                tier: "sol".into(),
+                effort: "xhigh".into(),
+            },
+            reviewer: CodexStage {
+                tier: "astra".into(),
+                effort: "max".into(),
+            },
+            core: CoreModels::default(),
+        }
+    }
+}
+fn token(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_whitespace)
+}
+fn validate_tier(s: &str) -> Res<()> {
+    match crate::codex::routing::parse_tier(s) {
+        Ok(crate::codex::routing::Tier::Luna) => Err(invalid("luna is not allowed")),
+        Ok(_) => Ok(()),
+        Err(e) => Err(invalid(e)),
+    }
+}
+fn validate_stage(s: &CodexStage) -> Res<()> {
+    validate_tier(&s.tier)?;
+    crate::codex::routing::parse_effort(&s.effort).map_err(invalid)?;
+    Ok(())
+}
+impl Models {
+    pub fn validate(&self) -> Res<()> {
+        validate_stage(&self.self_check)?;
+        validate_stage(&self.reviewer)?;
+        for k in self.worker.keys() {
+            validate_tier(k)?;
+        }
+        if [
+            &self.core.planning,
+            &self.core.build,
+            &self.core.escalation,
+            &self.core.close,
+        ]
+        .iter()
+        .any(|v| v.is_empty())
+        {
+            return Err(invalid("invalid core model"));
+        }
+        Ok(())
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalModels {
+    version: u64,
+    models: Models,
+}
+fn read_global(home: &Path) -> Res<Option<GlobalModels>> {
+    let bytes = match std::fs::read(home.join("settings/models.json")) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Failure::new("io", e.to_string())),
+    };
+    let global: GlobalModels =
+        serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+    global.models.validate()?;
+    Ok(Some(global))
+}
+pub struct EffectiveModels {
+    pub models: Models,
+    pub version: String,
+}
+pub fn effective_models(home: Option<&Path>, store: &Path) -> Res<EffectiveModels> {
+    let policy = load(store)?;
+    if let Some(models) = policy.models {
+        return Ok(EffectiveModels {
+            models,
+            version: format!("policy:{}", policy.version),
+        });
+    }
+    if let Some(home) = home {
+        if let Some(global) = read_global(home)? {
+            return Ok(EffectiveModels {
+                models: global.models,
+                version: format!("global:{}", global.version),
+            });
+        }
+    }
+    Ok(EffectiveModels {
+        models: Models::default(),
+        version: "default:0".into(),
+    })
+}
+pub fn save_global_models(home: &Path, models: &Models) -> Res<u64> {
+    models.validate()?;
+    let version = read_global(home)?
+        .map_or(0, |g| g.version)
+        .checked_add(1)
+        .ok_or_else(|| invalid("version overflow"))?;
+    let path = home.join("settings/models.json");
+    let bytes = serde_json::to_vec_pretty(&GlobalModels {
+        version,
+        models: models.clone(),
+    })
+    .map_err(|e| invalid(e.to_string()))?;
+    std::fs::create_dir_all(path.parent().unwrap())
+        .map_err(|e| Failure::new("io", e.to_string()))?;
+    base::atomic_write(&path, &bytes).map_err(|e| Failure::new("io", e.to_string()))?;
+    Ok(version)
 }

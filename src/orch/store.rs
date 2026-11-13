@@ -10,7 +10,7 @@ use std::{
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>, schedule next [--cursor N] [--timeout S] | claim <module> | release <module> --reason <text>, activity start|finish --module <m> --actor core|dispatcher --phase brief|review|decide [--id <id>], setup start --repo <dir> | status | keep <id>... | cancel [<id>...]";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>] [--routing <tier>/<effort> --reason <text>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>, schedule next [--cursor N] [--timeout S] | claim <module> | release <module> --reason <text>, activity start|finish --module <m> --actor core|dispatcher --phase brief|review|decide [--id <id>], setup start --repo <dir> | status | keep <id>... | cancel [<id>...]";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -211,6 +211,66 @@ fn read_file(store: &Path, name: &str) -> Res<String> {
 fn write(store: &Path, name: &str, text: &str) -> Res<()> {
     base::atomic_write(&store.join(name), text.as_bytes()).map_err(io)
 }
+
+fn adjudication_entries(store: &Path) -> Res<Vec<String>> {
+    match std::fs::read_to_string(store.join("adjudication.pending")) {
+        Ok(text) => Ok(text.lines().filter(|s| !s.trim().is_empty()).map(str::to_owned).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(io(e)),
+    }
+}
+
+// Caller holds the store lock, including the read/modify/write cycle.
+pub(crate) fn add_adjudication_locked(store: &Path, reason: &str, target: &str) -> Res<()> {
+    let mut entries = adjudication_entries(store)?;
+    let entry = format!("{reason} {target}");
+    if !entries.contains(&entry) {
+        entries.push(entry);
+        write(store, "adjudication.pending", &(entries.join("\n") + "\n"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_adjudication(store: &Path, target: &str, module: bool) -> Res<()> {
+    with_lock(store, false, || {
+        let mut entries = adjudication_entries(store)?;
+        if entries.is_empty() { return Ok(()); }
+        let units = read_units(store)?;
+        let track = units.iter().find(|u| u.id == target).map(|u| u.track.as_str());
+        let mut module_resolved = !module && track.is_some();
+        if module_resolved {
+            for unit in units.iter().filter(|u| Some(u.track.as_str()) == track && u.id != target && !u.state.starts_with(SUPERSEDED)) {
+                if entries.contains(&format!("fix_rounds {}", unit.id)) {
+                    module_resolved = false;
+                    break;
+                }
+                if let Some(verdict) = super::read_verdict(store, &unit.id)? {
+                    let waived = super::waivers(&super::evidence(store, &unit.id)?)
+                        .into_iter().map(|w| w.number).collect();
+                    if !super::passes(&verdict, &waived) {
+                        module_resolved = false;
+                        break;
+                    }
+                }
+            }
+        }
+        let before = entries.len();
+        entries.retain(|entry| match entry.split_once(' ') {
+            Some(("fix_rounds", unit)) => {
+                if module { !units.iter().any(|u| u.id == unit && u.track == target) }
+                else { unit != target }
+            }
+            Some(("stuck", id)) => if module { id != target } else { !(module_resolved && Some(id) == track) },
+            _ => true,
+        });
+        if entries.len() != before {
+            let text = if entries.is_empty() { String::new() } else { entries.join("\n") + "\n" };
+            write(store, "adjudication.pending", &text)?;
+        }
+        Ok(())
+    })
+}
+
 pub fn read_units(store: &Path) -> Res<Vec<Unit>> {
     let text = read_file(store, "units.tsv")?.replace('\r', "");
     let mut lines = text.split('\n');
@@ -1295,6 +1355,47 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 let fixes = option(args, "--fixes")?
                     .map(|s| required(s, "fixes"))
                     .transpose()?;
+                let routing_arg = option(args, "--routing").map_err(|e| {
+                    Failure::new(
+                        "invalid_argument",
+                        format!("invalid_argument: {}", e.message),
+                    )
+                })?;
+                let reason_arg = option(args, "--reason").map_err(|e| {
+                    Failure::new(
+                        "invalid_argument",
+                        format!("invalid_argument: {}", e.message),
+                    )
+                })?;
+                if routing_arg.is_some() != reason_arg.is_some()
+                    || (routing_arg.is_some() && fixes.is_none())
+                    || reason_arg.is_some_and(|s| s.trim().is_empty())
+                {
+                    return Err(Failure::new("invalid_argument", "invalid_argument: --routing and non-empty --reason require each other and --fixes"));
+                }
+                let explicit = routing_arg
+                    .map(|s| -> Res<_> {
+                        let (tier, effort) = s.split_once('/').ok_or_else(|| {
+                            Failure::new(
+                                "invalid_argument",
+                                "invalid_argument: routing must be tier/effort",
+                            )
+                        })?;
+                        let tier = crate::codex::routing::parse_tier(tier).map_err(|e| {
+                            Failure::new("invalid_argument", format!("invalid_argument: {e}"))
+                        })?;
+                        if tier == crate::codex::routing::Tier::Luna {
+                            return Err(Failure::new(
+                                "invalid_argument",
+                                "invalid_argument: luna is not valid for an exception",
+                            ));
+                        }
+                        let effort = crate::codex::routing::parse_effort(effort).map_err(|e| {
+                            Failure::new("invalid_argument", format!("invalid_argument: {e}"))
+                        })?;
+                        Ok((tier, effort))
+                    })
+                    .transpose()?;
                 if fixes.is_some() && brief.is_empty() {
                     return Err(fail("--fixes requires --brief"));
                 }
@@ -1310,7 +1411,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 if fixes.is_none() {
                     validate_add_brief(store, &row)?;
                 }
-                locked(store, force, &mut note, || {
+                let fix_routing = locked(store, force, &mut note, || {
                     if fixes.is_some() {
                         validate_add_brief(store, &row)?;
                     }
@@ -1341,11 +1442,131 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             }
                         }
                         if fix_units.len() >= 2 {
+                            add_adjudication_locked(store, "fix_rounds", old)?;
                             return Err(Failure::new("fix_rounds", format!(
                                 "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
                                 fix_units.join(", ")
                             )));
                         }
+                        use crate::codex::routing::{
+                            self, Escalation, FixRecord, Risk, Routing, Rule, Tier,
+                        };
+                        let parent = rows.iter().find(|u| u.id == *old).unwrap();
+                        let snapshot = routing::read_snapshot(store, old)?;
+                        let map_text = match std::fs::read_to_string(store.join("modules.md")) {
+                            Ok(s) => s,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                            Err(e) => return Err(io(e)),
+                        };
+                        let line = crate::orch::parse::parse_map(&map_text)
+                            .ok()
+                            .and_then(|m| m.modules.into_iter().find(|m| m.id == parent.track))
+                            .and_then(|m| {
+                                m.routing
+                                    .iter()
+                                    .find(|r| r.key == *old)
+                                    .or_else(|| m.routing.iter().find(|r| r.key == "default"))
+                                    .cloned()
+                            });
+                        let invalid = |e| Failure::new("invalid_argument", e);
+                        let (parent_tier, parent_effort) =
+                            if let Some(s) = snapshot.as_ref().filter(|s| s.tier.is_some()) {
+                                (s.tier.unwrap(), s.effort)
+                            } else if let Some(l) = &line {
+                                (
+                                    routing::parse_tier(&l.tier).map_err(invalid)?,
+                                    Some(routing::parse_effort(&l.effort).map_err(invalid)?),
+                                )
+                            } else {
+                                (Tier::Terra, None)
+                            };
+                        let risk = if let Some(r) = snapshot.as_ref().and_then(|s| s.risk) {
+                            r
+                        } else if let Some(l) = &line {
+                            serde_json::from_value(serde_json::Value::String(l.risk.clone()))
+                                .map_err(|e| invalid(format!("{e}")))?
+                        } else {
+                            Risk::Standard
+                        };
+                        let (route, rule) = if let Some((tier, effort)) = explicit {
+                            let r = Routing {
+                                tier,
+                                effort,
+                                risk: Some(risk),
+                                reason: reason_arg.unwrap().trim().into(),
+                            };
+                            routing::check_rubric(&r).map_err(|e| {
+                                Failure::new("routing_rubric", format!("routing_rubric: {e}"))
+                            })?;
+                            (r, Rule::PlanException)
+                        } else {
+                            match routing::escalate(parent_tier, parent_effort) {
+                                Escalation::Next(r) => (r, Rule::FixEscalation),
+                                Escalation::Saturated => {
+                                    return Err(Failure::new(
+                                        "escalation_saturated",
+                                        "escalation_saturated: parent routing is saturated",
+                                    ))
+                                }
+                            }
+                        };
+                        let brief_text = std::fs::read_to_string(&row.brief).map_err(io)?;
+                        let parsed = parse_brief(&brief_text).map_err(invalid)?;
+                        if parsed
+                            .tier
+                            .as_deref()
+                            .is_some_and(|s| routing::parse_tier(s).ok() != Some(route.tier))
+                            || parsed.effort.as_deref().is_some_and(|s| {
+                                routing::parse_effort(s).ok() != Some(route.effort)
+                            })
+                        {
+                            return Err(Failure::new(
+                                "routing_mismatch",
+                                "routing_mismatch: brief conflicts with routing",
+                            ));
+                        }
+                        let tier = serde_json::to_value(route.tier)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_owned();
+                        let effort = serde_json::to_value(route.effort)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_owned();
+                        let mut additions = String::new();
+                        if parsed.tier.is_none() {
+                            additions.push_str(&format!("TIER {tier}\n"));
+                        }
+                        if parsed.effort.is_none() {
+                            additions.push_str(&format!("EFFORT {effort}\n"));
+                        }
+                        let mut updated = String::new();
+                        for part in brief_text.split_inclusive('\n') {
+                            updated.push_str(part);
+                            if part
+                                .strip_prefix("GOAL")
+                                .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+                                && !additions.is_empty()
+                            {
+                                if !part.ends_with('\n') {
+                                    updated.push('\n');
+                                }
+                                updated.push_str(&additions);
+                                additions.clear();
+                            }
+                        }
+                        let record = FixRecord {
+                            unit: row.id.clone(),
+                            parent: old.clone(),
+                            parent_tier,
+                            parent_effort,
+                            tier: route.tier,
+                            effort: route.effort,
+                            rule,
+                            reason: route.reason,
+                        };
                         // Validate existing evidence before either write.
                         crate::orch::evidence(store, &row.id)?;
                         // The add response computes readiness; reject existing invalid data
@@ -1353,6 +1574,20 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         crate::orch::ready_units(store)?;
                         crate::orch::waiting_units(store)?;
                         let original_units = std::fs::read(store.join("units.tsv")).map_err(io)?;
+                        let evidence_path = store
+                            .join("reports")
+                            .join(format!("{}.evidence.tsv", row.id));
+                        let original_evidence = match std::fs::read(&evidence_path) {
+                            Ok(v) => Some(v),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(e) => return Err(io(e)),
+                        };
+                        let fix_path = routing::fix_record_path(store, &row.id);
+                        let original_fix = match std::fs::read(&fix_path) {
+                            Ok(v) => Some(v),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(e) => return Err(io(e)),
+                        };
                         save_units(store, &rows)?;
                         let appended = crate::orch::append_evidence_locked(
                             store,
@@ -1365,14 +1600,46 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                                 ts: base::now_iso(),
                             },
                         );
-                        if let Err(error) = appended {
+                        let result = appended
+                            .and_then(|_| routing::write_fix(store, &record))
+                            .and_then(|_| {
+                                if updated != brief_text {
+                                    // Test-only final-write failure, gated like crash_point.
+                                    if cfg!(debug_assertions)
+                                        && std::env::var("AXIOM_TEST_FAIL_FIX_BRIEF_WRITE")
+                                            .ok().as_deref() == Some("1")
+                                    {
+                                        return Err(io(std::io::Error::new(
+                                            std::io::ErrorKind::PermissionDenied,
+                                            "injected fix brief write failure",
+                                        )));
+                                    }
+                                    base::atomic_write(Path::new(&row.brief), updated.as_bytes())
+                                        .map_err(io)?;
+                                }
+                                Ok(())
+                            });
+                        if let Err(error) = result {
                             base::atomic_write(&store.join("units.tsv"), &original_units)
                                 .map_err(io)?;
+                            for (path, original) in [
+                                (&evidence_path, original_evidence),
+                                (&fix_path, original_fix),
+                            ] {
+                                if let Some(bytes) = original {
+                                    base::atomic_write(path, &bytes).map_err(io)?;
+                                } else if let Err(e) = std::fs::remove_file(path) {
+                                    if e.kind() != std::io::ErrorKind::NotFound {
+                                        return Err(io(e));
+                                    }
+                                }
+                            }
                             return Err(error);
                         }
-                        Ok(())
+                        Ok(Some(record))
                     } else {
-                        save_units(store, &rows)
+                        save_units(store, &rows)?;
+                        Ok(None)
                     }
                 })?;
                 let next = crate::orch::next_step_for(store, &row.id)?;
@@ -1381,7 +1648,20 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 if let Some(old) = fixes {
                     value["fixes"] = serde_json::json!(old);
                 }
-                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
+                let mut text = format!("{}\n{next}", unit_line(&row));
+                if let Some(r) = fix_routing {
+                    let rule = serde_json::to_value(r.rule).unwrap();
+                    let tier = serde_json::to_value(r.tier).unwrap();
+                    let effort = serde_json::to_value(r.effort).unwrap();
+                    text.push_str(&format!(
+                        "\nrouting {}/{} {}",
+                        tier.as_str().unwrap(),
+                        effort.as_str().unwrap(),
+                        rule.as_str().unwrap()
+                    ));
+                    value["routing"] = serde_json::json!({"tier": tier, "effort": effort, "rule": rule, "reason": r.reason, "parent": {"tier": r.parent_tier, "effort": r.parent_effort}});
+                }
+                Ok(emit(value, text, json))
             }
             ("unit", "set") => {
                 let id = required(arg(args, 2)?, "unit id")?;

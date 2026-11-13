@@ -1,14 +1,15 @@
 use crate::{
     base::{self, Failure, Res},
-    codex::AppServer,
+    codex::{AppServer, RunRequest},
     engine::{
         self,
-        budgets::Role,
-        calls::{self, EngineCall},
+        budgets::{self, Role},
+        calls::EngineCall,
         finding_verification,
         policy::{self, ReviewerMode},
     },
     orch,
+    usage::price::{self, CodexUsage},
 };
 use serde_json::{json, Value};
 use std::{
@@ -79,11 +80,30 @@ pub fn engine_review(
     unit: &str,
     repo: &Path,
 ) -> Res<Option<Value>> {
+    engine_review_with_home(codex, None, store, unit, repo)
+}
+
+pub fn engine_review_with_home(
+    codex: &AppServer,
+    home: Option<&Path>,
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+) -> Res<Option<Value>> {
     if !matches!(
         policy::load(store)?.reviewer,
         ReviewerMode::AstraMax | ReviewerMode::Both
     ) {
         return Ok(None);
+    }
+    if !matches!(
+        orch::selfcheck_state(store, unit)?,
+        orch::SelfCheckState::NotRequired | orch::SelfCheckState::Passed
+    ) {
+        return Err(Failure::new(
+            "selfcheck_required",
+            format!("self-check required for {unit}"),
+        ));
     }
     base::require_slug("unit", unit)?;
     let tree = orch::evidence(store, unit)?
@@ -95,10 +115,11 @@ pub fn engine_review(
         .ok_or_else(|| Failure::new("not_built", "no passing verify"))?;
     let pack = std::fs::read_to_string(orch::pack_path(store, unit))
         .map_err(|e| Failure::new("no_review_pack", e.to_string()))?;
-    if tree.is_empty() || !pack.contains(&tree) {
+    let brief = orch::unit_brief(store, unit)?;
+    if tree.is_empty() || !pack.contains(&tree) || orch::snapshot(repo, &brief.scope) != tree {
         return Err(Failure::new("no_review_pack", "review pack is not current"));
     }
-    let model = codex.resolve_model("astra")?;
+    let stage = policy::effective_models(home, store)?.models.reviewer;
     let call = EngineCall {
         role: Role::Reviewer,
         case: "review",
@@ -111,12 +132,49 @@ pub fn engine_review(
         ),
         schema: json!({"type":"object","properties":{"verdict":{"type":"string"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"location":{"type":"string"},"check":{"type":"string"},"evidence":{"type":"string"},"fix":{"type":"string"},"needs":{"type":["string","null"]}}}}},"required":["verdict","findings"]}),
     };
-    let mut value = calls::astra_max(codex, store, &call)?;
+    budgets::check(store, call.role, call.case)?;
+    let model = codex.resolve_model(&stage.tier)?;
+    let report = codex.run(&RunRequest {
+        model: model.clone(),
+        effort: Some(stage.effort),
+        sandbox: "read-only".into(),
+        developer_instructions: None,
+        lean: true,
+        web_search: false,
+        output_schema: Some(call.schema.clone()),
+        brief: format!("AXIOM-ENGINE reviewer review\n{}", call.pack),
+        cwd: call.cwd.to_string_lossy().into_owned(),
+        timeout_s: call.timeout_s,
+        keep_plugins: vec![],
+    })?;
+    let usage = &report["usage"];
+    let input = usage["inputTokens"].as_u64();
+    let cached = usage["cachedInputTokens"].as_u64();
+    let output = usage["outputTokens"].as_u64();
+    let usd = match (input, cached, output) {
+        (Some(input), Some(cached_input), Some(output)) => price::codex_usd(
+            &model, &CodexUsage { input, cached_input, output },
+        ),
+        _ => None,
+    };
+    budgets::record(store, call.role, &model, usd, input.unwrap_or(0), output.unwrap_or(0), call.case)?;
+    if report["status"] != "completed" {
+        return Err(Failure::new(
+            report["error"]["kind"].as_str().unwrap_or("codex_call"),
+            report["error"]["message"].as_str().unwrap_or("Codex call failed"),
+        ));
+    }
+    let mut value = report["structured_output"].clone();
     let object = value
         .as_object_mut()
         .ok_or_else(|| Failure::new("invalid_argument", "review verdict must be an object"))?;
     object.insert("unit".into(), json!(unit));
     object.insert("tree".into(), json!(tree));
+    // Preserve supplied thread evidence without inventing an id when it is absent.
+    object.remove("thread_id");
+    if let Some(thread) = report["thread_id"].as_str() {
+        object.insert("thread_id".into(), json!(thread));
+    }
     let text = serde_json::to_string_pretty(&value)
         .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
     let verdict = orch::parse_verdict(&text)?;

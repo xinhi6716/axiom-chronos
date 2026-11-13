@@ -94,6 +94,7 @@ fn reply(status: &str) -> Value {
 
 #[test]
 fn rejected_major_closes_review_without_waiver() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("rejected"));
     f.add("run", "gpt-6-terra", 0, "tree:a");
     f.add("verify", "tests", 0, "tree:a");
@@ -121,6 +122,7 @@ fn rejected_major_closes_review_without_waiver() {
 
 #[test]
 fn confirmed_and_non_failing_findings() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("confirmed"));
     f.review("a", "chronos:reviewer", findings("blocker"));
     assert!(f.gate().is_ok());
@@ -135,6 +137,7 @@ fn confirmed_and_non_failing_findings() {
 
 #[test]
 fn reuses_same_review_and_rechecks_new_tree() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("rejected"));
     f.review("a", "chronos:reviewer", findings("major"));
     assert_eq!(f.check()[0].review_id, "u1#1");
@@ -150,6 +153,7 @@ fn reuses_same_review_and_rechecks_new_tree() {
 
 #[test]
 fn errors_missing_reply_and_budget_are_inconclusive() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(json!({"findings":[]}));
     f.review("a", "chronos:reviewer", findings("major"));
     let c = f.check();
@@ -164,8 +168,11 @@ fn errors_missing_reply_and_budget_are_inconclusive() {
     assert_eq!(fv::rejection_rate(&f.store).unwrap(), (0, 0));
 }
 
+static CLAUDE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
-fn openai_reviewer_uses_claude() {
+fn claude_calls_by_severity() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("confirmed"));
     let log = f.store.join("member.jsonl");
     let mut cmd = common::fake("fake_member");
@@ -176,7 +183,7 @@ fn openai_reviewer_uses_claude() {
     f.review("a", "engine-astra:gpt-6-astra", findings("major"));
     let check = f.check();
     match previous {
-        Some(v) => std::env::set_var("AXIOM_CLAUDE_CMD", v),
+        Some(ref v) => std::env::set_var("AXIOM_CLAUDE_CMD", v),
         None => std::env::remove_var("AXIOM_CLAUDE_CMD"),
     }
     assert_eq!(check[0].status, Status::Confirmed);
@@ -186,6 +193,74 @@ fn openai_reviewer_uses_claude() {
         .as_str()
         .unwrap()
         .starts_with("AXIOM-ENGINE verifier finding\n"));
+    assert!(f.turns().is_empty());
+
+    // A single review batches the two serious findings into one verifier request.
+    let mut mixed = findings("blocker");
+    mixed.as_array_mut().unwrap().push(findings("major")[0].clone());
+    fs::write(&f.script, json!([{"match":"AXIOM-ENGINE verifier finding","reply":{"findings":[{"finding":1,"status":"confirmed","reason":"blocker confirmed"},{"finding":2,"status":"rejected","reason":"major rejected"}]}}]).to_string()).unwrap();
+    std::env::set_var("AXIOM_CLAUDE_CMD", serde_json::to_string(&cmd).unwrap());
+    f.review("b", "engine-astra:gpt-6-astra", mixed);
+    let checks = f.check();
+    match previous {
+        Some(ref v) => std::env::set_var("AXIOM_CLAUDE_CMD", v),
+        None => std::env::remove_var("AXIOM_CLAUDE_CMD"),
+    }
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0].severity, "blocker");
+    assert_eq!(checks[1].severity, "major");
+    assert_eq!(checks[1].status, Status::Rejected);
+    let calls = lines(&log);
+    assert_eq!(calls.len(), 2); // one initial major request, then one two-finding batch
+    let prompt = calls[1]["prompt"].as_str().unwrap();
+    assert_eq!(prompt.matches("\nFinding ").count(), 2);
+
+    for severity in ["blocker", "major", "minor", "pass"] {
+        let f = Fixture::new(reply("confirmed"));
+        let log = f.store.join("member.jsonl");
+        let mut cmd = common::fake("fake_member");
+        cmd.push(format!("--fake-script={}", f.script.display()));
+        cmd.push(format!("--fake-log={}", log.display()));
+        let previous = std::env::var_os("AXIOM_CLAUDE_CMD");
+        std::env::set_var("AXIOM_CLAUDE_CMD", serde_json::to_string(&cmd).unwrap());
+        f.review("a", "engine-astra:gpt-6-astra", if severity == "pass" { json!([]) } else { findings(severity) });
+        if severity == "pass" {
+            fs::write(orch::review_verdict_path(&f.store, "u1", "engine-astra:gpt-6-astra"), json!({"unit":"u1","tree":"a","verdict":"pass","findings":[]}).to_string()).unwrap();
+        }
+        let checks = f.check();
+        match previous {
+            Some(v) => std::env::set_var("AXIOM_CLAUDE_CMD", v),
+            None => std::env::remove_var("AXIOM_CLAUDE_CMD"),
+        }
+        let expected = usize::from(matches!(severity, "blocker" | "major"));
+        assert_eq!(lines(&log).len(), expected);
+        assert_eq!(checks.len(), expected);
+        assert!(f.turns().is_empty());
+    }
+}
+
+#[test]
+fn minor_findings_get_no_check() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    for status in ["rejected", "confirmed"] {
+        let f = Fixture::new(json!({"findings":[{"finding":2,"status":status,"reason":"grounded reason"}]}));
+        let mut mixed = findings("minor");
+        mixed.as_array_mut().unwrap().push(findings("major")[0].clone());
+        f.review("a", "chronos:reviewer", mixed);
+        let checks = f.check();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].finding, 2);
+        assert_eq!(checks[0].severity, "major");
+        assert_eq!(fv::checks(&f.store, "u1").unwrap(), checks);
+        assert_eq!(fv::rejection_rate(&f.store).unwrap(), (u64::from(status == "rejected"), 1));
+        if status == "rejected" { assert_eq!(f.gate().unwrap_err().kind, "findings_rejected"); }
+        else { assert!(f.gate().is_ok()); }
+        assert_eq!(f.turns().len(), 1);
+    }
+    let f = Fixture::new(reply("confirmed"));
+    f.review("a", "chronos:reviewer", findings("minor"));
+    assert!(f.check().is_empty());
+    assert!(f.gate().is_ok());
     assert!(f.turns().is_empty());
 }
 
@@ -228,6 +303,7 @@ fn parsing_paths_and_failed_checked_control() {
 
 #[test]
 fn call_error_is_failed_and_does_not_reject() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("rejected"));
     f.review("a", "chronos:reviewer", findings("major"));
     let broken = AppServer::new(vec!["axiom-nonexistent-finding-verifier".into()])
@@ -245,6 +321,7 @@ fn call_error_is_failed_and_does_not_reject() {
 
 #[test]
 fn multiple_reviews_do_not_close_one_another() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("rejected"));
     f.add("run", "gpt-6-terra", 0, "a");
     f.add("verify", "test", 0, "a");
@@ -269,6 +346,7 @@ fn multiple_reviews_do_not_close_one_another() {
 
 #[test]
 fn waived_finding_does_not_block_all_rejected_gate() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("rejected"));
     f.review(
         "a",
@@ -285,6 +363,7 @@ fn waived_finding_does_not_block_all_rejected_gate() {
 
 #[test]
 fn absent_review_and_stale_verdict_do_not_call_verifier() {
+    let _lock = CLAUDE_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new(reply("confirmed"));
     assert!(f.gate().is_ok());
     f.review("a", "chronos:reviewer", findings("major"));

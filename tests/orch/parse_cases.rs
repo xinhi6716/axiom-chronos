@@ -37,19 +37,27 @@ fn brief_settings_are_read_and_kept_from_the_worker() {
     );
     assert_eq!((b.goal.as_str(), b.verify.as_str()), ("g", "v"));
     assert_eq!(b.scope, ["a"]);
-    for effort in ["low", "medium", "high"] {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
         let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nEFFORT {effort}")).unwrap();
         assert_eq!(b.effort.as_deref(), Some(effort));
         assert_eq!(b.tier, None);
+        assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
+    }
+    for tier in ["terra", "sol", "astra", "luna"] {
+        let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nTIER {tier}")).unwrap();
+        assert_eq!(b.tier.as_deref(), Some(tier));
+        assert_eq!(b.effort, None);
         assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
     }
 }
 
 #[test]
 fn brief_settings_outside_the_allowed_set_are_refused() {
-    let efforts = "low, medium, high";
+    let efforts = "low, medium, high, xhigh, max";
+    let tiers = "terra, sol, astra, luna";
     for (line, field, value, allowed) in [
-        ("EFFORT xhigh", "EFFORT", "xhigh", efforts),
+        ("EFFORT ultra", "EFFORT", "ultra", efforts),
+        ("EFFORT extreme", "EFFORT", "extreme", efforts),
         ("EFFORT Low", "EFFORT", "Low", efforts),
         ("EFFORT low please", "EFFORT", "low please", efforts),
         ("EFFORT", "EFFORT", "", efforts),
@@ -60,10 +68,9 @@ EFFORT high",
             "high",
             efforts,
         ),
-        ("TIER terra", "TIER", "terra", "luna"),
-        ("TIER sol", "TIER", "sol", "luna"),
-        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", "luna"),
-        ("TIER", "TIER", "", "luna"),
+        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", tiers),
+        ("TIER 1 sources", "TIER", "1 sources", tiers),
+        ("TIER", "TIER", "", tiers),
     ] {
         let err = parse_brief(&format!(
             "GOAL g
@@ -85,8 +92,9 @@ VERIFY v
 fn old_briefs_cannot_trip_the_settings() {
     for text in [
         "EFFORT was spent here\nTIER 1 sources\nGOAL g\nSCOPE a\nVERIFY v\n",
-        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\nTIER sol\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\n  TIER sol\n",
         "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT low\n  TIER luna\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  TIER sol\n  EFFORT high\n",
         "GOAL g\n  EFFORT low\nSCOPE a\nVERIFY v\n",
         "GOAL g\nEFFORTS low\nTIERED luna\nSCOPE a\nVERIFY v\n",
     ] {

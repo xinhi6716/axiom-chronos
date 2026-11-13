@@ -321,6 +321,13 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
                 .get(&module.id)
                 .is_some_and(|s| s == events::MODULE_RELEASED)
             {
+                orch::with_lock(store, false, || {
+                    // A concurrent core claim must not be overwritten by this snapshot.
+                    if states(store)?.get(&module.id).is_some_and(|s| s == events::MODULE_RELEASED) {
+                        orch::store::add_adjudication_locked(store, "stuck", &module.id)?;
+                    }
+                    Ok(())
+                })?;
                 stuck.push(Stuck {
                     module: module.id.clone(),
                     reason: "released".into(),

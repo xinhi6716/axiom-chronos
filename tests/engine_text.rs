@@ -4,6 +4,10 @@ fn asset(path: &str) -> &'static str {
     FILES.iter().find(|(name, _)| *name == path).unwrap().1
 }
 
+fn phrase_count(text: &str, phrase: &str) -> usize {
+    text.matches(phrase).count()
+}
+
 #[test]
 fn contract_sentences_are_embedded() {
     let unit_mode = "Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
@@ -25,7 +29,7 @@ fn contract_sentences_are_embedded() {
         ("agents/dispatcher.md", "only when the hook says the review was not recorded, after fixing the cause."),
         ("agents/dispatcher.md", "process every `{unit, pack}` in `review`"),
         ("agents/dispatcher.md", "For `wait`, a later unit runs ACCEPT, or `reason` names what to do."),
-        ("agents/dispatcher.md", "For `fix`, follow the fix flow below."),
+        ("agents/dispatcher.md", "For `fix`, run `unit add --fixes <old>` (CONTEXT: findings/contract); engine auto-escalates TIER/EFFORT; dispatch cycle."),
         ("agents/dispatcher.md", "the outcome saying `module_done` is the report: return it without calling `orch report` or `orch status`"),
         ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
         ("agents/dispatcher.md", "Before dispatching a fix, register it separately with `orch` `[\"unit\", \"add\", <new>, \"--track\", <module>, \"--brief\", <path>, \"--fixes\", <old>]`."),
@@ -65,8 +69,16 @@ fn contract_sentences_are_embedded() {
     ];
     for (path, phrase) in cases {
         let text = asset(path);
-        assert_eq!(text.matches(phrase).count(), 1, "{path}: {phrase}");
+        assert_eq!(phrase_count(text, phrase), 1, "{path}: {phrase}");
     }
+}
+
+#[test]
+fn made_up_contract_sentence_is_not_embedded() {
+    assert_eq!(
+        phrase_count(asset("agents/dispatcher.md"), "For `fix`, ask the moon to dispatch a unicorn."),
+        0
+    );
 }
 
 #[test]

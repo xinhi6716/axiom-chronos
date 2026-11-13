@@ -175,8 +175,9 @@ fn models_are_paginated_and_role_matching_is_exact() {
     assert!(server.alive());
     assert!(models.contains(&"gpt-6.9-terra".to_string()));
     assert_eq!(server.resolve_model("terra").unwrap(), "gpt-6.10-terra");
+    assert_eq!(server.resolve_model("sol").unwrap(), "gpt-6-sol");
     assert_eq!(
-        server.resolve_model("sol").unwrap_err().kind,
+        server.resolve_model("ultra").unwrap_err().kind,
         "model_not_found"
     );
     assert!(!role_matches("terra", "gpt-6-terra-lite"));

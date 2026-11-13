@@ -468,11 +468,11 @@ fn unit_add_refuses_bad_brief_settings_with_a_clear_error() {
     for (body, reason) in [
         (
             "GOAL g\nSCOPE a\nVERIFY v\nEFFORT extreme\n",
-            "has invalid EFFORT \"extreme\": give it once, as one of low, medium, high",
+            "has invalid EFFORT \"extreme\": give it once, as one of low, medium, high, xhigh, max",
         ),
         (
-            "GOAL g\nSCOPE a\nVERIFY v\nTIER sol\n",
-            "has invalid TIER \"sol\": give it once, as one of luna",
+            "GOAL g\nSCOPE a\nVERIFY v\nEFFORT ultra\n",
+            "has invalid EFFORT \"ultra\": give it once, as one of low, medium, high, xhigh, max",
         ),
         ("GOAL g\nSCOPE a\n", "is missing VERIFY"),
     ] {
@@ -485,6 +485,21 @@ fn unit_add_refuses_bad_brief_settings_with_a_clear_error() {
     std::fs::write(&brief, "GOAL g\nSCOPE a\nVERIFY v\nEFFORT low\nTIER luna\n").unwrap();
     assert_eq!(add("x").exit_code, 0);
     assert_eq!(call(p, &["unit", "get", "x"], false, false).exit_code, 0);
+}
+
+#[test]
+fn unit_add_accepts_sol_brief_settings() {
+    let t = Temp::new();
+    let p = &t.0;
+    ok(p, &["init"], false);
+    let brief = p.join("brief.md");
+    std::fs::write(&brief, "GOAL g\nSCOPE a\nVERIFY v\nTIER sol\n").unwrap();
+    ok(
+        p,
+        &["unit", "add", "sol", "--track", "core", "--brief", brief.to_str().unwrap()],
+        false,
+    );
+    ok(p, &["unit", "get", "sol"], false);
 }
 
 #[test]

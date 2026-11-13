@@ -28,15 +28,24 @@ fn report_evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
     if lines.next() != Some("kind\tcommand\texit_code\tcommit\tts") {
         return Err(Failure::new("invalid_argument", "invalid evidence header"));
     }
-    lines.filter(|line| !line.is_empty()).map(|line| {
-        let c: Vec<_> = line.split('\t').collect();
-        if c.len() != 5 { return Err(Failure::new("invalid_argument", "malformed evidence row")); }
-        Ok(Evidence {
-            kind: c[0].into(), command: c[1].into(),
-            exit_code: c[2].parse().map_err(|_| Failure::new("invalid_argument", "invalid evidence exit code"))?,
-            commit: c[3].into(), ts: c[4].into(),
+    lines
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let c: Vec<_> = line.split('\t').collect();
+            if c.len() != 5 {
+                return Err(Failure::new("invalid_argument", "malformed evidence row"));
+            }
+            Ok(Evidence {
+                kind: c[0].into(),
+                command: c[1].into(),
+                exit_code: c[2]
+                    .parse()
+                    .map_err(|_| Failure::new("invalid_argument", "invalid evidence exit code"))?,
+                commit: c[3].into(),
+                ts: c[4].into(),
+            })
         })
-    }).collect()
+        .collect()
 }
 fn evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
     base::require_slug("unit", unit)?;
@@ -294,6 +303,27 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         head.push_str(&format!("\n## Module contract\n\n{}\n", module.contract));
     }
     head.push_str(&format!("\n## Brief\n\n{}\n", brief.text.trim_end()));
+    if !brief.contract.is_empty() {
+        head.push_str(&format!("\n## CONTRACT\n\n{}\n", brief.contract.join("\n")));
+    }
+    if !brief.test_matrix.is_empty() {
+        head.push_str("\n## TEST_MATRIX\n\n");
+        for row in &brief.test_matrix {
+            head.push_str(&format!("{} | {} | {}::{} | {} | {}\n", row.id, row.kind, row.file, row.case, row.assertion, row.command));
+        }
+    }
+    {
+        head.push_str("\n## Test matrix results\n\n");
+        for result in rows
+            .iter()
+            .filter(|r| r.kind == "red" || r.kind == "matrix")
+        {
+            head.push_str(&format!(
+                "{} | {} | exit {} | {}\n",
+                result.kind, result.command, result.exit_code, result.commit
+            ));
+        }
+    }
     if earlier.is_some() {
         head.push_str("\n## Earlier findings\n\n");
         pack_findings(store, unit, &rows, &mut head)?;
@@ -403,14 +433,15 @@ fn unit_paths(
     repo: &Path,
     notes: &mut Vec<String>,
 ) -> Res<BTreeSet<String>> {
-    let mut paths: BTreeSet<String> =
-        match crate::storage::archive::read_to_string(&store.join("reports").join(format!("{unit}.json"))) {
-            Ok(text) => serde_json::from_str::<Value>(&text)
-                .map(|v| report_paths(&v, repo).into_iter().collect())
-                .unwrap_or_default(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(e) => return Err(io(e)),
-        };
+    let mut paths: BTreeSet<String> = match crate::storage::archive::read_to_string(
+        &store.join("reports").join(format!("{unit}.json")),
+    ) {
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .map(|v| report_paths(&v, repo).into_iter().collect())
+            .unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => return Err(io(e)),
+    };
     let rows = evidence(store, unit)?;
     let tree = |r: &&Evidence| r.commit.starts_with("tree:");
     let base = rows.iter().filter(|r| r.kind == "run").find(tree);
