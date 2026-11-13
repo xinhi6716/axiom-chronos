@@ -73,28 +73,10 @@ fn wait_for(
         std::thread::sleep(Duration::from_millis(2));
     }
 }
-fn save_capture(lines: &[(String, String)], lang: Lang, mode: ThemeMode, size: (f32, f32)) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("captures/research");
-    std::fs::create_dir_all(&dir).unwrap();
-    let lang = if lang == Lang::En { "en" } else { "zh-TW" };
-    let theme = if mode == ThemeMode::Dark {
-        "dark"
-    } else {
-        "light"
-    };
-    let filename = format!(
-        "sources.{theme}.{}x{}.{lang}.txt",
-        size.0 as u32, size.1 as u32
-    );
-    let body = lines
-        .iter()
-        .filter(|(p, _)| p.contains("research-sources"))
-        .map(|(p, t)| format!("{p}\t{t}\n"))
-        .collect::<String>();
-    std::fs::write(dir.join(filename), body).unwrap();
-}
 #[gpui_kit::test]
 fn sources_funnel_is_visible(cx: &mut TestAppContext) {
+    let research_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("captures/research");
+    let captures_before = tree_hash(&research_dir);
     let copy = fixture_copy("rram");
     let before = tree_hash(&copy);
     let wb = opened_workbench(cx, &copy.join("project"), &copy.join("store"));
@@ -119,6 +101,16 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
                     "research-sources-node-total",
                     &f.total.to_string(),
                 );
+                let lines: Vec<_> = lines
+                    .into_iter()
+                    .filter(|(path, _)| path.contains("research-sources"))
+                    .collect();
+                assert!(!lines.is_empty());
+                assert!(shows(
+                    &lines,
+                    "research-sources-node-total",
+                    &f.total.to_string()
+                ));
                 assert!(shows(
                     &lines,
                     "research-sources-node-pending",
@@ -135,7 +127,6 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
                     shows(&lines, "research-sources-row-0", "10.1234/same")
                         && shows(&lines, "research-sources-row-1", "10.1234/same")
                 );
-                save_capture(&lines, lang, mode, size);
             }
         }
     }
@@ -325,4 +316,9 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
     assert!(visible(&lines, "research-sources-row-200"));
     click(cx, reopened, "research-sources-previous");
     wait_for(cx, reopened, "research-sources-page", "1–200 / 241");
+    assert_eq!(
+        tree_hash(&research_dir),
+        captures_before,
+        "research_sources must not write captures/research"
+    );
 }
