@@ -260,13 +260,33 @@ pub fn run(options: Options) -> i32 {
         } else {
             settings::opening_bounds(&prefs, default_size, min_size, cx)
         };
-        let window = WindowOptions {
+        let mut window = WindowOptions {
             window_bounds: Some(bounds),
             window_min_size: Some(min_size),
             titlebar: Some(component::TitleBar::title_bar_options()),
             focus: !options.offscreen && targets::place::focus(cx),
             ..Default::default()
         };
+        #[cfg(windows)]
+        let placement = targets::place::installed(cx);
+        #[cfg(windows)]
+        let placement_name = if options.offscreen { "offscreen" } else { options.place.map_or("unknown", |place| place.key()) };
+        #[cfg(windows)]
+        if let Some(chosen) = &placement {
+            let inputs = targets::place::window_inputs(chosen, default_size);
+            window.window_bounds = Some(WindowBounds::Windowed(inputs.bounds));
+            window.show = inputs.show;
+            window.focus = inputs.focus;
+            if let Some(id) = inputs.display_id {
+                window.display_id = cx.displays().iter().find(|display| targets::place::display_id(display.as_ref()) == id).map(|display| display.id());
+                if window.display_id.is_none() {
+                    eprintln!("placement {placement_name} failed: display {id} is no longer available");
+                    run_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cx.quit();
+                    return;
+                }
+            }
+        }
         let may_flash = !options.offscreen;
         // The launch starts with the window; a scene that holds it freezes the motion clock there.
         let start = std::time::Instant::now();
@@ -280,6 +300,13 @@ pub fn run(options: Options) -> i32 {
             launch::Launch::none()
         };
         if shell::start_mini_only(ephemeral, prefs.mode, options.confirm_quit) {
+                #[cfg(windows)]
+                if options.place.is_some() {
+                    eprintln!("placement {placement_name} failed: mini startup cannot create a hidden window for monitor verification");
+                    run_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cx.quit();
+                    return;
+                }
                 match mini::open_mini_at(state.clone(), prefs.mini_on_top, options.offscreen, cx) {
                     Ok(handle) => if let Err(error) = instrument_mini(handle, cx) {
                         eprintln!("{error}");
@@ -288,12 +315,61 @@ pub fn run(options: Options) -> i32 {
                     Err(error) => { eprintln!("{error}"); cx.quit(); }
                 }
         } else {
+                #[cfg(windows)]
+                let selected_display_id = window.display_id;
+                #[cfg(windows)]
+                let previous_windows = if placement.is_some() {
+                    match targets::place::process_windows() {
+                        Ok(windows) => windows,
+                        Err(error) => {
+                            eprintln!("placement {placement_name} failed: {error}");
+                            run_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            cx.quit();
+                            return;
+                        }
+                    }
+                } else { Vec::new() };
                 let mut shell = None;
                 let (handle, _) = gpui_kit::open_window(window, cx, |window, cx| {
                     let view = cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening));
                     shell = Some(view.clone());
                     cx.new(|_| perf::Root::new(view.into()))
                 }).expect("could not open the main window");
+                #[cfg(windows)]
+                if let Some(chosen) = placement {
+                    let scale = handle.update(cx, |_, window, _| window.scale_factor()).unwrap_or(1.);
+                    let displays = targets::place::display_infos(cx);
+                    let run_failed = run_failed.clone();
+                    let capture_state = options.capture_state;
+                    let quit_after = options.quit_after;
+                    cx.spawn(async move |cx| {
+                        // SetWindowPos can synchronously invoke gpui callbacks, so
+                        // do not hold an App borrow while using the native HWND.
+                        let result = targets::place::verify_and_show(&chosen, selected_display_id, default_size, &displays, scale, &previous_windows);
+                        let _ = cx.update(|cx| {
+                            if let Err(error) = result {
+                                eprintln!("placement {placement_name} failed: {error}");
+                                run_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                cx.quit();
+                                return;
+                            }
+                            if let Some(t) = &capture {
+                                handle.update(cx, |_, window, cx| {
+                                    let prepared = state.update(cx, |state, cx| { let result = targets::prepare(t, capture_state, state); cx.notify(); result });
+                                    let result = prepared.and_then(|()| shell.as_ref().unwrap().update(cx, |shell, cx| shell.apply_target(t, capture_state, window, cx)));
+                                    if let Err(error) = result { eprintln!("unregistered target: {} ({})", error.target, error.state.key()); run_failed.store(true, std::sync::atomic::Ordering::Relaxed); cx.quit(); }
+                                }).expect("could not update the main window");
+                            }
+                            if let Some(seconds) = quit_after {
+                                cx.spawn(async move |cx| {
+                                    cx.background_executor().timer(Duration::from_secs(seconds)).await;
+                                    let _ = cx.update(|cx| cx.quit());
+                                }).detach();
+                            }
+                        });
+                    }).detach();
+                    return;
+                }
                 if let Some(t) = &capture {
                     handle.update(cx, |_, window, cx| {
                         let prepared = state.update(cx, |state, cx| { let result = targets::prepare(t, options.capture_state, state); cx.notify(); result });
@@ -306,8 +382,7 @@ pub fn run(options: Options) -> i32 {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(seconds)).await;
                 let _ = cx.update(|cx| cx.quit());
-            })
-            .detach();
+            }).detach();
         }
     });
     if failed.load(std::sync::atomic::Ordering::Relaxed) { 1 } else { 0 }
