@@ -2,6 +2,16 @@ use super::*;
 use crate::desktop::{parse_options, research::Tab, ux::Page};
 use std::prelude::v1::test;
 #[test]
+fn capture_target_is_applied_after_the_window_opens() {
+ let source = include_str!("../mod.rs");
+ let closure = source.split_once("gpui_kit::open_window(window, cx, |window, cx| {").unwrap().1
+  .split_once(".expect(\"could not open the main window\")").unwrap().0;
+ assert!(!closure.contains("targets::prepare"));
+ assert!(!closure.contains("apply_target"));
+ assert!(source.contains("targets::prepare"));
+ assert!(source.contains("apply_target"));
+}
+#[test]
 fn inventory_covers_pages_screens_tabs_and_ids() {
  let pages = [Page::Research, Page::Storage, Page::Chat, Page::QuickTask, Page::Plaza, Page::Session("id".into()), Page::Paper("id".into()), Page::Routine];
  let targets = all();

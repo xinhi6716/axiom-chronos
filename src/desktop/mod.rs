@@ -277,15 +277,19 @@ pub fn run(options: Options) -> i32 {
                     Err(error) => { eprintln!("{error}"); cx.quit(); }
                 }
         } else {
-                gpui_kit::open_window(window, cx, |window, cx| {
-                    let shell = cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening));
-                    if let Some(t) = &capture {
-                        let prepared = state.update(cx, |state, cx| { let result = targets::prepare(t, options.capture_state, state); cx.notify(); result });
-                        let result = prepared.and_then(|()| shell.update(cx, |shell, cx| shell.apply_target(t, options.capture_state, window, cx)));
-                        if let Err(error) = result { eprintln!("unregistered target: {} ({})", error.target, error.state.key()); run_failed.store(true, std::sync::atomic::Ordering::Relaxed); cx.quit(); }
-                    }
-                    cx.new(|_| perf::Root::new(shell.into()))
+                let mut shell = None;
+                let (handle, _) = gpui_kit::open_window(window, cx, |window, cx| {
+                    let view = cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening));
+                    shell = Some(view.clone());
+                    cx.new(|_| perf::Root::new(view.into()))
                 }).expect("could not open the main window");
+                if let Some(t) = &capture {
+                    handle.update(cx, |_, window, cx| {
+                        let prepared = state.update(cx, |state, cx| { let result = targets::prepare(t, options.capture_state, state); cx.notify(); result });
+                        let result = prepared.and_then(|()| shell.as_ref().unwrap().update(cx, |shell, cx| shell.apply_target(t, options.capture_state, window, cx)));
+                        if let Err(error) = result { eprintln!("unregistered target: {} ({})", error.target, error.state.key()); run_failed.store(true, std::sync::atomic::Ordering::Relaxed); cx.quit(); }
+                    }).expect("could not update the main window");
+                }
         }
         if let Some(seconds) = options.quit_after {
             cx.spawn(async move |cx| {
