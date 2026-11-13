@@ -3,12 +3,14 @@ use super::{keys, Batch, EdgeSpec, GraphStore, IngestReport, NodeRef, NodeSpec, 
 use crate::{
     base::{Failure, Res},
     council::Council,
+    engine::kinds,
     goal::Goal,
     orch,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -91,9 +93,104 @@ fn councils(
     Ok(())
 }
 
+fn terminal_events(
+    home: &Path,
+    store: &Path,
+    wish: &str,
+    amendments: Option<&HashSet<String>>,
+    waiver_reasons: &HashSet<String>,
+    out: &mut Vec<FeedbackEvent>,
+) -> Res<()> {
+    let path = store.join("events.jsonl");
+    if !path.exists() {
+        return Ok(());
+    }
+    let events = orch::events::read_events(store, 0)?;
+    let terminal: Vec<_> = events
+        .iter()
+        .rev()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                kinds::INTERJECTION_APPLIED
+                    | kinds::INTERJECTION_DECLINED
+                    | kinds::ADJUDICATION_OVERTURNED
+            )
+        })
+        .take(2000)
+        .collect();
+    let interjection_ids: HashSet<_> = terminal
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                kinds::INTERJECTION_APPLIED | kinds::INTERJECTION_DECLINED
+            )
+        })
+        .filter_map(|event| event.data["id"].as_str())
+        .collect();
+    let mut amended_ids = HashSet::new();
+    if let Some(amendments) =
+        amendments.filter(|set| !set.is_empty() && !interjection_ids.is_empty())
+    {
+        // A receipt may precede its terminal decision by an arbitrary number of events.
+        for event in &events {
+            if event.kind == kinds::INTERJECTION_RECEIVED {
+                if let (Some(id), Some(digest)) =
+                    (event.data["id"].as_str(), event.data["digest"].as_str())
+                {
+                    if interjection_ids.contains(id) && amendments.contains(digest) {
+                        amended_ids.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    for event in terminal {
+        let Some(id) = event.data["id"].as_str() else {
+            continue;
+        };
+        let reason = event.data["reason"].as_str().unwrap_or("");
+        let overturned = event.kind == kinds::ADJUDICATION_OVERTURNED;
+        if (overturned && waiver_reasons.contains(reason))
+            || (!overturned && amended_ids.contains(id))
+        {
+            continue;
+        }
+        let default_decider = if overturned { "user" } else { "core" };
+        let decider = event.data["decider"]
+            .as_str()
+            .filter(|v| *v == "user" || *v == "core")
+            .unwrap_or(default_decider);
+        let text = if overturned {
+            reason.to_owned()
+        } else if event.kind == kinds::INTERJECTION_APPLIED {
+            format!("interjection {id} applied")
+        } else {
+            event.data["reason"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("interjection {id} declined"))
+        };
+        out.push(FeedbackEvent {
+            kind: event.kind.clone(),
+            target: keys::wish(wish),
+            decider: decider.into(),
+            reason: reason.into(),
+            text,
+            wish: wish.into(),
+            source: format!("{}#{id}", locator(home, &path)),
+            source_sha256: hash(&serde_json::to_vec(event).map_err(io)?),
+            supersedes: None,
+        });
+    }
+    Ok(())
+}
+
 pub fn collect(home: &Path, project: &str) -> Res<Vec<FeedbackEvent>> {
     let project_store = orch::wish_store(home, project, None)?;
     let mut out = Vec::new();
+    let mut amendments: HashMap<String, HashSet<String>> = HashMap::new();
     for path in entries(&home.join("goals"))? {
         if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
@@ -113,6 +210,10 @@ pub fn collect(home: &Path, project: &str) -> Res<Vec<FeedbackEvent>> {
             .map(str::to_owned);
         let digest = hash(&bytes);
         for (i, text) in goal.amendments.into_iter().enumerate() {
+            amendments
+                .entry(wish.clone())
+                .or_default()
+                .insert(hash(text.as_bytes()));
             out.push(FeedbackEvent {
                 kind: "correction".into(),
                 target: target.clone(),
@@ -143,43 +244,52 @@ pub fn collect(home: &Path, project: &str) -> Res<Vec<FeedbackEvent>> {
     for store in orch::wish_stores(&project_store) {
         let wish = orch::wish_of_store(&store);
         councils(home, &store, 0, &wish, &mut out)?;
-        if !store.join("units.tsv").exists() {
-            continue;
-        }
-        for unit in orch::read_units(&store)? {
-            let rows = orch::evidence(&store, &unit.id)?;
-            let waivers = orch::findings::waivers(&rows);
-            if waivers.is_empty() {
-                continue;
-            }
-            let Some(verdict) = orch::findings::read_verdict(&store, &unit.id)? else {
-                continue;
-            };
-            let path = store
-                .join("reports")
-                .join(format!("{}.evidence.tsv", unit.id));
-            let digest = hash(&fs::read(&path).map_err(io)?);
-            for (i, waiver) in waivers.into_iter().enumerate() {
-                let Some(finding) = verdict.findings.iter().find(|f| f.number == waiver.number)
-                else {
+        let mut waiver_reasons = HashSet::new();
+        if store.join("units.tsv").exists() {
+            for unit in orch::read_units(&store)? {
+                let rows = orch::evidence(&store, &unit.id)?;
+                let waivers = orch::findings::waivers(&rows);
+                if waivers.is_empty() {
+                    continue;
+                }
+                let Some(verdict) = orch::findings::read_verdict(&store, &unit.id)? else {
                     continue;
                 };
-                let Ok(number) = u32::try_from(finding.number) else {
-                    continue;
-                };
-                out.push(FeedbackEvent {
-                    kind: "waived_finding".into(),
-                    target: keys::finding(&wish, &unit.id, number),
-                    decider: "core".into(),
-                    reason: waiver.reason,
-                    text: finding.evidence.clone(),
-                    wish: wish.clone(),
-                    source: format!("{}#waivers/{i}", locator(home, &path)),
-                    source_sha256: digest.clone(),
-                    supersedes: None,
-                });
+                let path = store
+                    .join("reports")
+                    .join(format!("{}.evidence.tsv", unit.id));
+                let digest = hash(&fs::read(&path).map_err(io)?);
+                for (i, waiver) in waivers.into_iter().enumerate() {
+                    let Some(finding) = verdict.findings.iter().find(|f| f.number == waiver.number)
+                    else {
+                        continue;
+                    };
+                    let Ok(number) = u32::try_from(finding.number) else {
+                        continue;
+                    };
+                    waiver_reasons.insert(waiver.reason.clone());
+                    out.push(FeedbackEvent {
+                        kind: "waived_finding".into(),
+                        target: keys::finding(&wish, &unit.id, number),
+                        decider: "core".into(),
+                        reason: waiver.reason,
+                        text: finding.evidence.clone(),
+                        wish: wish.clone(),
+                        source: format!("{}#waivers/{i}", locator(home, &path)),
+                        source_sha256: digest.clone(),
+                        supersedes: None,
+                    });
+                }
             }
         }
+        terminal_events(
+            home,
+            &store,
+            &wish,
+            amendments.get(&wish),
+            &waiver_reasons,
+            &mut out,
+        )?;
     }
     out.sort_by(|a, b| (&a.wish, &a.source, &a.kind).cmp(&(&b.wish, &b.source, &b.kind)));
     Ok(out)
