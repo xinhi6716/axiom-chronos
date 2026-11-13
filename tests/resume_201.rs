@@ -1,7 +1,8 @@
 //! Resume compatibility contract (fixed before any run): existing units may move only
 //! among pending, claimed, running, verified, failed, superseded, paused and resumed;
-//! new events, receipts and units may be appended. All other existing data, including
-//! unknown JSON fields and completed work, must remain field-equal or byte-identical.
+//! new events, receipts and units may be appended. The goal may gain a non-negative
+//! integer need_bytes field, which must remain unchanged once present. All other data,
+//! including unknown JSON fields and completed work, must remain field-equal or byte-identical.
 //! Verified work must never be executed or charged again.
 mod common;
 
@@ -85,6 +86,21 @@ fn goal_fields(bytes: &[u8]) -> Value {
     }
     v
 }
+fn goal_change_ok(old: &[u8], new: &[u8]) -> Result<(), String> {
+    let mut old = goal_fields(old);
+    let mut new = goal_fields(new);
+    let old_need = old.as_object_mut().unwrap().remove("need_bytes");
+    let new_need = new.as_object_mut().unwrap().remove("need_bytes");
+    if old != new
+        || match old_need {
+            Some(value) => new_need != Some(value),
+            None => new_need.is_some_and(|value| value.as_u64().is_none()),
+        }
+    {
+        return Err("goal fields changed".into());
+    }
+    Ok(())
+}
 fn unit_rows(bytes: &[u8]) -> Result<BTreeMap<String, Vec<String>>, String> {
     let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
     let mut lines = text.lines();
@@ -148,9 +164,7 @@ fn compare(
     for (path, old) in before {
         let new = after.get(path).ok_or_else(|| format!("deleted {path:?}"))?;
         if path == Path::new("goal.json") {
-            if goal_fields(old) != goal_fields(new) {
-                return Err("goal fields changed".into());
-            }
+            goal_change_ok(old, new)?;
         } else if path == units_path {
             continue;
         } else if path == Path::new("store/events.jsonl")
@@ -237,6 +251,54 @@ fn compare(
         }
     }
     Ok(())
+}
+#[test]
+fn goal_need_bytes_control() {
+    let cases = [
+        (json!({}), json!({"need_bytes": 42}), true),
+        (json!({}), json!({}), true),
+        (json!({"need_bytes": 42}), json!({"need_bytes": 42}), true),
+        (json!({"need_bytes": 42}), json!({"need_bytes": 43}), false),
+        (json!({"need_bytes": 42}), json!({}), false),
+        (json!({}), json!({"need_bytes": "x"}), false),
+        (json!({}), json!({"need_bytes": -1}), false),
+        (json!({}), json!({"need_bytes": 1.5}), false),
+        (json!({}), json!({"need_bytes": null}), false),
+    ];
+    for (old, new, expected) in cases {
+        let result = goal_change_ok(
+            &serde_json::to_vec(&old).unwrap(),
+            &serde_json::to_vec(&new).unwrap(),
+        );
+        assert_eq!(result.is_ok(), expected, "{old} -> {new}: {result:?}");
+    }
+}
+
+#[test]
+fn goal_other_fields_negative_control() {
+    let (temp, store) = fixture("synthetic");
+    let baseline = snapshot(temp.path(), &store, "legacy");
+    let original: Value = serde_json::from_slice(&baseline[Path::new("goal.json")]).unwrap();
+    for change in ["unknown", "wish", "project", "removed"] {
+        let mut goal = original.clone();
+        goal["need_bytes"] = json!(42);
+        match change {
+            "unknown" => goal["new_unknown_field"] = json!(true),
+            "wish" => goal["wish"] = json!("changed wish"),
+            "project" => goal["project"] = json!("changed project"),
+            "removed" => {
+                goal.as_object_mut().unwrap().remove("future_goal");
+            }
+            _ => unreachable!(),
+        }
+        let mut changed = baseline.clone();
+        changed.insert("goal.json".into(), serde_json::to_vec(&goal).unwrap());
+        assert_eq!(
+            compare(temp.path(), &baseline, &changed),
+            Err("goal fields changed".into()),
+            "{change}"
+        );
+    }
 }
 fn snapshot(home: &Path, store: &Path, session_id: &str) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
