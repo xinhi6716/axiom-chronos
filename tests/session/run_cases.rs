@@ -20,6 +20,7 @@ impl EnvRestore {
         Self(
             [
                 "FAKE_CLAUDE_RECORD",
+                "FAKE_CLAUDE_SET_MODEL",
                 "FAKE_CLAUDE_SCENARIO",
                 "FAKE_CLAUDE_SESSION",
                 "FAKE_CLAUDE_PIDS",
@@ -846,4 +847,113 @@ fn resume_rejects_missing_done_and_missing_cwd() {
         assert_eq!(err.kind, "invalid_argument");
         assert!(err.message.contains("has no project directory"));
     }
+}
+
+
+struct StageRun { turns: Vec<Value>, record: Value, users: Vec<String>, argv: Vec<Value>, code: i32, trace: Vec<(String,String,u64)> }
+fn stages(supported: bool, unchanged: bool, reread: bool, equal: bool, fail_resume: bool) -> StageRun {
+    use axiom::{orch, engine::policy, session::stage};
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = EnvRestore::new();
+    let temp = common::temp(); let home = temp.path().join("home"); let record = temp.path().join("record.json");
+    std::env::set_var("FAKE_CLAUDE_RECORD", &record);
+    std::env::set_var("FAKE_CLAUDE_SCENARIO", "stages");
+    std::env::set_var("FAKE_CLAUDE_SESSION", SESSION);
+    std::env::remove_var("FAKE_CLAUDE_SET_MODEL");
+    if supported { std::env::set_var("FAKE_CLAUDE_SET_MODEL", "supported"); }
+    let g = goal::open(&home, SESSION, "stage wish", temp.path().to_str()).unwrap();
+    let store = orch::store_for_goal(&home, &g).unwrap();
+    std::fs::create_dir_all(store.join("astra")).unwrap();
+    std::fs::create_dir_all(store.join("reports")).unwrap();
+    std::fs::write(store.join("reports/_full.evidence.tsv"), "kind\tcommand\texit_code\tcommit\tts\nfull\tfixture\t0\t\t9999\n").unwrap();
+    let mut models = policy::Models::default();
+    if equal { models.core.build = "opus".into(); }
+    policy::save_global_models(&home, &models).unwrap();
+    let mut claude = common::fake("fake_claude");
+    if fail_resume {
+        let fake = claude.pop().unwrap();
+        claude.extend(["-c".into(), format!("import sys,runpy; sys.exit(3) if '--resume' in sys.argv else None; sys.argv=[{}]+sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')", serde_json::json!(fake))]);
+    }
+    let config = Config { claude: Ok(claude), home: home.clone(), bin: temp.path().join("axiom"), clock: Clock::system() };
+    let spawned = axiom::session::spawn(&config, "wish", "stage wish", temp.path(), None, None).unwrap();
+    let mut n = 0; let mut users = vec![]; let mut argv = vec![];
+    let result = axiom::session::drive(spawned, &config, &mut Vec::new(), &std::sync::atomic::AtomicBool::new(false), &mut |event| {
+        if event["type"] == "system" && event["subtype"] == "init" {
+            assert_eq!(event["session_id"], SESSION);
+            argv.push(Value::Null);
+        }
+        if event["type"] != "result" { return; }
+        n += 1;
+        let r: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        *argv.last_mut().unwrap() = r["argv"].clone();
+        users.push(r["messages"].as_array().unwrap().iter().rev().find(|m| m["type"] == "user").unwrap()["message"]["content"][0]["text"].as_str().unwrap().to_owned());
+        if unchanged { if n == 3 { goal::set_status(&home, SESSION, "done", None).unwrap(); } return; }
+        match n {
+            1 => { std::fs::write(store.join("astra/plan-final.md"), "plan").unwrap(); std::fs::write(store.join("modules.md"), "modules").unwrap(); }
+            2 => { std::fs::write(store.join("gates.md"), "# Gates\n\n## g1\n- Question: q\n- Options: a,b\n- Default: a\n- Status: open\n").unwrap(); if reread { models.core.build = "haiku".into(); policy::save_global_models(&home, &models).unwrap(); } }
+            3 => { std::fs::write(store.join("gates.md"), "# Gates\n\n## g1\n- Question: q\n- Options: a,b\n- Default: a\n- Status: resolved\n- Answer: a\n").unwrap(); }
+            4 => { std::fs::write(store.join("units.tsv"), "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm1\tverified\t\t\t\t\n").unwrap(); }
+            _ => { goal::set_status(&home, SESSION, "done", None).unwrap(); }
+        }
+    });
+    let turns = stage::read_turns(&home, SESSION).unwrap().iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+    let trace = stage::trace(&home, SESSION).unwrap().into_iter().map(|r| (r.model,r.role,r.calls)).collect();
+    assert_eq!(goal::load(&home, SESSION).unwrap().unwrap().wish, "stage wish");
+    StageRun { turns, record: serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap(), users, argv, code: result.unwrap_or(1), trace }
+}
+fn assert_sequence(r: &StageRun, via: &str) {
+    assert_eq!(r.code, 0);
+    assert_eq!(r.turns.iter().map(|t| t["stage"].as_str().unwrap()).collect::<Vec<_>>(), ["planning","build","escalation","build","close"]);
+    let models = ["opus","sonnet","opus","sonnet","opus"];
+    assert_eq!(r.record["turn_models"], serde_json::json!(models));
+    for (i,t) in r.turns.iter().enumerate() { assert_eq!(t["turn"], (i+1) as u64); assert_eq!(t["model"], models[i]); assert_eq!(t["ok"], true); assert_eq!(t["via"], if i == 0 { "initial" } else { via }); }
+}
+#[test]
+fn stage_sequence_via_control() {
+    let r = stages(true,false,false,false,false); assert_sequence(&r,"control"); assert_eq!(r.argv.len(),1);
+    let requests = r.record["control_requests"].as_array().unwrap(); assert_eq!(requests.len(),4);
+    assert_eq!(requests.iter().map(|r| r["request"]["model"].as_str().unwrap()).collect::<Vec<_>>(), ["sonnet","opus","sonnet","opus"]);
+    assert!(!r.argv[0].as_array().unwrap().iter().any(|v| v == "--resume"));
+}
+#[test]
+fn stage_sequence_via_resume_fallback() {
+    let r=stages(false,false,false,false,false); assert_sequence(&r,"resume"); assert_eq!(r.argv.len(),5);
+    for t in &r.turns[1..] { assert!(t["control_error"].is_string()); }
+    for args in &r.argv[1..] {
+        let args = args.as_array().unwrap();
+        assert_eq!(args[args.iter().position(|v| v == "--resume").unwrap()+1], SESSION);
+    }
+    let args=r.record["argv"].as_array().unwrap();
+    assert_eq!(args[args.iter().position(|v| v == "--resume").unwrap()+1], SESSION);
+    assert_eq!(args[args.iter().position(|v| v == "--model").unwrap()+1], "opus");
+}
+#[test]
+fn failed_control_never_claims_a_switch() { let r=stages(false,false,false,false,false); assert_sequence(&r,"resume"); assert!(r.turns.iter().all(|t| t["via"] != "control")); }
+#[test]
+fn no_duplicate_dispatch() { for supported in [false,true] { let r=stages(supported,false,false,false,false); assert_eq!(r.users.len(),5); assert_eq!(r.users.iter().filter(|s| s.starts_with("/chronos:wish")).count(),1); assert_eq!(r.record["turn_models"].as_array().unwrap().len(),r.users.len()); } }
+#[test]
+fn unchanged_stage_sends_no_control() { let r=stages(true,true,false,false,false); assert_eq!(r.turns.len(),3); assert!(r.turns.iter().all(|t| t["via"] == "initial")); assert_eq!(r.argv.len(),1); assert_eq!(r.record["control_requests"],serde_json::json!([])); }
+#[test]
+fn models_are_reread_at_each_boundary() { let r=stages(true,false,true,false,false); assert_eq!(r.turns.len(),5); assert_eq!(r.turns[3]["model"],"haiku"); assert_eq!(r.record["turn_models"][3],"haiku"); }
+#[test]
+fn stage_trace_by_model_and_role() { let r=stages(true,false,false,false,false); assert_eq!(r.trace,vec![("opus".into(),"core".into(),3),("sonnet".into(),"core".into(),2)]); }
+#[test]
+fn resume_failure_is_not_a_switch() { let r=stages(false,false,false,false,true); assert_ne!(r.code,0); assert_eq!(r.turns.len(),2); assert_eq!(r.turns[1]["ok"],false); assert_eq!(r.turns[1]["model"],"opus"); assert_eq!(r.turns[1]["via"],"resume"); }
+#[test]
+fn switch_logic_is_what_changes_models() { let r=stages(true,false,false,true,false); assert_eq!(r.turns.len(),5); assert!(r.turns.iter().all(|t| t["model"] == "opus")); assert_eq!(r.record["control_requests"],serde_json::json!([])); }
+#[test]
+fn await_control_response_cases() {
+    use std::sync::{mpsc,atomic::AtomicBool};
+    use axiom::session::await_control_response as wait;
+    let stop=AtomicBool::new(false);
+    for error in [None,Some("rejected")] {
+        let (tx,rx)=mpsc::channel();
+        tx.send(b"not json\n".to_vec()).unwrap();
+        tx.send(serde_json::to_vec(&serde_json::json!({"type":"control_response","response":{"request_id":"other","subtype":"success"}})).unwrap()).unwrap();
+        tx.send(serde_json::to_vec(&serde_json::json!({"type":"control_response","response":{"request_id":"id","subtype":if error.is_some(){"error"}else{"success"},"error":error}})).unwrap()).unwrap();
+        assert_eq!(wait(&rx,"id",Duration::from_millis(50),&stop),error.map_or(Ok(()),|s|Err(s.into())));
+    }
+    let (tx,rx)=mpsc::channel(); assert_eq!(wait(&rx,"id",Duration::from_millis(50),&stop),Err("timeout".into()));
+    drop(tx); assert_eq!(wait(&rx,"id",Duration::from_millis(50),&stop),Err("closed".into()));
+    assert_eq!(wait(&rx,"id",Duration::from_millis(50),&AtomicBool::new(true)),Err("stopped".into()));
 }

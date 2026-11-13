@@ -154,12 +154,19 @@ fn run(after: bool) -> f64 {
                     scope.spawn(move || {
                         barrier.wait();
                         let result = call(bridge, "codex_run", &input)["structuredContent"].clone();
+                        assert_ne!(result["error"]["kind"], "not_ready", "{CODEX} {input}: {result}");
                         assert_eq!(result["status"], "completed", "{CODEX} {input}: {result}");
                         if after { assert_ne!(result["next"], "fix", "cycle {input}: {result}"); }
                     })
                 }).collect();
                 for handle in handles { handle.join().unwrap(); }
             });
+            // Module acceptance is a shared fixture barrier, not part of the
+            // dispatcher-turn comparison. Parallel workers can both skip auto-accept.
+            let module = calls[0].1["input"]["track"].as_str().unwrap();
+            let result = f.orch(json!(["accept",module,"--repo",f.repo]));
+            assert_ne!(result["error"]["kind"], "not_ready", "accept {module}: {result}");
+            assert_eq!(result["exit_code"], 0, "accept {module}: {result}");
             continue;
         }
         for (parent, tool) in calls {
@@ -185,6 +192,7 @@ fn run(after: bool) -> f64 {
                 }
                 let short = if name == ORCH {"orch"} else if name == CODEX {"codex_run"} else {"memory_search"};
                 let result=call(&f.bridge, short, &input)["structuredContent"].clone();
+                assert_ne!(result["error"]["kind"], "not_ready", "{name} {input}: {result}");
                 if name != MEMORY { assert_eq!(result["status"],"completed", "{name} {input}: {result}"); }
                 if name == CODEX && after { assert_ne!(result["next"], "fix", "cycle {input}: {result}"); }
                 if name == ORCH { assert_eq!(result["exit_code"],0, "{input}: {result}"); }
@@ -207,5 +215,26 @@ fn run(after: bool) -> f64 {
 }
 #[test]
 fn synthetic_dispatch_turns() { let before=run(false); let after=run(true); assert!(within_limit(after), "after={after}"); assert!(after < before, "after={after}, before={before}"); }
+#[test]
+fn dependent_dispatch_requires_accept() {
+    let f = Fixture::new();
+    let (brief, text) = f.brief("a1");
+    write_file(brief.to_str().unwrap(), &text);
+    let added = f.orch(json!(["unit","add","a1","--track","a","--brief",brief]));
+    assert_eq!(added["exit_code"], 0, "{added}");
+    let orch::Begin::Run { attempt_id, .. } = orch::begin_unit(&f.store, "a1", "terra", &f.repo, false).unwrap() else { panic!("expected new run") };
+    fs::write(f.repo.join("a/one.txt"), "fake-written").unwrap();
+    orch::finish_unit(&f.store, "a1", &attempt_id, &f.repo, "terra", "gpt-6-terra", &json!({"status":"completed","file_changes":[]})).unwrap();
+    let rows = orch::evidence(&f.store, "a1").unwrap();
+    assert_eq!(orch::derive_state(&rows, true), "built");
+    assert!(!rows.iter().any(|r| r.kind == "accept"));
+    let (brief, text) = f.brief("b1");
+    write_file(brief.to_str().unwrap(), &text);
+    for cycle in [false, true] {
+        let result = call(&f.bridge, "codex_run", &json!({"project":f.project,"unit":"b1","role":"terra","cwd":f.repo,"cycle":cycle,"track":"b","brief_file":brief}))["structuredContent"].clone();
+        assert_eq!(result["error"]["kind"], "not_ready", "cycle={cycle}: {result}");
+        assert!(result["error"]["message"].as_str().unwrap().contains("a1 (built; next accept)"), "{result}");
+    }
+}
 #[test]
 fn counting_negative_control() { let events:Vec<Value>=(0..7).map(|_|json!({"type":"assistant","parent_tool_use_id":"d-a","message":{"content":[{"type":"tool_use","name":"Read"}]}})).collect(); let (_,per,_,_,_)=counts(&events,2); assert_eq!(per,3.5); assert!(!within_limit(per)); }

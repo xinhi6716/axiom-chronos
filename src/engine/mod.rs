@@ -12,6 +12,7 @@ pub mod finding_verification;
 pub mod interjections;
 pub mod kinds;
 pub mod policy;
+pub mod self_check;
 
 pub const FILES: &[(&str, &str)] = &[
     (
@@ -29,6 +30,10 @@ pub const FILES: &[(&str, &str)] = &[
     (
         "roles/astra-reviewer.md",
         include_str!("../../engine/roles/astra-reviewer.md"),
+    ),
+    (
+        "roles/self-check.md",
+        include_str!("../../engine/roles/self-check.md"),
     ),
     (
         "roles/co-core.md",

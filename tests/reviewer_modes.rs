@@ -24,7 +24,7 @@ struct Fixture {
 impl Fixture {
     fn new(worker: &str, reply: Value) -> Self {
         let temp = common::temp();
-        let store = temp.path().join("store");
+        let store = temp.path().join("orchestrate/store");
         let repo = temp.path().join("repo");
         fs::create_dir_all(store.join("reports")).unwrap();
         fs::create_dir_all(&repo).unwrap();
@@ -114,6 +114,146 @@ fn lines(path: &Path) -> Vec<Value> {
         .lines()
         .map(|s| serde_json::from_str(s).unwrap())
         .collect()
+}
+
+#[test]
+fn selfcheck_missing_blocks_review() {
+    assert_selfcheck_blocks_review(orch::SelfCheckState::Missing);
+}
+
+#[test]
+fn selfcheck_failed_blocks_review() {
+    assert_selfcheck_blocks_review(orch::SelfCheckState::Failed);
+}
+
+#[test]
+fn selfcheck_stale_blocks_review() {
+    assert_selfcheck_blocks_review(orch::SelfCheckState::Stale);
+}
+
+fn selfcheck_fixture() -> Fixture {
+    let f = Fixture::new("gpt-6-terra", json!({"verdict":"pass","findings":[]}));
+    policy::set(&f.store, "reviewer", "astra-max").unwrap();
+    fs::write(f.store.join("u.brief"), "GOAL x\nSCOPE a.txt\nVERIFY echo ok\nCONTRACT behavior\nTEST_MATRIX\ns1 | behaviour | a.txt::test_case | checks behavior | echo ok\n").unwrap();
+    f.verify();
+    f.pack();
+    f
+}
+
+fn selfcheck_row(f: &Fixture, exit_code: i32, tree: &str) {
+    orch::append_evidence(&f.store, "u", &Evidence {
+        kind: "selfcheck".into(), command: "a1|self-check".into(),
+        exit_code, commit: tree.into(), ts: base::now_iso(),
+    }).unwrap();
+}
+
+fn assert_selfcheck_blocks_review(state: orch::SelfCheckState) {
+    // Also prove self-check refusal takes precedence over budget checks.
+    for exhausted_budget in [false, true] {
+        let f = selfcheck_fixture();
+        match state {
+            orch::SelfCheckState::Failed => selfcheck_row(&f, 1, &f.tree()),
+            orch::SelfCheckState::Stale => selfcheck_row(&f, 0, "old-tree"),
+            _ => {}
+        }
+        if exhausted_budget { policy::set(&f.store, "budget.reviewer", "0").unwrap(); }
+        assert_eq!(orch::selfcheck_state(&f.store, "u").unwrap(), state);
+        let before = orch::events::read_events(&f.store, 0).unwrap().len();
+        let err = roles::engine_review(&f.server, &f.store, "u", &f.repo).unwrap_err();
+        assert_eq!(err.kind, "selfcheck_required");
+        assert_eq!(lines(&f.log).iter().filter(|v| v["method"] == "turn/start").count(), 0);
+        assert!(!orch::review_verdict_path(&f.store, "u", "engine-astra:x").exists());
+        assert!(!f.rows().iter().any(|r| r.kind == "review"));
+        assert_eq!(orch::events::read_events(&f.store, 0).unwrap().len(), before);
+    }
+}
+
+#[test]
+fn selfcheck_passed_allows_review() {
+    let f = selfcheck_fixture();
+    selfcheck_row(&f, 0, &f.tree());
+    assert_eq!(orch::selfcheck_state(&f.store, "u").unwrap(), orch::SelfCheckState::Passed);
+    assert!(f.run().is_some());
+    assert_eq!(lines(&f.log).iter().filter(|v| v["method"] == "turn/start").count(), 1);
+    assert!(orch::review_verdict_path(&f.store, "u", "engine-astra:x").exists());
+    assert!(f.rows().iter().any(|r| r.kind == "review"));
+}
+
+#[test]
+fn review_uses_policy_stage() {
+    for stage in [None, Some("sol/xhigh"), Some("sol/high")] {
+        let f = Fixture::new("gpt-6-terra", json!({"verdict":"pass","findings":[]}));
+        policy::set(&f.store, "reviewer", "astra-max").unwrap();
+        if let Some(stage) = stage { policy::set(&f.store, "models.reviewer", stage).unwrap(); }
+        f.verify();
+        f.pack();
+        f.run();
+        let log = lines(&f.log);
+        let turn = log.iter().find(|v| v["method"] == "turn/start").unwrap();
+        let tier = if stage.is_some() { "sol" } else { "astra" };
+        assert_eq!(turn["params"]["effort"], stage.map_or("max", |s| s.split_once('/').unwrap().1));
+        let start = log.iter().find(|v| v["method"] == "thread/start").unwrap();
+        assert_eq!(start["params"]["model"], f.server.resolve_model(tier).unwrap());
+        assert!(f.rows().iter().any(|r| r.kind == "review" && r.command == format!("engine-astra:{}", f.server.resolve_model(tier).unwrap())));
+    }
+}
+
+#[test]
+fn review_thread_is_fresh_and_distinct() {
+    let f = Fixture::new("gpt-6-terra", json!({"verdict":"pass","findings":[]}));
+    policy::set(&f.store, "reviewer", "astra-max").unwrap();
+    let req = axiom::codex::RunRequest {
+        brief: "prior worker".into(), cwd: f.repo.to_string_lossy().into_owned(),
+        model: f.server.resolve_model("sol").unwrap(), sandbox: "read-only".into(),
+        effort: Some("high".into()), output_schema: None, developer_instructions: None,
+        timeout_s: 30, lean: true, keep_plugins: vec![], web_search: false,
+    };
+    let worker = f.server.run(&req).unwrap();
+    let self_check = f.server.run(&axiom::codex::RunRequest { brief: "prior self-check".into(), ..req }).unwrap();
+    f.verify(); f.pack();
+    for n in 1..=2 {
+        f.run();
+        let log = lines(&f.log);
+        let starts: Vec<_> = log.iter().filter(|v| v["method"] == "thread/start").collect();
+        let turns: Vec<_> = log.iter().filter(|v| v["method"] == "turn/start").collect();
+        assert_eq!(starts.len(), 2 + n);
+        assert_eq!(starts[1+n]["params"]["sandbox"], "read-only");
+        let id = &turns[1+n]["params"]["threadId"];
+        assert_ne!(id, &worker["thread_id"]);
+        assert_ne!(id, &self_check["thread_id"]);
+        assert_ne!(id, &turns[n]["params"]["threadId"]);
+        let verdict: Value = serde_json::from_str(&fs::read_to_string(orch::review_verdict_path(&f.store, "u", "engine-astra:x")).unwrap()).unwrap();
+        assert_eq!(&verdict["thread_id"], id);
+    }
+}
+
+#[test]
+fn stale_pack_gives_no_review_pack() {
+    for stale_tree in [false, true] {
+        let f = Fixture::new("gpt-6-terra", json!({"verdict":"pass","findings":[]}));
+        policy::set(&f.store, "reviewer", "astra-max").unwrap();
+        f.verify(); f.pack();
+        if stale_tree { fs::write(f.repo.join("a.txt"), "changed").unwrap(); }
+        else { fs::write(orch::pack_path(&f.store, "u"), "stale pack").unwrap(); }
+        let err = roles::engine_review(&f.server, &f.store, "u", &f.repo).unwrap_err();
+        assert_eq!(err.kind, "no_review_pack");
+        assert!(!orch::review_verdict_path(&f.store, "u", "engine-astra:x").exists());
+        assert!(lines(&f.log).iter().all(|v| v["method"] != "turn/start"));
+    }
+}
+
+#[test]
+fn claude_and_both_modes_unchanged() {
+    for (mode, expected) in [("claude", 0), ("both", 1)] {
+        let f = Fixture::new("gpt-6-terra", json!({"verdict":"pass","findings":[]}));
+        policy::set(&f.store, "reviewer", mode).unwrap();
+        f.verify(); f.pack();
+        let names: Vec<_> = roles::review_items(&f.store, "u").unwrap().into_iter().map(|i| i.reviewer).collect();
+        assert_eq!(names, vec!["chronos:reviewer"]);
+        f.run();
+        let turns = lines(&f.log).iter().filter(|v| v["method"] == "turn/start").count();
+        assert_eq!(turns, expected);
+    }
 }
 
 #[test]

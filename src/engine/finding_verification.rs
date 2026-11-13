@@ -164,6 +164,7 @@ pub fn verify_review(codex: &AppServer, store: &Path, unit: &str, repo: &Path) -
         let missing: Vec<_> = review
             .findings
             .iter()
+            .filter(|f| f.is_serious())
             .filter(|f| {
                 !latest
                     .get(&(review.id.clone(), review.row.commit.clone(), f.number))

@@ -21,10 +21,22 @@ fn string<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
     a.get(key).and_then(Value::as_str)
 }
 pub fn codex_run(b: &Bridge, a: &Value) -> Value {
-    match run(b, a) {
+    let cycle = a.get("cycle") == Some(&Value::Bool(true)) && string(a, "unit").is_some();
+    let root = if cycle {
+        string(a, "project").and_then(|p| b.home().ok().and_then(|h| orch::store_for(h, p).ok()))
+    } else { None };
+    let before = root.as_ref().and_then(|r| summary::cycle_ready(r).ok()).unwrap_or_default();
+    let mut result = match run(b, a) {
         Ok(v) => v,
         Err(e) => json!({"status":"bridge_error","error":e.to_json()}),
+    };
+    if cycle {
+        let ready = root.as_ref().and_then(|r| summary::cycle_ready(r).ok()).unwrap_or_default();
+        result["ready"] = json!(ready.into_iter().filter(|id| !before.contains(id)).collect::<Vec<_>>());
+        result["core"] = summary::cycle_core(&result);
+        result["handoff"] = json!(summary::cycle_handoff(&result));
     }
+    result
 }
 pub(super) fn destination(root: &Path, path: &str) -> Res<PathBuf> {
     let dest = Path::new(path);
@@ -134,6 +146,9 @@ fn ensure_review_requirements(root: &Path, unit: &str) -> Res<()> {
     Ok(())
 }
 struct UnitGuard(Option<(PathBuf, String, String)>);
+fn resumable_cut(kind: &str) -> bool {
+    matches!(kind, "interrupted" | "timeout" | "token_cap" | "usage_limit" | "usageLimitExceeded")
+}
 impl Drop for UnitGuard {
     fn drop(&mut self) {
         if let Some((store, u, attempt_id)) = &self.0 {
@@ -141,6 +156,12 @@ impl Drop for UnitGuard {
         }
     }
 }
+pub(crate) fn crash_point(name: &str) {
+    if cfg!(debug_assertions) && std::env::var("AXIOM_TEST_CRASH_AT").ok().as_deref() == Some(name) {
+        std::process::abort();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn unit_reply(
     b: &Bridge,
@@ -158,6 +179,58 @@ fn unit_reply(
     reused: bool,
 ) -> Res<Value> {
     let built = finished.state == "built" || reused;
+    if !reused && built && finished.verify_exit == Some(0) {
+        if !orch::unit_brief(root, unit)?.test_matrix.is_empty() {
+            let id = attempt_id.as_str().map(str::to_owned)
+                .or(codex::routing::read_snapshot(root, unit)?.map(|s|s.attempt_id))
+                .ok_or_else(|| Failure::new("red_invalid", "matrix row has no attempt"))?;
+            orch::lifecycle::final_matrix(root, unit, repo, &id)?;
+        }
+    }
+    if !reused
+        && built
+        && finished.verify_exit == Some(0)
+        && !matches!(
+            orch::selfcheck_state(root, unit)?,
+            orch::SelfCheckState::NotRequired | orch::SelfCheckState::Passed
+        )
+    {
+        let id = attempt_id
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                codex::routing::read_snapshot(root, unit)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.attempt_id)
+            })
+            .unwrap_or_default();
+        let check = crate::engine::self_check::run(
+            b.codex()?.as_ref(),
+            b.home().ok(),
+            root,
+            unit,
+            &id,
+            repo,
+        )?;
+        if check.changed {
+            let verify = orch::record_verify(root, unit, repo)?;
+            if verify.exit_code != 0 {
+                return Err(Failure::new(
+                    "verify_failed",
+                    "verification after self-check failed",
+                ));
+            }
+            orch::lifecycle::final_matrix(root, unit, repo, &id)?;
+        }
+        if check.status != "pass" {
+            return Err(Failure::new("selfcheck_required", "self-check failed"));
+        }
+    }
+    if built && finished.verify_exit.is_some() {
+        if let Some(id) = attempt_id.as_str() { orch::lifecycle::checkpoint_stage(root, unit, id, "selfchecked", repo)?; }
+        crash_point("after_selfcheck");
+    }
     let mut accept = json!({"ran":false,"reason":if reused {"reused"} else {"not_built"},"detail":"","tests":null,"failing":[],"output_file":null});
     if !reused && built && finished.verify_exit == Some(0) {
         let result = goal::accept_hold(b.home()?, project).and_then(|hold| match hold {
@@ -296,7 +369,11 @@ fn unit_reply(
                         policy::load(root)?.reviewer,
                         ReviewerMode::AstraMax | ReviewerMode::Both
                     ) {
-                        review_roles::engine_review(b.codex()?.as_ref(), root, &u.id, repo)?;
+                        review_roles::engine_review_with_home(b.codex()?.as_ref(), b.home().ok(), root, &u.id, repo)?;
+                        if u.id == unit {
+                            if let Some(id) = attempt_id.as_str() { orch::lifecycle::checkpoint_stage(root, unit, id, "reviewed", repo)?; }
+                        }
+                        crash_point("after_review");
                         reviewed_primary |= u.id == unit;
                     }
                     for item in review_roles::review_items(root, &u.id)? {
@@ -321,6 +398,8 @@ fn unit_reply(
             if next == Next::Review {
                 next = if pending_primary && (state == "built" || state == "verified") {
                     Next::Review
+                } else if state == "verified" && !pending_primary {
+                    Next::Done
                 } else {
                     summary::next_for(root, unit)?
                 };
@@ -358,6 +437,7 @@ fn unit_reply(
             result[key] = value.clone();
         }
         result["review"] = json!(review_reply);
+
     }
     // Preserve the ignored-scope sample when a cycle reply's additional paths would
     // otherwise force the shared reply limiter to trim both samples equally.
@@ -411,7 +491,15 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     if role.is_none() && explicit.is_none() {
         return Err(invalid("model or role is required"));
     }
-    if let Some(r) = role { crate::laya::router::observe_routing(crate::laya::home_from_env().as_deref(), None, string(a, "unit"), r, string(a, "brief").unwrap_or("")); } // laya-shadow
+    if let Some(r) = role {
+        crate::laya::router::observe_routing(
+            crate::laya::home_from_env().as_deref(),
+            None,
+            string(a, "unit"),
+            r,
+            string(a, "brief").unwrap_or(""),
+        );
+    } // laya-shadow
     let project = string(a, "project");
     let unit = string(a, "unit");
     let save = string(a, "save_to");
@@ -468,6 +556,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut brief = string(a, "brief").unwrap_or("").to_owned();
     let mut effort = string(a, "effort").map(str::to_owned);
     let mut tier = None;
+    let mut routing_snapshot = None;
     let mut attempt = 0;
     let mut attempt_id = String::new();
     let mut guard = UnitGuard(None);
@@ -603,18 +692,41 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 attempt: n,
                 attempt_id: id,
             }) => {
-                brief = value.text;
-                effort = value.effort;
-                tier = value.tier;
                 attempt = n;
                 attempt_id = id;
                 guard.0 = Some((root.to_path_buf(), u.to_owned(), attempt_id.clone()));
-                brief = graph::constraints::prepend(&brief, &graph::constraints::load(Path::new(cwd), Some(root), graph::constraints::DEFAULT_BUDGET)?);
-                if tier.is_some() && (r != "terra" || explicit.is_some()) {
+                if value.tier.as_deref() == Some("luna") && (r != "terra" || explicit.is_some()) {
                     return Err(invalid(
                         "TIER in a brief applies only to a terra unit dispatched without model",
                     ));
                 }
+                let server = b.codex()?;
+                let snapshot = codex::routing::for_attempt(
+                    &server,
+                    b.home().ok(),
+                    root,
+                    u,
+                    &attempt_id,
+                    r,
+                    &value,
+                    explicit,
+                )?;
+                orch::lifecycle::checkpoint_routing(root, u, &snapshot)?;
+                effort = snapshot
+                    .effort
+                    .map(|e| format!("{e:?}").to_lowercase())
+                    .or(value.effort);
+                tier = value.tier;
+                brief = value.text;
+                routing_snapshot = Some(snapshot);
+                brief = graph::constraints::prepend(
+                    &brief,
+                    &graph::constraints::load(
+                        Path::new(cwd),
+                        Some(root),
+                        graph::constraints::DEFAULT_BUDGET,
+                    )?,
+                );
             }
             Some(_) => unreachable!("begin never reuses a verified unit"),
         }
@@ -634,12 +746,16 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let mut resolved = explicit.unwrap_or("").to_owned();
     let result = (|| -> Res<(String, Value)> {
         let server = b.codex()?;
-        let model = match explicit {
-            Some(m) => m.to_owned(),
-            None => server.resolve_model(tier.as_deref().or(role).unwrap())?,
+        let model = if let Some(snapshot) = &routing_snapshot {
+            snapshot.model.clone()
+        } else {
+            match explicit {
+                Some(m) => m.to_owned(),
+                None => server.resolve_model(tier.as_deref().or(role).unwrap())?,
+            }
         };
         resolved = model.clone();
-        let req = RunRequest {
+        let mut req = RunRequest {
             brief,
             cwd: cwd.into(),
             model: model.clone(),
@@ -656,7 +772,29 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             keep_plugins: plugins,
             web_search: a.get("web_search") == Some(&Value::Bool(true)),
         };
-        let report = if let Some(root) = &store {
+        let saved_worker = match (&store, unit) {
+            (Some(root), Some(u)) => orch::lifecycle::checkpoint_worker(root, u, &attempt_id, None)?,
+            _ => None,
+        };
+        if let (Some(root), Some(u)) = (&store, unit) {
+            let matrix = orch::unit_brief(root, u)?;
+            if !matrix.test_matrix.is_empty() && !orch::lifecycle::validate_red(root, u, &attempt_id, Path::new(cwd))? {
+                let implement_brief = std::mem::take(&mut req.brief);
+                let implement_schema = req.output_schema.take();
+                req.brief = format!("TESTS-FIRST\nWrite only these matrix test files: {}. Use stubbed signatures so tests fail on assertions, not compile errors. Do not implement production code.\nCONTRACT\n{}\nTEST_MATRIX\n{}",
+                    matrix.test_matrix.iter().map(|r|r.file.as_str()).collect::<Vec<_>>().join(", "),
+                    matrix.contract.join("\n"),
+                    matrix.test_matrix.iter().map(|r|format!("{} | {} | {}::{} | {} | {}",r.id,r.kind,r.file,r.case,r.assertion,r.command)).collect::<Vec<_>>().join("\n"));
+                let red_worker = server.run(&req)?;
+                req.brief = implement_brief;
+                req.output_schema = implement_schema;
+                if red_worker["status"] != "completed" { return Err(Failure::new("red_invalid", "matrix tests-first worker did not complete")); }
+                orch::lifecycle::record_red(root, u, &attempt_id, Path::new(cwd))?;
+            }
+        }
+        let report = if let Some(report) = saved_worker {
+            report
+        } else if let Some(root) = &store {
             let path = if let Some(u) = unit {
                 orch::scratch_dir(root, &[u, &attempt_id])
             } else {
@@ -715,12 +853,77 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
     let (model, mut report) = match result {
         Ok(r) => r,
         Err(e) => {
+            if resumable_cut(&e.kind) {
+                if let Some((root, u, id)) = &guard.0 {
+                    orch::lifecycle::suspend_claim(root, u, id)?;
+                    guard.0 = None;
+                }
+            }
             if dest.is_some() {
                 let _ = orch::record_stage(store.as_ref().unwrap(), "astra", &resolved, false);
             }
             return Err(e);
         }
     };
+    if unit.is_some() && (resumable_cut(report["status"].as_str().unwrap_or(""))
+        || resumable_cut(report["error"]["kind"].as_str().unwrap_or("")))
+    {
+        // Keep the existing interruption timing receipt for diagnostics. This is
+        // not counting run evidence and never drives fix limits or unit state.
+        if report["status"] == "interrupted" {
+            if let (Some(root), Some(u), Some(started_ms), Some(ended_ms)) = (
+                &store, unit, report["run_started_ms"].as_i64(), report["run_ended_ms"].as_i64(),
+            ) {
+                if orch::receipts::read_runs(root).is_ok_and(|rows| !rows.iter().any(|r| r.unit == u && r.attempt == attempt_id)) {
+                    let _ = orch::receipts::record_run(root, &orch::receipts::RunRecord {
+                        unit: u.into(), attempt: attempt_id.clone(), started_ms, ended_ms,
+                        status: "interrupted".into(),
+                    });
+                }
+            }
+        }
+        if let Some((root, u, id)) = &guard.0 {
+            orch::lifecycle::suspend_claim(root, u, id)?;
+            guard.0 = None;
+        }
+        return Ok(json!({"status":"interrupted","error":report["error"],"unit":unit,
+            "attempt":attempt,"attempt_id":attempt_id,"model":model,"next":"wait",
+            "usage":report["usage"]}));
+    }
+    if let (Some(root), Some(u)) = (&store, unit) {
+        if !orch::lifecycle::validate_red(root, u, &attempt_id, Path::new(cwd))? {
+            return Err(Failure::new("red_invalid", "matrix row has no engine RED"));
+        }
+        orch::lifecycle::checkpoint_worker(root, u, &attempt_id, Some(&report))?;
+        crash_point("after_worker");
+    }
+    if let (Some(root), Some(snapshot)) = (&store, &routing_snapshot) {
+        let name = |v: serde_json::Value| v.as_str().map(str::to_owned);
+        let record = orch::receipts::RoutingReceipt {
+            unit: snapshot.unit.clone(),
+            attempt: snapshot.attempt_id.clone(),
+            tier: name(json!(snapshot.tier)),
+            effort: name(json!(snapshot.effort)),
+            risk: name(json!(snapshot.risk)),
+            model_assigned: snapshot.model.clone(),
+            model_used: Some(
+                report["model"]
+                    .as_str()
+                    .unwrap_or(&snapshot.model)
+                    .to_owned(),
+            ),
+            rule: name(json!(snapshot.rule)).unwrap_or_default(),
+            reason: snapshot.reason.clone(),
+            settings_version: snapshot.settings_version.clone(),
+        };
+        if orch::receipts::read_routing(root).is_ok_and(|rows| {
+            !rows
+                .iter()
+                .any(|r| r.unit == record.unit && r.attempt == record.attempt)
+        }) {
+            let _ = orch::receipts::record_routing(root, &record);
+        }
+    }
     if let Some(root) = &store {
         let usage = &report["usage"];
         let input = usage["inputTokens"].as_u64();
@@ -737,15 +940,16 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             ),
             _ => None,
         };
-        budgets::record(
-            root,
-            budget_role,
-            &model,
-            usd,
-            input.unwrap_or(0),
-            output.unwrap_or(0),
-            "codex_run",
-        )?;
+        orch::store::with_lock(root, false, || {
+            let recorded = unit.is_some() && orch::events::read_events(root, 0)?.iter().any(|e|
+                e.kind == crate::engine::kinds::ROLE_SPEND && e.unit.as_deref() == unit
+                    && e.data["attempt_id"] == attempt_id && e.data["call"] == "codex_run");
+            if !recorded {
+                orch::events::append_event(root, crate::engine::kinds::ROLE_SPEND, None, unit,
+                    json!({"role":budget_role.name(),"model":model,"usd":usd,"input_tokens":input.unwrap_or(0),"output_tokens":output.unwrap_or(0),"call":"codex_run","attempt_id":attempt_id}))?;
+            }
+            Ok(())
+        })?;
     }
     if let (Some(u), Some(root), Some(r)) = (unit, &store, role) {
         if let (Some(started_ms), Some(ended_ms), Some(status)) = (
@@ -753,6 +957,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             report["run_ended_ms"].as_i64(),
             report["status"].as_str(),
         ) {
+            if orch::receipts::read_runs(root).is_ok_and(|rows| !rows.iter().any(|row| row.unit == u && row.attempt == attempt_id)) {
             let _ = orch::receipts::record_run(
                 root,
                 &orch::receipts::RunRecord {
@@ -763,18 +968,23 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                     status: status.to_owned(),
                 },
             );
+            }
         }
-        let finished = orch::finish_unit(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
+        let finished = orch::lifecycle::finish_checkpointed(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
+        if finished.verify_exit.is_some() { crash_point("after_verify"); }
         let graph_sync = match graph::GraphStore::open(b.home()?) {
             Ok(store) => {
-                let options = graph::code::SyncOptions { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)), ..Default::default() };
+                let options = graph::code::SyncOptions {
+                    deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+                    ..Default::default()
+                };
                 let code = graph::code::sync(&store, Path::new(cwd), None, &options);
                 let orch = graph::ingest::sync_orch(&store, root, Path::new(cwd));
                 json!({"code":match code { Ok(report) => json!({"partial":report.partial,"partial_reason":report.partial_reason,"parse_failures":report.parse_failures}), Err(e) => json!({"error":e.to_json()}) }, "orch":match orch { Ok(report) => json!({"nodes_written":report.nodes_written,"edges_written":report.edges_written,"skipped":report.skipped}), Err(e) => json!({"error":e.to_json()}) }})
             }
             Err(e) => json!({"error":e.to_json()}),
         };
-        let mut reply = unit_reply(
+        let reply = unit_reply(
             b,
             project.unwrap(),
             root,
@@ -788,7 +998,14 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             finished,
             cycle,
             false,
-        )?;
+        );
+        if let Err(e) = &reply {
+            if resumable_cut(&e.kind) {
+                orch::lifecycle::suspend_claim(root, u, &attempt_id)?;
+                guard.0 = None;
+            }
+        }
+        let mut reply = reply?;
         reply["graph_sync"] = graph_sync;
         return Ok(reply);
     }

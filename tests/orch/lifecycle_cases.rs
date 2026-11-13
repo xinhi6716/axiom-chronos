@@ -135,12 +135,16 @@ fn lifecycle_reuse_scope_and_limit() {
             store.join("reports").join("a.verify.txt").display()
         )
     );
+    let mut expected_report = report.clone();
+    expected_report["brief_sha256"] = json!(axiom::seams::sha256_hex(
+        b"GOAL test\nSCOPE a.txt\nVERIFY echo ok\n"
+    ));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(
             &fs::read(store.join("reports/a.json")).unwrap()
         )
         .unwrap(),
-        report
+        expected_report
     );
     let pointer = fs::read_dir(store.join("inbox"))
         .unwrap()

@@ -16,6 +16,7 @@ fn module(id: &str, path: &str, owner: Option<&str>) -> Module {
         accept_file: "test".into(),
         accept_command: "echo ok".into(),
         serves: vec![],
+        routing: vec![],
         new_paths: vec![],
         shared_owner: owner.map(str::to_owned),
     }

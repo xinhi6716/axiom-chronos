@@ -27,6 +27,11 @@ def option(name, default=''):
     return next((arg[len(prefix):] for arg in sys.argv if arg.startswith(prefix)), default)
 
 
+def directive(text, name):
+    match = re.search(r'^' + re.escape(name) + r'[ \t]+([^\r\n]+?)[ \t]*$', text, flags=re.M)
+    return match.group(1) if match else os.getenv(name)
+
+
 if '--version' in sys.argv:
     if '--fake-version-hang' in sys.argv:
         time.sleep(60)
@@ -48,6 +53,7 @@ if broken_method == 'start':
     sys.exit(2)
 
 pending_turns = {}
+turn_texts = {}
 send_lock = threading.Lock()
 log_lock = threading.Lock()
 barrier = threading.Condition()
@@ -88,7 +94,11 @@ def item(thread_id, turn_id, payload):
 
 def complete(thread_id, turn_id, status='completed', error=None):
     log_record('fake/complete', {'threadId': thread_id, 'turnId': turn_id, 'status': status})
-    send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn_id, 'status': status, 'error': error, 'items': []}}})
+    turn = {'id': turn_id, 'status': status, 'error': error, 'items': []}
+    if not os.getenv('FAKE_NO_USAGE') and (thread_id, turn_id) in turn_texts:
+        length = len(turn_texts[(thread_id, turn_id)])
+        turn['usage'] = {'inputTokens': max(1, length), 'outputTokens': max(1, (length + 1) // 2)}
+    send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': turn}})
 
 
 threads = 0
@@ -133,8 +143,11 @@ for line in sys.stdin:
                 send({'method': 'account/other', 'params': {}})
             send({'method': 'account/rateLimits/updated', 'params': {'rateLimits': {'primary': {'usedPercent': 41, 'windowDurationMins': 300, 'resetsAt': 1900000000}}}})
     elif method == 'model/list':
-        if params.get('cursor'):
-            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-terra-lite'}]}})
+        if 'FAKE_CODEX_MODELS' in os.environ:
+            ids = [model.strip() for model in os.environ['FAKE_CODEX_MODELS'].split(',') if model.strip()]
+            send({'id': message['id'], 'result': {'data': [{'id': model} for model in ids]}})
+        elif params.get('cursor'):
+            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-sol'}, {'id': 'gpt-6-terra-lite'}]}})
         else:
             send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6-luna', 'isDefault': True}, {'id': 'gpt-5.6-terra'}, {'model': 'gpt-6.9-terra'}], 'nextCursor': 'page-2'}})
     elif method == 'plugin/installed':
@@ -170,11 +183,18 @@ for line in sys.stdin:
         # extreme-mode end
         thread_id, text = params['threadId'], params['input'][0]['text']
         turn_id = thread_id + '-turn'
+        turn_texts[(thread_id, turn_id)] = text
+        selfcheck = (params.get('outputSchema') or {}).get('title') == 'axiom.self_check.v1'
         script_entry = next((entry for entry in script if entry['match'] in text), None)
-        if script_entry is None and 'HANGREQ' in text:
+        if script_entry is None and not selfcheck and 'HANGREQ' in text:
             continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
-        if script_entry is None:
+        if os.getenv('FAKE_USAGE_LIMIT'):
+            error = {'message': 'You have hit your usage limit.', 'codexErrorInfo': 'usageLimitExceeded'}
+            send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
+            complete(thread_id, turn_id, 'failed', error)
+            continue
+        if script_entry is None and not selfcheck:
             if 'CRASH' in text:
                 sys.exit(7)
             if 'HANG' in text:
@@ -244,10 +264,11 @@ for line in sys.stdin:
         delay_ms = int(delay.group(1)) if delay else 0
         gate = re.search(r'^FAKE_GATE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
         gate_path = gate.group(1).strip() if gate else None
+        hold_path = directive(text, 'FAKE_HOLD')
         # extreme-mode begin
         wait_file = re.search(r'^WAIT_FILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
         # extreme-mode end
-        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file, script_entry=script_entry):
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file, script_entry=script_entry, hold_path=hold_path, selfcheck=selfcheck):
             # extreme-mode begin
             if wait_file:
                 deadline = time.monotonic() + 30
@@ -266,6 +287,9 @@ for line in sys.stdin:
                         complete(thread_id, turn_id, 'failed', {'message': f'gate timeout: {gate_path}'})
                         return
                     time.sleep(0.02)
+            if hold_path:
+                while not os.path.exists(hold_path):
+                    time.sleep(0.02)
             from pathlib import Path
             import subprocess
             cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
@@ -279,6 +303,29 @@ for line in sys.stdin:
                 message = f'sandbox denied write: {target}'
                 item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'failed', 'exitCode': 1})
                 complete(thread_id, turn_id, 'failed', {'message': message})
+            # Additive phase7 tests-first scenario: stable tests, separate stub.
+            if text.startswith('TESTS-FIRST\n'):
+                for test, source in re.findall(r'^\s*FAKE_MATRIX_STUB[ \t]+(\S+)[ \t]+(\S+)', text, flags=re.M):
+                    target = cwd / test
+                    if not permitted(target) or not permitted(cwd / source):
+                        denied(target)
+                        return
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("import pathlib,unittest\nclass Seed(unittest.TestCase):\n def test_seed_result(self):\n  self.assertEqual(pathlib.Path(" + repr(source) + ").read_text(), 'fake-written\\n')\nunittest.main(verbosity=2)\n", encoding='utf-8')
+                    (cwd / source).write_text('stub\n', encoding='utf-8')
+            if selfcheck:
+                write_path = directive(text, 'FAKE_SELFCHECK_WRITE')
+                if write_path:
+                    target = cwd / write_path
+                    if not permitted(target):
+                        denied(target)
+                        return
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('fake-written\n', encoding='utf-8')
+                final = json.dumps(json.loads(directive(text, 'FAKE_SELFCHECK') or '{}'))
+                item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
+                complete(thread_id, turn_id)
+                return
             for name in re.findall(r'^FAKE_TEMPDIR[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
                 target = Path(temp) if temp else cwd
                 target = target / 'pytest-of-fake' / 'pytest-0' / name.strip() / 'case.txt'
@@ -334,9 +381,13 @@ for line in sys.stdin:
             if script_entry is not None:
                 reply = script_entry['reply']
                 final = reply if isinstance(reply, str) else json.dumps(reply)
+            review = directive(text, 'FAKE_REVIEW')
+            model = params.get('model') or models[thread_id]
+            if model and 'astra' in model.lower() and review and params.get('outputSchema'):
+                final = json.dumps(json.loads(review))
             item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
             complete(thread_id, turn_id)
-        if delay_ms or gate_path or wait_file:
+        if delay_ms or gate_path or wait_file or hold_path:
             threading.Thread(target=finish_normal, daemon=True).start()
         else:
             finish_normal()

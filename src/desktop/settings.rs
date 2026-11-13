@@ -670,8 +670,115 @@ pub fn opening_bounds(settings: &Settings, default: Size<Pixels>, min: Size<Pixe
         .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, default, cx)))
 }
 
+// p7-runtime seam
+pub fn save_runtime_and_models(
+    home: &Path,
+    models: &crate::engine::policy::Models,
+    runtime: &crate::codex::slots::Runtime,
+) -> crate::base::Res<(u64, u64)> {
+    models.validate()?;
+    runtime.validate()?;
+    let models_version = crate::engine::policy::save_global_models(home, models)?;
+    let runtime_version = crate::codex::slots::save_runtime(home, runtime)?;
+    Ok((models_version, runtime_version))
+}
+// end p7-runtime seam
+
 #[cfg(test)]
 mod tests {
+    // p7-runtime seam tests
+    fn p7_runtime(cap: u64) -> crate::codex::slots::Runtime {
+        crate::codex::slots::Runtime { codex_max_parallel: cap, codex_command: vec!["x".into()] }
+    }
+
+    #[test]
+    fn p7_seam_saves_both() {
+        let home = tempfile::tempdir().unwrap();
+        let models = crate::engine::policy::Models::default();
+        let runtime = p7_runtime(3);
+        assert_eq!(save_runtime_and_models(home.path(), &models, &runtime).unwrap(), (1, 1));
+        let bytes = std::fs::read(home.path().join("settings/models.json")).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["version"], 1);
+        assert_eq!(serde_json::from_value::<crate::engine::policy::Models>(saved["models"].clone()).unwrap(), models);
+        assert_eq!(crate::codex::slots::load_runtime(home.path()).unwrap(), Some((runtime, 1)));
+    }
+
+    #[test]
+    fn p7_seam_invalid_models_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut models = crate::engine::policy::Models::default();
+        models.self_check.tier = "ultra".into();
+        let expected = models.validate().unwrap_err();
+        let error = save_runtime_and_models(home.path(), &models, &p7_runtime(3)).unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!home.path().join("settings/models.json").exists());
+        assert!(!home.path().join("settings/runtime.json").exists());
+    }
+
+    #[test]
+    fn p7_seam_invalid_runtime_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = p7_runtime(0);
+        let expected = runtime.validate().unwrap_err();
+        let error = save_runtime_and_models(home.path(), &crate::engine::policy::Models::default(), &runtime).unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!home.path().join("settings/models.json").exists());
+        assert!(!home.path().join("settings/runtime.json").exists());
+    }
+
+    #[test]
+    fn p7_seam_invalid_keeps_existing_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let mut models = crate::engine::policy::Models::default();
+        assert_eq!(save_runtime_and_models(home.path(), &models, &p7_runtime(3)).unwrap(), (1, 1));
+        let model_path = home.path().join("settings/models.json");
+        let runtime_path = home.path().join("settings/runtime.json");
+        let model_bytes = std::fs::read(&model_path).unwrap();
+        let runtime_bytes = std::fs::read(&runtime_path).unwrap();
+        models.core.build = "different".into();
+        assert!(save_runtime_and_models(home.path(), &models, &p7_runtime(0)).is_err());
+        assert_eq!(std::fs::read(&model_path).unwrap(), model_bytes);
+        assert_eq!(std::fs::read(&runtime_path).unwrap(), runtime_bytes);
+        models.self_check.tier = "ultra".into();
+        assert!(save_runtime_and_models(home.path(), &models, &p7_runtime(7)).is_err());
+        assert_eq!(std::fs::read(&model_path).unwrap(), model_bytes);
+        assert_eq!(std::fs::read(&runtime_path).unwrap(), runtime_bytes);
+    }
+
+    fn p7_files(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    files.insert(path.strip_prefix(root).unwrap().to_owned(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(home, home, &mut files);
+        files
+    }
+
+    #[test]
+    fn p7_seam_no_side_effects() {
+        let home = tempfile::tempdir().unwrap();
+        for (name, bytes) in [("goals/g.json", "{\"status\":\"done\"}"), ("briefs/u.md", "# Brief\n"), ("evidence/u.json", "{\"valid\":true}")] {
+            let path = home.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let before = p7_files(home.path());
+        assert_eq!(save_runtime_and_models(home.path(), &crate::engine::policy::Models::default(), &p7_runtime(3)).unwrap(), (1, 1));
+        let mut after = p7_files(home.path());
+        assert!(after.remove(&PathBuf::from("settings/models.json")).is_some());
+        assert!(after.remove(&PathBuf::from("settings/runtime.json")).is_some());
+        assert_eq!(after, before);
+    }
+    // end p7-runtime seam tests
+
     #[test]
     fn codex_limit_drafts_persist_and_default_to_48() {
         for value in ["2", "0", "bad", ""] {

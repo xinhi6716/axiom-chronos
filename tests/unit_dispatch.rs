@@ -283,6 +283,32 @@ fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
 }
 
 #[test]
+fn built_dispatch_resumes_until_brief_changes() {
+    for cycle in [false, true] {
+        let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+        let first = f.run("one", false);
+        assert_eq!(first["state"], "built", "{first}");
+        assert!(orch::resume_built(&f.store, "one", &f.repo).unwrap());
+        let resumed = f.run("one", cycle);
+        assert_eq!(resumed["attempt"], first["attempt"], "{resumed}");
+        assert_eq!(f.turns(), 1);
+        assert_eq!(orch::receipts::read_runs(&f.store).unwrap().len(), 1);
+
+        fs::write(f.store.join("one.brief"), "GOAL rebuild\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        assert!(!orch::resume_built(&f.store, "one", &f.repo).unwrap());
+        let second = f.run("one", cycle);
+        assert_eq!(second["status"], "completed", "{second}");
+        assert_eq!(second["attempt"], 2, "{second}");
+        assert_ne!(second["attempt_id"], first["attempt_id"]);
+        assert_eq!(f.turns(), 2);
+        let rows = orch::receipts::read_runs(&f.store).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].attempt, second["attempt_id"].as_str().unwrap());
+        assert_eq!(rows[1].status, "completed");
+    }
+}
+
+#[test]
 fn unit_runs_record_receipts_even_on_failure() {
     let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
     let good = f.run("one", false);

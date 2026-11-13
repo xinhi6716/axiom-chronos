@@ -52,6 +52,10 @@ pub fn command(
     max_turns: Option<u32>,
     graph: bool,
 ) -> Res<Vec<String>> {
+    command_with_model(config, plugin_dir, max_turns, graph, "opus")
+}
+
+pub fn command_with_model(config: &Config, plugin_dir: &Path, max_turns: Option<u32>, graph: bool, model: &str) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
@@ -84,7 +88,7 @@ pub fn command(
         "--disallowedTools".into(),
         "PowerShell,ScheduleWakeup,CronCreate".into(),
         "--model".into(),
-        "opus".into(),
+        model.into(),
     ]);
     if graph {
         cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);

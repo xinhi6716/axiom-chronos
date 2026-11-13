@@ -29,10 +29,10 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 
 ## Prompt sizes
 
-- engine/agents/dispatcher.md: 9872 bytes
-- engine/DISPATCH.md: 2824 bytes
-- engine/skills/wish/SKILL.md: 8072 bytes
-- total: 20768 bytes (cap 20813)
+- engine/agents/dispatcher.md: 9538 bytes
+- engine/DISPATCH.md: 3463 bytes
+- engine/skills/wish/SKILL.md: 7757 bytes
+- total: 20758 bytes (cap 20813)
 
 ## Offline graph evaluation
 

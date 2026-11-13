@@ -22,6 +22,9 @@ You decide where the boundaries go and what crosses them. You write no project c
    DEPENDS    earlier module ids, or none
    CONTRACT   signatures, data shapes, invariants
    ACCEPT     test file, and the command that runs it
+   ROUTING
+     default sol/high standard ordinary module work
+     <unit-id> <tier>/<effort> <risk> <reason...>
    SERVES     plan item ids from `<store>/astra/plan-final.md` this module delivers
 
    OUT OF SCOPE <id> <reason>   (one line per plan item no module builds)
@@ -31,3 +34,18 @@ You decide where the boundaries go and what crosses them. You write no project c
    Every `### <id>` item of `plan-final.md` needs a module that SERVES it or an OUT OF SCOPE line. Run `orch` `["map", "--repo", <dir>]` and fix what it refuses.
 
 Return the map path and one line per module: id, paths, depends.
+
+## Routing for the plan and map
+
+Assign each unit TIER terra|sol|astra and EFFORT low|medium|high|xhigh|max. Use sol/high by default; risky units (state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure) need sol/xhigh or max. Use TIER astra at high/xhigh/max for the hardest: novel algorithms, subtle concurrency, deep cross-module refactors, or units that failed on sol/xhigh. Use terra/medium only for trivial units: docs, renames, mechanical edits, pure data. When unsure, choose the stronger setting. Risk classes: trivial, standard, state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure, novel. Record the rubric and each unit's assignment with its reason in the plan; the engine records the resolved assignment in routing receipts.
+
+Each module in modules.md has a ROUTING block with indented lines:
+
+```
+ROUTING
+  <default|unit-id> <tier>/<effort> <risk> <reason...>
+```
+
+A unit line overrides default. Route every module with a default line or none (`routing_partial`). Precedence: fix record, map unit, map default, brief TIER/EFFORT, legacy role model; a disagreeing brief is refused (`routing_mismatch`). TIER luna is legacy for terra units only, never in a map. Unrouted legacy units retain their role defaults.
+
+Use the first-pass rate table summarised in Astra's brief, grouped by model, effort and risk class, to inform assignments; rates with fewer than three units are not reported. It is historical evidence, not a guarantee.

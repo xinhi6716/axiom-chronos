@@ -29,7 +29,7 @@ impl Case {
         });
         let temp = tempfile::tempdir().unwrap();
         let plan = temp.path().join("plan.json");
-        fs::write(&plan, serde_json::to_vec(&json!({"summary":"test","coverage":{"read":[],"not_read":[]},"out_of_scope":[],"changes":[{"id":"a1","area":"design","location":"src/a.rs","evidence":"Astra says use AXIOM_CODEX_MAX_PARALLEL and gpt-6.1-terra; by Argon; I am Fable; gpt-6.1-claude evidence","problem":"slow","change":"Fable proposes AXIOM_CODEX_MAX_PARALLEL with gpt-6.1-terra","verify":"test"}]})).unwrap()).unwrap();
+        fs::write(&plan, serde_json::to_vec(&json!({"summary":"test","coverage":{"read":[],"not_read":[]},"out_of_scope":[],"changes":[{"id":"a1","area":"design","location":"src/a.rs","evidence":"Astra says use AXIOM_CODEX_MAX_PARALLEL and gpt-6.1-terra; by Argon; I am Fable; gpt-6.1-claude evidence","problem":"slow","change":"Fable proposes AXIOM_CODEX_MAX_PARALLEL with gpt-6.1-terra","verify":"test","tier":"sol","effort":"high","risk":"standard","reason":"Bounded design change"}]})).unwrap()).unwrap();
         let log = temp.path().join("calls.jsonl");
         Self { temp, plan, log }
     }
@@ -85,6 +85,30 @@ impl Case {
     }
     fn raw(&self, name: &str) -> Vec<u8> {
         fs::read(self.temp.path().join("council").join(name)).unwrap()
+    }
+}
+
+#[test]
+fn plan_schema_rejects_missing_or_invalid_routing() {
+    let case = Case::new();
+    let schema: Value = serde_json::from_slice(
+        &fs::read(common::repo_root().join("engine/research/audit.schema.json")).unwrap(),
+    ).unwrap();
+    let plan: Value = serde_json::from_slice(&fs::read(&case.plan).unwrap()).unwrap();
+    base::schema::validate(&schema, &plan).unwrap();
+    for (field, value, expected) in [
+        ("tier", None, "$.changes[0].tier: required"),
+        ("tier", Some("ultra"), "$.changes[0].tier: not in enum"),
+        ("effort", Some("ultra"), "$.changes[0].effort: not in enum"),
+    ] {
+        let mut invalid = plan.clone();
+        let change = invalid["changes"][0].as_object_mut().unwrap();
+        if let Some(value) = value {
+            change.insert(field.into(), json!(value));
+        } else {
+            change.remove(field);
+        }
+        assert_eq!(base::schema::validate(&schema, &invalid).unwrap_err(), expected);
     }
 }
 

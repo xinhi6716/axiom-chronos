@@ -1,6 +1,7 @@
 pub mod launch;
 pub mod render;
 pub mod run;
+pub mod stage;
 pub mod wait;
 pub use render::*;
 pub use run::*;

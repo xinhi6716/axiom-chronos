@@ -260,11 +260,11 @@ fn review_identity_empty_when_brief_unreadable() {
         record_review(&p, &["u".into()], "claude-review", true, &p)
             .unwrap_err()
             .kind,
-        "stale_review",
+        "io",
         "unreadable brief cannot produce a review snapshot"
     );
     let rows = evidence(&p, "u").unwrap();
-    assert_eq!(rows.len(), 2, "stale review must not be appended");
+    assert_eq!(rows.len(), 2, "review must not be appended");
     assert_eq!(derive_state(&rows, false), "built");
     fs::remove_dir_all(p).unwrap();
 }

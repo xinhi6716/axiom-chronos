@@ -191,6 +191,12 @@ pub fn next_for(store: &Path, unit: &str) -> Res<Next> {
     }
     let rows = evidence(store, unit)?;
     let needs = needs_accept(store, unit)?;
+    if !matches!(
+        super::selfcheck_state(store, unit)?,
+        super::SelfCheckState::NotRequired | super::SelfCheckState::Passed
+    ) {
+        return Ok(Next::Fix);
+    }
     Ok(match derive_state(&rows, needs).as_str() {
         "verified" => Next::Done,
         "built" => {
@@ -446,7 +452,18 @@ test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
     fn next_uses_derived_state_and_accept_after_last_verify() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path();
-        std::fs::write(store.join("units.tsv"), "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nverified\tother\tpending\t\t\t\t\nfailed\tother\tpending\t\t\t\t\nwaiting\tmodule\tpending\t\t\t\t\nbuilt\tother\tpending\t\t\t\t\nold\tother\tsuperseded:new\t\t\t\t\npending\tother\tpending\t\t\t\t\nacceptfailed\tmodule\tpending\t\t\t\t\nreviewfailed\tother\tpending\t\t\t\t\n").unwrap();
+        let brief = store.join("unit.brief");
+        std::fs::write(&brief, "GOAL test\nSCOPE src/\nVERIFY cargo test\n").unwrap();
+        let mut units = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n".to_owned();
+        for row in [
+            "verified\tother\tpending", "failed\tother\tpending",
+            "waiting\tmodule\tpending", "built\tother\tpending",
+            "old\tother\tsuperseded:new", "pending\tother\tpending",
+            "acceptfailed\tmodule\tpending", "reviewfailed\tother\tpending",
+        ] {
+            units.push_str(&format!("{row}\t\t\t\t{}\n", brief.display()));
+        }
+        std::fs::write(store.join("units.tsv"), units).unwrap();
         std::fs::write(store.join("modules.md"), "## module\nPURPOSE test\nPATHS src/\nDEPENDS none\nCONTRACT test\nACCEPT test `cargo test`\n").unwrap();
         add(store, "verified", "run", 0, "codex-test");
         add(store, "verified", "verify", 0, "test");
@@ -476,4 +493,82 @@ test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(next_for(store, "waiting").unwrap(), Next::Review);
         assert_eq!(next_for(store, "unknown").unwrap_err().kind, "not_found");
     }
+
+    #[test]
+    fn next_without_brief_reports_no_brief() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path();
+        std::fs::write(store.join("units.tsv"), "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu\tother\tpending\t\t\t\t\n").unwrap();
+        let error = next_for(store, "u").unwrap_err();
+        assert_eq!(error.kind, "no_brief");
+        assert_eq!(error.message, "unit u has no brief");
+    }
+}
+
+
+/// Snapshot dispatchable units and their modules without claiming or dispatching them.
+pub(crate) fn cycle_ready(root: &Path) -> Res<Vec<String>> {
+    let mut ready = crate::orch::ready_units(root)?;
+    let units = crate::orch::read_units(root)?;
+    let tracks: Vec<_> = units.iter().filter(|u| ready.contains(&u.id))
+        .map(|u| u.track.clone()).collect();
+    ready.extend(tracks);
+    if root.join("modules.md").is_file() {
+        let text = std::fs::read_to_string(root.join("modules.md"))
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        let map = crate::orch::parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
+        let claimed = crate::orch::lifecycle::scheduler::claimed_modules(root)?;
+        for module in map.modules {
+            if claimed.contains(&module.id) || crate::orch::lifecycle::scheduler::module_verified(root, &module.id)? {
+                continue;
+            }
+            let mut unblocked = true;
+            for dep in &module.depends {
+                if !crate::orch::lifecycle::scheduler::module_verified(root, dep)? { unblocked = false; break; }
+            }
+            if unblocked { ready.push(module.id); }
+        }
+    }
+    ready.sort();
+    ready.dedup();
+    Ok(ready)
+}
+
+pub(crate) fn cycle_core(reply: &Value) -> Value {
+    let error = reply["error"]["kind"].as_str().unwrap_or("");
+    let kind = match error {
+        "fix_limit" => "fix_rounds",
+        "escalation_saturated" | "escalation_required" => "escalation",
+        "not_ready" | "blocked" | "unknown_track" | "no_brief" | "superseded" => "blocked",
+        "selfcheck_required" | "verify_failed" | "red_invalid" => "fix_decision",
+        _ if reply["next"] == "fix" => "fix_decision",
+        _ => return Value::Null,
+    };
+    let reason = reply["error"]["message"].as_str().filter(|s| !s.is_empty())
+        .or_else(|| reply["reason"].as_str().filter(|s| !s.is_empty()))
+        .unwrap_or("unit requires a fix decision");
+    json!({"kind":kind,"reason":one_line(reason)})
+}
+
+pub(crate) fn cycle_handoff(reply: &Value) -> String {
+    let fields = [
+        ("RESULT", format!("{} {}", reply["state"].as_str().unwrap_or(""), reply["next"].as_str().unwrap_or(""))),
+        ("PATHS", reply["changed"]["sample"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+        ("COMMANDS", format!("verify exit {}", reply["verify_exit"])),
+        ("OPEN", reply["core"]["reason"].as_str().or_else(|| reply["reason"].as_str()).unwrap_or("").to_owned()),
+        ("EVIDENCE", format!("verify={} accept={}", reply["verify_exit"], reply["accept"]["exit_code"])),
+    ];
+    let mut handoff = String::new();
+    // Five 220-byte values plus labels and separators always fit the 1200-byte cap.
+    for (key, value) in fields {
+        if !handoff.is_empty() { handoff.push('\n'); }
+        handoff.push_str(key);
+        handoff.push(' ');
+        let clean = value.replace(['\r', '\n'], " ");
+        let mut end = clean.len().min(220);
+        while !clean.is_char_boundary(end) { end -= 1; }
+        handoff.push_str(&clean[..end]);
+    }
+    handoff
 }
