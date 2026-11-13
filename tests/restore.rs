@@ -70,8 +70,8 @@ fn contract_preserves_text_and_isolates_modules() {
 
 #[test]
 fn anchors_respect_order_budgets_cap_and_store() {
-    let store = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/restore1");
-    fs::create_dir_all(&store).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path();
     let map_path = store.join("modules.md");
     let map_display = map_path.display();
     let missing = Anchor {
@@ -221,14 +221,12 @@ fn anchors_respect_order_budgets_cap_and_store() {
         fs::read_to_string(&map_path).unwrap(),
         format!("## m1\n{exact_block}\n")
     );
-    fs::remove_file(&map_path).unwrap();
-    fs::remove_dir(&store).unwrap();
 }
 
 #[test]
 fn oversized_module_keeps_contract_incomplete_line_whole() {
-    let store = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/restore-long-module");
-    fs::create_dir_all(&store).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path();
     let module = "界".repeat(10_000);
     let contract = format!("CONTRACT {}", "x".repeat(CONTRACT_BUDGET));
     let map_path = store.join("modules.md");
@@ -275,7 +273,4 @@ fn oversized_module_keeps_contract_incomplete_line_whole() {
         format!("INCOMPLETE: wish is cut at {WISH_BUDGET} of {} bytes; read the rest in the goal file.\n", wish.len())
     );
     assert_eq!(markers[1], last_line);
-
-    fs::remove_file(map_path).unwrap();
-    fs::remove_dir(store).unwrap();
 }

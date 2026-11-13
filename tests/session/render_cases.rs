@@ -155,9 +155,7 @@ fn codex_briefs() {
 }
 #[test]
 fn codex_brief_files() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/render-label-1");
-    std::fs::create_dir_all(&dir).unwrap();
-    let temp = tempfile::tempdir_in(&dir).unwrap();
+    let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let name = format!("{BRIDGE}codex_run");
     let file = dir.join("brief.txt");

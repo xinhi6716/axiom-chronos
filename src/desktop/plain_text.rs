@@ -450,9 +450,7 @@ mod tests {
 
     #[test]
     fn cache_survives_restart_and_changed_text_misses() {
-        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/.axiom-tmp/plain-text-1"));
-        std::fs::create_dir_all(&root).unwrap();
-        let dir = tempfile::tempdir_in(&root).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.json");
         let fake = Fake::new(r#"["原文翻譯"]"#);
         let mut first = Core::default();
@@ -475,8 +473,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::write(&path, b"{bad").unwrap();
         assert!(load(&path).is_empty());
-        dir.close().unwrap();
-        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]
