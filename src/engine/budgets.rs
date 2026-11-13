@@ -120,6 +120,25 @@ pub fn record(
         json!({"role":role.name(),"model":model,"usd":usd,"input_tokens":input_tokens,"output_tokens":output_tokens,"call":call}),
     )
 }
+pub fn check_model(store: &Path, home: &Path, role: Role, call: &str, model: &str) -> Res<()> {
+    check(store, role, call)?;
+    crate::usage::pools::check(home, model)
+}
+
+pub fn record_model(
+    store: &Path,
+    home: &Path,
+    role: Role,
+    model: &str,
+    usd: Option<f64>,
+    input_tokens: u64,
+    output_tokens: u64,
+    call: &str,
+) -> Res<Event> {
+    let event = record(store, role, model, usd, input_tokens, output_tokens, call)?;
+    crate::usage::pools::charge(home, model, input_tokens.checked_add(output_tokens), usd, call)?;
+    Ok(event)
+}
 pub fn role_for_agent(subagent: &str) -> Option<Role> {
     let name = subagent.strip_prefix("chronos:")?;
     Some(match name {

@@ -1,6 +1,7 @@
 //! Static quota strip presentation.
 use super::{concurrency, i18n::{self, Lang, Table}, model::AppState, ornament, theme::{self, Step, Tokened, Tokens, TypeSize}};
 use crate::usage::quota::{self, Freshness, Level, ProviderQuota, Quotas, Window, WindowKind};
+use crate::usage::pools::{Pool, PoolStatus, PoolStrip, Remaining};
 use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::h_flex;
@@ -16,7 +17,17 @@ const T: Table = &[
     ("last known · {} · {} ago", "最後已知 · {} · {}前"),
     ("{}% left ({}% used)", "剩 {}%（已用 {}%）"),
     ("{} · observed {}", "{} · 觀測 {}"), ("{} · resets {}", "{} · {} 重置"),
+    ("used {}", "已用 {}"), ("remaining {}", "剩餘 {}"),
+    ("unknown", "未知"), ("exhausted", "已耗盡"),
 ];
+
+impl Global for PoolStrip {}
+
+pub(super) fn unknown_pools() -> Vec<PoolStatus> {
+    Pool::ALL.into_iter().map(|pool| PoolStatus {
+        pool, used_tokens: None, cost_usd: None, remaining: Remaining::Unknown, exhausted_until_ms: None,
+    }).collect()
+}
 
 fn tr(lang: Lang, key: &'static str) -> &'static str { i18n::translate(lang, T, key) }
 fn fill(lang: Lang, key: &'static str, args: &[&str]) -> String { i18n::fill(tr(lang, key), args) }
@@ -65,6 +76,34 @@ fn meter_text(w: Option<&Window>, lang: Lang) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tone { Gold, Amber, Cinnabar, Muted }
+
+fn pool_tokens(tokens: u64) -> String {
+    let n = tokens as f64;
+    let (value, suffix) = if tokens >= 1_000_000_000 { (n / 1e9, "B") }
+        else if tokens >= 1_000_000 { (n / 1e6, "M") }
+        else if tokens >= 1_000 { (n / 1e3, "k") }
+        else { return format!("{tokens} tok") };
+    format!("{value:.1}{suffix} tok")
+}
+
+fn pool_text(status: &PoolStatus, lang: Lang) -> String {
+    let used = status.used_tokens.map(pool_tokens).unwrap_or_else(|| "—".into());
+    let remaining = match status.remaining {
+        Remaining::Known { tokens } => pool_tokens(tokens),
+        Remaining::Unknown => tr(lang, "unknown").into(),
+    };
+    let mut parts = vec![fill(lang, "used {}", &[&used])];
+    if let Some(cost) = status.cost_usd { parts.push(format!("${cost:.2}")); }
+    parts.push(fill(lang, "remaining {}", &[&remaining]));
+    if status.exhausted_until_ms.is_some() { parts.push(tr(lang, "exhausted").into()); }
+    parts.join(" · ")
+}
+
+fn pool_tone(status: &PoolStatus) -> Tone {
+    if status.exhausted_until_ms.is_some() { Tone::Cinnabar }
+    else if status.used_tokens.is_none() && matches!(status.remaining, Remaining::Unknown) { Tone::Muted }
+    else { Tone::Gold }
+}
 
 fn tone(w: Option<&Window>, now: i64) -> Tone {
     match w {
@@ -252,6 +291,8 @@ fn strip_layout(state: &AppState, cx: &App, mini: Option<&gpui_kit::Window>, con
          super::doctor::storage::low_disk_notice(space, lang, &t, d,
             Rc::new(move |_, cx| open_state.update(cx, |s, cx| s.open_page(super::ux::Page::Storage, cx)))))
     } else { (None, None, None) };
+    let fallback = unknown_pools();
+    let pools = cx.try_global::<PoolStrip>().map(|strip| strip.0.as_slice()).unwrap_or(&fallback);
     h_flex().id("quota-strip").relative().w_full().h(theme::row_height(d)).min_h(theme::TARGET_MIN)
         .px(spacing).gap(gap)
         .border_t_1().border_color(t.border).bg(t.surface).text_size(theme::font(d,TypeSize::Caption))
@@ -259,6 +300,15 @@ fn strip_layout(state: &AppState, cx: &App, mini: Option<&gpui_kit::Window>, con
         .when(show_quotas,|row|row
             .child(provider("Claude", &state.quota.claude, "quota-claude", "quota-claude-five-hour", "quota-claude-weekly"))
             .child(provider("Codex", &state.quota.codex, "quota-codex", "quota-codex-five-hour", "quota-codex-weekly")))
+        .when(!compact, |row| row.children(pools.iter().map(|status| {
+            let label = status.pool.label();
+            let value = pool_text(status, lang);
+            let id = match status.pool { Pool::HydrogenFlash => "quota-pool-hydrogen_flash", Pool::Argon => "quota-pool-argon" };
+            h_flex().id(id).flex_none().gap(spacing / 2.)
+                .child(div().text_color(t.gold.opacity(0.75)).child(label.test_text(label)))
+                .child(div().text_color(ink(&t, pool_tone(status))).child(value.clone().test_text(value)))
+                .test_support()
+        })))
         .when(show_models,|row|row.child(model_row))
         .when(show_parallel, |row| row.child(div().id("codex-parallel").flex_none().text_color(t.muted).child(value.clone().test_text(value)).test_support()))
         .children(notice)
@@ -275,6 +325,26 @@ fn parallel_text(used: Option<u64>, cap: Option<u64>, lang: Lang) -> String {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn pool_readout_is_honest_and_localized() {
+        use crate::usage::pools::{Pool, PoolStatus, Remaining};
+        let mut status = PoolStatus { pool: Pool::HydrogenFlash, used_tokens: None, cost_usd: None, remaining: Remaining::Unknown, exhausted_until_ms: None };
+        assert_eq!(pool_text(&status, Lang::En), "used — · remaining unknown");
+        assert_eq!(pool_text(&status, Lang::ZhTw), "已用 — · 剩餘 未知");
+        assert_eq!(pool_tone(&status), Tone::Muted);
+        status.used_tokens = Some(0);
+        status.remaining = Remaining::Known { tokens: 0 };
+        assert_eq!(pool_text(&status, Lang::En), "used 0 tok · remaining 0 tok");
+        status.used_tokens = Some(12_300);
+        status.cost_usd = Some(1.25);
+        status.remaining = Remaining::Known { tokens: 42_000 };
+        assert_eq!(pool_text(&status, Lang::En), "used 12.3k tok · $1.25 · remaining 42.0k tok");
+        status.exhausted_until_ms = Some(1);
+        assert_eq!(pool_text(&status, Lang::En), "used 12.3k tok · $1.25 · remaining 42.0k tok · exhausted");
+        assert_eq!(pool_text(&status, Lang::ZhTw), "已用 12.3k tok · $1.25 · 剩餘 42.0k tok · 已耗盡");
+        assert_eq!(pool_tone(&status), Tone::Cinnabar);
+    }
 
     #[test]
     fn compact_budget_preserves_controls_before_readouts() {

@@ -3,6 +3,16 @@ use crate::{base::{self, Failure, Res}, codex::AppServer};
 use serde_json::Value;
 use std::{sync::{Arc, Mutex, mpsc::Receiver}, time::{Duration, Instant}};
 
+fn pool_snapshot(home: &std::path::Path, now_ms: i64) -> Vec<crate::usage::pools::PoolStatus> {
+    crate::usage::pools::status(home, now_ms).unwrap_or_else(|_| super::super::quota::unknown_pools())
+}
+
+pub fn publish_pools(home: &std::path::Path, cx: &mut gpui_kit::App) {
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0);
+    cx.set_global(crate::usage::pools::PoolStrip(pool_snapshot(home, now_ms)));
+}
+
 pub(super) trait RateSource: Send + Sync {
     fn read(&self) -> Res<Value>;
     fn generation(&self) -> u64;
@@ -73,6 +83,28 @@ pub(super) fn due(now: Instant, started: Instant, last: Option<(Instant, u64, u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_snapshot_reads_home_and_falls_back_on_error() {
+        use crate::usage::pools::{self, Pool, Remaining};
+        let home = tempfile::tempdir().unwrap();
+        pools::charge(home.path(), "gemini-4-hydrogen-xhigh", Some(12_300), None, "test").unwrap();
+        pools::mark_exhausted(home.path(), Pool::Argon, 10_000, "test").unwrap();
+        let statuses = pool_snapshot(home.path(), 1_000);
+        assert_eq!(statuses[0].used_tokens, Some(12_300));
+        assert_eq!(statuses[0].cost_usd, None);
+        assert_eq!(statuses[1].exhausted_until_ms, Some(10_000));
+        std::fs::write(home.path().join("usage/pools.jsonl"), "bad json\n").unwrap();
+        let statuses = pool_snapshot(home.path(), 1_000);
+        assert_eq!(statuses.len(), 2);
+        for (status, pool) in statuses.iter().zip(Pool::ALL) {
+            assert_eq!(status.pool, pool);
+            assert_eq!(status.used_tokens, None);
+            assert_eq!(status.cost_usd, None);
+            assert_eq!(status.remaining, Remaining::Unknown);
+            assert_eq!(status.exhausted_until_ms, None);
+        }
+    }
 
     #[test]
     fn refresh_boundaries() {

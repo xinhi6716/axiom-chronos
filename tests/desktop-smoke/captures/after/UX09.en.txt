@@ -12,6 +12,10 @@ gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	used — · remaining unknown
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
