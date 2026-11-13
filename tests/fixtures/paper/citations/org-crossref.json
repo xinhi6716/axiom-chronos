@@ -1,0 +1,23 @@
+{
+  "message": {
+    "DOI": "10.1038/orgtest1",
+    "title": [
+      "Global health report"
+    ],
+    "author": [
+      {
+        "name": "World Health Organization"
+      }
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          2020
+        ]
+      ]
+    },
+    "container-title": [
+      "WHO Bulletin"
+    ]
+  }
+}

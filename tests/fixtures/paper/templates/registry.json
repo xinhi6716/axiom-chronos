@@ -1,0 +1,69 @@
+{
+  "templates": [
+    {
+      "id": "elsarticle",
+      "publisher": "Elsevier",
+      "author_page": "https://www.elsevier.com/authors/policies-and-guidelines/latex-instructions",
+      "download_source": "Elsevier https://assets.ctfassets.net/o78em1y1w4i4/4MpsJHO0MOJ2xZuwGTAbOZ/7bc64af36477c5d6cfce335a1f872363/elsarticle.zip (sha256 0b093093e84db49f99bcc9a7c3f69ed1fb61b0147c6d296427aff7963e7f50f6); CTAN https://ctan.org/pkg/elsarticle (current 3.5, 2026-01-09); the class file used for the fixtures is the copy in the Tectonic default package set v33",
+      "version": "3.3",
+      "sha256": "23a341acd0e35c20148c836fc6e9251549aa45b059fc1750356ca2f3f11f3cb0",
+      "class": "elsarticle",
+      "class_options": [
+        "preprint",
+        "12pt"
+      ],
+      "bib_style": "elsarticle-num",
+      "preamble": [
+        "\\usepackage{booktabs}",
+        "\\usepackage{graphicx}"
+      ],
+      "status": "verified"
+    },
+    {
+      "id": "IEEEtran",
+      "publisher": "IEEE",
+      "author_page": "https://journals.ieeeauthorcenter.ieee.org/create-your-ieee-journal-article/authoring-tools-and-templates/",
+      "download_source": "CTAN https://ctan.org/pkg/ieeetran (https://mirrors.ctan.org/macros/latex/contrib/IEEEtran.zip, sha256 e0cd4f5afbd42c8076092280e72b3e0a5111efe501d35de9f715cfb8da313cb4); the class file used for the fixtures is the copy in the Tectonic default package set v33",
+      "version": "1.8b",
+      "sha256": "da751920a317ed318b7b5cd7fa585a6cc7d28502d457856382e9be24b10a3bd7",
+      "class": "IEEEtran",
+      "class_options": [
+        "journal"
+      ],
+      "bib_style": "IEEEtran",
+      "preamble": [
+        "\\usepackage{booktabs}",
+        "\\usepackage{graphicx}"
+      ],
+      "status": "verified"
+    },
+    {
+      "id": "sn-jnl",
+      "publisher": "Springer Nature",
+      "author_page": "https://www.springernature.com/gp/authors/campaigns/latex-author-support",
+      "download_source": "",
+      "version": "",
+      "sha256": "",
+      "class": "sn-jnl",
+      "class_options": [],
+      "bib_style": "sn-basic",
+      "preamble": [],
+      "status": "unconfirmed",
+      "reason": "Springer Nature author page https://www.springernature.com/gp/authors/campaigns/latex-author-support recommends the Springer Nature LaTeX template (Overleaf https://www.overleaf.com/latex/templates/springer-nature-latex-template/gsvvftmrppwq) but does not name the sn-jnl class, and no class file or hash was recorded"
+    },
+    {
+      "id": "achemso",
+      "publisher": "American Chemical Society",
+      "author_page": "https://pubs.acs.org/",
+      "download_source": "",
+      "version": "",
+      "sha256": "",
+      "class": "achemso",
+      "class_options": [],
+      "bib_style": "achemso",
+      "preamble": [],
+      "status": "unconfirmed",
+      "reason": "ACS author pages (pubs.acs.org) return HTTP 403 to automated fetch; CTAN lists achemso 3.14 (2025-09-22) but no author-page confirmation or class hash was recorded"
+    }
+  ]
+}

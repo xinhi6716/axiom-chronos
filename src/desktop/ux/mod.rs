@@ -28,6 +28,9 @@ pub enum Page {
     QuickTask,
     Plaza,
     Session(SharedString),
+    // p8: begin stub
+    Paper(SharedString),
+    // p8: end stub
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReadFilter {
@@ -49,6 +52,7 @@ pub struct Seams {
     pub unit_actions: Option<Arc<dyn UnitActions>>,
     pub optimizer: Option<Arc<dyn OptimizerRunner>>,
     pub github: Option<Arc<dyn GhRunner>>,
+    pub paper: Option<Arc<dyn PaperService>>, // p8:
 }
 impl Seams {
     pub fn demo() -> Self {
@@ -167,6 +171,7 @@ impl Seams {
                 stdout: "Repository is ready".into(),
                 stderr: String::new(),
             }]))),
+            paper: None, // p8:
         }
     }
 }

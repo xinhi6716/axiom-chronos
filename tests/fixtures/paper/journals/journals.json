@@ -1,0 +1,801 @@
+[
+  {
+    "id": "a-pass",
+    "title": "cancer immune",
+    "issns": [
+      "a-pass"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 100000,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [
+      "therapy"
+    ],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "b-free",
+    "title": "trial",
+    "issns": [
+      "b-free"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": "no_fee",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [
+      "genomics"
+    ],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "c-unknown",
+    "title": "cancer therapy",
+    "issns": [
+      "c-unknown"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [
+      "immune"
+    ],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "d-currency",
+    "title": "trial",
+    "issns": [
+      "d-currency"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 100000,
+            "currency": "EUR"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [
+      "biomarker"
+    ],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "e-tier",
+    "title": "unrelated",
+    "issns": [
+      "e-tier"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q2",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 100000,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "f-access",
+    "title": "unrelated",
+    "issns": [
+      "f-access"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "subscription",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 100000,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "g-apc",
+    "title": "unrelated",
+    "issns": [
+      "g-apc"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "open_access",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 400000,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  },
+  {
+    "id": "h-hybrid",
+    "title": "unrelated",
+    "issns": [
+      "h-hybrid"
+    ],
+    "issn_l": null,
+    "publisher": {
+      "known": {
+        "value": "Example Publisher",
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "homepage": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "quartiles": [
+      {
+        "value": {
+          "quartile": "q1",
+          "scheme": "sjr",
+          "category": "Oncology",
+          "year": 2024
+        },
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    ],
+    "sjr": {
+      "known": {
+        "value": 1.2,
+        "source": {
+          "kind": "sjr",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "access": {
+      "known": {
+        "value": "hybrid",
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "apc": {
+      "known": {
+        "value": {
+          "fee": {
+            "amount_minor": 100000,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "kind": "doaj",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    },
+    "review_weeks": {
+      "unknown": {
+        "reason": "not reported"
+      }
+    },
+    "topics": [],
+    "works_count": {
+      "known": {
+        "value": 100,
+        "source": {
+          "kind": "openalex",
+          "url": null,
+          "fetched_at": "2025-01-01T00:00:00Z",
+          "data_year": 2024,
+          "raw": "fixture#/value"
+        }
+      }
+    }
+  }
+]

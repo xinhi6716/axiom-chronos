@@ -1,0 +1,254 @@
+[
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:2020-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works1.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:2020-01-01&per-page=200&cursor=page2",
+    "status": 200,
+    "file": "works2.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:2020-01-01&per-page=200&cursor=*&mailto=test%40example.org",
+    "status": 200,
+    "file": "works-mail.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/sources/S1",
+    "status": 200,
+    "file": "source.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/sources/S1",
+    "status": 200,
+    "file": "source.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/W1",
+    "status": 200,
+    "file": "work.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/api/search/journals/issn%3A1234-5678",
+    "status": 200,
+    "file": "doaj-1234-5678.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/api/search/journals/issn%3A1111-1111",
+    "status": 200,
+    "file": "doaj-1111-1111.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/api/search/journals/issn%3A2222-2222",
+    "status": 200,
+    "file": "doaj-2222-2222.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/api/search/journals/issn%3A3333-3333",
+    "status": 200,
+    "file": "doaj-3333-3333.json",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/journalrank.php?year=2023&type=j&out=xls",
+    "status": 200,
+    "file": "sjr-2023.csv",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/journalrank.php?year=2024&type=j&out=xls",
+    "status": 200,
+    "file": "sjr-2024.csv",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry",
+    "status": 429,
+    "file": "retry-0.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/retry",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-429",
+    "status": 429,
+    "file": "retry-0.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-429",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-503",
+    "status": 503,
+    "file": "retry-0.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/retry-default-503",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/limited",
+    "status": 429,
+    "file": "limited-0.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/limited",
+    "status": 429,
+    "file": "limited-1.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/limited",
+    "status": 429,
+    "file": "limited-2.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/limited",
+    "status": 429,
+    "file": "limited-3.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://doaj.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/contract-ttl",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://www.scimagojr.com/contract-interval",
+    "status": 200,
+    "file": "contract.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/unavailable",
+    "status": 503,
+    "file": "retry-0.json",
+    "headers": {
+      "Retry-After": "3"
+    }
+  },
+  {
+    "url": "https://api.openalex.org/unavailable",
+    "status": 200,
+    "file": "retry-ok.json",
+    "headers": {}
+  }
+]

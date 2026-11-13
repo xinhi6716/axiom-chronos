@@ -1,0 +1,35 @@
+{
+  "message": {
+    "DOI": "10.1038/NATURE14539",
+    "title": [
+      "Deep learning"
+    ],
+    "author": [
+      {
+        "given": "Yann",
+        "family": "LeCun"
+      },
+      {
+        "given": "Yoshua",
+        "family": "Bengio"
+      },
+      {
+        "given": "Geoffrey",
+        "family": "Hinton"
+      }
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          2015
+        ]
+      ]
+    },
+    "container-title": [
+      "Nature"
+    ],
+    "volume": "1",
+    "issue": "2",
+    "page": "436-444"
+  }
+}

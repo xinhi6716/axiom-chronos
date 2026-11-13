@@ -27,13 +27,15 @@ pub fn council_line(v: &CouncilView, lang: Lang) -> String {
 
 pub fn orbit_moving(v: &CouncilView) -> bool { v.active }
 
-fn member(m: Member) -> (&'static str, ornament::Celestial, usize) {
+// p8: begin
+pub(crate) fn member(m: Member) -> (&'static str, ornament::Celestial, usize) {
     match m {
         Member::Astra => ("Astra", ornament::Celestial::Star, 0),
         Member::Fable => ("Fable", ornament::Celestial::Jupiter, 1),
         Member::Argon => ("Argon", ornament::Celestial::Gemini, 2),
     }
 }
+// p8: end
 fn position(index: usize, phase: f32) -> (f32, f32) {
     let a = phase + index as f32 * TAU / 3.0 - TAU / 4.0;
     (150. + 105. * a.cos(), 112. + 70. * a.sin())

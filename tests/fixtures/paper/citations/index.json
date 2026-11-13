@@ -1,0 +1,152 @@
+[
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fnature14539",
+    "status": 200,
+    "file": "article-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Fnature14539",
+    "status": 200,
+    "file": "article-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fnature12373",
+    "status": 200,
+    "file": "title-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Fnature12373",
+    "status": 200,
+    "file": "title-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fnature12374",
+    "status": 200,
+    "file": "authors-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Fnature12374",
+    "status": 200,
+    "file": "authors-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fnature12375",
+    "status": 200,
+    "file": "pages-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Fnature12375",
+    "status": 200,
+    "file": "pages-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0000308",
+    "status": 200,
+    "file": "electronic-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1371%2Fjournal.pone.0000308",
+    "status": 200,
+    "file": "electronic-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.2307%2F1330360",
+    "status": 200,
+    "file": "law-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.2307%2F1330360",
+    "status": 200,
+    "file": "law-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/W123",
+    "status": 200,
+    "file": "no-doi-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.9999%2Ffake",
+    "status": 404,
+    "file": "error.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.9999%2Ffake",
+    "status": 404,
+    "file": "error.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.9999%2Funavailable",
+    "status": 500,
+    "file": "error.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.9999%2Funavailable",
+    "status": 500,
+    "file": "error.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Forgtest1",
+    "status": 200,
+    "file": "org-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.openalex.org/works/doi:10.1038%2Forgtest1",
+    "status": 200,
+    "file": "org-openalex.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Forgtest2",
+    "status": 200,
+    "file": "org-mixed-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest0",
+    "status": 200,
+    "file": "dash-0-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest1",
+    "status": 200,
+    "file": "dash-1-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest2",
+    "status": 200,
+    "file": "dash-2-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest3",
+    "status": 200,
+    "file": "dash-3-crossref.json",
+    "headers": {}
+  },
+  {
+    "url": "https://api.crossref.org/works/10.1038%2Fdashtest4",
+    "status": 200,
+    "file": "dash-4-crossref.json",
+    "headers": {}
+  }
+]

@@ -1,0 +1,117 @@
+[
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20cancer&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/sources/S1",
+    "status": 200,
+    "file": "source.json"
+  },
+  {
+    "url": "https://www.scimagojr.com/journalrank.php?year=2023&type=j&out=xls",
+    "status": 200,
+    "file": "sjr-2023.csv"
+  },
+  {
+    "url": "https://doaj.org/api/search/journals/issn%3A1234-5678",
+    "status": 200,
+    "file": "doaj-1234-5678.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  },
+  {
+    "url": "https://api.openalex.org/works?search=cancer%20oncology&filter=from_publication_date:{{year}}-01-01&per-page=200&cursor=*",
+    "status": 200,
+    "file": "works.json"
+  }
+]

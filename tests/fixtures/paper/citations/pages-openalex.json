@@ -1,0 +1,25 @@
+{
+  "id": "https://openalex.org/W4",
+  "doi": "https://doi.org/10.1038/nature12375",
+  "display_name": "Another published article",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Grace Hopper"
+      }
+    }
+  ],
+  "publication_year": 2013,
+  "primary_location": {
+    "source": {
+      "display_name": "Journal of Machine Learning Research"
+    }
+  },
+  "biblio": {
+    "volume": "1",
+    "issue": "2",
+    "first_page": "100",
+    "last_page": "110",
+    "article_number": null
+  }
+}

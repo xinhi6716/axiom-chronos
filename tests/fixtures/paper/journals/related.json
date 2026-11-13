@@ -1,0 +1,55 @@
+[
+  {
+    "id": "W-high",
+    "title": "biomarker",
+    "abstract_words": [],
+    "year": 2024,
+    "source_id": "a-pass",
+    "topics": [
+      "cancer"
+    ],
+    "doi": null
+  },
+  {
+    "id": "W-high-2",
+    "title": "unrelated",
+    "abstract_words": [],
+    "year": 2024,
+    "source_id": "a-pass",
+    "topics": [],
+    "doi": null
+  },
+  {
+    "id": "W-free",
+    "title": "immune",
+    "abstract_words": [],
+    "year": 2024,
+    "source_id": "b-free",
+    "topics": [
+      "biomarker"
+    ],
+    "doi": null
+  },
+  {
+    "id": "W-unknown",
+    "title": "genomics",
+    "abstract_words": [],
+    "year": 2024,
+    "source_id": "c-unknown",
+    "topics": [
+      "therapy"
+    ],
+    "doi": null
+  },
+  {
+    "id": "W-currency",
+    "title": "cancer",
+    "abstract_words": [],
+    "year": 2024,
+    "source_id": "d-currency",
+    "topics": [
+      "genomics"
+    ],
+    "doi": null
+  }
+]

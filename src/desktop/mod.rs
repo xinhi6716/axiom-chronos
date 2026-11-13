@@ -16,6 +16,9 @@ pub mod model;
 mod motion;
 mod ornament;
 mod palette;
+// p8: begin stub
+pub mod paper;
+// p8: end stub
 pub mod plain_text;
 mod quota;
 mod run_view;
