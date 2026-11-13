@@ -6,10 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{FILETIME, HANDLE, HWND, LPARAM, POINT, RECT},
+    Foundation::{FILETIME, HANDLE, HWND, LPARAM},
     Graphics::Gdi::{
-        ClientToScreen, EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
-        ENUM_CURRENT_SETTINGS,
+        EnumDisplayDevicesW, GetMonitorInfoW, MonitorFromWindow, DISPLAY_DEVICEW, MONITORINFOEXW,
+        MONITOR_DEFAULTTONEAREST,
     },
     System::{
         ProcessStatus::{
@@ -17,28 +17,11 @@ use windows_sys::Win32::{
         },
         Threading::GetProcessTimes,
     },
-    UI::{
-        HiDpi::GetDpiForSystem,
-        Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-            MOUSEINPUT,
-        },
-        WindowsAndMessaging::{
-            EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-            IsWindowVisible, PostMessageW, SetCursorPos, SetForegroundWindow, WM_MOUSEWHEEL,
-        },
-    },
+    UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible},
 };
 
-pub fn machine() -> (String, u32, u32) {
+pub fn machine(hz: u32, dpi: u32) -> (String, u32, u32) {
     unsafe {
-        let mut mode: DEVMODEW = mem::zeroed();
-        mode.dmSize = mem::size_of::<DEVMODEW>() as u16;
-        assert_ne!(
-            EnumDisplaySettingsW(std::ptr::null(), ENUM_CURRENT_SETTINGS, &mut mode),
-            0,
-            "EnumDisplaySettingsW failed"
-        );
         let mut display: DISPLAY_DEVICEW = mem::zeroed();
         display.cb = mem::size_of::<DISPLAY_DEVICEW>() as u32;
         let gpu = if EnumDisplayDevicesW(std::ptr::null(), 0, &mut display, 0) != 0 {
@@ -57,9 +40,27 @@ pub fn machine() -> (String, u32, u32) {
             } else {
                 gpu
             },
-            mode.dmDisplayFrequency,
-            GetDpiForSystem(),
+            hz,
+            dpi,
         )
+    }
+}
+pub fn display_device(hwnd: HWND) -> String {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFOEXW = mem::zeroed();
+        info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+        assert_ne!(
+            GetMonitorInfoW(monitor, &mut info.monitorInfo),
+            0,
+            "GetMonitorInfoW failed"
+        );
+        let len = info
+            .szDevice
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(info.szDevice.len());
+        String::from_utf16_lossy(&info.szDevice[..len])
     }
 }
 unsafe extern "system" fn find(hwnd: HWND, arg: LPARAM) -> i32 {
@@ -91,54 +92,6 @@ pub fn wait_window(child: &mut Child) -> HWND {
         );
         assert!(Instant::now() < deadline, "app window did not appear");
         thread::sleep(Duration::from_millis(20));
-    }
-}
-pub fn click(w: HWND) -> bool {
-    unsafe {
-        SetForegroundWindow(w);
-        if GetForegroundWindow() != w {
-            return false;
-        }
-        let mut point = POINT { x: 100, y: 100 };
-        assert_ne!(ClientToScreen(w, &mut point), 0, "ClientToScreen failed");
-        assert_ne!(SetCursorPos(point.x, point.y), 0, "SetCursorPos failed");
-        let mouse = |flags| INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let input = [mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)];
-        assert_eq!(
-            SendInput(
-                input.len() as u32,
-                input.as_ptr(),
-                mem::size_of::<INPUT>() as i32
-            ),
-            input.len() as u32,
-            "SendInput failed"
-        );
-        true
-    }
-}
-pub fn wheel(w: HWND, delta: i16) {
-    unsafe {
-        let mut rect: RECT = mem::zeroed();
-        assert_ne!(GetWindowRect(w, &mut rect), 0, "GetWindowRect failed");
-        let x = rect.left + (rect.right - rect.left) * 3 / 4;
-        let y = rect.top + (rect.bottom - rect.top) / 2;
-        let location = (((y as u16 as u32) << 16) | x as u16 as u32) as isize;
-        assert_ne!(
-            PostMessageW(w, WM_MOUSEWHEEL, (delta as u16 as usize) << 16, location),
-            0
-        );
     }
 }
 pub fn cpu_ticks(h: HANDLE) -> u64 {

@@ -1,8 +1,10 @@
+#[path = "../isolation_support/mod.rs"]
+mod isolation;
 use super::Png;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::Stdio,
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -40,17 +42,10 @@ impl Drop for DpiContext {
     }
 }
 pub struct App {
-    child: Mutex<Child>,
+    child: Mutex<isolation::Launched>,
     _temp: tempfile::TempDir,
     log: PathBuf,
     stderr: PathBuf,
-}
-impl Drop for App {
-    fn drop(&mut self) {
-        let child = self.child.get_mut().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }
 pub fn launch(
     exe: &Path,
@@ -65,23 +60,18 @@ pub fn launch(
     let log = temp.path().join("perf.jsonl");
     let stderr = temp.path().join("stderr.log");
     let err = fs::File::create(&stderr).expect("stderr capture");
-    let mut cmd = Command::new(exe);
-    cmd.args(["--demo", "--target", target, "--state", state]);
+    let size_arg = format!("{}x{}", size.0, size.1);
+    let log_arg = log.to_str().expect("capture log path is not UTF-8");
+    let mut args = vec!["--demo", "--target", target, "--state", state];
     if lang == "en" {
-        cmd.arg("--english");
+        args.push("--english");
     }
     if theme == "light" {
-        cmd.arg("--light");
+        args.push("--light");
     }
-    cmd.arg("--size")
-        .arg(format!("{}x{}", size.0, size.1))
-        .arg("--perf-log")
-        .arg(&log)
-        .env("AXIOM_HOME", home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(err));
+    args.extend(["--size", &size_arg, "--perf-log", log_arg]);
     App {
-        child: Mutex::new(cmd.spawn().expect("launch application")),
+        child: Mutex::new(isolation::launch(exe, home, &args, Stdio::from(err))),
         _temp: temp,
         log,
         stderr,
@@ -96,6 +86,7 @@ fn check(app: &App) -> Result<(), String> {
         .child
         .lock()
         .unwrap()
+        .child
         .try_wait()
         .map_err(|e| e.to_string())?
     {
@@ -126,7 +117,7 @@ unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> i32 {
 }
 fn window(app: &App) -> Result<HWND, String> {
     let mut s = Search {
-        pid: app.child.lock().unwrap().id(),
+        pid: app.child.lock().unwrap().child.id(),
         hwnd: std::ptr::null_mut(),
         area: 0,
     };
@@ -171,6 +162,11 @@ pub fn capture(app: &App) -> Result<Png, String> {
     thread::sleep(Duration::from_millis(500));
     check(app)?;
     let hwnd = window(app)?;
+    {
+        let launched = app.child.lock().unwrap();
+        isolation::shown(&launched, hwnd)?;
+        isolation::not_foreground(&launched)?;
+    }
     let result = unsafe {
         let mut rect: RECT = std::mem::zeroed();
         if GetWindowRect(hwnd, &mut rect) == 0 {

@@ -1,3 +1,5 @@
+#[path = "../isolation_support/mod.rs"]
+mod isolation;
 use crate::{
     perf_support::{results, workload},
     release_support, win,
@@ -7,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -58,7 +60,7 @@ pub fn parse(text: &str, require_interactive: bool) -> Result<Log, String> {
         }
     }
     if require_interactive && log.interactive.is_none() {
-        return Err("missing interactive record (window could not receive foreground input or did not record it)".into());
+        return Err("missing interactive record".into());
     }
     Ok(log)
 }
@@ -88,47 +90,56 @@ fn read(path: &Path, require: bool) -> Result<Log, String> {
     parse(&fs::read_to_string(path).unwrap_or_default(), require)
 }
 struct App {
-    child: Child,
+    launched: isolation::Launched,
     log: PathBuf,
-}
-impl Drop for App {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 impl App {
     fn start(exe: &Path, home: &Path, target: &str, name: &str) -> Self {
         let log = home.join(format!("{name}.jsonl"));
         let _ = fs::remove_file(&log);
-        let child = Command::new(exe)
-            .args(["--target", target, "--state", "live", "--perf-log"])
-            .arg(&log)
-            .env("AXIOM_HOME", home)
-            .spawn()
-            .expect("launch release chronos");
-        Self { child, log }
+        let log_arg = log.to_str().expect("perf log path is not UTF-8");
+        let launched = isolation::launch(
+            exe,
+            home,
+            &["--target", target, "--state", "live", "--perf-log", log_arg],
+            Stdio::inherit(),
+        );
+        Self { launched, log }
     }
-    fn interactive(&mut self) -> u64 {
-        let window = win::wait_window(&mut self.child);
+    fn interactive(&mut self) -> (u64, isolation::Shown) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut next_click = Instant::now();
         loop {
-            if Instant::now() >= next_click {
-                win::click(window);
-                next_click = Instant::now() + Duration::from_millis(200);
-            }
-            if let Some(t) = read(&self.log, false).unwrap().interactive {
-                return t;
+            isolation::not_foreground(&self.launched).expect("application took foreground");
+            if let Some(window) = win::window(self.launched.child.id()) {
+                let shown =
+                    isolation::shown(&self.launched, window).expect("invalid window placement");
+                if Instant::now() >= next_click {
+                    isolation::input::post_click(window, (100, 100)).expect("post click");
+                    next_click = Instant::now() + Duration::from_millis(200);
+                }
+                if let Some(t) = read(&self.log, false).unwrap().interactive {
+                    return (t, shown);
+                }
             }
             assert!(
-                self.child.try_wait().unwrap().is_none(),
+                self.launched.child.try_wait().unwrap().is_none(),
                 "app exited before interactive"
             );
-            assert!(Instant::now() < deadline, "missing interactive record (window could not receive foreground input or did not record it)");
+            assert!(Instant::now() < deadline, "missing interactive record");
             thread::sleep(Duration::from_millis(2));
         }
     }
+}
+fn display(shown: &isolation::Shown) -> String {
+    win::display_device(shown.hwnd)
+}
+fn same_display(shown: &isolation::Shown, expected: &str) {
+    let actual = display(shown);
+    assert_eq!(
+        actual, expected,
+        "scenario window is on a different display"
+    );
 }
 const WISH: &str = "w-1234567890123-abcdef";
 fn write(path: &Path, data: &str) {
@@ -170,7 +181,7 @@ fn wait_events(app: &mut App, count: usize, timeout: Duration) -> Vec<Value> {
             }
         }
         assert!(
-            app.child.try_wait().unwrap().is_none(),
+            app.launched.child.try_wait().unwrap().is_none(),
             "app exited waiting for events"
         );
         assert!(
@@ -265,12 +276,12 @@ fn frames(
     phase: &str,
     dir: &Path,
     budgets: &Value,
-    hz: u32,
+    expected_display: Option<(&str, u32)>,
     target: &str,
     scenario: &str,
     scrolling: bool,
     out: &mut Vec<Value>,
-) {
+) -> (isolation::Shown, isolation::Place, String) {
     let home = release_support::isolated_home();
     if scrolling {
         seed_wishes(home.path());
@@ -285,7 +296,17 @@ fn frames(
         );
     }
     let mut app = App::start(exe, home.path(), target, scenario);
-    app.interactive();
+    let (_, shown) = app.interactive();
+    let device = display(&shown);
+    let hz = if let Some((expected, hz)) = expected_display {
+        assert_eq!(
+            device, expected,
+            "scenario window is on a different display"
+        );
+        hz
+    } else {
+        shown.hz
+    };
     thread::sleep(Duration::from_secs(5));
     let start = Instant::now();
     let start_us = read(&app.log, true)
@@ -294,21 +315,22 @@ fn frames(
         .last()
         .map(|v| v["start_us"].as_u64().unwrap())
         .unwrap_or(0);
-    let w = win::wait_window(&mut app.child);
+    let w = win::wait_window(&mut app.launched.child);
     while start.elapsed() < Duration::from_secs(30) {
         assert!(
-            app.child.try_wait().unwrap().is_none(),
+            app.launched.child.try_wait().unwrap().is_none(),
             "app exited during {scenario}"
         );
         if scrolling {
-            win::wheel(
+            isolation::input::post_wheel(
                 w,
                 if start.elapsed().as_secs() % 8 < 4 {
                     -120
                 } else {
                     120
                 },
-            );
+            )
+            .expect("post wheel");
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -353,6 +375,7 @@ fn frames(
             None,
         );
     }
+    (shown, app.launched.place, device)
 }
 pub fn measure(phase: &str) {
     let exe = release_support::release_exe("chronos").expect("build release chronos first");
@@ -362,25 +385,29 @@ pub fn measure(phase: &str) {
     let matrix = release_support::load_matrix();
     let budgets = &matrix.budgets;
     let dir = repo.join("tests/desktop-smoke/perf");
-    let (gpu, hz, dpi) = win::machine();
     let mut out = Vec::new();
-    frames(
+    let (first, place, device) = frames(
         &exe,
         phase,
         &dir,
         budgets,
-        hz,
+        None,
         "run",
         "animation",
         false,
         &mut out,
     );
+    let (gpu, hz, dpi) = win::machine(first.hz, first.dpi);
+    let placement = match place {
+        isolation::Place::Secondary => "secondary",
+        isolation::Place::Offscreen => "offscreen",
+    };
     frames(
         &exe,
         phase,
         &dir,
         budgets,
-        hz,
+        Some((&device, hz)),
         "wishes",
         "scrolling",
         true,
@@ -389,7 +416,8 @@ pub fn measure(phase: &str) {
     let home = release_support::isolated_home();
     let store = seed_run(home.path());
     let mut app = App::start(&exe, home.path(), "run", "events");
-    app.interactive();
+    let (_, shown) = app.interactive();
+    same_display(&shown, &device);
     append(&store, 200);
     let raw = wait_events(&mut app, 200, Duration::from_secs(30));
     assert_eq!(raw.len(), 200, "expected 200 paired events");
@@ -418,18 +446,23 @@ pub fn measure(phase: &str) {
         .expect("matrix needs non-animated research target");
     let home = release_support::isolated_home();
     let mut app = App::start(&exe, home.path(), &idle_view.id, "idle");
-    app.interactive();
+    let (_, shown) = app.interactive();
+    same_display(&shown, &device);
     thread::sleep(Duration::from_secs(10));
-    let idle = win::private_mib(&app.child);
+    let idle = win::private_mib(&app.launched.child);
     scalar(&mut out, &dir, phase, budgets, "memory", vec![idle]);
     let t = Instant::now();
-    let cpu = win::cpu_ticks(win::handle(&app.child));
+    let cpu = win::cpu_ticks(win::handle(&app.launched.child));
     thread::sleep(Duration::from_secs(60));
     assert!(
-        app.child.try_wait().unwrap().is_none(),
+        app.launched.child.try_wait().unwrap().is_none(),
         "idle app exited during CPU sampling"
     );
-    let pct = win::cpu_percent(cpu, win::cpu_ticks(win::handle(&app.child)), t.elapsed());
+    let pct = win::cpu_percent(
+        cpu,
+        win::cpu_ticks(win::handle(&app.launched.child)),
+        t.elapsed(),
+    );
     scalar(&mut out, &dir, phase, budgets, "idle_cpu", vec![pct]);
     drop(app);
     let mut starts = Vec::new();
@@ -438,7 +471,8 @@ pub fn measure(phase: &str) {
         let home = release_support::isolated_home();
         let now = Instant::now();
         let mut app = App::start(&exe, home.path(), "run", &format!("cold{n}"));
-        let since_start_us = app.interactive();
+        let (since_start_us, shown) = app.interactive();
+        same_display(&shown, &device);
         // The writer and poll introduce a small delay after the recorded input.
         let elapsed = now.elapsed().as_secs_f64();
         starts.push(elapsed);
@@ -477,15 +511,19 @@ pub fn measure(phase: &str) {
     let mut next_click = Instant::now();
     while start.elapsed() < Duration::from_secs(30) {
         assert!(
-            app.child.try_wait().unwrap().is_none(),
+            app.launched.child.try_wait().unwrap().is_none(),
             "research app exited during sampling"
         );
-        samples.push((start.elapsed().as_secs_f64(), win::private_mib(&app.child)));
-        if !interactive {
-            if Instant::now() >= next_click {
-                if let Some(w) = win::window(app.child.id()) {
-                    win::click(w);
-                }
+        samples.push((
+            start.elapsed().as_secs_f64(),
+            win::private_mib(&app.launched.child),
+        ));
+        isolation::not_foreground(&app.launched).expect("application took foreground");
+        if let Some(w) = win::window(app.launched.child.id()) {
+            let shown = isolation::shown(&app.launched, w).expect("invalid window placement");
+            same_display(&shown, &device);
+            if !interactive && Instant::now() >= next_click {
+                isolation::input::post_click(w, (100, 100)).expect("post click");
                 next_click = Instant::now() + Duration::from_millis(200);
             }
             interactive = read(&app.log, false).unwrap().interactive.is_some();
@@ -526,6 +564,6 @@ pub fn measure(phase: &str) {
     );
     results::write_results(
         &dir,
-        &json!({"source_id":source,"commit":release_support::commit(&repo),"machine":{"gpu":gpu,"refresh_hz":hz,"dpi":dpi},"phase":phase,"measurements":out,"workload":{"rows":work.rows,"seed":work.seed,"sha256":work.sha256}}),
+        &json!({"source_id":source,"commit":release_support::commit(&repo),"machine":{"gpu":gpu,"refresh_hz":hz,"dpi":dpi,"display":device,"placement":placement},"phase":phase,"measurements":out,"workload":{"rows":work.rows,"seed":work.seed,"sha256":work.sha256}}),
     );
 }
