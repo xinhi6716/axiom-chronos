@@ -29,10 +29,12 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 
 ## Prompt sizes
 
-- engine/agents/dispatcher.md: 9568 bytes
-- engine/DISPATCH.md: 3402 bytes
-- engine/skills/wish/SKILL.md: 7786 bytes
-- total: 20756 bytes (cap 20813)
+- engine/agents/dispatcher.md: 9762 bytes
+- engine/DISPATCH.md: 3571 bytes
+- engine/skills/wish/SKILL.md: 7457 bytes
+- total: 20790 bytes (cap 20813)
+
+Before phase 11: dispatcher.md 9538 bytes, DISPATCH.md 3463 bytes, SKILL.md 7757 bytes; total 20758 bytes.
 
 Before this round: total 20768 bytes (cap 20813). After this round: dispatcher.md 9568, DISPATCH.md 3402, SKILL.md 7786; total 20756 bytes (cap 20813). Measured after normalizing CRLF to LF, as the test does.
 

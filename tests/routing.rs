@@ -63,7 +63,8 @@ impl RunFixture {
         let wrapper = temp.path().join("fake.py");
         fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\nos.environ['FAKE_CODEX_MODELS']='gpt-6.1-sol,gpt-6-astra,gpt-6-terra,gpt-6-luna'\nsys.argv=sys.argv[2:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
         if !route.is_empty() {
-            let hook = format!(r#"
+            let hook = format!(
+                r#"
 import json,pathlib
 repo = pathlib.Path({repo})
 original_stdin = sys.stdin
@@ -80,9 +81,15 @@ class Input:
                 (repo/'src/mod.py').write_text('fixture' if 'TESTS-FIRST' in text else 'implemented')
         return line
 sys.stdin = Input()
-"#, repo = serde_json::to_string(&repo.to_string_lossy()).unwrap());
+"#,
+                repo = serde_json::to_string(&repo.to_string_lossy()).unwrap()
+            );
             let original = fs::read_to_string(&wrapper).unwrap();
-            fs::write(&wrapper, original.replace("runpy.run_path", &(hook + "\nrunpy.run_path"))).unwrap();
+            fs::write(
+                &wrapper,
+                original.replace("runpy.run_path", &(hook + "\nrunpy.run_path")),
+            )
+            .unwrap();
         }
         let mut config = axiom::bridge::Config::from_env();
         config.data_home = Some(temp.path().into());
@@ -168,8 +175,14 @@ fn brief_tier_effort_applied() {
     );
 }
 #[test]
-fn legacy_role_unchanged() {
-    check_run("", "", "gpt-6-terra", None, Rule::LegacyRole);
+fn brief_risk_routes_by_rubric() {
+    check_run(
+        "",
+        "RISK trivial",
+        "gpt-6-terra",
+        Some("medium"),
+        Rule::RiskRubric,
+    );
 }
 #[test]
 fn astra_tier_applied() {
@@ -200,7 +213,9 @@ fn routing_receipt_written() {
     let f = RunFixture::new("ROUTING\n  default sol/xhigh parser reason", "");
     let axiom::orch::Begin::Run { attempt_id, .. } =
         axiom::orch::begin_unit(&f.store, "u1", "terra", &f.repo, false).unwrap()
-    else { panic!("expected claim") };
+    else {
+        panic!("expected claim")
+    };
     let checkpoint_path = f.store.join("checkpoints/u1.json");
     let checkpoint = std::fs::read(&checkpoint_path).unwrap();
     axiom::orch::release_claim(&f.store, "u1", &attempt_id).unwrap();
@@ -210,7 +225,9 @@ fn routing_receipt_written() {
         std::fs::write(&checkpoint_path, &checkpoint).unwrap();
         std::fs::write(
             f.store.join("claims.tsv"),
-            format!("unit\tattempt\tscope\tstarted\nu1\t{attempt_id}\tsrc/mod.py tests/routing.py\t\n"),
+            format!(
+                "unit\tattempt\tscope\tstarted\nu1\t{attempt_id}\tsrc/mod.py tests/routing.py\t\n"
+            ),
         )
         .unwrap();
     };
@@ -237,15 +254,14 @@ fn routing_receipt_written() {
     assert_eq!(rows.len(), 1);
 }
 #[test]
-fn sol_role_still_gated() {
-    let f = RunFixture::new("", "");
+fn sol_role_needs_no_failed_fulltest() {
+    let f = RunFixture::new("", "RISK standard");
     let result = f.run("sol");
-    assert_eq!(result["error"]["kind"], "sol_not_allowed", "{result}");
-    assert!(!f.log.exists());
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(f.params("thread/start")["model"], "gpt-6.1-sol");
 }
 #[test]
-fn luna_brief_legacy() {
-    check_run("", "TIER luna", "gpt-6-luna", None, Rule::Brief);
+fn luna_brief_rejected() {
     let f = RunFixture::new("", "TIER luna");
     let result = f.run("sol");
     assert!(result["error"]["kind"].is_string());
@@ -394,7 +410,7 @@ fn fix() -> FixRecord {
     FixRecord {
         unit: "u".into(),
         parent: "p".into(),
-        parent_tier: Tier::Sol,
+        parent_tier: Some(Tier::Sol),
         parent_effort: Some(Effort::High),
         tier: Tier::Sol,
         effort: Effort::Xhigh,
@@ -828,7 +844,10 @@ fn audit_changes_keeps_existing() {
     let items = &audit["properties"]["changes"]["items"];
     assert_eq!(
         items["required"],
-        serde_json::json!(["id", "area", "location", "evidence", "problem", "change", "verify", "tier", "effort", "risk", "reason"])
+        serde_json::json!([
+            "id", "area", "location", "evidence", "problem", "change", "verify", "tier", "effort",
+            "risk", "reason"
+        ])
     );
     assert!(items["properties"]["id"]["description"]
         .as_str()
@@ -865,4 +884,213 @@ fn map_missing_default_and_invalid_values() {
     ] {
         assert!(has(&module("a", &routed(line)), "routing_value"));
     }
+}
+#[test]
+fn brief_luna_is_below_worker_floor() {
+    let error = axiom::orch::parse::parse_brief("GOAL test\nSCOPE src/a\nVERIFY test\nTIER luna\n")
+        .unwrap_err();
+    assert!(error.contains("terra"), "{error}");
+}
+
+#[test]
+fn rubric_table_and_floor() {
+    for (risk, tier, effort, name) in [
+        (Risk::Trivial, Tier::Terra, Effort::Medium, "trivial"),
+        (Risk::Standard, Tier::Sol, Effort::High, "standard"),
+        (
+            Risk::StateMachine,
+            Tier::Sol,
+            Effort::Xhigh,
+            "state_machine",
+        ),
+        (Risk::Concurrency, Tier::Sol, Effort::Xhigh, "concurrency"),
+        (Risk::Migration, Tier::Sol, Effort::Xhigh, "migration"),
+        (Risk::Parser, Tier::Sol, Effort::Xhigh, "parser"),
+        (Risk::Security, Tier::Sol, Effort::Xhigh, "security"),
+        (Risk::Privacy, Tier::Sol, Effort::Xhigh, "privacy"),
+        (Risk::CrossModule, Tier::Sol, Effort::Xhigh, "cross_module"),
+        (
+            Risk::PriorFailure,
+            Tier::Sol,
+            Effort::Xhigh,
+            "prior_failure",
+        ),
+        (Risk::Novel, Tier::Astra, Effort::Xhigh, "novel"),
+    ] {
+        let r = rubric(risk);
+        assert_eq!(
+            (r.tier, r.effort, r.risk, r.reason.as_str()),
+            (tier, effort, Some(risk), format!("rubric {name}").as_str())
+        );
+        check_rubric(&r).unwrap();
+    }
+    for (tier, model) in [
+        (Some(Tier::Luna), "some-model"),
+        (None, "GPT-6-LuNa"),
+        (Some(Tier::Sol), "lunatic"),
+    ] {
+        assert_eq!(check_floor(tier, model).unwrap_err().kind, "model_floor");
+    }
+    check_floor(None, "owner-model").unwrap();
+    check_floor(Some(Tier::Terra), "gpt-6-terra").unwrap();
+}
+
+#[test]
+fn routing_missing_incomplete_rubric_and_floor_errors_do_not_write() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("units.tsv"),
+        "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm\tpending\t\t\t\t\n",
+    )
+    .unwrap();
+    let server = axiom::codex::rpc::AppServer::new(vec![]);
+    for (settings, model, kind) in [
+        ("", None, "routing_missing"),
+        ("TIER sol", None, "routing_incomplete"),
+        ("EFFORT high", None, "routing_incomplete"),
+        ("", Some("owner-model"), "routing_missing"),
+        (
+            "TIER terra\nEFFORT medium\nRISK security",
+            None,
+            "routing_rubric",
+        ),
+        ("EFFORT high", Some("owner-LuNa"), "model_floor"),
+    ] {
+        let b = parse_brief(&brief(settings)).unwrap();
+        let error = for_attempt(&server, None, d.path(), "u1", "a", "sol", &b, model).unwrap_err();
+        assert_eq!(error.kind, kind, "{settings}");
+        if settings.is_empty() && model.is_none() {
+            assert!(
+                error.message.contains("u1")
+                    && error.message.contains("ROUTING")
+                    && error.message.contains("RISK")
+            );
+        }
+        assert!(!snapshot_path(d.path(), "u1").exists());
+    }
+    let b = parse_brief(&brief("EFFORT high")).unwrap();
+    let s = for_attempt(
+        &server,
+        None,
+        d.path(),
+        "u1",
+        "a",
+        "sol",
+        &b,
+        Some("owner-model"),
+    )
+    .unwrap();
+    assert_eq!(
+        (s.tier, s.effort, s.rule),
+        (None, Some(Effort::High), Rule::ExplicitModel)
+    );
+    let mut old = s;
+    old.model = "gpt-LUNA".into();
+    write_snapshot(d.path(), &old).unwrap();
+    assert_eq!(
+        for_attempt(
+            &server,
+            None,
+            d.path(),
+            "u1",
+            "a",
+            "sol",
+            &b,
+            Some("owner-model")
+        )
+        .unwrap_err()
+        .kind,
+        "model_floor"
+    );
+    assert_eq!(read_snapshot(d.path(), "u1").unwrap(), Some(old));
+}
+
+#[test]
+fn brief_and_risk_take_precedence_over_explicit_model() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("units.tsv"),
+        "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm\tpending\t\t\t\t\n",
+    )
+    .unwrap();
+    let server = axiom::codex::rpc::AppServer::new(vec![]);
+    for (id, settings, tier, effort, rule) in [
+        (
+            "a",
+            "TIER sol\nEFFORT xhigh\nRISK parser",
+            Tier::Sol,
+            Effort::Xhigh,
+            Rule::Brief,
+        ),
+        (
+            "b",
+            "RISK trivial",
+            Tier::Terra,
+            Effort::Medium,
+            Rule::RiskRubric,
+        ),
+        (
+            "c",
+            "RISK novel\nTIER sol",
+            Tier::Astra,
+            Effort::Xhigh,
+            Rule::RiskRubric,
+        ),
+    ] {
+        let b = parse_brief(&brief(settings)).unwrap();
+        let s = for_attempt(
+            &server,
+            None,
+            d.path(),
+            "u1",
+            id,
+            "sol",
+            &b,
+            Some("owner-model"),
+        )
+        .unwrap();
+        assert_eq!(
+            (s.tier, s.effort, s.rule, s.model.as_str()),
+            (Some(tier), Some(effort), rule, "owner-model")
+        );
+    }
+}
+
+#[test]
+fn fix_snapshot_preserves_plan_exception_rule() {
+    let d = attempt_store("default sol/high standard reason");
+    let mut record = fix();
+    record.unit = "u1".into();
+    record.rule = Rule::PlanException;
+    write_fix(d.path(), &record).unwrap();
+    let server = axiom::codex::rpc::AppServer::new(vec![]);
+    let b = parse_brief(&brief("")).unwrap();
+    assert_eq!(
+        for_attempt(
+            &server,
+            None,
+            d.path(),
+            "u1",
+            "a",
+            "terra",
+            &b,
+            Some("owner-model")
+        )
+        .unwrap_err()
+        .kind,
+        "invalid_argument"
+    );
+    let wrapper = d.path().join("server.py");
+    std::fs::write(&wrapper, "import os,runpy,sys\nos.environ['FAKE_CODEX_MODELS']='gpt-6.1-sol'\nsys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n").unwrap();
+    let server = axiom::codex::rpc::AppServer::new(vec![
+        common::python(),
+        wrapper.to_string_lossy().into_owned(),
+        common::repo_root()
+            .join("tests/fakes/fake_codex.py")
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    let snapshot = for_attempt(&server, None, d.path(), "u1", "a", "terra", &b, None).unwrap();
+    assert_eq!(snapshot.rule, Rule::PlanException);
+    assert_eq!(snapshot.effort, Some(Effort::Xhigh));
 }

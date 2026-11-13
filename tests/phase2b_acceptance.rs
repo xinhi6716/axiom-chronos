@@ -68,7 +68,7 @@ impl Fixture {
         )
         .unwrap();
         let brief = store.join("u1.brief");
-        fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
         fs::write(
             store.join("units.tsv"),
             format!(

@@ -347,6 +347,14 @@ fn human(bytes: u64) -> String {
     }
 }
 impl Check {
+    pub fn owner_line(&self) -> String {
+        let shortfall = self
+            .need
+            .bytes
+            .saturating_add(self.reserve_bytes)
+            .saturating_sub(self.free_bytes.saturating_sub(self.reserved_bytes));
+        format!("wish paused, free space then resume: {} needs {}, {} free, {} short; resumes when space returns", self.path.display(), human(self.need.bytes), human(self.free_bytes), human(shortfall))
+    }
     pub fn line(&self) -> String {
         format!(
             "disk: {} needs {} on {} (+{} reserve); {} free, {} reserved by other runs; {}",
@@ -460,6 +468,22 @@ pub fn check(
     tx.commit().map_err(storage)?;
     Ok(result)
 }
+pub fn guard(
+    home: &Path,
+    probe: &dyn Probe,
+    policy: &Policy,
+    paths: &[&Path],
+    kind: Kind,
+    need: Need,
+) -> Res<Option<Check>> {
+    for path in paths {
+        let check = check(home, probe, policy, path, kind, need)?;
+        if !check.ok {
+            return Ok(Some(check));
+        }
+    }
+    Ok(None)
+}
 pub struct Reservation {
     pub id: i64,
     home: PathBuf,
@@ -558,7 +582,7 @@ pub fn notify_paused(store: &Path, event: &str, check: &Check, pending: Value) -
         event,
         None,
         None,
-        json!({"check":check,"pending":pending}),
+        json!({"check":check,"pending":pending,"line":check.owner_line()}),
     )?;
     let dir = store.join("reports");
     fs::create_dir_all(&dir).map_err(io)?;

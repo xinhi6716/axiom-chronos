@@ -155,10 +155,7 @@ pub fn set(store: &Path, key: &str, value: &str) -> Res<Policy> {
                     if value == "none" {
                         models.worker.remove(tier);
                     } else {
-                        if !token(value) {
-                            return Err(invalid("expected a single token"));
-                        }
-                        models.worker.insert(tier.into(), value.into());
+                        return Err(invalid("worker models are chosen per unit and an owner-named model goes in codex_run model"));
                     }
                 }
                 _ => return Err(invalid("unknown policy key")),

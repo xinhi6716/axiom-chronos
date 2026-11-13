@@ -48,7 +48,7 @@ impl Fixture {
             let brief = store.join(format!("{id}.brief"));
             fs::write(
                 &brief,
-                format!("GOAL build\nSCOPE src/mod.py\nVERIFY {verify}\n"),
+                format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY {verify}\n"),
             )
             .unwrap();
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
@@ -149,7 +149,7 @@ fn ready_lists_unblocked() {
     let rows = fs::read_to_string(f.store.join("units.tsv")).unwrap().replace("two\tm\t", "two\tn\t");
     fs::write(f.store.join("units.tsv"), rows).unwrap();
     fs::write(f.store.join("modules.md"), "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## n\nPURPOSE x\nPATHS other/\nDEPENDS m\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
-    fs::write(f.store.join("two.brief"), "GOAL dependent\nSCOPE other/\nVERIFY echo ok\n").unwrap();
+    fs::write(f.store.join("two.brief"), "GOAL dependent\nRISK trivial\nSCOPE other/\nVERIFY echo ok\n").unwrap();
     assert!(!orch::ready_units(&f.store).unwrap().contains(&"two".into()));
     let r = f.cycle("one");
     assert!(r["ready"].as_array().expect("ready array").contains(&json!("two")), "{r}");

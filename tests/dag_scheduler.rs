@@ -79,7 +79,7 @@ fn check_transition_emits_unit_state() {
     fs::create_dir_all(&store).unwrap();
     fs::create_dir_all(&repo).unwrap();
     let brief = store.join("u.brief");
-    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\nRISK trivial\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(
@@ -118,7 +118,7 @@ fn releasing_last_unit_claim_notifies_a_verified_module() {
     let store = temp.path().join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("u.brief");
-    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\nRISK trivial\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(
@@ -212,7 +212,7 @@ fn verified_fast_module_unlocks_while_slow_worker_is_running() {
         } else {
             format!("{unit}.txt")
         };
-        fs::write(&brief, format!("GOAL build\nSCOPE {unit}.txt\nVERIFY echo ok\nFAKE_DELAY_MS {delay}\nFAKE_WRITE {write}\n")).unwrap();
+        fs::write(&brief, format!("GOAL build\nSCOPE {unit}.txt\nVERIFY echo ok\nRISK trivial\nFAKE_DELAY_MS {delay}\nFAKE_WRITE {write}\n")).unwrap();
         units.push_str(&format!(
             "{unit}\t{unit}\tpending\t\t\t\t{}\n",
             brief.display()
@@ -286,6 +286,7 @@ fn verified_fast_module_unlocks_while_slow_worker_is_running() {
     assert_eq!(review["status"], "completed", "{review}");
     let next = schedule(Some(before["cursor"].as_u64().unwrap()));
     assert_eq!(next["start"], json!(["later"]));
+    assert!(next["running"].as_array().unwrap().contains(&json!("slow")));
     assert!(
         !slow.is_finished(),
         "slow module finished before dependent was started"
@@ -306,7 +307,7 @@ fn unchanged_accept_preserves_reviewed_module_gate() {
     let store = temp.path().join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("u.brief");
-    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE x\nVERIFY echo ok\nRISK trivial\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(
@@ -397,7 +398,7 @@ fn dependent_waits_for_successful_accept_review_and_all_briefs() {
     fs::create_dir_all(store.join("reports")).unwrap();
     fs::write(store.join("modules.md"), "## a\nPURPOSE x\nPATHS a/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## b\nPURPOSE x\nPATHS b/\nDEPENDS a\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
     let brief = store.join("u.brief");
-    fs::write(&brief, "GOAL x\nSCOPE a/x\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE a/x\nVERIFY echo ok\nRISK trivial\n").unwrap();
     let units = |second: &str| {
         format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu\ta\tbuilt\t\t\t\t{}\nv\ta\tbuilt\t\t\t\t{second}\n",brief.display())
     };
@@ -470,6 +471,53 @@ fn stopped_and_cutoff_goals_hold_claims_until_resumed() {
         scheduler::next(&store, None, Duration::ZERO).unwrap().start,
         vec!["a"]
     );
+}
+
+#[test]
+fn disk_space_hold_masks_claims_until_reopened() {
+    use axiom::{
+        goal,
+        orch::{self, events, lifecycle::scheduler},
+    };
+    use std::time::Duration;
+
+    let temp = common::temp();
+    let home = temp.path();
+    let repo = home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let g = goal::open(home, "s", "test", Some(repo.to_str().unwrap())).unwrap();
+    let store = orch::store_for(home, g.project.as_deref().unwrap()).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        store.join("modules.md"),
+        "## a\nPURPOSE x\nPATHS a/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
+    )
+    .unwrap();
+    fs::write(
+        store.join("units.tsv"),
+        "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n",
+    )
+    .unwrap();
+    let line = "fake disk: free_bytes=0 reserve_bytes=0";
+    goal::disk_pause(home, "s", line).unwrap().unwrap();
+    let held = scheduler::next(&store, None, Duration::ZERO).unwrap();
+    assert_eq!(held.held.as_deref(), Some("disk_space"));
+    assert!(held.start.is_empty());
+    assert!(held.running.is_empty());
+    assert!(!events::read_events(&store, 0)
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == events::MODULE_CLAIMED));
+
+    goal::reopen(home, "s").unwrap();
+    let resumed = scheduler::next(&store, None, Duration::ZERO).unwrap();
+    assert_eq!(resumed.start, vec!["a"]);
+
+    goal::disk_pause(home, "s", line).unwrap().unwrap();
+    let held_replay = scheduler::next(&store, None, Duration::ZERO).unwrap();
+    assert_eq!(held_replay.held.as_deref(), Some("disk_space"));
+    assert!(held_replay.start.is_empty());
+    assert_eq!(held_replay.running, vec!["a"]);
 }
 
 #[test]
@@ -605,7 +653,7 @@ fn scheduled_workers_respect_codex_slot_cap() {
     let mut map = String::new();
     for unit in ["one", "two"] {
         let brief = store.join(format!("{unit}.brief"));
-        fs::write(&brief,format!("GOAL x\nSCOPE {unit}.txt\nVERIFY echo ok\nFAKE_DELAY_MS 1200\nFAKE_WRITE {unit}.txt\n")).unwrap();
+        fs::write(&brief,format!("GOAL x\nSCOPE {unit}.txt\nVERIFY echo ok\nRISK trivial\nFAKE_DELAY_MS 1200\nFAKE_WRITE {unit}.txt\n")).unwrap();
         units.push_str(&format!(
             "{unit}\t{unit}\tpending\t\t\t\t{}\n",
             brief.display()
@@ -734,7 +782,7 @@ fn explicit_claim_and_release_report_each_error() {
     let store = temp.path().join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("a.brief");
-    fs::write(&brief, "GOAL x\nSCOPE a\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE a\nVERIFY echo ok\nRISK trivial\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(
@@ -850,7 +898,7 @@ fn review_transition_without_claim_emits_one_module_verified() {
         .success());
     fs::write(repo.join("a"), "content").unwrap();
     let brief = store.join("u.brief");
-    fs::write(&brief, "GOAL x\nSCOPE a\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL x\nSCOPE a\nVERIFY echo ok\nRISK trivial\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(

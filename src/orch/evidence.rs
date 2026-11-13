@@ -577,6 +577,84 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     }
     Ok(result)
 }
+pub(crate) fn guard_verify(store: &Path, unit: &str, repo: &Path) -> Res<()> {
+    use crate::storage::{preflight, Policy};
+
+    let (home, owner) = super::store::storage_context(store);
+    let mut session_goal = None;
+    let goals = match std::fs::read_dir(home.join("goals")) {
+        Ok(goals) => Some(goals),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(e)),
+    };
+    for entry in goals.into_iter().flatten() {
+        let entry = entry.map_err(io)?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if session.is_empty()
+            || session.len() > 64
+            || !session
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            continue;
+        }
+        let Some(goal) = crate::goal::load(&home, session)? else {
+            continue;
+        };
+        if goal.project.as_deref() != Some(owner.project.as_str())
+            || !(goal.status == "active"
+                || goal.status == "blocked" && goal.reason.as_deref() == Some(preflight::REASON))
+            || !super::store::store_for_goal(&home, &goal).is_ok_and(|p| p == store)
+        {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|m| m.modified()).map_err(io)?;
+        if session_goal
+            .as_ref()
+            .is_none_or(|(time, _, _)| modified > *time)
+        {
+            session_goal = Some((modified, session.to_owned(), goal));
+        }
+    }
+    let policy = Policy::load(&home)?;
+    let need = preflight::need(
+        &policy,
+        preflight::Kind::Wish,
+        session_goal
+            .as_ref()
+            .and_then(|(_, _, goal)| goal.need_bytes),
+        Some(repo),
+        None,
+    )?;
+    if let Some(check) = preflight::guard(
+        &home,
+        &*preflight::os_probe(),
+        &policy,
+        &[repo, &home],
+        preflight::Kind::Wish,
+        need,
+    )? {
+        let line = check.owner_line();
+        if let Some((_, session, _)) = &session_goal {
+            crate::goal::disk_pause(&home, session, &line)?;
+        }
+        preflight::notify_paused(
+            store,
+            preflight::EVENT_DISK_PAUSE,
+            &check,
+            serde_json::json!({"unit": unit, "stage": "verify"}),
+        )?;
+        return Err(Failure::new(preflight::REASON, line));
+    }
+    Ok(())
+}
+
 pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
     if let Some(u) = read_units(store)?.iter().find(|u| u.id == unit) {
         u.refuse_superseded()?;
@@ -593,6 +671,7 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
         )));
     }
     let brief = unit_brief(store, unit)?;
+    guard_verify(store, unit, repo)?;
     let result = run_scratch(
         store,
         &brief.verify,

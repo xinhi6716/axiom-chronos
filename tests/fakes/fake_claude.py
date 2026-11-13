@@ -18,7 +18,7 @@ if sys.argv[1:4] == ['plugin', 'list', '--json']:
     sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
-record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_CODEX_MAX_PARALLEL', 'AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'AXIOM_FABLE_CAP_USD', 'AXIOM_ASTRA_TOKEN_CAP', 'AXIOM_ARGON_TOKEN_CAP', 'AXIOM_COUNCIL_ROUNDS', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')}, 'messages': []}
+record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_CODEX_MAX_PARALLEL', 'AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'AXIOM_FABLE_CAP_USD', 'AXIOM_ASTRA_TOKEN_CAP', 'AXIOM_ARGON_TOKEN_CAP', 'AXIOM_COUNCIL_ROUNDS', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', 'FAKE_ROLLING_STORE', 'FAKE_ROLLING_GATE', 'FAKE_ROLLING_CONTROL')}, 'messages': []}
 
 def save():
     with open(os.environ['FAKE_CLAUDE_RECORD'], 'w', encoding='utf-8') as f:
@@ -96,6 +96,78 @@ first = incoming.get()
 if first is None:
     sys.exit(0)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'failed' if scenario == 'no-bridge' else 'connected'}]})
+if scenario == 'background-budget':
+    emit({'type': 'system', 'subtype': 'task_started', 'task_id': 'budget-task', 'is_backgrounded': True})
+    emit({'type': 'result', 'is_error': False, 'result': 'in progress', 'total_cost_usd': .1})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
+if scenario == 'background-order':
+    emit({'type': 'system', 'subtype': 'task_started', 'task_id': 'a', 'is_backgrounded': True})
+    emit({'type': 'result', 'is_error': False, 'result': 'initial', 'total_cost_usd': .1})
+    emit({'type': 'result', 'is_error': False, 'result': 'completion before notification', 'total_cost_usd': .2})
+    emit({'type': 'system', 'subtype': 'task_notification', 'task_id': 'a', 'status': 'failed'})
+    emit({'type': 'result', 'is_error': False, 'result': 'after notification', 'total_cost_usd': .3})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
+if scenario == 'rolling':
+    store = Path(os.environ['FAKE_ROLLING_STORE'])
+    gate = Path(os.environ['FAKE_ROLLING_GATE'])
+    control = os.getenv('FAKE_ROLLING_CONTROL', '')
+    foreground = os.getenv('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS') == '1'
+    completed = queue.Queue()
+    cursor = None
+    def orch(*args):
+        result = subprocess.run([os.environ['AXIOM_BIN'], 'orch', '--store', str(store), '--json', *args], capture_output=True, text=True, encoding='utf-8')
+        if result.returncode:
+            raise RuntimeError(f'orch {args}: {result.stderr} {result.stdout}')
+        return json.loads(result.stdout)
+    def dispatch(module):
+        activity = orch('activity', 'start', '--module', module, '--actor', 'dispatcher', '--phase', 'brief')['id']
+        if module == 'slow':
+            deadline = time.monotonic() + 12
+            while not gate.exists():
+                if time.monotonic() >= deadline:
+                    os._exit(7)
+                time.sleep(.02)
+        if module == 'fast':
+            brief = store / 'fast.brief'
+            orch('unit', 'add', 'fast-unit', '--track', 'fast', '--brief', str(brief))
+            reports = store / 'reports'
+            reports.mkdir(exist_ok=True)
+            (reports / 'fast-unit.evidence.tsv').write_text('kind\tcommand\texit_code\tcommit\tts\n' + ''.join(f'{k}\t{cmd}\t0\ttree:1\t2026-01-01T00:00:00Z\n' for k, cmd in (('run', 'terra'), ('verify', 'verify'), ('accept', 'accept'), ('review', 'engine-astra:fixture'))), encoding='utf-8')
+        orch('activity', 'finish', '--module', module, '--actor', 'dispatcher', '--phase', 'brief', '--id', activity)
+        completed.put(module)
+    def schedule():
+        global cursor
+        args = ['schedule', 'next', '--timeout', '0']
+        if cursor is not None:
+            args += ['--cursor', str(cursor)]
+        reply = orch(*args)
+        cursor = reply['cursor']
+        for module in reply['start']:
+            emit({'type': 'system', 'subtype': 'task_started', 'task_id': module, 'is_backgrounded': not foreground})
+            if foreground:
+                dispatch(module)
+            else:
+                threading.Thread(target=dispatch, args=(module,), daemon=True).start()
+    schedule()
+    emit({'type': 'result', 'is_error': False, 'result': 'dispatching', 'total_cost_usd': .1})
+    while True:
+        try:
+            message = incoming.get_nowait()
+            if message is None:
+                sys.exit(0)
+        except queue.Empty:
+            pass
+        try:
+            module = completed.get(timeout=.02)
+        except queue.Empty:
+            continue
+        emit({'type': 'system', 'subtype': 'task_notification', 'task_id': module, 'status': 'completed'})
+        schedule()
+        emit({'type': 'result', 'is_error': False, 'result': 'completion turn', 'total_cost_usd': .2})
 if scenario == 'tick':
     emit_lock = threading.Lock()
     def emit_text(text):

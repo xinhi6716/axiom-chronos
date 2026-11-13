@@ -28,6 +28,8 @@ impl EnvRestore {
                 "AXIOM_HEADLESS",
                 "CLAUDE_CODE_PROMPT_CACHE_TTL",
                 "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                "AXIOM_FAKE_DISK",
             ]
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
@@ -70,6 +72,9 @@ fn execute(
     let temp = common::temp();
     let home = temp.path().join("home");
     let record = temp.path().join("record.json");
+    let disk = temp.path().join("disk.json");
+    std::fs::write(&disk, r#"{"free_bytes":1099511627776}"#).unwrap();
+    std::env::set_var("AXIOM_FAKE_DISK", disk);
     std::env::set_var("FAKE_CLAUDE_RECORD", &record);
     std::env::set_var("FAKE_CLAUDE_SCENARIO", scenario);
     std::env::remove_var("FAKE_CLAUDE_SESSION");
@@ -77,8 +82,14 @@ fn execute(
     std::env::set_var("AXIOM_HEADLESS", "0");
     std::env::set_var("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m");
     std::env::set_var("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "5m");
+    std::env::set_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
     if active {
-        goal::open(&home, "12345678-1234-1234-1234-123456789abc", "目標", None).unwrap();
+        let cwd = if scenario == "background-budget" { temp.path().to_str() } else { None };
+        let g = goal::open(&home, SESSION, "目標", cwd).unwrap();
+        if scenario == "background-budget" {
+            let store = axiom::orch::store_for_goal(&home, &g).unwrap();
+            axiom::engine::policy::set(&store, "budget.core", "0.1").unwrap();
+        }
     }
     if scenario == "blocked" {
         goal::open(&home, SESSION, "目標", None).unwrap();
@@ -123,7 +134,7 @@ fn execute(
     assert_eq!(record["env"]["AXIOM_DATA_HOME"], home.to_str().unwrap());
     assert_eq!(record["env"]["AXIOM_HEADLESS"], "1");
     assert_eq!(record["env"]["AXIOM_BIN"], config.bin.to_str().unwrap());
-    assert_eq!(record["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
+    assert!(record["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"].is_null());
     assert!(record["env"]["AXIOM_PYTHON"].is_null());
     assert_eq!(record["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h");
     assert_eq!(record["env"]["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"], "1h");
@@ -148,12 +159,38 @@ fn execute(
         );
     }
     let mut record = record;
+    if scenario == "background-budget" {
+        let g = goal::load(&home, SESSION).unwrap().unwrap();
+        let store = axiom::orch::store_for_goal(&home, &g).unwrap();
+        record["budget_events"] = serde_json::to_value(axiom::orch::events::read_events(&store, 0).unwrap()).unwrap();
+    }
     record["log_path"] = paths[0].to_string_lossy().to_string().into();
     record["home"] = home.to_string_lossy().to_string().into();
     (code, String::from_utf8(output).unwrap(), record, lines)
 }
 fn empty() -> Box<dyn BufRead + Send> {
     Box::new(Cursor::new(Vec::<u8>::new()))
+}
+#[test]
+fn background_results_wait_for_a_result_after_last_notification() {
+    let (code, _, record, lines) = execute("background-order", empty(), false);
+    assert_eq!(code, 0);
+    assert_eq!(record["messages"].as_array().unwrap().len(), 1);
+    let results: Vec<_> = lines.iter().filter_map(|line| {
+        let event: Value = serde_json::from_str(line).ok()?;
+        (event["type"] == "result").then(|| event["result"].as_str().unwrap().to_owned())
+    }).collect();
+    assert_eq!(results, ["initial", "completion before notification", "after notification"]);
+}
+#[test]
+fn background_result_records_cost_and_stops_at_budget() {
+    let (code, output, record, _) = execute("background-budget", empty(), true);
+    assert_eq!(code, 0);
+    assert!(output.contains("budget_exceeded"), "{output}");
+    assert_eq!(record["messages"].as_array().unwrap().len(), 1);
+    let events = record["budget_events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["kind"] == "role_spend" && e["data"]["usd"] == 0.1));
+    assert!(events.iter().any(|e| e["kind"] == "budget_exceeded"));
 }
 #[test]
 fn launch_progress_and_log() {

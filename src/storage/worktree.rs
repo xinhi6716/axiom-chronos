@@ -1,7 +1,7 @@
 use super::{
     ledger,
     retention::{self, AuditRecord},
-    Class, Entry, Ledger, Owner, Policy,
+    Class, Entry, EntryState, Ledger, Owner, Policy,
 };
 use crate::{
     base::{self, Failure, Res},
@@ -163,16 +163,34 @@ fn register_inner(
         }
     }
     let entry = ledger.register(path, Class::Worktree, owner, meta)?;
-    let target = path.join("target");
-    if target.is_dir() {
-        ledger.register(
-            &target,
-            Class::BuildCache,
-            owner,
-            json!({"worktree": path_string(path)}),
-        )?;
-    }
+    register_caches(&ledger, path, owner, true)?;
     Ok(Some(entry))
+}
+fn register_caches(ledger: &Ledger, path: &Path, owner: &Owner, touch: bool) -> Res<()> {
+    for target in [path.join("target"), path.join("tests/desktop-smoke/target")] {
+        if !target.is_dir() {
+            continue;
+        }
+        let worktree = path_string(path);
+        if touch
+            || ledger.get(&target)?.is_none_or(|e| {
+                e.state == EntryState::Deleted
+                    || e.class != Class::BuildCache
+                    || e.owner != *owner
+                    || !e.meta["worktree"]
+                        .as_str()
+                        .is_some_and(|p| same(Path::new(p), path))
+            })
+        {
+            ledger.register(
+                &target,
+                Class::BuildCache,
+                owner,
+                json!({"worktree": worktree}),
+            )?;
+        }
+    }
+    Ok(())
 }
 pub fn register(home: &Path, path: &Path, owner: &Owner) -> Res<Option<Entry>> {
     register_inner(home, path, owner, true)
@@ -278,7 +296,13 @@ fn own_cache(e: &Entry, path: &Path) -> bool {
 }
 fn scan_inner(home: &Path, now_ms: i64, persist: bool) -> Res<Vec<Worktree>> {
     let ledger = Ledger::open(home)?;
-    let entries = ledger.entries()?;
+    let mut entries = ledger.entries()?;
+    if persist {
+        for e in entries.iter().filter(|e| e.class == Class::Worktree) {
+            register_caches(&ledger, &e.path, &e.owner, false)?;
+        }
+        entries = ledger.entries()?;
+    }
     let policy = Policy::load(home)?;
     let mut result = Vec::new();
     for e in entries.iter().filter(|e| e.class == Class::Worktree) {

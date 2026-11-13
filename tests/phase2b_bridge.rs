@@ -425,7 +425,7 @@ impl ToolFixture {
         let store = orch::store_for(temp.path(), "demo").unwrap();
         fs::create_dir_all(store.join("reports")).unwrap();
         let brief = store.join("u1.brief");
-        fs::write(&brief, "GOAL build\nSCOPE evidence.txt\nVERIFY test\n").unwrap();
+        fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE evidence.txt\nVERIFY test\n").unwrap();
         fs::write(
             store.join("units.tsv"),
             format!(
@@ -449,6 +449,15 @@ impl ToolFixture {
                 commit: "tree".into(),
                 ts: "2025-01-01".into(),
             },
+        )
+        .unwrap();
+        // Unit events also supply evidence when the temporary path is excluded.
+        events::append_event(
+            &store,
+            kinds::REVIEW_RECORDED,
+            None,
+            Some("u1"),
+            json!({"review_id":"r1", "unit":"u1", "role":"reviewer", "reviewer":"alice", "model":"m", "paths":["evidence.txt"], "pass":true, "findings":[finding]}),
         )
         .unwrap();
         orch::append_evidence(
@@ -850,7 +859,7 @@ impl WireFixture {
         )
         .unwrap();
         let brief = self.store.join("u1.brief");
-        fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
         fs::write(
             self.store.join("units.tsv"),
             format!(

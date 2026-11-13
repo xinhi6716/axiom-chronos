@@ -49,7 +49,7 @@ impl Fixture {
         let module = &unit[..1];
         let file = format!("{module}/{}.txt", if unit.ends_with('1') { "one" } else { "two" });
         let py = common::python();
-        let text = format!("GOAL Build {file}\nSCOPE {file}\nVERIFY {py} -I check.py {file}\nCONTEXT contract: write the file\nFAKE_DELAY_MS 500\nFAKE_WRITE {file}\n");
+        let text = format!("GOAL Build {file}\nRISK trivial\nSCOPE {file}\nVERIFY {py} -I check.py {file}\nCONTEXT contract: write the file\nFAKE_DELAY_MS 500\nFAKE_WRITE {file}\n");
         let parsed = orch::parse_brief(&text).unwrap();
         assert_eq!(parsed.verify, format!("{py} -I check.py {file}"));
         assert!(parsed.text.contains(&format!("FAKE_WRITE {file}")));

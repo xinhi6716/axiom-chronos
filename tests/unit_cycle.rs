@@ -48,7 +48,7 @@ impl Fixture {
             let brief = store.join(format!("{id}.brief"));
             fs::write(
                 &brief,
-                format!("GOAL build\nSCOPE src/mod.py\nVERIFY {verify}\n"),
+                format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY {verify}\n"),
             )
             .unwrap();
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
@@ -197,7 +197,7 @@ fn lifecycle_resume_claim_and_changed_tree() {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     fs::write(
         f.store.join("one.brief"),
-        "GOAL build\nSCOPE src/\nVERIFY echo ok\n",
+        "GOAL build\nRISK trivial\nSCOPE src/\nVERIFY echo ok\n",
     )
     .unwrap();
     let orch::Begin::Run { attempt_id, .. } =
@@ -292,7 +292,7 @@ fn accept_lists_other_review_units_when_trigger_review_is_carried() {
         .unwrap();
     orch::append_evidence(&f.store, "one", &verify).unwrap();
     let brief = f.store.join("two.brief");
-    fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     let mut units = fs::read_to_string(f.store.join("units.tsv")).unwrap();
     units.push_str(&format!("two\tm\tpending\t\t\t\t{}\n", brief.display()));
     fs::write(f.store.join("units.tsv"), units).unwrap();
@@ -417,7 +417,8 @@ fn cycle_preserves_pre_turn_gates() {
         "codex_run",
         &json!({"project":"demo","unit":"one","role":"sol","cwd":f.repo,"cycle":true}),
     );
-    assert_eq!(sol["structuredContent"]["error"]["kind"], "sol_not_allowed");
+    assert_eq!(sol["structuredContent"]["state"], "built", "{sol}");
+    let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     let rows = fs::read_to_string(f.store.join("units.tsv")).unwrap();
     fs::write(
         f.store.join("units.tsv"),
@@ -493,7 +494,7 @@ fn cycle_reports_outside_scope() {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     fs::write(
         f.store.join("one.brief"),
-        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nCONTEXT\nFAKE_WRITE outside.txt\n",
+        "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nCONTEXT\nFAKE_WRITE outside.txt\n",
     )
     .unwrap();
     let r = f.cycle("one");

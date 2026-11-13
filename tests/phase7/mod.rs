@@ -307,10 +307,10 @@ fn workload(seeds: &Path, routed: bool) -> Workload {
         let name = p.file_stem().unwrap().to_str().unwrap();
         let brief = store.join(format!("{name}.md"));
         fs::copy(p, &brief).unwrap();
-        let test_path = if routed {format!(" tests/{name}.py")} else {String::new()};
+        let test_path = format!(" tests/{name}.py");
         modules.push_str(&format!("## {name}\nPURPOSE fixture\nPATHS {name}.txt{test_path}\nDEPENDS none\nCONTRACT fixture\nACCEPT test `echo ok`\n"));
-        if routed {
-            let (tier,effort,risk)=if name=="vacuous" {("astra","high","novel")} else {("sol","xhigh","parser")};
+        {
+            let (tier,effort,risk)=if !routed {("terra","medium","trivial")} else if name=="vacuous" {("astra","high","novel")} else {("sol","xhigh","parser")};
             modules.push_str(&format!("ROUTING\n  default {tier}/{effort} {risk} seed contract\n  {name} {tier}/{effort} {risk} seed contract\n"));
             // Keep the frozen seed verbatim as context. Its legacy matrix has no
             // file::case target; supply an executable matrix in the store only.
@@ -331,6 +331,7 @@ fn workload(seeds: &Path, routed: bool) -> Workload {
     }
     fs::write(store.join("modules.md"), modules).unwrap();
     if routed {orch::parse::parse_map(&fs::read_to_string(store.join("modules.md")).unwrap()).unwrap();}
+    if !routed {axiom::engine::policy::set(&store, "reviewer", "claude").unwrap();}
     fs::write(store.join("units.tsv"), units).unwrap();
     let mut config = Config::from_env();
     config.data_home = Some(home.path().into());

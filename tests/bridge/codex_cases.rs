@@ -56,6 +56,7 @@ fn fixture(home: &Path, units: &[(&str, &str)]) -> (std::path::PathBuf, std::pat
     let mut rows = String::from("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n");
     for (unit, brief) in units {
         let path = store.join(format!("{unit}.brief"));
+        let brief = if !brief.contains("\nTIER ") && !brief.contains("\nEFFORT ") && !brief.contains("\nRISK ") { brief.replacen("\nSCOPE", "\nRISK trivial\nSCOPE", 1) } else { brief.to_string() };
         fs::write(&path, brief).unwrap();
         rows.push_str(&format!("{unit}\tm\tpending\t\t\t\t{}\n", path.display()));
     }
@@ -116,7 +117,7 @@ fn unit_build_reuse_and_gates() {
         &b,
         json!({"project":"demo","unit":"bridgeunit","cwd":repo,"role":"terra","model":"gpt-6-sol"}),
     );
-    assert_eq!(sol["error"]["kind"], "invalid_argument");
+    assert_eq!(sol["error"]["kind"], "already_verified");
 }
 #[test]
 fn sol_and_astra_restrictions() {
@@ -124,14 +125,17 @@ fn sol_and_astra_restrictions() {
     let home = temp.path();
     let (repo, store) = fixture(
         home,
-        &[("gatedunit", "GOAL build\nSCOPE gated.txt\nVERIFY echo ok\n")],
+        &[
+            ("solunit", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n"),
+            ("gatedunit", "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n"),
+        ],
     );
     let b = bridge(home);
     let sol = invoke(
         &b,
-        json!({"project":"demo","unit":"gatedunit","cwd":repo,"role":"sol","model":"gpt-6-sol"}),
+        json!({"project":"demo","unit":"solunit","cwd":repo,"role":"sol","model":"gpt-6-sol"}),
     );
-    assert_eq!(sol["error"]["kind"], "sol_not_allowed");
+    assert_eq!(sol["state"], "built", "{sol}");
     let mut g = axiom::goal::open(
         home,
         "session",
@@ -447,7 +451,7 @@ fn astra_gate_requires_every_prerequisite() {
     }
 }
 #[test]
-fn sol_requires_failing_fulltest() {
+fn sol_runs_after_failing_fulltest() {
     let temp = common::temp();
     let (repo, store) = fixture(
         temp.path(),
@@ -456,7 +460,6 @@ fn sol_requires_failing_fulltest() {
     let b = bridge(temp.path());
     let args =
         json!({"project":"demo","unit":"solunit","cwd":repo,"role":"sol","model":"gpt-6-sol"});
-    assert_eq!(invoke(&b, args.clone())["error"]["kind"], "sol_not_allowed");
     orch::record_full(&store, &repo, Some("exit 1")).unwrap();
     let r = invoke(&b, args);
     assert_eq!(r["state"], "built", "{r}");
@@ -473,7 +476,6 @@ fn sol_runs_on_external_failure_recorded_through_the_bridge() {
     fs::write(&log, "linux job failed").unwrap();
     let args =
         json!({"project":"demo","unit":"solunit","cwd":repo,"role":"sol","model":"gpt-6-sol"});
-    assert_eq!(invoke(&b, args.clone())["error"]["kind"], "sol_not_allowed");
     let recorded = call(
         &b,
         "orch",
@@ -684,7 +686,7 @@ fn brief_settings_choose_model_and_effort() {
             ),
             (
                 "modest",
-                "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nEFFORT medium\n",
+                "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nTIER terra\nEFFORT medium\n",
             ),
         ],
     );
@@ -694,12 +696,8 @@ fn brief_settings_choose_model_and_effort() {
         &b,
         json!({"project":"demo","unit":"cheap","cwd":repo,"role":"terra"}),
     );
-    assert_eq!(cheap["state"], "built", "{cheap}");
-    assert_eq!(cheap["model"], "gpt-6-luna", "{cheap}");
-    assert!(orch::evidence(&store, "cheap")
-        .unwrap()
-        .iter()
-        .any(|e| e.kind == "run" && e.command == "gpt-6-luna"));
+    assert_eq!(cheap["error"]["kind"], "model_floor", "{cheap}");
+    assert!(orch::evidence(&store, "cheap").unwrap().is_empty());
     let modest = invoke(
         &b,
         json!({"project":"demo","unit":"modest","cwd":repo,"role":"terra"}),
@@ -708,20 +706,14 @@ fn brief_settings_choose_model_and_effort() {
     assert_eq!(modest["model"], "gpt-6.10-terra", "{modest}");
     let threads = logged(&log, "thread/start");
     let turns = logged(&log, "turn/start");
-    assert_eq!((threads.len(), turns.len()), (2, 2));
-    assert_eq!(threads[0]["model"], "gpt-6-luna");
-    assert_eq!(turns[0]["effort"], "low");
-    assert_eq!(
-        turns[0]["input"][0]["text"],
-        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nCONTEXT\nEFFORT stays pasted\n"
-    );
-    assert_eq!(threads[1]["model"], "gpt-6.10-terra");
-    assert_eq!(turns[1]["effort"], "medium");
-    assert_eq!(turns[1]["input"][0]["text"], PLAIN);
+    assert_eq!((threads.len(), turns.len()), (1, 1));
+    assert_eq!(threads[0]["model"], "gpt-6.10-terra");
+    assert_eq!(turns[0]["effort"], "medium");
+    assert_eq!(turns[0]["input"][0]["text"], PLAIN);
 }
 
 #[test]
-fn briefs_without_settings_keep_the_role_model_and_send_no_effort() {
+fn brief_risk_selects_model_and_effort() {
     let temp = common::temp();
     let home = temp.path();
     let (repo, _) = fixture(home, &[("plain", PLAIN)]);
@@ -735,7 +727,7 @@ fn briefs_without_settings_keep_the_role_model_and_send_no_effort() {
     assert_eq!(r["model"], "gpt-6.10-terra", "{r}");
     assert_eq!(logged(&log, "thread/start")[0]["model"], "gpt-6.10-terra");
     let turn = &logged(&log, "turn/start")[0];
-    assert!(turn.get("effort").is_none(), "{turn}");
+    assert_eq!(turn["effort"], "medium", "{turn}");
     assert_eq!(turn["input"][0]["text"], PLAIN);
 }
 
@@ -780,19 +772,19 @@ fn bad_brief_settings_are_refused_before_any_turn() {
             ),
             (
                 "xhigh",
-                "GOAL build\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
+                "GOAL build\nTIER terra\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
             (
                 "max",
-                "GOAL build\nEFFORT max\nSCOPE src/mod.py\nVERIFY echo ok\n",
+                "GOAL build\nTIER terra\nEFFORT max\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
             (
                 "sol",
-                "GOAL build\nTIER sol\nSCOPE src/mod.py\nVERIFY echo ok\n",
+                "GOAL build\nTIER sol\nEFFORT high\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
             (
                 "astra",
-                "GOAL build\nTIER astra\nSCOPE src/mod.py\nVERIFY echo ok\n",
+                "GOAL build\nTIER astra\nEFFORT xhigh\nSCOPE src/mod.py\nVERIFY echo ok\n",
             ),
         ],
     );
@@ -800,7 +792,7 @@ fn bad_brief_settings_are_refused_before_any_turn() {
     let b = logged_bridge(home, &log);
     for (unit, field, value, allowed) in [
         ("badeffort", "EFFORT", "ultra", "low, medium, high, xhigh, max"),
-        ("badtier", "TIER", "gpt-6-sol", "terra, sol, astra, luna"),
+        ("badtier", "TIER", "gpt-6-sol", "terra, sol, astra"),
     ] {
         let r = invoke(
             &b,
@@ -823,8 +815,8 @@ fn bad_brief_settings_are_refused_before_any_turn() {
     for (index, (unit, model, effort)) in [
         ("xhigh", "gpt-6.10-terra", Some("xhigh")),
         ("max", "gpt-6.10-terra", Some("max")),
-        ("sol", "gpt-6-sol", None),
-        ("astra", "gpt-6-astra", None),
+        ("sol", "gpt-6-sol", Some("high")),
+        ("astra", "gpt-6-astra", Some("xhigh")),
     ]
     .into_iter()
     .enumerate()
@@ -843,7 +835,7 @@ fn bad_brief_settings_are_refused_before_any_turn() {
 }
 
 #[test]
-fn tier_needs_a_terra_unit_without_a_model() {
+fn luna_tier_is_refused_for_each_role_and_model() {
     let temp = common::temp();
     let home = temp.path();
     let (repo, store) = fixture(
@@ -869,18 +861,12 @@ fn tier_needs_a_terra_unit_without_a_model() {
         json!({"role":"terra","model":"gpt-6-terra"}),
     ] {
         let r = call_with(choice);
-        assert_eq!(r["error"]["kind"], "invalid_argument", "{r}");
-        assert!(
-            r["error"]["message"].as_str().unwrap().contains("TIER"),
-            "{r}"
-        );
+        assert_eq!(r["error"]["kind"], "model_floor", "{r}");
         assert_eq!(claim_count(&store), 0, "{r}");
     }
     assert!(logged(&log, "turn/start").is_empty());
     let accepted = call_with(json!({"role":"terra"}));
-    assert_eq!(accepted["state"], "built", "{accepted}");
-    assert_eq!(accepted["attempt"], 1, "{accepted}");
-    assert_eq!(accepted["model"], "gpt-6-luna", "{accepted}");
+    assert_eq!(accepted["error"]["kind"], "model_floor", "{accepted}");
 }
 
 #[test]
@@ -890,16 +876,18 @@ fn tier_the_account_does_not_list_fails_without_fallback() {
         temp.path(),
         &[(
             "cheap",
-            "GOAL build\nTIER luna\nSCOPE src/mod.py\nVERIFY echo ok\n",
+            "GOAL build\nTIER sol\nEFFORT high\nSCOPE src/mod.py\nVERIFY echo ok\n",
         )],
     );
-    let wrapper = temp.path().join("no_luna.py");
-    fs::write(&wrapper, "import sys\np=sys.argv[1]\ns=open(p,encoding='utf8').read().replace(\"{'id': 'gpt-6-luna', 'isDefault': True}, \", '')\nexec(compile(s,p,'exec'))\n").unwrap();
+    let log = temp.path().join("codex.log");
+    let wrapper = temp.path().join("no_sol.py");
+    fs::write(&wrapper, "import os,sys\nos.environ['FAKE_CODEX_LOG']=sys.argv[1]\np=sys.argv[2]\ns=open(p,encoding='utf8').read()\ntarget=\"{'id': 'gpt-6-sol'}, \"\nassert target in s\ns=s.replace(target, '')\nexec(compile(s,p,'exec'))\n").unwrap();
     let b = Bridge::new(Config {
         data_home: Some(temp.path().into()),
         codex: Ok(vec![
             common::python(),
             wrapper.to_string_lossy().into_owned(),
+            log.to_string_lossy().into_owned(),
             common::repo_root()
                 .join("tests/fakes/fake_codex.py")
                 .to_string_lossy()
@@ -913,6 +901,8 @@ fn tier_the_account_does_not_list_fails_without_fallback() {
         json!({"project":"demo","unit":"cheap","cwd":repo,"role":"terra"}),
     );
     assert_eq!(r["error"]["kind"], "model_not_found", "{r}");
+    assert!(!logged(&log, "model/list").is_empty(), "{r}");
+    assert!(logged(&log, "thread/start").is_empty(), "{r}");
     assert!(orch::evidence(&store, "cheap").unwrap().is_empty(), "{r}");
     assert_eq!(claim_count(&store), 0, "{r}");
 }

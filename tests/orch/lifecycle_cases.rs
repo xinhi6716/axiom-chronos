@@ -200,13 +200,7 @@ fn lifecycle_reuse_scope_and_limit() {
 #[test]
 fn sol_and_extra_commands() {
     let (store, repo) = setup();
-    assert_eq!(
-        begin_unit(&store, "a", "sol", &repo, false)
-            .err()
-            .unwrap()
-            .kind,
-        "sol_not_allowed"
-    );
+    assert_eq!(sol_refusal(&store, &repo), None);
     assert_eq!(
         begin_unit(&store, "a", "worker", &repo, true)
             .err()
@@ -263,7 +257,7 @@ fn external(store: &Path, repo: &Path, flags: &[&str]) -> Output {
 #[test]
 fn ci_failure_opens_sol_like_a_local_failure() {
     let (store, repo) = setup();
-    let refused = Some("sol_not_allowed".to_string());
+    let refused = None;
     assert_eq!(
         sol_refusal(&store, &repo),
         refused,
@@ -365,7 +359,7 @@ fn external_failure_without_real_evidence_records_nothing() {
         assert!(!repo.join("marker").exists(), "{flags:?}");
         assert_eq!(
             sol_refusal(&store, &repo).as_deref(),
-            Some("sol_not_allowed"),
+            None,
             "{flags:?}"
         );
     }
@@ -392,7 +386,7 @@ fn old_full_evidence_still_reads_beside_external_rows() {
     let (store, repo) = setup();
     let path = store.join("reports/_full.evidence.tsv");
     let header = "kind\tcommand\texit_code\tcommit\tts";
-    let refused = Some("sol_not_allowed".to_string());
+    let refused = None;
     fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
     assert_eq!(sol_refusal(&store, &repo), refused);
     fs::write(&path, format!("{header}\r\nfull\told\t3\t\t2000\r\n")).unwrap();

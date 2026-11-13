@@ -103,7 +103,7 @@ impl Fixture {
             for n in 1..=count {
                 let id = unit(module, n);
                 let path = file(&id);
-                fs::write(store.join(format!("{id}.brief")), format!("GOAL build\nSCOPE {path}\nVERIFY {}\nFAKE_DELAY_MS {}\nFAKE_WRITE {path}\n", command("verify", &[path.clone()]), if is_slow { slow } else { fast })).unwrap();
+                fs::write(store.join(format!("{id}.brief")), format!("GOAL build\nSCOPE {path}\nVERIFY {}\nRISK trivial\nFAKE_DELAY_MS {}\nFAKE_WRITE {path}\n", command("verify", &[path.clone()]), if is_slow { slow } else { fast })).unwrap();
             }
         }
         fs::write(store.join("modules.md"), &map).unwrap();

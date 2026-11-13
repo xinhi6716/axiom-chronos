@@ -21,6 +21,8 @@ pub struct Goal {
     pub wish_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need_bytes: Option<u64>,
     #[serde(default)]
     pub cwd: Option<String>,
     pub status: String,
@@ -120,6 +122,10 @@ pub fn open(home: &Path, session: &str, wish: &str, cwd: Option<&str>) -> Res<Go
         wish: wish.into(),
         wish_id: Some(mint_wish_id(home)),
         turn_limit: None,
+        need_bytes: std::env::var("AXIOM_WISH_START_NEED_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0),
         cwd: cwd.map(str::to_owned),
         status: "active".into(),
         amendments: vec![],
@@ -216,16 +222,34 @@ pub fn disk_pause(home: &Path, session: &str, line: &str) -> Res<Option<Goal>> {
     let Some(mut goal) = load(home, session)? else {
         return Ok(None);
     };
-    if !matches!(goal.status.as_str(), "active" | "waiting") {
+    if goal.status == "blocked" && goal.reason.as_deref() == Some(crate::storage::preflight::REASON)
+    {
+        goal.note = Some(line.to_owned());
+        save(home, session, &goal)?;
+        return Ok(None);
+    }
+    if !matches!(goal.status.as_str(), "active" | "waiting" | "blocked") {
         return Ok(None);
     }
     leave_waiting(&mut goal, None);
     goal.status = "blocked".into();
     goal.reason = Some(crate::storage::preflight::REASON.into());
-    goal.note = Some(format!("{line} Resume with: axiom wish --resume {session}"));
+    goal.note = Some(line.to_owned());
     goal.batch = None;
     goal.interjection = None;
     save(home, session, &goal)?;
+    Ok(Some(goal))
+}
+
+pub fn record_need(home: &Path, session: &str, bytes: u64) -> Res<Option<Goal>> {
+    let _lock = lock(home)?;
+    let Some(mut goal) = load(home, session)? else {
+        return Ok(None);
+    };
+    if goal.need_bytes.is_none() {
+        goal.need_bytes = Some(bytes);
+        save(home, session, &goal)?;
+    }
     Ok(Some(goal))
 }
 
@@ -249,7 +273,13 @@ pub fn resume_disk_space(
         .map(Path::new)
         .ok_or_else(|| Failure::new("invalid_argument", "goal has no working directory"))?;
     let policy = Policy::load(home)?;
-    let need = preflight::need(&policy, preflight::Kind::Wish, None, Some(cwd), None)?;
+    let need = preflight::need(
+        &policy,
+        preflight::Kind::Wish,
+        goal.need_bytes,
+        Some(cwd),
+        None,
+    )?;
     let cwd_check = preflight::check(home, probe, &policy, cwd, preflight::Kind::Wish, need)?;
     if !cwd_check.ok {
         return Err(Failure::new(preflight::REASON, cwd_check.line()));
@@ -702,10 +732,7 @@ mod disk_tests {
         let paused = disk_pause(home.path(), "one", "low disk").unwrap().unwrap();
         assert_eq!(paused.status, "blocked");
         assert_eq!(paused.reason.as_deref(), Some("disk_space"));
-        assert_eq!(
-            paused.note.as_deref(),
-            Some("low disk Resume with: axiom wish --resume one")
-        );
+        assert_eq!(paused.note.as_deref(), Some("low disk"));
         assert!(paused.interjection.is_none());
         assert_eq!(
             accept_hold(home.path(), paused.project.as_deref().unwrap())
@@ -811,6 +838,48 @@ mod disk_tests {
             crate::orch::events::read_events(&store, 0).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn recorded_need_controls_disk_resume_and_old_files_load() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("storage")).unwrap();
+        std::fs::write(
+            home.path().join("storage/policy.json"),
+            r#"{"reserve_bytes":0,"estimates":{"wish":20}}"#,
+        )
+        .unwrap();
+        let probe = FakeProbe {
+            home: home.path().into(),
+            cwd_free: 50,
+            home_free: 50,
+        };
+        for (id, need, policy_need, passes) in [("large", 100, 20, false), ("small", 10, 80, true)]
+        {
+            std::fs::write(
+                home.path().join("storage/policy.json"),
+                format!(r#"{{"reserve_bytes":0,"estimates":{{"wish":{policy_need}}}}}"#),
+            )
+            .unwrap();
+            open(home.path(), id, "wish", cwd.path().to_str()).unwrap();
+            record_need(home.path(), id, need).unwrap();
+            disk_pause(home.path(), id, "paused").unwrap();
+            assert_eq!(resume_disk_space(home.path(), id, &probe).is_ok(), passes);
+        }
+        open(home.path(), "old", "wish", cwd.path().to_str()).unwrap();
+        assert!(load(home.path(), "old")
+            .unwrap()
+            .unwrap()
+            .need_bytes
+            .is_none());
+        disk_pause(home.path(), "old", "paused").unwrap();
+        std::fs::write(
+            home.path().join("storage/policy.json"),
+            r#"{"reserve_bytes":0,"estimates":{"wish":20}}"#,
+        )
+        .unwrap();
+        assert!(resume_disk_space(home.path(), "old", &probe).is_ok());
     }
 
     #[test]

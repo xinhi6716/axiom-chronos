@@ -351,13 +351,10 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
         });
         let timed_out = !signal && held.is_none() && !done && start_time.elapsed() >= timeout;
         if signal || held.is_some() || done || timed_out {
-            let interjection_paused = held.as_deref().is_some_and(|reason| {
-                reason.starts_with("interjection ") && reason.ends_with(" paused")
-            });
             let start = running
                 .iter()
                 .filter(|m| {
-                    !interjection_paused
+                    held.is_none()
                         && all.iter().any(|e| {
                             e.kind == events::MODULE_CLAIMED && e.module.as_ref() == Some(*m)
                         })

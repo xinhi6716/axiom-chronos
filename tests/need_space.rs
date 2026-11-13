@@ -57,11 +57,16 @@ impl Fixture {
     }
 
     fn run(&self, skill: &str, need_args: &[&str], message: bool) -> Output {
+        self.run_inner(skill, need_args, message, false)
+    }
+
+    fn run_inner(&self, skill: &str, need_args: &[&str], message: bool, recover: bool) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_axiom"));
         command
             .env("AXIOM_HOME", &self.home)
             .env("AXIOM_DATA_HOME", &self.home)
             .env("AXIOM_FAKE_DISK", &self.disk)
+            .env("AXIOM_DISK_POLL_MS", "10")
             .env(
                 "AXIOM_CLAUDE_CMD",
                 serde_json::to_string(&common::fake("fake_claude")).unwrap(),
@@ -75,6 +80,49 @@ impl Fixture {
             .args(need_args);
         if message {
             command.arg("test");
+        }
+        if recover {
+            let stdout = self._temp.path().join("stdout");
+            let stderr = self._temp.path().join("stderr");
+            command
+                .stdin(Stdio::null())
+                .stdout(fs::File::create(&stdout).unwrap())
+                .stderr(fs::File::create(&stderr).unwrap());
+            let mut child = axiom::base::proc::spawn_group(&mut command).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut raised = false;
+            let status = loop {
+                if !raised
+                    && fs::read_to_string(&stdout)
+                        .unwrap_or_default()
+                        .contains("paused")
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                    assert!(!self.record.exists(), "started before space returned");
+                    axiom::base::atomic_write(&self.disk, br#"{"free_bytes":10000}"#).unwrap();
+                    raised = true;
+                }
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    axiom::base::proc::terminate_tree(&mut child).unwrap();
+                    child.wait().unwrap();
+                    panic!("axiom timed out waiting for pause or completion");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                raised,
+                "axiom exited without pausing: status {status}, stdout: {}, stderr: {}",
+                String::from_utf8_lossy(&fs::read(&stdout).unwrap()),
+                String::from_utf8_lossy(&fs::read(&stderr).unwrap())
+            );
+            return Output {
+                code: status.code().unwrap_or(-1),
+                stdout: fs::read(stdout).unwrap(),
+                stderr: fs::read(stderr).unwrap(),
+            };
         }
         command
             .stdin(Stdio::null())
@@ -94,6 +142,10 @@ impl Fixture {
             "axiom did not finish cleanly: {output:?}"
         );
         output
+    }
+
+    fn run_recover(&self, skill: &str, need_args: &[&str]) -> Output {
+        self.run_inner(skill, need_args, true, true)
     }
 }
 
@@ -170,10 +222,17 @@ fn enough_space_and_boundary() {
         for free in [10000, NEED + RESERVE, NEED + RESERVE - 1] {
             let f = Fixture::new();
             f.disk(json!({"free_bytes": free}));
-            let out = f.run(skill, &["--need-space", "100"], true);
+            let out = if skill == "wish" && free < NEED + RESERVE {
+                f.run_recover(skill, &["--need-space", "100"])
+            } else {
+                f.run(skill, &["--need-space", "100"], true)
+            };
             if free >= NEED + RESERVE {
                 verify(&out, &f.record, 0, true, None);
                 negative(&out, &f.record, 75, false, Some(("paused", false)));
+            } else if skill == "wish" {
+                verify(&out, &f.record, 0, true, Some(("paused", false)));
+                negative(&out, &f.record, 75, false, None);
             } else {
                 verify(&out, &f.record, 75, false, Some(("paused", false)));
                 negative(&out, &f.record, 0, true, None);
@@ -199,9 +258,18 @@ fn project_and_home_are_checked_independently() {
                 json!(if project_short { 10000 } else { 109 }),
             );
             f.disk(json!({"free_bytes": 10000, "paths": paths}));
-            let out = f.run(skill, &["--need-space", "100"], true);
-            verify(&out, &f.record, 75, false, Some(("paused", false)));
-            negative(&out, &f.record, 0, true, None);
+            let out = if skill == "wish" {
+                f.run_recover(skill, &["--need-space", "100"])
+            } else {
+                f.run(skill, &["--need-space", "100"], true)
+            };
+            if skill == "wish" {
+                verify(&out, &f.record, 0, true, Some(("paused", false)));
+                negative(&out, &f.record, 75, false, None);
+            } else {
+                verify(&out, &f.record, 75, false, Some(("paused", false)));
+                negative(&out, &f.record, 0, true, None);
+            }
         }
     }
 }
@@ -224,9 +292,18 @@ fn fake_disk_fallback_respects_path_components() {
         let mut paths = serde_json::Map::new();
         paths.insert(misleading.to_string_lossy().into_owned(), json!(10000));
         f.disk(json!({"free_bytes": 109, "paths": paths}));
-        let out = f.run(skill, &["--need-space", "100"], true);
-        verify(&out, &f.record, 75, false, Some(("paused", false)));
-        negative(&out, &f.record, 0, true, None);
+        let out = if skill == "wish" {
+            f.run_recover(skill, &["--need-space", "100"])
+        } else {
+            f.run(skill, &["--need-space", "100"], true)
+        };
+        if skill == "wish" {
+            verify(&out, &f.record, 0, true, Some(("paused", false)));
+            negative(&out, &f.record, 75, false, None);
+        } else {
+            verify(&out, &f.record, 75, false, Some(("paused", false)));
+            negative(&out, &f.record, 0, true, None);
+        }
     }
 }
 
@@ -267,14 +344,29 @@ fn negative_controls_reject_contrasting_executions() {
 
         let blocked = Fixture::new();
         blocked.disk(json!({"free_bytes": NEED + RESERVE - 1}));
-        let blocked_out = blocked.run(skill, &["--need-space", "100"], true);
-        verify(
-            &blocked_out,
-            &blocked.record,
-            75,
-            false,
-            Some(("paused", false)),
-        );
+        let blocked_out = if skill == "wish" {
+            blocked.run_recover(skill, &["--need-space", "100"])
+        } else {
+            blocked.run(skill, &["--need-space", "100"], true)
+        };
+        if skill == "wish" {
+            verify(
+                &blocked_out,
+                &blocked.record,
+                0,
+                true,
+                Some(("paused", false)),
+            );
+            negative(&blocked_out, &blocked.record, 75, false, None);
+        } else {
+            verify(
+                &blocked_out,
+                &blocked.record,
+                75,
+                false,
+                Some(("paused", false)),
+            );
+        }
 
         // A started run must not satisfy any blocked/error invariant, and a
         // blocked run must not satisfy the successful-session invariant.
@@ -299,14 +391,16 @@ fn negative_controls_reject_contrasting_executions() {
             false,
             Some(("axiom:", true)),
         );
-        negative(&blocked_out, &blocked.record, 0, true, None);
+        if skill == "research" {
+            negative(&blocked_out, &blocked.record, 0, true, None);
+        }
         // Isolate the record and message checks from the exit-code check.
         negative(&ready_out, &ready.record, 0, false, None);
         negative(
             &blocked_out,
             &blocked.record,
-            75,
-            false,
+            if skill == "wish" { 0 } else { 75 },
+            skill == "wish",
             Some(("not a pause message", false)),
         );
         let probe_error = Fixture::new();

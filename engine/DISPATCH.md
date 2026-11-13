@@ -20,7 +20,7 @@ Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) 
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
-Between GOAL and CONTEXT: tier `TIER terra|sol|astra`; effort `EFFORT low|medium|high|xhigh|max`. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. Legacy syntax: `EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model. Luna is legacy for terra units only, never maps.
+Between GOAL and CONTEXT, use `TIER terra|sol|astra` and `EFFORT low|medium|high|xhigh|max` together, or `RISK <class>`: trivial, standard, state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure, novel. The bridge reads these from the registered brief; never pass them to `codex_run`, and the worker never sees them. With no ROUTING line, RISK, TIER+EFFORT or explicit model, the unit is refused (`routing_missing`). Legacy `EFFORT low|medium|high` sets reasoning effort; `TIER luna` runs a terra unit on luna, legacy for terra units only, never maps.
 
 Worker-visible sections between GOAL and CONTEXT:
 
@@ -35,18 +35,18 @@ Test files must be in SCOPE. Both sections are required in routed stores; any ma
 
 Fix: `unit add --fixes <old>` climbs one routing step and writes TIER/EFFORT into its brief. A plan exception requires both `--routing <tier>/<effort> --reason <text>`; saturation without it gives `escalation_saturated`.
 
-In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste the upstream result as its HANDOFF block or the retrieved snippet, not a pointer.
+In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste the upstream HANDOFF block or retrieved snippet, not a pointer.
 
 ## Before dispatch
 
 - Decide every open choice in GOAL or SCOPE. If reasonable workers could deliver different results, the brief is unfinished.
-- A field you cannot fill precisely means the unit is not ready. Split it or decide and record the missing choice; do not dispatch as is.
+- If a field cannot be filled precisely, the unit is not ready. Split it or decide and record the missing choice; do not dispatch as is.
 - An invariant check gets a negative control: VERIFY includes a case that breaks it and expects the check to fail.
 - VERIFY runs a test file, never inline code. Put the check in a test file in SCOPE and make VERIFY the test runner, such as `python -m unittest test_todo`.
 
 ## Write by subtraction
 
-- No prohibitions, warnings or reminders. Naming a behaviour puts it in the worker's context. SCOPE and the bridge (sandbox, lean mode) bound what the worker can do.
+- No prohibitions, warnings or reminders: naming a behaviour puts it in the worker's context. SCOPE and the bridge (sandbox, lean mode) bound what the worker can do.
 - No persona, tone or background the unit does not use.
 
 

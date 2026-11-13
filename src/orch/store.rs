@@ -1449,7 +1449,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             )));
                         }
                         use crate::codex::routing::{
-                            self, Escalation, FixRecord, Risk, Routing, Rule, Tier,
+                            self, Escalation, FixRecord, Risk, Routing, Rule,
                         };
                         let parent = rows.iter().find(|u| u.id == *old).unwrap();
                         let snapshot = routing::read_snapshot(store, old)?;
@@ -1469,16 +1469,27 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                                     .cloned()
                             });
                         let invalid = |e| Failure::new("invalid_argument", e);
+                        let missing = || Failure::new(
+                            "routing_missing",
+                            format!("routing_missing: parent unit {old} needs a routing decision and risk (ROUTING or RISK)"),
+                        );
                         let (parent_tier, parent_effort) =
                             if let Some(s) = snapshot.as_ref().filter(|s| s.tier.is_some()) {
-                                (s.tier.unwrap(), s.effort)
+                                (s.tier, s.effort)
+                            } else if snapshot.as_ref().is_some_and(|s| {
+                                s.rule == Rule::ExplicitModel && s.tier.is_none()
+                            }) {
+                                if explicit.is_none() {
+                                    return Err(Failure::new("routing_missing", format!("routing_missing: parent unit {old} has an explicit model without a tier; supply --routing <tier>/<effort> --reason")));
+                                }
+                                (None, snapshot.as_ref().unwrap().effort)
                             } else if let Some(l) = &line {
                                 (
-                                    routing::parse_tier(&l.tier).map_err(invalid)?,
+                                    Some(routing::parse_tier(&l.tier).map_err(invalid)?),
                                     Some(routing::parse_effort(&l.effort).map_err(invalid)?),
                                 )
                             } else {
-                                (Tier::Terra, None)
+                                return Err(missing());
                             };
                         let risk = if let Some(r) = snapshot.as_ref().and_then(|s| s.risk) {
                             r
@@ -1486,7 +1497,17 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             serde_json::from_value(serde_json::Value::String(l.risk.clone()))
                                 .map_err(|e| invalid(format!("{e}")))?
                         } else {
-                            Risk::Standard
+                            let text = std::fs::read_to_string(&parent.brief).map_err(|e| {
+                                if e.kind() == std::io::ErrorKind::NotFound || parent.brief.is_empty() {
+                                    missing()
+                                } else {
+                                    io(e)
+                                }
+                            })?;
+                            let parent_brief = parse_brief(&text).map_err(invalid)?;
+                            let value = parent_brief.risk.ok_or_else(missing)?;
+                            serde_json::from_value::<Risk>(serde_json::Value::String(value))
+                                .map_err(|e| invalid(format!("{e}")))?
                         };
                         let (route, rule) = if let Some((tier, effort)) = explicit {
                             let r = Routing {
@@ -1500,7 +1521,7 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             })?;
                             (r, Rule::PlanException)
                         } else {
-                            match routing::escalate(parent_tier, parent_effort) {
+                            match routing::escalate(parent_tier.ok_or_else(missing)?, parent_effort) {
                                 Escalation::Next(r) => (r, Rule::FixEscalation),
                                 Escalation::Saturated => {
                                     return Err(Failure::new(

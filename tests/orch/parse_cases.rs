@@ -27,10 +27,11 @@ fn brief_fields_and_crlf() {
 #[test]
 fn brief_settings_are_read_and_kept_from_the_worker() {
     let text =
-        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
+        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER terra\r\nRISK trivial\r\nVERIFY v\r\nCONTEXT c\r\n";
     let b = parse_brief(text).unwrap();
     assert_eq!(b.effort.as_deref(), Some("low"));
-    assert_eq!(b.tier.as_deref(), Some("luna"));
+    assert_eq!(b.tier.as_deref(), Some("terra"));
+    assert_eq!(b.risk.as_deref(), Some("trivial"));
     assert_eq!(
         b.text,
         "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n"
@@ -43,7 +44,7 @@ fn brief_settings_are_read_and_kept_from_the_worker() {
         assert_eq!(b.tier, None);
         assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
     }
-    for tier in ["terra", "sol", "astra", "luna"] {
+    for tier in ["terra", "sol", "astra"] {
         let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nTIER {tier}")).unwrap();
         assert_eq!(b.tier.as_deref(), Some(tier));
         assert_eq!(b.effort, None);
@@ -54,7 +55,7 @@ fn brief_settings_are_read_and_kept_from_the_worker() {
 #[test]
 fn brief_settings_outside_the_allowed_set_are_refused() {
     let efforts = "low, medium, high, xhigh, max";
-    let tiers = "terra, sol, astra, luna";
+    let tiers = "terra, sol, astra";
     for (line, field, value, allowed) in [
         ("EFFORT ultra", "EFFORT", "ultra", efforts),
         ("EFFORT extreme", "EFFORT", "extreme", efforts),
@@ -86,6 +87,40 @@ VERIFY v
             "{line}"
         );
     }
+}
+
+#[test]
+fn risk_settings_validation_and_placement() {
+    for risk in [
+        "trivial",
+        "standard",
+        "state_machine",
+        "concurrency",
+        "migration",
+        "parser",
+        "security",
+        "privacy",
+        "cross_module",
+        "prior_failure",
+        "novel",
+    ] {
+        let b = parse_brief(&format!(
+            "GOAL g\nSCOPE a\nRISK {risk}\nVERIFY v\nCONTEXT c\n"
+        ))
+        .unwrap();
+        assert_eq!(b.risk.as_deref(), Some(risk));
+        assert!(!b.text.contains("RISK "));
+    }
+    for text in [
+        "GOAL g\nSCOPE a\nVERIFY v\nRISK unknown\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nRISK standard\nRISK trivial\n",
+        "RISK standard\nGOAL g\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT c\nRISK standard\n",
+    ] {
+        assert!(parse_brief(text).is_err(), "{text}");
+    }
+    let legacy: axiom::orch::parse::Brief = serde_json::from_value(serde_json::json!({"goal":"g", "scope":["a"], "verify":"v", "context":null, "effort":null, "tier":null, "text":""})).unwrap();
+    assert_eq!(legacy.risk, None);
 }
 
 #[test]
@@ -127,7 +162,7 @@ fn misplaced_settings_are_refused_instead_of_ignored() {
             "{text}"
         );
     }
-    let placed = "GOAL g\nEFFORT high\nTIER luna\nSCOPE a\nVERIFY v\nCONTEXT c\n";
+    let placed = "GOAL g\nEFFORT high\nTIER terra\nSCOPE a\nVERIFY v\nCONTEXT c\n";
     assert_eq!(parse_brief(placed).unwrap().effort.as_deref(), Some("high"));
 }
 

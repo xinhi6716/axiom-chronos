@@ -13,7 +13,7 @@ impl Fixture {
         fs::write(f.home.path().join("goals/s.json"), json!({"wish":"test", "status":"active", "project":"project", "wish_id":"w-1234567890123-abcdef"}).to_string()).unwrap();
         fs::create_dir_all(f.store.join("astra")).unwrap();
         fs::write(f.store.join("astra/plan-final.md"), "plan").unwrap();
-        fs::write(f.store.join("modules.md"), "## core\nPURPOSE x\nPATHS src/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
+        fs::write(f.store.join("modules.md"), "## core\nPURPOSE x\nPATHS src/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default terra/medium trivial reason\n").unwrap();
         f
     }
     fn call(&self, args: &[&str]) -> orch::Output {
@@ -25,7 +25,7 @@ impl Fixture {
     }
     fn add(&self, id: &str, old: Option<&str>) -> orch::Output {
         let brief = self.store.join(format!("{id}.md"));
-        fs::write(&brief, "GOAL g\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        fs::write(&brief, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
         let mut args = vec!["unit", "add", id, "--track", "core", "--brief", brief.to_str().unwrap()];
         if let Some(old) = old { args.extend(["--fixes", old]); }
         self.call(&args)
@@ -162,7 +162,7 @@ fn module_claim_keeps_other_module_and_stuck_is_idempotent() {
     f.exhaust("u");
     f.stuck();
     let map = fs::read_to_string(f.store.join("modules.md")).unwrap();
-    fs::write(f.store.join("modules.md"), map + "## other\nPURPOSE x\nPATHS other/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n").unwrap();
+    fs::write(f.store.join("modules.md"), map + "## other\nPURPOSE x\nPATHS other/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default terra/medium trivial reason\n").unwrap();
     scheduler::next(&f.store, None, Duration::ZERO).unwrap();
     scheduler::release(&f.store, "other", "awaiting ruling").unwrap();
     scheduler::next(&f.store, None, Duration::ZERO).unwrap();

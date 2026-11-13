@@ -423,6 +423,57 @@ fn commands_list_fix_units_and_waivers() {
 }
 
 #[test]
+fn fix_uses_actual_parent_decision_and_requires_routing_sources() {
+    use axiom::codex::routing::{self, Effort, Risk, RoutingSnapshot, Rule, Tier};
+    for scenario in ["missing_decision", "missing_risk", "snapshot", "map_unit", "map_default", "explicit"] {
+        let t = Temp::new();
+        let p = &t.0;
+        ok(p, &["init"], false);
+        let parent = p.join("parent.md");
+        let child = p.join("child.md");
+        std::fs::write(&parent, if scenario == "missing_risk" { "GOAL g\nSCOPE src/a\nVERIFY v\n" } else { "GOAL g\nSCOPE src/a\nVERIFY v\nRISK parser\n" }).unwrap();
+        std::fs::write(&child, "GOAL fix\nSCOPE src/a\nVERIFY v\n").unwrap();
+        let parent_path = parent.to_str().unwrap();
+        let child_path = child.to_str().unwrap();
+        ok(p, &["unit", "add", "origin", "--track", "core", "--brief", parent_path], false);
+        if matches!(scenario, "map_unit" | "map_default") {
+            let extra = if scenario == "map_unit" { "  origin sol/xhigh parser unit\n" } else { "" };
+            std::fs::write(p.join("modules.md"), format!("## core\nPURPOSE x\nPATHS src/a\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default sol/high standard default\n{extra}")).unwrap();
+        }
+        if matches!(scenario, "snapshot" | "missing_risk" | "explicit") {
+            routing::write_snapshot(p, &RoutingSnapshot {
+                unit: "origin".into(), attempt_id: "a".into(), role: "sol".into(),
+                tier: if scenario == "explicit" { None } else { Some(Tier::Sol) },
+                effort: Some(Effort::Xhigh), risk: if scenario == "snapshot" { Some(Risk::Parser) } else { None },
+                model: "owner-model".into(), rule: if scenario == "explicit" { Rule::ExplicitModel } else { Rule::Brief },
+                reason: String::new(), settings_version: None,
+            }).unwrap();
+        }
+        let args = ["unit", "add", "fix", "--track", "core", "--brief", child_path, "--fixes", "origin"];
+        let out = call(p, &args, false, false);
+        if matches!(scenario, "missing_decision" | "missing_risk" | "explicit") {
+            assert_ne!(out.exit_code, 0, "{scenario}");
+            assert!(out.stderr.contains("routing_missing"), "{scenario}: {}", out.stderr);
+            assert!(!routing::fix_record_path(p, "fix").exists());
+            if scenario != "explicit" { continue; }
+            let mut args = args.to_vec();
+            args.extend(["--routing", "sol/xhigh", "--reason", "owner decision"]);
+            ok(p, &args, false);
+        } else {
+            assert_eq!(out.exit_code, 0, "{scenario}: {}", out.stderr);
+        }
+        let fix = routing::read_fix(p, "fix").unwrap().unwrap();
+        if scenario == "explicit" {
+            assert_eq!((fix.parent_tier, fix.rule, fix.tier, fix.effort), (None, Rule::PlanException, Tier::Sol, Effort::Xhigh));
+        } else if scenario == "map_default" {
+            assert_eq!((fix.parent_tier, fix.parent_effort, fix.tier, fix.effort), (Some(Tier::Sol), Some(Effort::High), Tier::Sol, Effort::Xhigh));
+        } else {
+            assert_eq!((fix.parent_tier, fix.parent_effort, fix.tier, fix.effort), (Some(Tier::Sol), Some(Effort::Xhigh), Tier::Astra, Effort::Xhigh));
+        }
+    }
+}
+
+#[test]
 fn unit_add_reports_the_next_step() {
     let t = Temp::new();
     let p = &t.0;
@@ -483,8 +534,10 @@ fn unit_add_refuses_bad_brief_settings_with_a_clear_error() {
         assert!(call(p, &["unit", "get", "x"], false, false).exit_code != 0);
     }
     std::fs::write(&brief, "GOAL g\nSCOPE a\nVERIFY v\nEFFORT low\nTIER luna\n").unwrap();
-    assert_eq!(add("x").exit_code, 0);
-    assert_eq!(call(p, &["unit", "get", "x"], false, false).exit_code, 0);
+    let out = add("x");
+    assert_ne!(out.exit_code, 0);
+    assert!(out.stderr.contains("terra"), "{}", out.stderr);
+    assert_ne!(call(p, &["unit", "get", "x"], false, false).exit_code, 0);
 }
 
 #[test]

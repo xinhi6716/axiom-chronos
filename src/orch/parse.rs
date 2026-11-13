@@ -10,6 +10,8 @@ pub struct Brief {
     pub context: Option<String>,
     pub effort: Option<String>,
     pub tier: Option<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
     pub text: String,
     #[serde(default)]
     pub contract: Vec<String>,
@@ -74,7 +76,11 @@ pub struct Map {
     pub out_of_scope: Vec<OutOfScope>,
 }
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-const TIERS: [&str; 4] = ["terra", "sol", "astra", "luna"];
+const TIERS: [&str; 3] = ["terra", "sol", "astra"];
+const RISKS: [&str; 11] = [
+    "trivial", "standard", "state_machine", "concurrency", "migration", "parser", "security",
+    "privacy", "cross_module", "prior_failure", "novel",
+];
 fn is_field(line: &str, name: &str) -> bool {
     line.strip_prefix(name)
         .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
@@ -130,15 +136,19 @@ fn is_valid_setting(line: &str) -> bool {
     let valid = |name: &str, allowed: &[&str]| {
         is_field(line, name) && allowed.contains(&line[name.len()..].trim())
     };
-    valid("EFFORT", &EFFORTS) || valid("TIER", &TIERS)
+    valid("EFFORT", &EFFORTS)
+        || valid("TIER", &TIERS)
+        || valid("TIER", &["luna"])
+        || valid("RISK", &RISKS)
 }
-const SECTION_FIELDS: [&str; 8] = [
+const SECTION_FIELDS: [&str; 9] = [
     "GOAL",
     "SCOPE",
     "VERIFY",
     "CONTEXT",
     "EFFORT",
     "TIER",
+    "RISK",
     "CONTRACT",
     "TEST_MATRIX",
 ];
@@ -296,7 +306,7 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
         return Err("is missing VERIFY".into());
     }
     let (contract, test_matrix) = brief_sections(&body, &scope)?;
-    let (mut effort, mut tier) = (None, None);
+    let (mut effort, mut tier, mut risk) = (None, None, None);
     let mut worker_text = String::with_capacity(text.len());
     let mut lines = text.split_inclusive('\n').peekable();
     while let Some(line) = lines.next_if(|l| !is_field(l, "GOAL")) {
@@ -307,7 +317,12 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
         if is_field(line, "EFFORT") {
             setting(line, "EFFORT", &EFFORTS, &mut effort)?;
         } else if is_field(line, "TIER") {
+            if line["TIER".len()..].trim() == "luna" {
+                return Err("TIER luna is below the terra worker floor".into());
+            }
             setting(line, "TIER", &TIERS, &mut tier)?;
+        } else if is_field(line, "RISK") {
+            setting(line, "RISK", &RISKS, &mut risk)?;
         } else {
             worker_text.push_str(line);
         }
@@ -325,6 +340,7 @@ pub fn parse_brief(text: &str) -> Result<Brief, String> {
         context: f.get("CONTEXT").cloned(),
         effort,
         tier,
+        risk,
         text: worker_text,
         contract,
         test_matrix,
