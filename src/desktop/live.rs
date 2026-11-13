@@ -161,6 +161,7 @@ enum Update {
     QuitRequested,
     LoginStart(bool),
     Quota(Quotas),
+    Pools(Vec<crate::usage::pools::PoolStatus>),
     CodexSlots(Option<u64>),
     CodexModels(Vec<RunningModel>),
     LiveModels(Vec<RunningModel>),
@@ -175,6 +176,7 @@ enum Update {
 #[derive(Default)]
 struct Mailbox {
     updates: Vec<Update>,
+    pushed: u64,
     closed: bool,
     waker: Option<Waker>,
 }
@@ -191,6 +193,7 @@ impl Inbox {
     fn push(&self, update: Update) {
         let mut mailbox = self.lock();
         mailbox.updates.push(update);
+        mailbox.pushed = mailbox.pushed.wrapping_add(1);
         if let Some(waker) = mailbox.waker.take() {
             waker.wake();
         }
@@ -418,7 +421,7 @@ pub fn connect_service(
     spawn: Option<PathBuf>,
     cx: &mut App,
 ) {
-    quota::publish_pools(&home, cx);
+    quota::publish_pools(super::quota::unknown_pools(), cx);
     let (commands, receiver) = mpsc::channel();
     let inbox = Inbox::default();
     let projects = Locations::from_env().projects;
@@ -462,7 +465,7 @@ pub fn connect_service(
             let alive = cx.update(|cx| {
                 let mut spent = Vec::new();
                 let result = state.update(cx, |s, cx| {
-                    spent = apply_batch(&home, s, updates, cx);
+                    spent = apply_batch(s, updates, cx);
                     let viewing = s.run().map(|run| run.session.clone());
                     if viewing != followed {
                         followed = viewing;
@@ -550,13 +553,25 @@ pub fn smoke_read(home: &Path, state: &mut AppState) -> Res<()> {
 }
 
 fn apply_batch(
-    home: &Path,
     state: &mut AppState,
     updates: Vec<Update>,
     cx: &mut App,
 ) -> Vec<crate::board::TokenUse> {
+    let mut pools = None;
+    let updates = updates
+        .into_iter()
+        .filter_map(|update| match update {
+            Update::Pools(snapshot) => {
+                pools = Some(snapshot);
+                None
+            }
+            other => Some(other),
+        })
+        .collect();
     let spent = apply(state, updates);
-    quota::publish_pools(home, cx);
+    if let Some(snapshot) = pools {
+        quota::publish_pools(snapshot, cx);
+    }
     spent
 }
 
@@ -564,6 +579,7 @@ fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenU
     let mut spent = Vec::new();
     for update in updates {
         match update {
+            Update::Pools(_) => {},
             Update::Board { session, entry } => {
                 state.board.insert(session.into(), entry);
             }
@@ -782,6 +798,8 @@ struct Engine {
     board_generations: HashMap<String, u64>,
     board_entries: HashMap<String, BoardEntry>,
     quotas: Quotas,
+    pools_sent: Option<Vec<crate::usage::pools::PoolStatus>>,
+    pools_updates_seen: u64,
     codex: Arc<quota::SharedCodex>,
     rate_source: Arc<dyn quota::RateSource>,
     quota_stop: Arc<AtomicBool>,
@@ -856,6 +874,8 @@ impl Engine {
             board_generations: HashMap::new(),
             board_entries: HashMap::new(),
             quotas: Quotas::default(),
+            pools_sent: None,
+            pools_updates_seen: 0,
             rate_source: codex.clone(),
             codex,
             quota_stop: Arc::new(AtomicBool::new(false)),
@@ -913,6 +933,7 @@ impl Engine {
 
     fn run(mut self, commands: mpsc::Receiver<Command>) {
         let _close = CloseOnExit(self.inbox.clone());
+        self.refresh_pools(true);
         self.recheck();
         if self.service_enabled {
             self.sync_service();
@@ -955,8 +976,27 @@ impl Engine {
                     }
                 }
             }
+            self.refresh_pools(false);
         }
         self.shutdown();
+    }
+
+    // Poll once per worker cycle that sent updates, even if the UI has already drained them.
+    fn refresh_pools(&mut self, force: bool) {
+        let pushed = self.inbox.lock().pushed;
+        if !force && pushed == self.pools_updates_seen {
+            return;
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        let snapshot = quota::pool_snapshot(&self.home, now_ms);
+        if self.pools_sent.as_ref() != Some(&snapshot) {
+            self.pools_sent = Some(snapshot.clone());
+            self.inbox.push(Update::Pools(snapshot));
+        }
+        self.pools_updates_seen = self.inbox.lock().pushed;
     }
 
     fn shutdown(&mut self) {
@@ -992,6 +1032,7 @@ impl Engine {
         }
         // ux: end
         self.schedule_quota(false);
+        self.refresh_pools(false);
     }
 
     /// Runs one command. Returns whether the disk should be read again right away.
@@ -3412,6 +3453,71 @@ fn early_run(key: &str, entry: &Hosted) -> Run {
 }
 
 #[cfg(test)]
+mod source_check {
+    // Blank comments and literals while retaining offsets and code delimiters.
+    pub(super) fn code(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut out = bytes.to_vec();
+        let mut i = 0;
+        while i < bytes.len() {
+            let start = i;
+            if bytes[i..].starts_with(b"//") {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            } else if bytes[i..].starts_with(b"/*") {
+                i += 2;
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i..].starts_with(b"/*") { depth += 1; i += 2; }
+                    else if bytes[i..].starts_with(b"*/") { depth -= 1; i += 2; }
+                    else { i += 1; }
+                }
+            } else if bytes[i] == b'r' || (bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r')) {
+                let mut j = i + if bytes[i] == b'b' { 2 } else { 1 };
+                while bytes.get(j) == Some(&b'#') { j += 1; }
+                if bytes.get(j) != Some(&b'"') { i += 1; continue; }
+                let hashes = j - i - if bytes[i] == b'b' { 2 } else { 1 };
+                i = j + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'"' && bytes.get(i + 1..i + 1 + hashes).is_some_and(|h| h.iter().all(|b| *b == b'#')) {
+                        i += 1 + hashes; break;
+                    }
+                    i += 1;
+                }
+            } else if bytes[i] == b'"' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i = (i + 2).min(bytes.len()); }
+                    else if bytes[i] == b'"' { i += 1; break; }
+                    else { i += 1; }
+                }
+            } else if bytes[i] == b'\'' && (bytes.get(i + 2) == Some(&b'\'') || (bytes.get(i + 1) == Some(&b'\\') && bytes.get(i + 3) == Some(&b'\''))) {
+                i += if bytes[i + 1] == b'\\' { 4 } else { 3 };
+            } else {
+                i += 1;
+                continue;
+            }
+            for byte in &mut out[start..i] { if *byte != b'\n' { *byte = b' '; } }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    pub(super) fn body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source.find(&format!("fn {name}(")).unwrap();
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 0;
+        for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => { depth -= 1; if depth == 0 { return &source[open + 1..open + offset]; } }
+                _ => {}
+            }
+        }
+        panic!("unclosed function body: {name}");
+    }
+}
+
+#[cfg(test)]
 mod pools_refresh {
     use super::*;
     use crate::usage::pools::{self, Pool, PoolStrip};
@@ -3444,7 +3550,6 @@ mod pools_refresh {
             .used_tokens
     }
 
-    // Before wiring: assertion `left == right` failed: live refresh must publish the charged pool (left: None, right: Some(12300)).
     #[test]
     fn pools_refresh_publishes_charged_pool() {
         with_app(|cx| {
@@ -3453,7 +3558,7 @@ mod pools_refresh {
                 .unwrap();
             let mut state = tests::state_with(vec![]);
 
-            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+            apply_batch(&mut state, vec![Update::Quota(Quotas::default()), Update::Pools(quota::pool_snapshot(home.path(), 0))], cx);
 
             assert!(state.feeds.quota.loaded);
             assert_eq!(
@@ -3477,14 +3582,14 @@ mod pools_refresh {
             }
             let mut state = tests::state_with(vec![]);
 
-            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+            apply_batch(&mut state, vec![Update::Quota(Quotas::default()), Update::Pools(quota::pool_snapshot(home.path(), 0))], cx);
 
             assert_eq!(cx.try_global::<PoolStrip>().unwrap().0.len(), 2);
             assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(125));
             assert_eq!(used_tokens(cx, Pool::Argon), Some(900));
 
             pools::charge(home.path(), "gemini-4-argon-high", Some(50), None, "test").unwrap();
-            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+            apply_batch(&mut state, vec![Update::Quota(Quotas::default()), Update::Pools(quota::pool_snapshot(home.path(), 0))], cx);
 
             assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(125));
             assert_eq!(used_tokens(cx, Pool::Argon), Some(950));
@@ -3492,17 +3597,17 @@ mod pools_refresh {
     }
 
     #[test]
-    fn pools_refresh_without_quota_change_reads_updated_ledger() {
+    fn pools_refresh_without_quota_change_publishes_updated_snapshot() {
         with_app(|cx| {
             let home = tempfile::tempdir().unwrap();
             let mut state = tests::state_with(vec![]);
             pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(100), None, "test").unwrap();
-            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+            apply_batch(&mut state, vec![Update::Quota(Quotas::default()), Update::Pools(quota::pool_snapshot(home.path(), 0))], cx);
             assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(100));
             let quota = state.quota.clone();
 
             pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(23), None, "test").unwrap();
-            apply_batch(home.path(), &mut state, vec![Update::CodexSlots(Some(2))], cx);
+            apply_batch(&mut state, vec![Update::CodexSlots(Some(2)), Update::Pools(quota::pool_snapshot(home.path(), 0))], cx);
 
             assert_eq!(state.quota, quota);
             assert_eq!(state.codex_slots, Some(2));
@@ -3511,6 +3616,60 @@ mod pools_refresh {
         });
     }
 
+    #[test]
+    fn foreground_publishes_last_snapshot_after_ledger_removed() {
+        with_app(|cx| {
+            let home = tempfile::tempdir().unwrap();
+            pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(77), None, "test").unwrap();
+            let snapshot = quota::pool_snapshot(home.path(), 0);
+            std::fs::remove_file(home.path().join("usage/pools.jsonl")).unwrap();
+            let mut state = tests::state_with(vec![]);
+            apply_batch(&mut state, vec![Update::Pools(super::super::quota::unknown_pools()), Update::Pools(snapshot.clone())], cx);
+            assert_eq!(cx.try_global::<PoolStrip>().unwrap().0, snapshot);
+            assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(77));
+        });
+    }
+
+    #[test]
+    fn engine_publishes_changed_pools_with_other_updates() {
+        let home = tempfile::tempdir().unwrap();
+        let (commands, _) = mpsc::channel();
+        let inbox = Inbox::default();
+        let mut engine = Engine::new(home.path().to_owned(), home.path().join("projects"), Box::new(Config::from_env), commands, inbox.clone());
+        engine.refresh_pools(true);
+        assert!(matches!(inbox.lock().updates.pop(), Some(Update::Pools(_))));
+        pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(123), None, "test").unwrap();
+        engine.tick();
+        let updates = std::mem::take(&mut inbox.lock().updates);
+        assert!(updates.iter().any(|u| matches!(u, Update::Pools(statuses) if statuses.iter().any(|s| s.pool == Pool::HydrogenFlash && s.used_tokens == Some(123)))));
+        engine.tick();
+        assert!(!inbox.lock().updates.iter().any(|u| matches!(u, Update::Pools(_))));
+    }
+
+    #[test]
+    fn foreground_functions_do_not_read_pool_status() {
+        fn clean(body: &str) -> bool {
+            let code: String = source_check::code(body)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            !code.contains("pools::status") && !code.contains("pool_snapshot(")
+        }
+        let source = source_check::code(include_str!("live.rs"));
+        for name in ["connect_service", "apply_batch"] {
+            assert!(clean(source_check::body(&source, name)), "{name}");
+        }
+        assert!(!clean("pools::status(home, now);"));
+        assert!(!clean("pool_snapshot(home, now);"));
+        assert!(!clean("pool_snapshot/* comment */(home, now);"));
+        assert!(!clean("pools /* comment */ :: status(home, now);"));
+        assert!(clean("// pools::status(home, now)\n/* pool_snapshot(home, now) */"));
+    }
+
+    // Audited connect, connect_service, apply_batch, apply, follow_current, replace_runs,
+    // report, feed::apply, feed::rename and model render data: no foreground disk reads.
+    // Engine::compose -> map_wish -> structure -> unit_title -> read_start and review_text
+    // perform their reads on the engine worker, as do feed::Feed::poll and read_memory.
     #[test]
     fn pools_refresh_negative_control_apply_alone_does_not_publish() {
         with_app(|cx| {

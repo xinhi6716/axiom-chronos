@@ -3,14 +3,12 @@ use crate::{base::{self, Failure, Res}, codex::AppServer};
 use serde_json::Value;
 use std::{sync::{Arc, Mutex, mpsc::Receiver}, time::{Duration, Instant}};
 
-fn pool_snapshot(home: &std::path::Path, now_ms: i64) -> Vec<crate::usage::pools::PoolStatus> {
+pub(super) fn pool_snapshot(home: &std::path::Path, now_ms: i64) -> Vec<crate::usage::pools::PoolStatus> {
     crate::usage::pools::status(home, now_ms).unwrap_or_else(|_| super::super::quota::unknown_pools())
 }
 
-pub fn publish_pools(home: &std::path::Path, cx: &mut gpui_kit::App) {
-    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0);
-    cx.set_global(crate::usage::pools::PoolStrip(pool_snapshot(home, now_ms)));
+pub fn publish_pools(statuses: Vec<crate::usage::pools::PoolStatus>, cx: &mut gpui_kit::App) {
+    cx.set_global(crate::usage::pools::PoolStrip(statuses));
 }
 
 pub(super) trait RateSource: Send + Sync {

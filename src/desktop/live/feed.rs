@@ -244,20 +244,22 @@ mod tests {
 
     #[test]
     fn received_helper_calls_perf() {
-        fn assert_calls_perf(body: &str) {
-            assert!(body.contains("perf::event_received("));
+        fn calls_perf(body: &str) -> bool {
+            let body: String = super::super::source_check::code(body)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            body.contains("crate::desktop::perf::event_received(")
+                || body.contains("perf::event_received(")
         }
-        let source = include_str!("feed.rs");
-        let body = source
-            .split("\nfn note_received(")
-            .nth(1)
-            .unwrap()
-            .split("\n}\n")
-            .next()
-            .unwrap();
-        assert_calls_perf(body);
-        assert!(std::panic::catch_unwind(|| assert_calls_perf("fn note_received() {}"))
-            .is_err());
+        let source = super::super::source_check::code(include_str!("feed.rs"));
+        let body = super::super::source_check::body(&source, "note_received");
+        assert!(calls_perf(body));
+        assert!(calls_perf("perf::event_received/* comment */(1)"));
+        assert!(!calls_perf("// perf::event_received(1)"));
+        assert!(!calls_perf("/* perf::event_received(1) */"));
+        assert!(!calls_perf("let x = \"perf::event_received(1)\";"));
+        assert!(!calls_perf("let x = r#\"perf::event_received(1)\"#;"));
     }
 
     #[test]
