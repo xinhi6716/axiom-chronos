@@ -204,7 +204,7 @@ impl Seams {
 #[derive(Default)]
 pub struct UxState {
     // --- research workspace (phase 9) ---
-    pub research: crate::desktop::research::ResearchSeams,
+    pub research: crate::desktop::research::adapter::ResearchSeams,
     // --- end research workspace (phase 9) ---
     pub seams: Seams,
     pub page: Option<Page>,

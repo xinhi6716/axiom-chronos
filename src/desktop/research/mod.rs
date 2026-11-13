@@ -9,9 +9,7 @@ use crate::{
     research_workspace::{
         index::{Filter, Index, IndexEvent, Indexer, Op},
         manifest::{locate, Capability, LocateOptions, Located, ManifestSource, Role},
-        pdf::PdfiumProcess,
         read::{self, Limits, Row},
-        seams::{PageRenderer, SnapshotConsumer, VaultActions},
         session::{self, ResearchRef, SessionPrefs, TabView},
         stages::{self, ResearchMap, StageState},
     },
@@ -34,6 +32,8 @@ use std::{
     sync::{mpsc, Arc, Mutex, OnceLock},
 };
 
+pub mod adapter;
+
 #[cfg(test)]
 mod accept;
 pub mod actions;
@@ -55,33 +55,7 @@ mod sources;
 #[cfg(test)]
 mod sources_accept;
 
-#[derive(Clone, Default)]
-pub struct ResearchSeams {
-    pub research_home: Option<PathBuf>,
-    pub orch_home: Option<PathBuf>,
-    pub goals_home: Option<PathBuf>,
-    pub renderer: Option<Arc<dyn PageRenderer>>,
-    pub snapshot_consumer: Option<Arc<dyn SnapshotConsumer>>,
-    pub vault: Option<Arc<dyn VaultActions>>,
-    pub page_cache_bytes: u64,
-}
-impl ResearchSeams {
-    pub fn production(axiom_home: &Path) -> Self {
-        let research_home = axiom_home.join("research");
-        Self {
-            renderer: Some(Arc::new(PdfiumProcess::from_env(&research_home))),
-            research_home: Some(research_home),
-            orch_home: Some(axiom_home.join("orchestrate")),
-            goals_home: Some(axiom_home.to_path_buf()),
-            snapshot_consumer:
-                crate::research_workspace::paper_handoff::PaperHandoff::production(axiom_home)
-                    .ok()
-                    .map(|handoff| Arc::new(handoff) as Arc<dyn SnapshotConsumer>),
-            vault: None,
-            page_cache_bytes: 256 * 1024 * 1024,
-        }
-    }
-}
+pub use adapter::ResearchSeams;
 
 #[cfg(test)]
 mod production_seams_tests {
