@@ -258,10 +258,30 @@ impl Probe for OsProbe {
     fn free_bytes(&self, path: &Path) -> Res<u64> {
         if let Some(file) = fake() {
             let v: Value = serde_json::from_slice(&fs::read(file).map_err(io)?).map_err(invalid)?;
-            return v
+            let default = v
                 .get("free_bytes")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| invalid("invalid fake disk free_bytes"));
+                .ok_or_else(|| invalid("invalid fake disk free_bytes"))?;
+            let mut selected = None;
+            if let Some(paths) = v.get("paths") {
+                let paths = paths
+                    .as_object()
+                    .ok_or_else(|| invalid("invalid fake disk paths"))?;
+                for (prefix, value) in paths {
+                    let prefix = Path::new(prefix);
+                    let bytes = value
+                        .as_u64()
+                        .ok_or_else(|| invalid("invalid fake disk paths"))?;
+                    if !prefix.is_absolute() {
+                        return Err(invalid("invalid fake disk paths"));
+                    }
+                    let length = prefix.components().count();
+                    if path.starts_with(prefix) && selected.is_none_or(|(best, _)| length > best) {
+                        selected = Some((length, bytes));
+                    }
+                }
+            }
+            return Ok(selected.map_or(default, |(_, bytes)| bytes));
         }
         let p = existing(path)?;
         #[cfg(unix)]
