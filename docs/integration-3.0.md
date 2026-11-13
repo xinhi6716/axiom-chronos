@@ -34,6 +34,8 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 - engine/skills/wish/SKILL.md: 7757 bytes
 - total: 20758 bytes (cap 20813)
 
+Earlier p9-side record: dispatcher.md 9872 bytes, DISPATCH.md 2824 bytes, SKILL.md 8072 bytes; total 20768 bytes (cap 20813).
+
 ## Offline graph evaluation
 
 Offline re-evaluation uses the same scenarios as the pre-change baseline, not an independent acceptance set. Bytes are pretty explore JSON bytes, not tokens; counts are required evidence, conditions, and major findings present.

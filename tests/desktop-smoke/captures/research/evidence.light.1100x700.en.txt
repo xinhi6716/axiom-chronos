@@ -1,0 +1,57 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: Paused: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	Ready
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	Map
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	Sources
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	Evidence
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	Dataset
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	Exports
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-layer-literature	Literature
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-layer-raw	Raw
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-entities/research-evidence-entity-0	HfO2
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-locator	Page 2 (printed 12) · No region recorded; showing the whole page
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-open-dataset	Open in dataset
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-correct	Correct
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0	C1
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-E1	E1
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-E2	E2
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-E3	E3
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-E7	E7
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-E12	E12
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	0 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-1	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-1	0 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-1	2 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-2	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-2	 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-2	2 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-3	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-3	0 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-3	6 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-4	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-4	 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-4	6 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-5	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-5	2 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-5	6 V
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 hours
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex parallel 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	Show what is blocking

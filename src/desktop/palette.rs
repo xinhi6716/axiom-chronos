@@ -25,6 +25,9 @@ mod accept;
 pub(super) mod menu;
 
 pub(super) const T: Table = &[
+    // --- research workspace (phase 9) ---
+    ("Research workbench", "研究查核台"),
+    // --- end research workspace (phase 9) ---
     // ux: begin commands
     ("Storage", "儲存空間"), ("Chat", "對話"), ("Quick task", "快速任務"), ("Plaza", "廣場討論"),
     ("Usage for this wish", "這個願望的用量"), ("Compare usage", "比較用量"), ("Mark all read", "全部標為已讀"),
@@ -489,6 +492,9 @@ pub(super) fn marked(text: SharedString, positions: &[usize], strong: Hsla) -> S
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Command {
+    // --- research workspace (phase 9) ---
+    Research,
+    // --- end research workspace (phase 9) ---
     NewWish,
     Open(Screen),
     ToggleTheme,
@@ -675,6 +681,9 @@ pub(super) fn index(state: &AppState, lang: Lang, dark: bool, prefs: &super::ux:
         items.push(command(title, target, icon, keys, lang));
     }
     items.push(command("Keyboard shortcuts", Command::Shortcuts, IconKind::Keys, Some(keys_of(Global::Shortcuts)), lang));
+    // --- research workspace (phase 9) ---
+    if state.ux.research.research_home.is_some() { items.push(command("Research workbench", Command::Research, IconKind::Module, None, lang)); }
+    // --- end research workspace (phase 9) ---
     // ux: begin commands
     if state.ux.seams.storage.is_some() { items.push(command("Storage", Command::Storage, IconKind::Settings, None, lang)); }
     if state.ux.seams.modes.is_some() {

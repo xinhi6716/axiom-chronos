@@ -6,3 +6,6 @@ tests/fixtures/phase7/** -text
 tests/fixtures/self_check_dev/** -text
 engine/paper/academic-humanizer/** -text
 docs/paper-adoption.md text eol=lf
+# --- research workspace (phase 9) ---
+tests/fixtures/research/** -text
+# --- end research workspace (phase 9) ---

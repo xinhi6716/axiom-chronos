@@ -1,0 +1,6 @@
+meta: {project: rram_fixture}
+paths: {source_root: 'pdfs'}
+seeds: {global: 20261112}
+codex: {effort_ladder: [medium, high, xhigh, max], timeout_s: 1800}
+pilot: {accuracy_threshold: 0.90}
+acceptance: {accuracy_threshold: 0.90}

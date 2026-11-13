@@ -1,0 +1,42 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	目前沒有阻礙這項研究的事項
+gpui_component::window_border::WindowBorder/root/research-page/research-load	已就緒
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	地圖
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	來源
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	證據
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	資料集
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	匯出
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-layer-literature	文獻
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-layer-raw	原始資料
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-capability	此研究不提供 PDF 頁面
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-entities/research-evidence-entity-0	HfO2
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-locator	runs/device_A.csv，第 1 列，欄位 value
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-open-dataset	在資料集中開啟
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-correct	修正
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0	C1
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-RE1	RE1
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-conditions/research-evidence-condition-0/research-evidence-item-RE2	RE2
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	C1 · voltage
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	0 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-contradictions/research-evidence-contradiction-0	1 V
+gpui_component::window_border::WindowBorder/root/research-page/research-evidence-panel/research-evidence-page	此證據沒有 PDF 頁面
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	<tmp>\rawonly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	凍結快照
