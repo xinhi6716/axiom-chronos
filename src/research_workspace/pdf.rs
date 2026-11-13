@@ -18,7 +18,8 @@ use std::{
 };
 
 // Preserve the original script bytes, including its single CRLF.
-const RENDER_PAGE_PY: &str = concat!(r##"import hashlib
+const RENDER_PAGE_PY: &str = concat!(
+    r##"import hashlib
 import json
 import sys
 
@@ -51,10 +52,13 @@ try:
     image = page.render(scale=float(scale_arg)).to_pil()
 except Exception as exc:
     print(str(exc), file=sys.stderr)
-    sys.exit(4)"##, "\r\n", r##"image.save(out, format='PNG')
+    sys.exit(4)"##,
+    "\r\n",
+    r##"image.save(out, format='PNG')
 print(json.dumps(dict(path=out, width_px=image.width, height_px=image.height,
                       page_width_pt=width, page_height_pt=height, rotation=rotation)))
-"##);
+"##
+);
 
 fn io(e: impl std::fmt::Display) -> Failure {
     Failure::new("io", e.to_string())
@@ -272,6 +276,25 @@ impl From<ImageInfo> for PageImage {
     }
 }
 
+/// First of `python` and `python3` (Windows order; reversed elsewhere) whose
+/// `--version` succeeds. A Microsoft Store stub that exits non-zero is skipped.
+pub fn working_python() -> Option<String> {
+    let names = if cfg!(windows) {
+        ["python", "python3"]
+    } else {
+        ["python3", "python"]
+    };
+    names
+        .into_iter()
+        .find(|p| {
+            base::proc::command(&[(*p).to_string(), "--version".into()])
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .map(String::from)
+}
+
 pub struct PdfiumProcess {
     pub command: Vec<String>,
     pub script_dir: PathBuf,
@@ -281,6 +304,13 @@ impl PdfiumProcess {
     pub fn from_env(research_home: &Path) -> Self {
         Self {
             command: base::resolve_command("AXIOM_PYTHON_CMD", "python")
+                .map(|c| {
+                    if std::env::var_os("AXIOM_PYTHON_CMD").is_some_and(|v| !v.is_empty()) {
+                        c
+                    } else {
+                        vec![working_python().unwrap_or_else(|| "python".into())]
+                    }
+                })
                 .unwrap_or_else(|_| vec!["python".into()]),
             script_dir: research_home.join("cache"),
             timeout: Duration::from_secs(60),
@@ -323,6 +353,15 @@ impl PageRenderer for PdfiumProcess {
                 return Err(Failure::new("render_timeout", "PDF rendering timed out"));
             }
             if run.exit_code != 0 {
+                if !matches!(run.exit_code, 3..=6)
+                    && run.stdout.is_empty()
+                    && run.stderr.iter().all(u8::is_ascii_whitespace)
+                {
+                    return Err(Failure::new(
+                        "renderer_missing",
+                        format!("interpreter exited {} without output", run.exit_code),
+                    ));
+                }
                 let kind = match run.exit_code {
                     3 => "renderer_missing",
                     4 => "corrupt_pdf",
@@ -549,6 +588,29 @@ mod tests {
         );
         assert_eq!(hashes(&fixture()), before);
     }
+    fn test_python() -> Option<String> {
+        std::env::var("AXIOM_TEST_PYTHON")
+            .ok()
+            .or_else(working_python)
+    }
+    #[test]
+    fn dead_interpreter_is_renderer_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut process = PdfiumProcess::from_env(d.path());
+        process.command = if cfg!(windows) {
+            vec!["cmd".into(), "/c".into(), "exit 49 &".into()]
+        } else {
+            vec!["sh".into(), "-c".into(), "exit 49".into()]
+        };
+        let out = d.path().join("page.png");
+        assert_eq!(
+            process
+                .render(&fixture().join("pdfs/a.pdf"), "x", 1, 1.0, &out)
+                .unwrap_err()
+                .kind,
+            "renderer_missing"
+        );
+    }
     #[test]
     fn real_process() {
         let d = tempfile::tempdir().unwrap();
@@ -561,7 +623,10 @@ mod tests {
             process.render(&pdf, sha, 2, 1.0, &out).unwrap_err().kind,
             "renderer_missing"
         );
-        let python = std::env::var("AXIOM_TEST_PYTHON").unwrap_or_else(|_| "python".into());
+        let Some(python) = test_python() else {
+            eprintln!("skipping real process test: no working python (AXIOM_TEST_PYTHON, python, python3)");
+            return;
+        };
         process.command = vec![python.clone(), "-c".into(), "import pathlib,sys,time; pathlib.Path(sys.argv[-1]).write_bytes(b'partial'); time.sleep(10)".into()];
         process.timeout = Duration::from_millis(500);
         assert_eq!(
