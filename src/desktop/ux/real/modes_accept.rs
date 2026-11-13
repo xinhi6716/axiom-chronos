@@ -365,7 +365,8 @@ fn lazy_quick_uses_engine_home_even_when_environment_home_differs() {
     }
     let root = tempfile::tempdir().unwrap();
     let fake = serde_json::to_string(&vec![
-        "python".to_owned(),
+        std::env::var("AXIOM_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into()),
         "-I".to_owned(),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fakes/fake_codex.py")

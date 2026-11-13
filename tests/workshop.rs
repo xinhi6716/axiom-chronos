@@ -203,26 +203,43 @@ fn drop_stops_started_modules() {
 #[test]
 fn resolves_python_from_path() {
     use std::process::Stdio;
-    if !["python3", "python"].into_iter().any(|python| {
+    let bare_works = ["python3", "python"].into_iter().any(|python| {
         proc::command(&[python.into(), "--version".into()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
-    }) {
+    });
+    let python = if bare_works {
+        None
+    } else if std::env::var("AXIOM_TEST_PYTHON").is_ok() {
+        let python = common::python();
+        if !proc::command(&[python.clone(), "--version".into()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            eprintln!("skipping: no usable Python interpreter");
+            return;
+        }
+        Some(python)
+    } else {
+        eprintln!("skipping: no usable Python interpreter");
         return;
-    }
+    };
     let tmp = setup();
     let host = Host::new(
         HostConfig {
             home: tmp.path().to_owned(),
-            python: None,
+            python,
         },
         Arc::new(AckHandler),
         Arc::new(FakeApproval::approving()),
     );
     host.start("hello").unwrap();
     done(tmp.path(), "hello");
+    println!("AXIOM_WORKSHOP_MODULE_STARTED");
 }
 
 #[test]

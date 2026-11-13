@@ -460,7 +460,8 @@ mod tests {
 
     #[test]
     fn notifications_and_cancel_reach_the_registered_turn() {
-        let python = if cfg!(windows) { "python" } else { "python3" };
+        let python = std::env::var("AXIOM_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let fake =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
         let server = AppServer::new(vec![
