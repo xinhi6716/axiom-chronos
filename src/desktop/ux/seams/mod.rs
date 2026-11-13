@@ -22,31 +22,34 @@ pub use interjection::*;
 pub use modes::*;
 pub use optimizer::*;
 pub use paper::*; // p8:
+#[allow(unused_imports)]
+pub use research::*;
 pub use sessions::*;
 pub use storage::*;
 pub use unit_actions::*;
 
 #[cfg(test)]
 mod research_tests {
-    fn comments_only(source: &str) -> bool {
+    fn base_only(source: &str) -> bool {
         source
             .lines()
             .map(str::trim)
-            .all(|line| line.is_empty() || line.starts_with("//"))
+            .filter(|line| line.starts_with("use ") || line.starts_with("pub use "))
+            .all(|line| {
+                line.starts_with("use crate::base") || line.starts_with("pub use crate::base")
+            })
     }
 
     #[test]
-    fn research_is_a_comment_only_seam_without_a_reexport() {
+    fn research_seam_is_declared_and_base_only() {
         let seams = include_str!("mod.rs");
         assert!(seams.lines().any(|line| line.trim() == "pub mod research;"));
-        assert!(!seams
-            .lines()
-            .any(|line| line.trim().starts_with("pub use research::")));
-        assert!(comments_only(include_str!("research.rs")));
+        assert!(base_only(include_str!("research.rs")));
     }
 
     #[test]
-    fn comments_only_rejects_items() {
-        assert!(!comments_only("/// Documentation\npub fn example() {}\n"));
+    fn base_only_rejects_other_imports() {
+        assert!(!base_only("use crate::desktop::ux::Foo;\n"));
+        assert!(base_only("use crate::base::Res;\n"));
     }
 }
