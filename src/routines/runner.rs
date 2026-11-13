@@ -29,9 +29,24 @@ pub fn tick(
     launcher: &dyn WishLauncher,
     approval: &dyn PersonApproval,
 ) -> Res<Vec<LaunchRecord>> {
+    tick_while(store, clock, events, launcher, approval, || true)
+}
+
+// A claimed slot must complete; cancellation is checked before claiming each routine.
+pub(crate) fn tick_while(
+    store: &Store,
+    clock: &dyn Clock,
+    events: &[Event],
+    launcher: &dyn WishLauncher,
+    approval: &dyn PersonApproval,
+    mut keep_going: impl FnMut() -> bool,
+) -> Res<Vec<LaunchRecord>> {
     let now = clock.now_ms();
     let mut records = Vec::new();
     for routine in store.routines()?.into_iter().filter(|r| r.enabled) {
+        if !keep_going() {
+            break;
+        }
         let scheduled = store.update_state(|state| {
             let slot = due(&routine, state.last_due_ms.get(&routine.id).copied(), now)?;
             state.last_due_ms.insert(routine.id.clone(), slot);

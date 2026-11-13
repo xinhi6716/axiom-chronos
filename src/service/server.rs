@@ -1,7 +1,9 @@
 use super::{
     lock, login,
     protocol::{HostedWish, LogRecord, Snapshot, StartRequest, WireEvent},
-    recover, tray,
+    recover,
+    scheduler::{self, SchedulerConfig},
+    tray,
 };
 use crate::{
     base::{
@@ -35,6 +37,7 @@ pub struct RunningService {
     actions: mpsc::Sender<tray::TrayAction>,
     thread: Option<thread::JoinHandle<i32>>,
     state: Option<Arc<Mutex<State>>>,
+    scheduler: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 impl RunningService {
     pub fn tray_actions(&self) -> mpsc::Sender<tray::TrayAction> {
@@ -42,17 +45,27 @@ impl RunningService {
     }
     pub fn quit(&self, stop_running: bool) -> Res<()> {
         if let Some(state) = &self.state {
-            let mut s = state.lock().unwrap();
-            s.quit(stop_running)
+            state.lock().unwrap().quit(stop_running)
         } else {
             Ok(())
         }
     }
     pub fn wait(mut self) -> i32 {
-        self.thread
+        let code = self
+            .thread
             .take()
             .map(|t| t.join().unwrap_or(1))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if let Some(state) = &self.state {
+            let _ = state.lock().unwrap().scheduler_stop.send(());
+        }
+        self.join_scheduler();
+        code
+    }
+    fn join_scheduler(&self) {
+        if let Some(handle) = self.scheduler.lock().unwrap().take() {
+            let _ = handle.join();
+        }
     }
 }
 struct Item {
@@ -75,6 +88,7 @@ struct State {
     cursor: u64,
     quitting: bool,
     quit_deadline: Option<Instant>,
+    scheduler_stop: mpsc::Sender<()>,
     last_count: usize,
 }
 fn now() -> u64 {
@@ -97,7 +111,14 @@ fn settings(home: &Path) -> Res<bool> {
     }
 }
 impl Server {
-    pub fn start(mut opts: ServerOptions) -> Res<RunningService> {
+    pub fn start(opts: ServerOptions) -> Res<RunningService> {
+        let scheduler = SchedulerConfig::production(&opts.home);
+        Self::start_with_scheduler(opts, scheduler)
+    }
+    pub fn start_with_scheduler(
+        mut opts: ServerOptions,
+        scheduler_config: SchedulerConfig,
+    ) -> Res<RunningService> {
         std::fs::create_dir_all(opts.home.join("service")).map_err(io)?;
         let home = opts.home.canonicalize().map_err(io)?;
         let endpoint = ipc::endpoint_for(&home)?;
@@ -109,6 +130,7 @@ impl Server {
                 actions: tx,
                 thread: None,
                 state: None,
+                scheduler: Arc::new(Mutex::new(None)),
             });
         }
         let guard = lock::acquire(&home)?;
@@ -144,6 +166,7 @@ impl Server {
             running: 0,
             text: tray::status_text(0),
         });
+        let (scheduler_stop, scheduler_rx) = mpsc::channel();
         let mut state = State {
             home: home.clone(),
             instance: instance.clone(),
@@ -157,6 +180,7 @@ impl Server {
             cursor: 0,
             quitting: false,
             quit_deadline: None,
+            scheduler_stop,
             last_count: 0,
         };
         if opts.login_launch {
@@ -184,6 +208,12 @@ impl Server {
         base::atomic_write(&home.join("service/service.json"),json!({"pid":std::process::id(),"started_ms":now(),"endpoint":endpoint.name,"instance":instance}).to_string().as_bytes()).map_err(io)?;
         let state = Arc::new(Mutex::new(state));
         let shared = state.clone();
+        let scheduler_handle = Arc::new(Mutex::new(Some(scheduler::spawn(
+            home.clone(),
+            scheduler_config,
+            scheduler_rx,
+        ))));
+        let scheduler_for_main = scheduler_handle.clone();
         let handle = thread::spawn(move || {
             let _guard = guard;
             let mut consecutive_errors = 0;
@@ -203,6 +233,7 @@ impl Server {
                                 let n = s.count();
                                 if n == 0 {
                                     s.quitting = true;
+                                    let _ = s.scheduler_stop.send(());
                                 } else {
                                     s.emit("", None, "quit_requested", json!({"running":n}));
                                     let _ = s.desktop.confirm_quit(n);
@@ -210,7 +241,13 @@ impl Server {
                             }
                         }
                     }
+                    // Keep accepting IPC until an already claimed scheduler launch completes.
                     if s.quitting
+                        && scheduler_for_main
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_none_or(|h| h.is_finished())
                         && (s.count() == 0 || s.quit_deadline.is_some_and(|d| Instant::now() >= d))
                     {
                         for item in &mut s.items {
@@ -240,6 +277,10 @@ impl Server {
                     }
                 }
             }
+            let _ = shared.lock().unwrap().scheduler_stop.send(());
+            if let Some(handle) = scheduler_for_main.lock().unwrap().take() {
+                let _ = handle.join();
+            }
             0
         });
         Ok(RunningService {
@@ -247,6 +288,7 @@ impl Server {
             actions: tx,
             thread: Some(handle),
             state: Some(state),
+            scheduler: scheduler_handle,
         })
     }
 }
@@ -420,6 +462,7 @@ impl State {
             self.pause();
         }
         self.quitting = true;
+        let _ = self.scheduler_stop.send(());
         self.quit_deadline = Some(Instant::now() + Duration::from_secs(30));
         Ok(())
     }
@@ -654,6 +697,7 @@ fn connection(mut conn: Conn, state: Arc<Mutex<State>>) {
     if quit {
         let mut s = state.lock().unwrap();
         s.quitting = true;
+        let _ = s.scheduler_stop.send(());
         s.quit_deadline = Some(Instant::now() + Duration::from_secs(30));
     }
 }
@@ -687,6 +731,7 @@ mod tests {
             cursor: 0,
             quitting: false,
             quit_deadline: None,
+            scheduler_stop: mpsc::channel().0,
             last_count: 0,
         };
         let req = StartRequest {

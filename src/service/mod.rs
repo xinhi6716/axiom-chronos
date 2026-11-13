@@ -4,6 +4,7 @@ pub mod lock;
 pub mod login;
 pub mod protocol;
 pub mod recover;
+pub mod scheduler;
 pub mod server;
 pub mod tray;
 pub use client::{Client, Subscription};
