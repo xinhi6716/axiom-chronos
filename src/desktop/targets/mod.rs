@@ -13,6 +13,7 @@ pub struct Target { pub id: &'static str, pub group: &'static str, pub opening: 
 #[derive(Debug, PartialEq)]
 pub struct Unregistered { pub target: String, pub state: CaptureState }
 mod shell;
+pub mod place;
 mod overlays;
 mod run;
 mod mesh;

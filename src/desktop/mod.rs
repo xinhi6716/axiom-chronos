@@ -69,6 +69,7 @@ pub struct Options {
     pub density: Option<theme::Density>,
     /// Open off-screen without taking focus, for capturing screenshots while someone uses the machine.
     pub offscreen: bool,
+    pub place: Option<targets::place::Place>,
     pub quit_after: Option<u64>,
     /// Opening window size, to capture a screen at a chosen size.
     pub size: Option<Size<Pixels>>,
@@ -144,6 +145,11 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
                 });
             }
             "--offscreen" => options.offscreen = true,
+            "--place" => {
+                i += 1;
+                let value = args.get(i).ok_or("--place takes secondary or offscreen")?;
+                options.place = Some(targets::place::Place::from_key(value).ok_or_else(|| format!("unknown place: {value}"))?);
+            }
             "--size" => {
                 i += 1;
                 options.size = Some(
@@ -181,6 +187,7 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
 pub fn state_scene(options: &Options) -> Option<String> {
     if options.demo { options.scene.clone() } else { None }
 }
+fn skips_intro(options: &Options) -> bool { options.offscreen }
 
 // `mini::open_mini_at` owns creation outside this module. Preserve its content and
 // the required gpui-kit overlay host while inserting the instrumentation root.
@@ -210,6 +217,8 @@ pub fn run(options: Options) -> i32 {
     if let Some(density) = options.density { store.settings.density = density; }
     let prefs = store.settings.clone();
     gpui_kit::application().with_assets(ornament::Assets).run(move |cx| {
+        if options.offscreen { targets::place::install(targets::place::Place::Offscreen, cx); }
+        else if let Some(place) = options.place { targets::place::install(place, cx); }
         gpui_kit::init(cx);
         if let Some(path) = options.perf_log.clone() { perf::install(path, started, cx); }
         let mode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()) };
@@ -246,6 +255,8 @@ pub fn run(options: Options) -> i32 {
         let min_size = size(px(layout::MIN_WINDOW.0), px(layout::MIN_WINDOW.1));
         let bounds = if options.offscreen {
             WindowBounds::Windowed(Bounds { origin: point(px(-3000.), px(-3000.)), size: default_size })
+        } else if let Some(bounds) = targets::place::bounds(default_size, cx) {
+            WindowBounds::Windowed(bounds)
         } else {
             settings::opening_bounds(&prefs, default_size, min_size, cx)
         };
@@ -253,7 +264,7 @@ pub fn run(options: Options) -> i32 {
             window_bounds: Some(bounds),
             window_min_size: Some(min_size),
             titlebar: Some(component::TitleBar::title_bar_options()),
-            focus: !options.offscreen,
+            focus: !options.offscreen && targets::place::focus(cx),
             ..Default::default()
         };
         let may_flash = !options.offscreen;
@@ -263,7 +274,7 @@ pub fn run(options: Options) -> i32 {
         if let Some(ms) = launch::held_ms(scene) {
             motion::freeze(start + Duration::from_millis(ms), cx);
         }
-        let opening = if launch::plays(options.offscreen, scene, cx.reduce_motion()) {
+        let opening = if launch::plays(skips_intro(&options), scene, cx.reduce_motion()) {
             launch::Launch::start(start)
         } else {
             launch::Launch::none()
@@ -306,6 +317,19 @@ pub fn run(options: Options) -> i32 {
 mod strip_startup_tests {
     use super::*;
     use std::prelude::v1::test;
+    #[test]
+    fn placement_arguments_keep_intro_unless_legacy_offscreen() {
+        for (value, expected) in [("secondary", targets::place::Place::Secondary), ("offscreen", targets::place::Place::Offscreen)] {
+            let options = parse_options(&["--place".into(), value.into()]).unwrap();
+            assert_eq!(options.place, Some(expected));
+            assert!(!options.offscreen);
+            assert!(launch::plays(skips_intro(&options), None, false));
+        }
+        assert_eq!(parse_options(&["--place".into()]).unwrap_err(), "--place takes secondary or offscreen");
+        assert_eq!(parse_options(&["--place".into(), "nowhere".into()]).unwrap_err(), "unknown place: nowhere");
+        let options = parse_options(&["--offscreen".into()]).unwrap();
+        assert!(!launch::plays(skips_intro(&options), None, false));
+    }
     #[test]
     fn real_and_empty_starts_have_no_demo_running_counts() {
         let real=initial_state(&Options::default());

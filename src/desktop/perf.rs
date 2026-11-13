@@ -6,6 +6,10 @@ static RECORDER: OnceLock<Mutex<Option<Recorder>>> = OnceLock::new();
 fn recorder() -> &'static Mutex<Option<Recorder>> { RECORDER.get_or_init(|| Mutex::new(None)) }
 fn send(r: &Recorder, line: String) { let _ = r.tx.try_send(line); }
 fn us(d: std::time::Duration) -> u128 { d.as_micros() }
+fn display_record(id: u32, displays: &[super::targets::place::DisplayInfo], placement: &str) -> String {
+ let refresh = super::targets::place::refresh_hz_of(displays, id).filter(|rate| rate.is_finite());
+ serde_json::json!({ "t": "display", "display_id": id, "refresh_hz": refresh, "placement": placement }).to_string()
+}
 
 pub fn install(path: PathBuf, started: Instant, _cx: &mut App) { install_recorder(path, started); }
 fn install_recorder(path: PathBuf, started: Instant) {
@@ -24,12 +28,22 @@ fn mark_interactive() {
 pub fn event_received(seq: u64) {
  if let Some(r) = recorder().lock().unwrap().as_mut() { let now = Instant::now(); send(r, format!("{{\"t\":\"event\",\"seq\":{seq},\"at_us\":{}}}", us(now.saturating_duration_since(r.started)))); r.pending.push((seq, now)); }
 }
-fn frame_end(start: Instant) {
+fn frame_end(start: Instant, window: Option<(&Window, &App)>) {
  if let Some(r) = recorder().lock().unwrap().as_mut() {
   let now = Instant::now();
   let interval = r.last.map(|last| us(start.saturating_duration_since(last))).unwrap_or(0); r.last = Some(start);
   send(r, format!("{{\"t\":\"frame\",\"start_us\":{},\"cost_us\":{},\"interval_us\":{interval}}}", us(start.saturating_duration_since(r.started)), us(now.saturating_duration_since(start))));
-  if !r.first { r.first = true; send(r, format!("{{\"t\":\"first_frame\",\"since_start_us\":{}}}", us(now.saturating_duration_since(r.started)))); }
+  if !r.first {
+   r.first = true;
+   if let Some((window, cx)) = window {
+    let display = window.display(cx);
+    let id = display.as_ref().map(|display| super::targets::place::display_id(display.as_ref())).unwrap_or(0);
+    let displays = if display.is_some() { super::targets::place::display_infos(cx) } else { Vec::new() };
+    let placement = match super::targets::place::installed(cx) { Some(super::targets::place::Chosen::Display { .. }) => "secondary", Some(super::targets::place::Chosen::Offscreen) => "offscreen", None => "default" };
+    send(r, display_record(id, &displays, placement));
+   }
+   send(r, format!("{{\"t\":\"first_frame\",\"since_start_us\":{}}}", us(now.saturating_duration_since(r.started))));
+  }
   for (seq, at) in std::mem::take(&mut r.pending) { send(r, format!("{{\"t\":\"pixel\",\"seq\":{seq},\"latency_us\":{}}}", us(now.saturating_duration_since(at)))); }
  }
 }
@@ -41,7 +55,7 @@ impl Render for Root {
   div().relative().size_full()
    .capture_key_down(|_, _, cx| interactive(cx))
    .capture_any_mouse_down(|_, _, cx| interactive(cx))
-   .child(self.view.clone()).child(canvas(|_,_,_| (), move |_,_,_,_| frame_end(start)).absolute().size_full())
+   .child(self.view.clone()).child(canvas(|_,_,_| (), move |_,_,window,cx| frame_end(start, Some((window, cx)))).absolute().size_full())
  }
 }
 
@@ -49,6 +63,22 @@ impl Render for Root {
 mod tests {
  use super::*;
  use std::prelude::v1::test;
+ #[test]
+ fn display_record_uses_window_refresh_and_is_json() {
+  use super::super::targets::place::DisplayInfo;
+  let displays = vec![
+   DisplayInfo { id: 1, bounds: Bounds::default(), primary: true, refresh_hz: Some(170.) },
+   DisplayInfo { id: 2, bounds: Bounds::default(), primary: false, refresh_hz: Some(60.) },
+  ];
+  let line = display_record(2, &displays, "secondary");
+  let record: serde_json::Value = serde_json::from_str(&line).unwrap();
+  assert_eq!(record["t"], "display");
+  assert_eq!(record["display_id"], 2);
+  assert_eq!(record["refresh_hz"], 60.);
+  assert_eq!(record["placement"], "secondary");
+  let unknown: serde_json::Value = serde_json::from_str(&display_record(99, &displays, "default")).unwrap();
+  assert!(unknown["refresh_hz"].is_null());
+ }
  #[test]
  fn window_roots_record_input_and_mini_start_is_instrumented() {
   // Test support is not enabled for the gpui dependency in this crate; these
@@ -65,20 +95,23 @@ mod tests {
  #[test]
  fn bounded_writer_records_frames_events_and_pixels() {
   *recorder().lock().unwrap() = None;
-  event_received(1); frame_end(Instant::now()); mark_interactive();
+  event_received(1); frame_end(Instant::now(), None); mark_interactive();
   assert!(recorder().lock().unwrap().is_none());
   let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("perf.jsonl");
   install_recorder(path.clone(),Instant::now());
-  event_received(42); frame_end(Instant::now()); frame_end(Instant::now()); mark_interactive(); mark_interactive();
+  let displays = [super::super::targets::place::DisplayInfo { id: 2, bounds: Bounds::default(), primary: false, refresh_hz: Some(60.) }];
+  send(recorder().lock().unwrap().as_ref().unwrap(), display_record(2, &displays, "secondary"));
+  event_received(42); frame_end(Instant::now(), None); frame_end(Instant::now(), None); mark_interactive(); mark_interactive();
   let deadline = Instant::now() + std::time::Duration::from_secs(5);
   let text = loop {
    let text = std::fs::read_to_string(&path).unwrap_or_default();
-   if text.lines().count() >= 6 { break text; }
+   if text.lines().count() >= 7 { break text; }
    assert!(Instant::now() < deadline, "background writer did not flush: {text}");
    std::thread::sleep(std::time::Duration::from_millis(10));
   };
   let records: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-  for kind in ["frame","first_frame","interactive","event","pixel"] { assert!(records.iter().any(|r| r["t"] == kind),"{kind}"); }
+  for kind in ["display","frame","first_frame","interactive","event","pixel"] { assert!(records.iter().any(|r| r["t"] == kind),"{kind}"); }
+  assert!(records.iter().any(|r| r["t"] == "display" && r["refresh_hz"] == 60.));
   assert_eq!(records.iter().filter(|r| r["t"] == "frame").count(),2);
   assert_eq!(records.iter().filter(|r| r["t"] == "interactive").count(),1);
   assert!(records.iter().any(|r| r["t"] == "pixel" && r["seq"] == 42));
