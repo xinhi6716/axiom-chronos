@@ -1,16 +1,201 @@
-use super::interjections::{EngineInterjections, InterjectTransport};
+use super::interjections::{EngineInterjections, InterjectTransport, ServiceTransport};
 use crate::{
     base::{Failure, Res},
     desktop::ux::seams::{Draft, Interjections, ReceiptStage},
     engine::interjections::{self, Links},
+    service::{client::Client, login, tray, RunningService, Server, ServerOptions, StartRequest},
+    session::{self, Config},
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
+
+// Stop and join even when an assertion panics, so the fake hosts cannot outlive a test.
+struct ServiceFixture {
+    home: tempfile::TempDir,
+    server: Option<RunningService>,
+}
+impl ServiceFixture {
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let storage = crate::storage::dir(home.path());
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(
+            storage.join("policy.json"),
+            r#"{"reserve_bytes":0,"estimates":{"wish":1}}"#,
+        )
+        .unwrap();
+        let config_home = home.path().to_path_buf();
+        let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_claude.py");
+        let python = std::env::var("AXIOM_TEST_PYTHON").unwrap_or_else(|_| {
+            let names = if cfg!(windows) {
+                ["python", "python3"]
+            } else {
+                ["python3", "python"]
+            };
+            names
+                .into_iter()
+                .find(|name| {
+                    crate::base::proc::cmd(name)
+                        .arg("--version")
+                        .output()
+                        .is_ok_and(|out| out.status.success())
+                })
+                .expect("Python not found")
+                .into()
+        });
+        let calls = || Arc::new(Mutex::new(Vec::new()));
+        let server = Server::start(ServerOptions {
+            home: home.path().to_path_buf(),
+            config: Arc::new(move || Config {
+                claude: Ok(vec![
+                    python.clone(), "-I".into(), "-c".into(),
+                    "import os,runpy,sys,uuid; os.environ['FAKE_CLAUDE_SCENARIO']='tick'; os.environ['FAKE_CLAUDE_SESSION']=str(uuid.uuid4()); os.environ['FAKE_CLAUDE_RECORD']=os.path.join(sys.argv[2],str(os.getpid())+'.json'); sys.argv=[sys.argv[1]]+sys.argv[3:]; runpy.run_path(sys.argv[0],run_name='__main__')".into(),
+                    fake.to_string_lossy().into_owned(), config_home.to_string_lossy().into_owned(),
+                ]),
+                home: config_home.clone(), bin: config_home.join("bin"), clock: session::Clock::system(),
+            }),
+            tray: Box::new(tray::Recording::new(calls())),
+            desktop: Box::new(tray::Recording::new(calls())),
+            login: Box::new(login::Recording::new(calls())),
+            login_launch: false,
+        }).unwrap();
+        Self {
+            home,
+            server: Some(server),
+        }
+    }
+    fn home(&self) -> &Path {
+        self.home.path()
+    }
+    fn stop(&mut self) {
+        if let Some(server) = self.server.take() {
+            let result = server.quit(true);
+            server.wait();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+}
+impl Drop for ServiceFixture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn hosted_session(client: &Client, home: &Path, wish: &str) -> (String, String) {
+    let handle = client
+        .start(StartRequest {
+            wish: wish.into(),
+            cwd: home.to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let snapshot = client.snapshot().unwrap();
+        if let Some(session) = snapshot
+            .wishes
+            .iter()
+            .find(|w| w.handle == handle && !w.log.is_empty())
+            .and_then(|w| w.session.clone())
+        {
+            return (handle, session);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wish {wish} did not report a session and log; home: {}; snapshot: {}",
+            home.display(),
+            serde_json::to_string(&snapshot).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+const SERVICE_TEXT: &str = "你好，世界 🌍\nsecond line: café";
+
+#[test]
+fn right_session_receives_text_byte_for_byte() {
+    let fixture = ServiceFixture::new();
+    let client = Client::connect(fixture.home()).unwrap();
+    let (a, session_a) = hosted_session(&client, fixture.home(), "wish A");
+    let (b, session_b) = hosted_session(&client, fixture.home(), "wish B");
+    assert_ne!(session_a, session_b);
+    ServiceTransport::new(fixture.home().into())
+        .interject(&session_a, SERVICE_TEXT)
+        .unwrap();
+    let expected = format!("heard: {SERVICE_TEXT}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let snapshot = client.snapshot().unwrap();
+        let wish = snapshot.wishes.iter().find(|w| w.handle == a).unwrap();
+        if wish.log.iter().any(|entry| entry.text == expected) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wish A did not receive the exact text"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let deadline = Instant::now() + Duration::from_millis(700);
+    loop {
+        let snapshot = client.snapshot().unwrap();
+        let wish = snapshot.wishes.iter().find(|w| w.handle == b).unwrap();
+        assert!(
+            !wish
+                .log
+                .iter()
+                .any(|entry| entry.text.contains(SERVICE_TEXT)),
+            "wish B received A's text"
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn unknown_session_is_rejected() {
+    let fixture = ServiceFixture::new();
+    let client = Client::connect(fixture.home()).unwrap();
+    hosted_session(&client, fixture.home(), "wish A");
+    hosted_session(&client, fixture.home(), "wish B");
+    let error = ServiceTransport::new(fixture.home().into())
+        .interject("unknown-session", SERVICE_TEXT)
+        .unwrap_err();
+    assert_eq!(error.kind, "not_found");
+    let deadline = Instant::now() + Duration::from_millis(700);
+    loop {
+        let snapshot = client.snapshot().unwrap();
+        assert!(snapshot
+            .wishes
+            .iter()
+            .all(|w| w.log.iter().all(|entry| !entry.text.contains(SERVICE_TEXT))));
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn service_disconnect_is_an_error() {
+    let mut fixture = ServiceFixture::new();
+    let client = Client::connect(fixture.home()).unwrap();
+    let (_, session) = hosted_session(&client, fixture.home(), "wish A");
+    fixture.stop();
+    assert!(ServiceTransport::new(fixture.home().into())
+        .interject(&session, SERVICE_TEXT)
+        .is_err());
+}
 
 struct Transport {
     home: PathBuf,
