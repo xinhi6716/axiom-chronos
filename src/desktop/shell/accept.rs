@@ -3,6 +3,37 @@ use crate::desktop::{parse_options, state_scene, theme::Density};
 use std::prelude::v1::test;
 
 #[test]
+fn declared_shell_panels_and_close_dialog_have_real_element_ids() {
+    let source = include_str!("../shell.rs").split("// ux: begin tests").next().unwrap();
+    let has_id = |id: &str| source.contains(&format!(".id(\"{id}\")"));
+    for target in crate::desktop::targets::all().into_iter().filter(|t| t.group == "shell" || t.id == "dialog.close") {
+        for id in target.panels {
+            assert!(has_id(id), "{} missing panel {id}", target.id);
+        }
+        if target.id == "dialog.close" {
+            for id in target.actions { assert!(has_id(id), "missing action {id}"); }
+        }
+    }
+    assert!(!has_id("made.up.element"));
+}
+
+#[test]
+fn first_frame_input_reaches_the_shell_and_is_reported() {
+    let source = include_str!("../shell.rs");
+    let skip = source.split("fn skip_launch(").nth(1).unwrap().split("fn screen(").next().unwrap();
+    assert!(skip.find("crate::desktop::perf::interactive(cx)").unwrap() < skip.find("self.launch.playing").unwrap());
+    let render = source.split("impl Render for Shell").nth(1).unwrap().split("// ux: begin tests").next().unwrap();
+    let mouse = render.split(".capture_any_mouse_down(").nth(1).unwrap().split("}))").next().unwrap();
+    let key = render.split(".capture_key_down(").nth(1).unwrap().split("}))").next().unwrap();
+    assert!(mouse.contains("this.skip_launch(cx)"));
+    assert!(key.contains("this.skip_launch(cx)"));
+    assert!(!key.contains("stop_propagation"));
+    assert!(!render.contains(".occlude()"));
+    let new = source.split("pub fn new(").nth(1).unwrap().split("fn apply_wanted(").next().unwrap();
+    assert!(new.rfind("focus.focus(window, cx)").unwrap() > new.find("Composer::new").unwrap());
+}
+
+#[test]
 fn all_mode_transitions() {
     use FocusPanel::*;
     use WindowMode::*;

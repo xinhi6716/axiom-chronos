@@ -10,13 +10,43 @@
 //! once. The app's data loads underneath it, so it costs no waiting.
 use super::motion::{ease_out, lerp, mix, seg, smooth, Pace, Settling};
 use super::ornament::PORTRAIT;
-use super::theme::{self, Density, TypeSize, Tokens};
+use super::theme::{self, ornament_tokens::{DIAMETER_FACTOR, TRANSPARENT}, Density, TypeSize, Tokens};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::f32::consts::{PI, TAU};
 use std::time::Instant;
 #[cfg(test)]
 use std::time::Duration;
+
+// Launch-specific artwork measurements and opacity levels.
+const EDGE_FACTOR: f32 = 0.13;
+const TITLE_ALPHA: f32 = 0.85;
+const NIGHT_HUE: f32 = 0.6;
+const NIGHT_SATURATION: f32 = 0.5;
+const NIGHT_LIGHTNESS: f32 = 0.02;
+const OPAQUE: f32 = 1.0;
+const COLD_GLOW_ALPHA: f32 = 0.55;
+const WARM_GLOW_ALPHA: f32 = 0.16;
+const STAR_GLINT_ALPHA: f32 = 0.5;
+const ORBIT_HALO_ALPHA: f32 = 0.16;
+const COVER_WIDTH_FACTOR: f32 = 2.6;
+const COVER_HEIGHT_FACTOR: f32 = 2.2;
+const COVER_RADIUS_FACTOR: f32 = 1.3;
+const COVER_BLUR_FACTOR: f32 = 0.9;
+const FRAME_ALPHA: f32 = 0.85;
+const GLASS_ALPHA: f32 = 0.8;
+const GLASS_STROKE: f32 = 1.4;
+const SAND_ALPHA: f32 = 0.55;
+const BLOOM_ALPHA: f32 = 0.22;
+const BLOOM_CORE_ALPHA: f32 = 0.35;
+const GLASS_SHADOW_ALPHA: f32 = 0.8;
+const SAND_GLOW_ALPHA: f32 = 0.22;
+const ORBIT_HEAD_ALPHA: f32 = 0.7;
+const SAND_GLINT_ALPHA: f32 = 0.55;
+const SAND_STREAM_ALPHA: f32 = 0.85;
+const RING_ALPHA: f32 = 0.3;
+const RING_FADE_POWER: i32 = 2;
+const RING_MIN_ALPHA: f32 = 0.4;
 
 /// Where the hourglass sits in the portrait, as fractions of its side.
 const GLASS_X: f32 = 0.5;
@@ -160,13 +190,13 @@ pub fn overlay(s: f32, w: f32, h: f32, rail: Option<Square>, night: Tokens) -> D
     let line = lerp(-0.4, 1.08, smooth(seg(s, LIGHT_DESCENDS.0, LIGHT_DESCENDS.1)));
     let veil = linear_gradient(
         180.0,
-        linear_color_stop(bg.opacity(0.0), line.clamp(0.0, 1.0)),
+        linear_color_stop(bg.opacity(TRANSPARENT), line.clamp(0.0, 1.0)),
         linear_color_stop(bg.opacity(layer.night), (line + 0.32).clamp(0.0, 1.0)),
     );
     let fade = |angle: f32| {
-        linear_gradient(angle, linear_color_stop(bg.opacity(layer.night), 0.0), linear_color_stop(bg.opacity(0.0), 1.0))
+        linear_gradient(angle, linear_color_stop(bg.opacity(layer.night), 0.0), linear_color_stop(bg.opacity(TRANSPARENT), 1.0))
     };
-    let edge = px(rect.side * 0.13);
+    let edge = px(rect.side * EDGE_FACTOR);
     let place = |d: Div| d.absolute().left(px(rect.x)).top(px(rect.y)).size(px(rect.side));
     let title_top = stage(w, h).y + stage(w, h).side + 20.0;
     div()
@@ -207,7 +237,7 @@ pub fn overlay(s: f32, w: f32, h: f32, rail: Option<Square>, night: Tokens) -> D
                     .flex()
                     .justify_center()
                     .text_size(theme::font(Density::Comfortable, TypeSize::Body))
-                    .text_color(night.gold.opacity(0.85 * layer.title))
+                    .text_color(night.gold.opacity(TITLE_ALPHA * layer.title))
                     .child("C\u{2002}H\u{2002}R\u{2002}O\u{2002}N\u{2002}O\u{2002}S"),
             )
         })
@@ -218,7 +248,7 @@ const PORTRAIT_NAVY: u32 = 0x142837;
 
 /// The night of the launch: the dark theme's canvas, deeper.
 fn backdrop_color(t: &Tokens) -> Hsla {
-    mix(t.canvas, hsla(0.6, 0.5, 0.02, 1.0), 0.5)
+    mix(t.canvas, hsla(NIGHT_HUE, NIGHT_SATURATION, NIGHT_LIGHTNESS, OPAQUE), 0.5)
 }
 
 fn p(x: f32, y: f32) -> Point<Pixels> {
@@ -240,7 +270,7 @@ fn disc(window: &mut Window, c: (f32, f32), r: f32, color: Hsla) {
     if color.a <= 0.003 {
         return;
     }
-    let bounds = Bounds { origin: p(c.0 - r, c.1 - r), size: size(px(r * 2.0), px(r * 2.0)) };
+    let bounds = Bounds { origin: p(c.0 - r, c.1 - r), size: size(px(r * DIAMETER_FACTOR), px(r * DIAMETER_FACTOR)) };
     window.paint_quad(fill(bounds, color).corner_radii(px(r)));
 }
 
@@ -248,11 +278,11 @@ fn glow(window: &mut Window, c: (f32, f32), r: f32, blur: f32, color: Hsla) {
     if color.a <= 0.003 {
         return;
     }
-    let bounds = Bounds { origin: p(c.0 - r, c.1 - r), size: size(px(r * 2.0), px(r * 2.0)) };
+    let bounds = Bounds { origin: p(c.0 - r, c.1 - r), size: size(px(r * DIAMETER_FACTOR), px(r * DIAMETER_FACTOR)) };
     window.paint_drop_shadows(
         bounds,
         Corners::all(px(r)),
-        &[BoxShadow { color, offset: Point::default(), blur_radius: px(blur), spread_radius: px(0.), inset: false }],
+        &[BoxShadow { color, offset: Point::default(), blur_radius: px(blur), spread_radius: px(TRANSPARENT), inset: false }],
     );
 }
 
@@ -313,9 +343,9 @@ fn paint_backdrop(window: &mut Window, bounds: Bounds<Pixels>, s: f32, rect: Squ
     // A cold glow of the observatory behind the keeper, then the warmth of the lit sand.
     let centre = (rect.x + rect.side / 2.0, rect.y + rect.side / 2.0);
     let presence = smooth(seg(s, 0.1, 1.2)) * layer.night;
-    glow(window, centre, rect.side * 0.42, rect.side * 0.55, mix(t.canvas, t.run, 0.22).opacity(0.55 * presence));
+    glow(window, centre, rect.side * 0.42, rect.side * 0.55, mix(t.canvas, t.run, 0.22).opacity(COLD_GLOW_ALPHA * presence));
     let warmth = smooth(seg(s, SAND_LIGHT.0, SAND_LIGHT.1)) * layer.night;
-    glow(window, rect.glass(), rect.side * 0.12, rect.side * 0.32, t.gold.opacity(0.16 * warmth));
+    glow(window, rect.glass(), rect.side * 0.12, rect.side * 0.32, t.gold.opacity(WARM_GLOW_ALPHA * warmth));
 
     for star in sky(w, h) {
         let kindle = ease_out(seg(s, star.appear, star.appear + 0.45));
@@ -329,7 +359,7 @@ fn paint_backdrop(window: &mut Window, bounds: Bounds<Pixels>, s: f32, rect: Squ
         if star.alpha > 0.3 {
             let glint = (1.0 - seg(s, star.appear, star.appear + 0.7)) * kindle * layer.night;
             let reach = 2.0 + 6.0 * glint;
-            let color = ink.opacity(0.5 * glint * star.alpha);
+            let color = ink.opacity(STAR_GLINT_ALPHA * glint * star.alpha);
             line(window, &[p(at.0 - reach, at.1), p(at.0 + reach, at.1)], false, 0.8, color);
             line(window, &[p(at.0, at.1 - reach), p(at.0, at.1 + reach)], false, 0.8, color);
         }
@@ -405,7 +435,7 @@ fn orbit_segments(o: &Orbit, c: (f32, f32), side: f32, s: f32) -> (Vec<Segment>,
 fn paint_segments(window: &mut Window, segments: &[Segment], t: &Tokens, alpha: f32) {
     let core = mix(t.gold, t.text, 0.22);
     for &(a, b, k) in segments {
-        line(window, &[a, b], false, 6.0, t.gold.opacity(0.16 * k * alpha));
+        line(window, &[a, b], false, 6.0, t.gold.opacity(ORBIT_HALO_ALPHA * k * alpha));
         line(window, &[a, b], false, 1.7, core.opacity(k * alpha));
     }
 }
@@ -421,16 +451,16 @@ fn paint_hourglass(window: &mut Window, c: (f32, f32), side: f32, t: &Tokens, tu
     };
     // Cover the portrait's own glass in the card's navy, so only one hourglass is seen to turn.
     // Its soft edge reads as a pool of shadow around the glass.
-    let cover = Bounds { origin: p(c.0 - gw * 1.3, c.1 - gh * 1.1), size: size(px(gw * 2.6), px(gh * 2.2)) };
+    let cover = Bounds { origin: p(c.0 - gw * 1.3, c.1 - gh * 1.1), size: size(px(gw * COVER_WIDTH_FACTOR), px(gh * COVER_HEIGHT_FACTOR)) };
     window.paint_drop_shadows(
         cover,
-        Corners::all(px(gw * 1.3)),
-        &[BoxShadow { color: ground.opacity(alpha), offset: Point::default(), blur_radius: px(gw * 0.9), spread_radius: px(0.), inset: false }],
+        Corners::all(px(gw * COVER_RADIUS_FACTOR)),
+        &[BoxShadow { color: ground.opacity(alpha), offset: Point::default(), blur_radius: px(gw * COVER_BLUR_FACTOR), spread_radius: px(TRANSPARENT), inset: false }],
     );
-    window.paint_quad(fill(cover, ground.opacity(alpha)).corner_radii(px(gw * 1.3)));
+    window.paint_quad(fill(cover, ground.opacity(alpha)).corner_radii(px(gw * COVER_RADIUS_FACTOR)));
 
-    let frame = mix(t.text.opacity(0.85), t.gold, 0.45 + 0.55 * light).opacity(alpha);
-    let glass = mix(t.text.opacity(0.8), t.gold, 0.4 * light).opacity(alpha);
+    let frame = mix(t.text.opacity(FRAME_ALPHA), t.gold, 0.45 + 0.55 * light).opacity(alpha);
+    let glass = mix(t.text.opacity(GLASS_ALPHA), t.gold, 0.4 * light).opacity(alpha);
     // The caps and the posts of the frame.
     for y in [-1.0f32, 1.0] {
         line(window, &[at(-1.0, y), at(1.0, y)], false, 2.6, frame);
@@ -442,7 +472,7 @@ fn paint_hourglass(window: &mut Window, c: (f32, f32), side: f32, t: &Tokens, tu
     }
     // The two bulbs, meeting at the neck.
     for side in [-1.0f32, 1.0] {
-        let mut b = PathBuilder::stroke(px(1.4));
+        let mut b = PathBuilder::stroke(px(GLASS_STROKE));
         b.move_to(at(side * 0.6, -0.92));
         b.cubic_bezier_to(at(side * 0.08, -0.06), at(side * 0.72, -0.5), at(side * 0.12, -0.2));
         b.cubic_bezier_to(at(side * 0.6, 0.92), at(side * 0.12, 0.2), at(side * 0.72, 0.5));
@@ -451,7 +481,7 @@ fn paint_hourglass(window: &mut Window, c: (f32, f32), side: f32, t: &Tokens, tu
         }
     }
     // The sand lies in the bottom bulb of the glass's own frame, so turning the glass lifts it.
-    let sand = mix(t.muted.opacity(0.55), t.gold, light).opacity(alpha);
+    let sand = mix(t.muted.opacity(SAND_ALPHA), t.gold, light).opacity(alpha);
     let mut pile = PathBuilder::fill();
     pile.move_to(at(-0.52, 0.86));
     pile.curve_to(at(0.0, 0.42), at(-0.3, 0.55));
@@ -470,8 +500,8 @@ fn paint_emblem(window: &mut Window, s: f32, rect: Square, layer: Layers, t: &To
     let bloom = (seg(s, LIGHT_DESCENDS.0, LIGHT_DESCENDS.1 + 0.2) * PI).sin().max(0.0) * layer.night;
     if bloom > 0.0 {
         let at = (rect.x + side * 0.5, rect.y + side * lerp(0.21, GLASS_Y, descent));
-        glow(window, at, side * 0.05, side * 0.2, t.gold.opacity(0.22 * bloom));
-        glow(window, at, 2.0, side * 0.05, mix(t.gold, t.text, 0.5).opacity(0.35 * bloom));
+        glow(window, at, side * 0.05, side * 0.2, t.gold.opacity(BLOOM_ALPHA * bloom));
+        glow(window, at, 2.0, side * 0.05, mix(t.gold, t.text, 0.5).opacity(BLOOM_CORE_ALPHA * bloom));
     }
     let alpha = layer.emblem;
     if alpha <= 0.0 {
@@ -482,7 +512,7 @@ fn paint_emblem(window: &mut Window, s: f32, rect: Square, layer: Layers, t: &To
     let light = smooth(seg(s, SAND_LIGHT.0, SAND_LIGHT.1));
 
     // A pool of shadow round the glass, so the orbits read as light against the card.
-    glow(window, c, side * 0.17, side * 0.16, ground.opacity(0.8 * alpha));
+    glow(window, c, side * 0.17, side * 0.16, ground.opacity(GLASS_SHADOW_ALPHA * alpha));
     let mut fronts = vec![];
     let mut heads = vec![];
     for orbit in &ORBITS {
@@ -493,12 +523,12 @@ fn paint_emblem(window: &mut Window, s: f32, rect: Square, layer: Layers, t: &To
     }
     paint_hourglass(window, c, side, t, turn, light, alpha, ground);
     // Warmth gathers in the glass as the sand catches the light.
-    glow(window, c, side * 0.05, side * 0.12, t.gold.opacity(0.22 * light * alpha));
+    glow(window, c, side * 0.05, side * 0.12, t.gold.opacity(SAND_GLOW_ALPHA * light * alpha));
     for front in &fronts {
         paint_segments(window, front, t, alpha);
     }
     for (at, k) in heads {
-        glow(window, at, 3.0, 12.0, t.gold.opacity(0.7 * k * alpha));
+        glow(window, at, 3.0, 12.0, t.gold.opacity(ORBIT_HEAD_ALPHA * k * alpha));
         disc(window, at, 2.4, mix(t.gold, t.text, 0.6).opacity(k * alpha));
     }
 
@@ -507,11 +537,11 @@ fn paint_emblem(window: &mut Window, s: f32, rect: Square, layer: Layers, t: &To
         let gh = GLASS_H * side;
         let glint = (light * PI).sin().max(0.0) * (1.0 - seg(s, SAND_LIGHT.1, 2.1));
         let top = (c.0, c.1 - gh * 0.62);
-        glow(window, top, 3.0 + 4.0 * glint, 14.0, t.gold.opacity(0.55 * glint * alpha));
+        glow(window, top, 3.0 + 4.0 * glint, 14.0, t.gold.opacity(SAND_GLINT_ALPHA * glint * alpha));
         disc(window, top, 1.2 + 1.6 * glint, mix(t.gold, t.text, 0.7).opacity(glint * alpha));
         let stream = ease_out(seg(s, SAND_LIGHT.0 + 0.08, 2.05));
         let (from, to) = (c.1 - gh * 0.04, c.1 + gh * lerp(0.04, 0.78, stream));
-        line(window, &[p(c.0, from), p(c.0, to)], false, 1.1, t.gold.opacity(0.85 * light * alpha));
+        line(window, &[p(c.0, from), p(c.0, to)], false, 1.1, t.gold.opacity(SAND_STREAM_ALPHA * light * alpha));
         // One ring of light runs out from the glass as it wakes.
         let ring = ease_out(seg(s, SAND_LIGHT.0 + 0.12, 2.35));
         if ring > 0.0 && ring < 1.0 {
@@ -520,7 +550,7 @@ fn paint_emblem(window: &mut Window, s: f32, rect: Square, layer: Layers, t: &To
                 let a = i as f32 / 120.0 * TAU;
                 p(c.0 + r * a.cos(), c.1 + r * a.sin())
             }).collect();
-            line(window, &points, true, 1.0, t.gold.opacity(0.3 * (1.0 - ring).powi(2) * alpha.max(0.4)));
+            line(window, &points, true, 1.0, t.gold.opacity(RING_ALPHA * (OPAQUE - ring).powi(RING_FADE_POWER) * alpha.max(RING_MIN_ALPHA)));
         }
     }
 }
@@ -530,6 +560,17 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn ritual_plays_until_skipped() {
+        let t0 = Instant::now();
+        let mut launch = Launch::start(t0);
+        for ms in [0, 1000, 2000, 2300] {
+            assert!(launch.playing(t0 + Duration::from_millis(ms)));
+        }
+        launch.skip();
+        assert!(!launch.playing(t0));
+    }
 
     #[test]
     fn the_launch_lasts_two_to_two_and_a_half_seconds() {

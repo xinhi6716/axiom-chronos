@@ -8,6 +8,8 @@ mod modes;
 mod pages;
 // ux: end
 use super::control::{ask, Ask};
+use super::components::panel::{Panel, PanelState as SurfaceState};
+use super::data::faults::{self, Fault};
 use super::i18n::{fill, tr, Lang, Table};
 use super::launch::{self, Launch, Square};
 use super::model::*;
@@ -164,10 +166,32 @@ pub(super) fn record_change(
     }
 }
 
+const ENGINE_DEADLINE_SECS: u64 = 5;
+const STOP_DEADLINE_SECS: u64 = 10;
+const MODE_APPLY_DELAY_MS: u64 = 50;
+const SCENE_DELAY_MS: u64 = 400;
+const SCENE_FREEZE_DELAY_MS: u64 = 300;
+const BADGE_TOP: f32 = -6.0;
+const BADGE_RIGHT: f32 = -9.0;
+const BADGE_HEIGHT: f32 = 15.0;
+const BADGE_PADDING: f32 = 3.0;
+const ALERT_ICON_SIZE: f32 = 20.0;
+const RAIL_ITEM_WIDTH: f32 = 64.0;
+const RAIL_ITEM_HEIGHT: f32 = 52.0;
+const ADD_ICON_SIZE: f32 = 18.0;
+const NEW_WISH_WIDTH: f32 = 68.0;
+const SEARCH_HEIGHT: f32 = 26.0;
+const SEARCH_ICON_SIZE: f32 = 13.0;
+const STRIP_DIVIDER_HEIGHT: f32 = 12.0;
+const STRIP_DOT_SIZE: f32 = 6.0;
+const RAIL_WIDTH: f32 = 80.0;
+const RAIL_DIVIDER_WIDTH: f32 = 60.0;
+const VISIBLE: f32 = 1.0;
+
 /// How long closing the window waits for the desktop to detach.
-const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
+const ENGINE_DEADLINE: Duration = Duration::from_secs(ENGINE_DEADLINE_SECS);
 /// How long a local stop waits for the runs to report that they stopped.
-const STOP_DEADLINE: Duration = Duration::from_secs(10);
+const STOP_DEADLINE: Duration = Duration::from_secs(STOP_DEADLINE_SECS);
 const TOAST_MESSAGE_CHARS: usize = 120;
 /// How far a new screen drifts up into place as it crossfades in.
 const SCREEN_DRIFT: f32 = 10.0;
@@ -319,11 +343,11 @@ fn clipped(text: &str, max_chars: usize) -> String {
 fn count_badge(count: usize, t: &Tokens, d: theme::Density) -> impl IntoElement {
     h_flex()
         .absolute()
-        .top(px(-6.))
-        .right(px(-9.))
-        .h(px(15.))
-        .min_w(px(15.))
-        .px(px(3.))
+        .top(px(BADGE_TOP))
+        .right(px(BADGE_RIGHT))
+        .h(px(BADGE_HEIGHT))
+        .min_w(px(BADGE_HEIGHT))
+        .px(px(BADGE_PADDING))
         .justify_center()
         .rounded_full()
         .bg(t.fail)
@@ -432,6 +456,12 @@ pub struct Shell {
     rail_portrait: Rc<Cell<Option<Square>>>,
     /// The screen last drawn, the one a switch is leaving, and how far the switch has come.
     shown: Screen,
+    // Keep a fault result visible after injection ends until its retry is clicked.
+    panel_panics: HashSet<&'static str>,
+    panel_faults: HashMap<&'static str, SurfaceState>,
+    // The generation prevents an obsolete slow-fault timer from completing a newer one.
+    panel_slow: HashMap<&'static str, (u64, u64, bool)>,
+    panel_slow_generation: u64,
     leaving: Option<Screen>,
     switch: Tween,
     /// Selection and hover share one glow per rail slot.
@@ -455,6 +485,7 @@ impl Shell {
 
     /// Any key or click during the launch ends it at once. Returns whether it was playing.
     fn skip_launch(&mut self, cx: &mut Context<Self>) -> bool {
+        crate::desktop::perf::interactive(cx);
         // A held demo frame is a still picture: stray input must not end it.
         if !self.launch.playing(motion::now(cx)) || motion::is_frozen(cx) {
             return false;
@@ -464,14 +495,61 @@ impl Shell {
         true
     }
 
-    fn screen(&self, screen: Screen) -> AnyElement {
-        match screen {
-            Screen::Run => self.run.clone().into_any_element(),
-            Screen::Wishes => self.wishes.clone().into_any_element(),
-            Screen::Memory => self.memory.clone().into_any_element(),
-            Screen::Usage => self.usage.clone().into_any_element(),
-            Screen::Doctor => self.doctor.clone().into_any_element(),
+    fn screen(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (id, kind, content) = match screen {
+            Screen::Run => ("run.overview", FeedKind::Runs, div().id("run.overview").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.run.clone()).into_any_element()),
+            Screen::Wishes => return self.wishes.clone().into_any_element(),
+            Screen::Memory => ("memory.list", FeedKind::Memory, div().id("memory.list").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.memory.clone()).into_any_element()),
+            Screen::Usage => ("usage.summary", FeedKind::Usage, div().id("usage.summary").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.usage.clone()).into_any_element()),
+            Screen::Doctor => return self.doctor.clone().into_any_element(),
+        };
+        let fault = faults::active(id, cx);
+        let slow_elapsed = if let Some(Fault::Slow { ms }) = fault.as_ref() {
+            if !self.panel_slow.get(id).is_some_and(|(delay, _, _)| delay == ms) {
+                self.panel_slow_generation = self.panel_slow_generation.wrapping_add(1);
+                let generation = self.panel_slow_generation;
+                self.panel_slow.insert(id, (*ms, generation, *ms == 0));
+                if *ms > 0 {
+                    let delay = Duration::from_millis(*ms);
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(delay).await;
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if let Some((_, current, elapsed)) = this.panel_slow.get_mut(id) {
+                                if *current == generation { *elapsed = true; cx.notify(); }
+                            }
+                        });
+                    }).detach();
+                }
+            }
+            self.panel_slow.get(id).is_some_and(|(_, _, elapsed)| *elapsed)
+        } else {
+            self.panel_slow.remove(id);
+            false
+        };
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
+        let mut state = logic::panel_state(self.state.read(cx).feeds.get(kind), fault.as_ref(), slow_elapsed, now_ms);
+        let panic_active = fault == Some(Fault::Panic);
+        match fault {
+            Some(Fault::Panic) => { self.panel_faults.remove(id); }
+            Some(Fault::Slow { .. }) if slow_elapsed => { self.panel_faults.remove(id); }
+            Some(_) => { self.panel_faults.insert(id, state.clone()); }
+            None => if let Some(pending) = self.panel_faults.get(id) { state = pending.clone(); },
         }
+        if panic_active && state == SurfaceState::Ready { self.panel_panics.insert(id); }
+        if self.panel_panics.contains(id) && !panic_active {
+            state = SurfaceState::Failed { reason: "panel rendering failed".into() };
+        }
+        Panel::new(id, &state)
+            .retry(cx.listener(move |this, _, _, cx| {
+                this.panel_panics.remove(id);
+                this.panel_faults.remove(id);
+                this.panel_slow.remove(id);
+                this.state.update(cx, |state, cx| state.retry(kind, cx));
+                cx.notify();
+            }))
+            .content(move |_, _| content)
+            .into_any_element()
     }
 
     pub fn new(
@@ -516,7 +594,6 @@ impl Shell {
         Self::on_global::<palette::ToggleDensity>(window, cx, Self::toggle_density);
         let palette = cx.new(|cx| Palette::new(state.clone(), window, cx));
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
         let mut subscriptions = subscriptions;
         subscriptions.extend(motion::watch_window(window, cx));
         subscriptions.push(cx.subscribe_in(
@@ -550,7 +627,7 @@ impl Shell {
         if initial_mode != WindowMode::Full {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(MODE_APPLY_DELAY_MS))
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| this.apply_wanted(window, cx));
             })
@@ -559,13 +636,13 @@ impl Shell {
         if let Some(scene) = scene {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
-                    .timer(Duration::from_millis(400))
+                    .timer(Duration::from_millis(SCENE_DELAY_MS))
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| this.play_scene(&scene, window, cx));
             })
             .detach();
         }
-        Self {
+        let shell = Self {
             run: cx.new(|cx| RunView::new(state.clone(), window, cx)),
             wishes: cx.new(|cx| WishesView::new(state.clone(), window, cx)),
             memory: cx.new(|cx| MemoryView::new(state.clone(), window, cx)),
@@ -589,6 +666,10 @@ impl Shell {
             launch: Launch::none(),
             rail_portrait: Rc::new(Cell::new(None)),
             shown,
+            panel_panics: HashSet::new(),
+            panel_faults: HashMap::new(),
+            panel_slow: HashMap::new(),
+            panel_slow_generation: 0,
             leaving: None,
             switch: Tween::rest(1.0, Pace::Screen, Curve::EaseOut),
             glows,
@@ -603,7 +684,9 @@ impl Shell {
                 _ => FocusPanel::Graph,
             },
             _subscriptions: subscriptions,
-        }
+        };
+        shell.focus.focus(window, cx);
+        shell
     }
 
     fn apply_wanted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1309,9 +1392,9 @@ impl Shell {
             let (keep, stop, closed) = (shell.clone(), shell.clone(), shell.clone());
             alert
                 .entrance(motion::DIALOG_ENTRANCE)
-                .icon(Icon::new(IconName::TriangleAlert).size(px(20.)).text_color(t.review))
+                .icon(Icon::new(IconName::TriangleAlert).size(px(ALERT_ICON_SIZE)).text_color(t.review))
                 .title(title.test_text(title))
-                .description(description)
+                .description(div().id("dialog.close.prompt").test_support().child(description))
                 .centered()
                 .on_ok(move |_, _, _| !stopping)
                 .on_cancel(move |_, _, _| !stopping)
@@ -1321,7 +1404,7 @@ impl Shell {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new(if service_quit { "stop-and-quit" } else { "stop-and-close" })
+                            div().id("action:dialog.close.confirm").test_support().child(Button::new(if service_quit { "stop-and-quit" } else { "stop-and-close" })
                                 .danger()
                                 .outline()
                                 .accessibility_label(stop_label)
@@ -1329,17 +1412,17 @@ impl Shell {
                                 .loading(stopping)
                                 .on_click(move |_, window, cx| {
                                     let _ = stop.update(cx, |shell, cx| shell.stop_and_close(service_quit, window, cx));
-                                }),
+                                })),
                         )
                         .child(
-                            theme::gold_leaf(Button::new("keep-working"), &t)
+                            div().id("action:dialog.close.cancel").test_support().child(theme::gold_leaf(Button::new("keep-working"), &t)
                                 .accessibility_label(keep_label)
                                 .child(keep_label.test_text(keep_label))
                                 .disabled(stopping)
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let _ = keep.update(cx, |shell, cx| shell.dismiss_quit(window, cx));
-                                }),
+                                })),
                         ),
                 )
         });
@@ -1446,7 +1529,7 @@ impl Shell {
         let held = motion::now(cx) + Duration::from_millis(ms);
         cx.spawn_in(window, async move |_, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(300))
+                .timer(Duration::from_millis(SCENE_FREEZE_DELAY_MS))
                 .await;
             let _ = cx.update(|_, cx| motion::freeze(held, cx));
         })
@@ -1542,7 +1625,7 @@ impl Shell {
         let ring = focus.is_focused(window) && window.last_input_was_keyboard();
         let state = self.state.clone();
         // Glow and underline follow selection (lit); hover only tints the face.
-        let face = mix(t.raised.opacity(0.0), t.raised, lit.max(hover));
+        let face = mix(t.raised.opacity(theme::ornament_tokens::TRANSPARENT), t.raised, lit.max(hover));
         let colors = ButtonCustomVariant::new(cx)
             .color(face)
             .foreground(t.rail_ink(lit))
@@ -1569,8 +1652,8 @@ impl Shell {
                     .track_focus(&focus.clone().tab_stop(true))
                     .custom(colors)
                     .selected(active)
-                    .w(px(64.))
-                    .h(px(52.))
+                    .w(px(RAIL_ITEM_WIDTH))
+                    .h(px(RAIL_ITEM_HEIGHT))
                     .rounded(theme::RADIUS)
                     .accessibility_label(tr(cx, &[], label))
                     .tooltip(hint)
@@ -1615,8 +1698,8 @@ impl Shell {
             .map(|check| (check.name.clone(), check.detail.clone()));
         let label = tr(cx, &[], "New wish");
         let button = theme::gold_leaf(Button::new("new-wish"), &t)
-            .w(px(64.))
-            .h(px(52.))
+            .w(px(RAIL_ITEM_WIDTH))
+            .h(px(RAIL_ITEM_HEIGHT))
             .rounded(theme::RADIUS)
             .disabled(blocked.is_some())
             .accessibility_label(label)
@@ -1628,7 +1711,7 @@ impl Shell {
                     .gap(theme::space(d, Step::Xs))
                     .text_size(theme::font(d, TypeSize::Label))
                     .font_medium()
-                    .child(Icon::new(IconName::Plus).size(px(18.)))
+                    .child(Icon::new(IconName::Plus).size(px(ADD_ICON_SIZE)))
                     .child(label),
             );
         let Some((name, detail)) = blocked else {
@@ -1643,7 +1726,7 @@ impl Shell {
             .child(
                 Button::new("setup-reason")
                     .text()
-                    .w(px(68.))
+                    .w(px(NEW_WISH_WIDTH))
                     .h_auto()
                     .tooltip(reason)
                     .tooltip_placement(Placement::Right)
@@ -1671,7 +1754,7 @@ impl Shell {
         h_flex()
             .id("title-search")
             .flex_none()
-            .h(px(26.))
+            .h(px(SEARCH_HEIGHT))
             .px(theme::space(d, Step::Sm))
             .gap(theme::space(d, Step::Sm))
             .rounded(theme::RADIUS)
@@ -1690,7 +1773,7 @@ impl Shell {
                 .build(window, cx)
             })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)))
-            .child(Icon::new(IconName::Search).size(px(13.)))
+            .child(Icon::new(IconName::Search).size(px(SEARCH_ICON_SIZE)))
             .child(label)
             .child(palette::key_cap(palette::keys_of(palette::Global::Palette)))
     }
@@ -1706,7 +1789,7 @@ impl Shell {
             h_flex()
                 .gap(theme::space(d, Step::Sm))
                 .min_w_0()
-                .child(div().w(px(1.)).h(px(12.)).bg(t.border))
+                .child(div().w(theme::ornament_tokens::DIVIDER_LINE_HEIGHT).h(px(STRIP_DIVIDER_HEIGHT)).bg(t.border))
                 .child(
                     div()
                         .text_size(theme::font(d, TypeSize::Body))
@@ -1720,7 +1803,7 @@ impl Shell {
                         .flex_shrink_0()
                         .text_size(theme::font(d, TypeSize::Caption))
                         .text_color(color)
-                        .child(div().size(px(6.)).rounded_full().bg(color))
+                        .child(div().size(px(STRIP_DOT_SIZE)).rounded_full().bg(color))
                         .child(label),
                 ),
         )
@@ -1798,13 +1881,13 @@ impl Render for Shell {
         // ux: begin page host
         let page = self.page(window, cx);
         let page_open = page.is_some();
-        let content = page.unwrap_or_else(|| self.screen(view));
+        let content = page.unwrap_or_else(|| self.screen(view, window, cx));
         // ux: end
         // The screen being left stays underneath while the new one fades in over it.
         let leaving = if page_open {
             None
         } else {
-            self.leaving.map(|screen| self.screen(screen))
+            self.leaving.map(|screen| self.screen(screen, window, cx))
         };
         let wishes_hint: SharedString = if waiting == 0 {
             tr(cx, T, "Every wish, newest first").into()
@@ -1880,7 +1963,7 @@ impl Render for Shell {
             .relative()
             .mt(theme::space(d, Step::Xs))
             .mb(theme::space(d, Step::Sm))
-            .child(ornament::portrait(44.).opacity(if launching.is_some() { 0.0 } else { 1.0 }))
+            .child(ornament::portrait(44.).opacity(if launching.is_some() { theme::ornament_tokens::TRANSPARENT } else { VISIBLE }))
             .child(
                 canvas(
                     move |bounds, _, _| {
@@ -1903,10 +1986,6 @@ impl Render for Shell {
             let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
             launch::overlay(s, w, h, self.rail_portrait.get(), super::theme::night())
                 .id("launch")
-                .occlude()
-                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
-                    this.skip_launch(cx);
-                }))
         });
         motion.finish(window);
         div()
@@ -1915,10 +1994,11 @@ impl Render for Shell {
             .key_context("ChronosShell")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::escape_page))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.skip_launch(cx);
+            }))
             .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
-                if this.skip_launch(cx) {
-                    cx.stop_propagation();
-                }
+                this.skip_launch(cx);
             }))
             .bg(tokens.canvas)
             .text_color(tokens.text)
@@ -1961,7 +2041,7 @@ impl Render for Shell {
                                     v_flex()
                                         .id("rail")
                                         .h_full()
-                                        .w(px(80.))
+                                        .w(px(RAIL_WIDTH))
                                         .flex_shrink_0()
                                         .p(theme::space(d, Step::Sm))
                                         .gap(theme::space(d, Step::Xs))
@@ -1973,7 +2053,7 @@ impl Render for Shell {
                                         .child(new_wish)
                                         .child(
                                             div()
-                                                .w(px(60.))
+                                                .w(px(RAIL_DIVIDER_WIDTH))
                                                 .my(theme::space(d, Step::Xs))
                                                 .child(ornament::divider(&tokens, 0.0)),
                                         )
@@ -1999,7 +2079,7 @@ impl Render for Shell {
                                         div()
                                             .relative()
                                             .size_full()
-                                            .top(px(SCREEN_DRIFT * (1.0 - switch)))
+                                            .top(px(SCREEN_DRIFT * (VISIBLE - switch)))
                                             .when(switch < 1.0, |this| this.opacity(switch))
                                             .child(content),
                                     ),
