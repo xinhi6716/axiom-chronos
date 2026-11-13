@@ -44,8 +44,8 @@ const T: Table = &[
         "論文寫作尚未連接，快照會留在此處供您分享",
     ),
     (
-        "Vault is not connected yet, so the snapshot stays here for you to share",
-        "知識庫尚未連接，快照會留在此處供您分享",
+        "Vault and memory are not in this version",
+        "此版本不包含知識庫與記憶功能",
     ),
     ("Delivered", "已交付"),
     ("Delivery failed", "交付失敗"),
@@ -64,7 +64,7 @@ pub(crate) fn delivery_text(d: &Delivery, seam: &str, lang: Lang) -> String {
             if seam == "paper" {
                 "Paper writing is not connected yet, so the snapshot stays here for you to share"
             } else {
-                "Vault is not connected yet, so the snapshot stays here for you to share"
+                "Vault and memory are not in this version"
             },
         )
         .into(),
@@ -369,6 +369,13 @@ impl Render for ExportsPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.run(Action::Snapshot, cx))),
                     ),
             );
+        let vault_available = self.wb.read(cx).seams.vault.is_some();
+        if !vault_available {
+            panel = panel.child(marked(
+                "research-exports-vault-status",
+                delivery_text(&Delivery::Unwired, "vault", lang),
+            ));
+        }
         if let Some(status) = &self.repro {
             panel = panel.child(marked("research-exports-repro", repro_text(status, lang)));
         }
@@ -389,11 +396,15 @@ impl Render for ExportsPanel {
         if let Some(handoff) = &self.handoff {
             panel = panel.child(marked(
                 "research-exports-handoff",
-                format!(
-                    "{} · {}",
-                    delivery_text(&handoff.consumer, "paper", lang),
-                    delivery_text(&handoff.vault, "vault", lang)
-                ),
+                if vault_available {
+                    format!(
+                        "{} · {}",
+                        delivery_text(&handoff.consumer, "paper", lang),
+                        delivery_text(&handoff.vault, "vault", lang)
+                    )
+                } else {
+                    delivery_text(&handoff.consumer, "paper", lang)
+                },
             ));
         }
         panel

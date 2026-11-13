@@ -8,7 +8,11 @@ use axiom::{
         session::{self, SessionPrefs},
     },
 };
-use gpui_kit::{component::ThemeMode, test::TestWindowExt as _, AppContext as _, TestAppContext};
+use gpui_kit::{
+    component::ThemeMode,
+    test::{TestQueryExt as _, TestWindowExt as _},
+    AppContext as _, ElementId, Role, TestAppContext,
+};
 use research_support::*;
 use std::{
     path::Path,
@@ -119,6 +123,46 @@ fn run(
     .research_id;
     let (window, _) = open_research(cx, lang, mode, size, &root, seams);
     click(cx, window, "research-tab-exports");
+    if !wired {
+        let lines = capture(cx, window);
+        assert!(shows(
+            &lines,
+            "research-exports-vault-status",
+            if lang == Lang::En {
+                "Vault and memory are not in this version"
+            } else {
+                "此版本不包含知識庫與記憶功能"
+            }
+        ));
+        assert!(!lines.iter().any(|(_, text)| text.contains("fake_")));
+        cx.update_window(window, |_, window, _| {
+            let status = window.find("research-exports-vault-status");
+            assert!(!matches!(status.role(), Some(Role::Button | Role::Link)));
+            for element in window.elements().into_iter().filter(|element| {
+                element
+                    .path()
+                    .contains(&ElementId::from("research-exports-panel"))
+                    && matches!(element.role(), Some(Role::Button | Role::Link))
+            }) {
+                let label = element.label().unwrap_or("").to_lowercase();
+                assert!(
+                    !["vault", "memory", "知識庫", "記憶"]
+                        .iter()
+                        .any(|word| label.contains(word)),
+                    "unexpected vault or memory control: {element:?}"
+                );
+            }
+            for id in [
+                "research-exports-vault",
+                "research-exports-memory",
+                "research-exports-vault-action",
+                "research-exports-memory-action",
+            ] {
+                assert!(window.try_find(id).is_none(), "unexpected control {id}");
+            }
+        })
+        .unwrap();
+    }
     cx.update_window(window, |_, window, _| {
         assert!(window.try_find("research-exports-dest").unwrap().visible());
         assert!(window
@@ -181,11 +225,11 @@ fn run(
     if !wired {
         assert!(shows(
             &handoff,
-            "research-exports-handoff",
+            "research-exports-vault-status",
             if lang == Lang::En {
-                "Vault is not connected yet"
+                "Vault and memory are not in this version"
             } else {
-                "知識庫尚未連接"
+                "此版本不包含知識庫與記憶功能"
             }
         ));
     }
@@ -252,6 +296,53 @@ fn exports_on_both_fixtures_and_layouts(cx: &mut TestAppContext) {
         (1100., 700.),
         false,
     );
+}
+
+#[gpui_kit::test]
+fn wired_paper_without_vault_reports_real_delivery(cx: &mut TestAppContext) {
+    for lang in [Lang::En, Lang::ZhTw] {
+        let copy = fixture_copy("rawonly");
+        let home = temp_dir();
+        let dest = temp_dir();
+        let consumer = Arc::new(FakeSnapshotConsumer::new());
+        let seams = ResearchSeams {
+            research_home: Some(home),
+            snapshot_consumer: Some(consumer.clone()),
+            vault: None,
+            ..Default::default()
+        };
+        let (window, _) = open_research(cx, lang, ThemeMode::Dark, (1100., 700.), &copy, seams);
+        click(cx, window, "research-tab-exports");
+        let lines = capture(cx, window);
+        assert!(shows(
+            &lines,
+            "research-exports-vault-status",
+            if lang == Lang::En {
+                "Vault and memory are not in this version"
+            } else {
+                "此版本不包含知識庫與記憶功能"
+            }
+        ));
+        assert!(!lines.iter().any(|(_, text)| text.contains("fake_")));
+        click(cx, window, "research-exports-dest");
+        type_text(cx, window, dest.to_str().unwrap());
+        click(cx, window, "research-exports-snapshot");
+        let lines = wait_for(
+            cx,
+            window,
+            "research-exports-handoff",
+            if lang == Lang::En {
+                "Delivered: fake_snapshot_consumer"
+            } else {
+                "已交付: fake_snapshot_consumer"
+            },
+        );
+        assert!(!shows(&lines, "research-exports-handoff", "not connected"));
+        assert!(!shows(&lines, "research-exports-handoff", "尚未連接"));
+        assert_eq!(consumer.calls().len(), 1);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+    }
 }
 #[gpui_kit::test]
 fn source_destination_is_rejected(cx: &mut TestAppContext) {
