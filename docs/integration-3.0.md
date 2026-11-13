@@ -105,7 +105,7 @@ Suites text (final, sequential runs, Windows, CARGO_HOME=E:/codex/.toolchains/ca
 - `cargo test --locked --offline --no-fail-fast`: 2429 passed, 0 failed, 6 ignored (sum of per-binary results, nested child summaries excluded).
 - `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 960 passed, 0 failed, 0 ignored.
 - `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml -j 1`: 184 passed, 0 failed, 1 ignored.
-- Linux (WSL), `cargo test --locked --offline --no-fail-fast`: 2406 passed, 14 failed, 12 ignored; all failures are host limits, not product regressions (see below).
+- Linux (WSL, fresh native clone at d823049a, `cargo test --locked --offline --no-fail-fast`): 2411 passed, 10 failed, 12 ignored; the 10 failures are all ONNX Runtime missing on the host (laya_infer 5, laya_ort 4, laya_router 1), not product regressions (see below). Windows main: 2429 passed plus 1 added test (measure-walk negative control); storage_ledger re-run on Windows green.
 
 Regressions fixed (each reproduced deterministically, then fixed under its module with VERIFY and review):
 1. engine text_cases::required_phrases_are_present and wish_flow a_long_batch_is_piloted_then_waited_on_without_a_model: engine prompt wording lost in the p2b merge, restored in engine/agents/dispatcher.md (unit fix-p2b-prompts-2, which supersedes fix-p2b-prompts).
@@ -126,7 +126,7 @@ Environmental and load-sensitive, not regressions:
 - desktop-smoke ux_interjection: one STATUS_ACCESS_VIOLATION in one full run; passed alone 3 of 3 and in the other full run.
 - tests/scheduler_wall_clock.rs failed in one full run and passed in the next.
 - Orch lifecycle_cases ci_failure_opens_sol_like_a_local_failure ("database is locked"), lifecycle_cases sol_and_extra_commands, and program_role_budgets mid_run_exhaustion_stops_later_requests failed once in an earlier full run (2425 passed, 3 failed); all passed alone and in the clean full re-run (2429 passed, 0 failed).
-- WSL host limits: ONNX Runtime is not installed (laya_infer, laya_ort and laya_router); laya_ort laya_runtime_directory_is_git_ignored, paper_fixture_bytes and scratch_outside_repo call `git` in a worktree whose `.git` file points to a Windows path; storage_ledger measure_walk_does_not_hold_write_lock has a Linux timing failure because the 12000-file walk finishes before register returns.
+- WSL host limit: ONNX Runtime 1.20.1 (Linux x64, libonnxruntime.so) is not installed and not available offline; the 10 laya tests stay red on WSL until the owner installs it (`python tools/laya/fetch.py --runtime`, or the onnxruntime-linux-x64-1.20.1 archive, and sets AXIOM_LAYA_ORT_LIB). The earlier git-in-worktree failures were an environment problem (worktree `.git` points at a Windows path) and pass in a native clone. storage_ledger measure_walk_does_not_hold_write_lock is now deterministic (walk hook, negative control measure_walk_lock_check_detects_held_write_lock).
 
 ## Limitations
 
