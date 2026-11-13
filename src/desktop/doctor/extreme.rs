@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod accept;
+
 const T: Table = &[
     ("Extreme mode", "極限模式"),
     ("Extreme mode: on", "極限模式：開"),
@@ -95,6 +98,16 @@ pub(crate) fn policy_on_toggle(
 impl AppState {
     pub fn set_extreme(&mut self, on: bool, cx: &mut Context<Self>) {
         let was_on = Store::current(cx).ux.extreme;
+        if was_on == on
+            && self
+                .ux
+                .seams
+                .turn_policy
+                .as_ref()
+                .is_none_or(|policy| policy.current().extreme == on)
+        {
+            return;
+        }
         let lang = cx.try_global::<Lang>().copied().unwrap_or(Lang::En);
         let mut saved = false;
         Store::edit(cx, |prefs| saved = policy_on_toggle(self, prefs, on, lang));
