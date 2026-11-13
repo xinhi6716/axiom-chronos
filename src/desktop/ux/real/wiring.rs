@@ -6,14 +6,16 @@ use super::{
     extreme::CodexTurnPolicy,
     interjections::{EngineInterjections, ServiceTransport},
     modes::{LazyQuick, ModesEngine},
+    sessions::ServiceSessions,
     storage::LedgerStorage,
     unit_actions::OrchUnitActions,
 };
 use crate::{
     base::Res,
     desktop::ux::Seams,
+    modes::runners::{ModelProvider, ModelRouter},
     service::{
-        launcher::{ServiceLauncher, StartPath, Unavailable},
+        launcher::{ServiceLauncher, StartPath},
         Client, StartRequest,
     },
 };
@@ -46,13 +48,13 @@ pub fn production(home: &Path, slots_home: &Path) -> Seams {
         background: Some(Arc::new(ServiceBackground::new(home))),
         modes: Some(Arc::new(ModesEngine::new(
             home,
-            Arc::new(Unavailable),
-            Arc::new(Unavailable),
+            Arc::new(ModelProvider::new(home.into())),
+            Arc::new(ModelRouter::new(home.into())),
             wish,
             Arc::new(LazyQuick { home: home.into() }),
         ))),
         unit_actions: Some(Arc::new(OrchUnitActions::new(home.into()))),
-        sessions: None,
+        sessions: Some(Arc::new(ServiceSessions::new(home.into()))),
         optimizer: None,
         github: None,
         paper: Some(Arc::new(super::paper::SessionPaper::new(home))), // p8:

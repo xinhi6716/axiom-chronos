@@ -40,3 +40,7 @@ pub(crate) fn session_store(home: &Path, session: &str) -> Res<PathBuf> {
         .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
     crate::orch::store_for_goal(home, &goal)
 }
+
+pub mod sessions;
+#[cfg(test)]
+mod sessions_accept;
