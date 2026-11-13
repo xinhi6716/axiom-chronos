@@ -328,6 +328,15 @@ impl Ledger {
             .max_by_key(|e| e.path.components().count()))
     }
     pub fn measure(&self, path: &Path, now_ms: i64) -> Res<Option<u64>> {
+        self.measure_with_walk_hook(path, now_ms, &|| {})
+    }
+    #[doc(hidden)]
+    pub fn measure_with_walk_hook(
+        &self,
+        path: &Path,
+        now_ms: i64,
+        hook: &dyn Fn(),
+    ) -> Res<Option<u64>> {
         let p = normalize(path);
         let entry = match self.get(&p)? {
             Some(e) if e.state == EntryState::Present => e,
@@ -347,7 +356,7 @@ impl Ledger {
             .filter(|e| e.id != entry.id && path_starts_with(&e.path, &p))
             .map(|e| e.path)
             .collect();
-        fn walk(p: &Path, excludes: &[PathBuf]) -> Res<u64> {
+        fn walk(p: &Path, excludes: &[PathBuf], hook: Option<&dyn Fn()>) -> Res<u64> {
             if excludes.iter().any(|x| same_path(x, p)) {
                 return Ok(0);
             }
@@ -362,15 +371,19 @@ impl Ledger {
                 return Ok(0);
             }
             let mut total = 0u64;
-            for item in fs::read_dir(p).map_err(err)? {
+            let items = fs::read_dir(p).map_err(err)?;
+            if let Some(hook) = hook {
+                hook();
+            }
+            for item in items {
                 let item = item.map_err(err)?;
                 total = total
-                    .checked_add(walk(&item.path(), excludes)?)
+                    .checked_add(walk(&item.path(), excludes, None)?)
                     .ok_or_else(|| err("size overflow"))?;
             }
             Ok(total)
         }
-        let size = walk(&p, &descendants)?;
+        let size = walk(&p, &descendants, Some(hook))?;
         let stored = i64::try_from(size).map_err(err)?;
         self.transaction(|| {
             if !self.get_key(&key(&p))?.is_some_and(|e| e.id == entry.id && e.state == EntryState::Present) {
