@@ -1,5 +1,12 @@
 use axiom::engine::policy::*;
 #[test]
+fn worker_model_setting_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let error = set(d.path(), "models.worker.sol", "owner-model").unwrap_err();
+    assert_eq!(error.kind, "invalid_argument");
+    assert!(error.message.contains("chosen per unit"));
+}
+#[test]
 fn defaults_when_nothing_set() {
     let d = tempfile::tempdir().unwrap();
     let e = effective_models(None, d.path()).unwrap();
@@ -48,7 +55,6 @@ fn set_accepts_valid_keys() {
         ("models.self_check", "sol/max"),
         ("models.reviewer", "astra/high"),
         ("models.core.build", "haiku"),
-        ("models.worker.sol", "some-id"),
     ]
     .iter()
     .enumerate()
@@ -59,7 +65,7 @@ fn set_accepts_valid_keys() {
     assert_eq!(m.self_check.effort, "max");
     assert_eq!(m.reviewer.effort, "high");
     assert_eq!(m.core.build, "haiku");
-    assert_eq!(m.worker["sol"], "some-id");
+    assert!(m.worker.is_empty());
 }
 #[test]
 fn invalid_values_change_nothing() {
@@ -122,35 +128,46 @@ fn attempt(
         )
         .unwrap();
     }
-    let b =
-        axiom::orch::parse::parse_brief("GOAL test\nSCOPE src/a\nVERIFY test\nTIER sol\n").unwrap();
+    let b = axiom::orch::parse::parse_brief(
+        "GOAL test\nSCOPE src/a\nVERIFY test\nTIER sol\nEFFORT high\n",
+    )
+    .unwrap();
     axiom::codex::routing::for_attempt(s, None, d, "u", id, "terra", &b, None).unwrap()
 }
 #[test]
-fn worker_override_applied() {
+fn legacy_worker_override_ignored() {
     let d = tempfile::tempdir().unwrap();
-    set(d.path(), "models.worker.sol", "custom-id").unwrap();
-    let s = axiom::codex::rpc::AppServer::new(vec![]);
+    let mut p = Policy::default();
+    let mut models = Models::default();
+    models.worker.insert("sol".into(), "custom-id".into());
+    p.models = Some(models);
+    p.version = 1;
+    save(d.path(), &p).unwrap();
+    let s = server(d.path());
     let r = attempt(&s, d.path(), "a");
-    assert_eq!(r.model, "custom-id");
+    assert_eq!(r.model, "gpt-6.1-sol");
     assert_eq!(r.settings_version.as_deref(), Some("policy:1"));
 }
 #[test]
 fn started_attempt_keeps_snapshot() {
     let d = tempfile::tempdir().unwrap();
-    set(d.path(), "models.worker.sol", "first").unwrap();
-    let s = axiom::codex::rpc::AppServer::new(vec![]);
+    set(d.path(), "models.core.build", "first").unwrap();
+    let s = server(d.path());
     let a = attempt(&s, d.path(), "a");
-    set(d.path(), "models.worker.sol", "second").unwrap();
+    set(d.path(), "models.core.build", "second").unwrap();
     assert_eq!(attempt(&s, d.path(), "a"), a);
     let b = attempt(&s, d.path(), "b");
-    assert_eq!(b.model, "second");
+    assert_eq!(b.model, "gpt-6.1-sol");
     assert_eq!(b.settings_version.as_deref(), Some("policy:2"));
 }
 #[test]
 fn worker_none_removes() {
     let d = tempfile::tempdir().unwrap();
-    set(d.path(), "models.worker.sol", "custom").unwrap();
+    let mut p = Policy::default();
+    let mut models = Models::default();
+    models.worker.insert("sol".into(), "custom".into());
+    p.models = Some(models);
+    save(d.path(), &p).unwrap();
     set(d.path(), "models.worker.sol", "none").unwrap();
     assert!(load(d.path()).unwrap().models.unwrap().worker.is_empty());
     assert_eq!(

@@ -48,7 +48,7 @@ impl Fixture {
             let brief = store.join(format!("{id}.brief"));
             fs::write(
                 &brief,
-                format!("GOAL build\nSCOPE src/mod.py\nVERIFY {verify}\n"),
+                format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY {verify}\n"),
             )
             .unwrap();
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
@@ -138,7 +138,7 @@ fn claim_child() {
 fn kill_mid_worker_resumes_same_attempt() {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     let gate = f.temp.path().join("gate");
-    fs::write(f.store.join("one.brief"), format!("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_HOLD {}\n", gate.display())).unwrap();
+    fs::write(f.store.join("one.brief"), format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_HOLD {}\n", gate.display())).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap()).args(["--exact", "claim_child", "--nocapture"])
         .env("RESUME_STORE", &f.store).env("RESUME_REPO", &f.repo).env("RESUME_BRIDGE_HOME", f.temp.path()).spawn().unwrap();
     let log = f.temp.path().join("codex.log");
@@ -171,7 +171,7 @@ fn live_owner_is_already_running() {
 fn brief_changed_refused() {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     dead_claim(&f);
-    fs::write(f.store.join("one.brief"), "GOAL changed\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(f.store.join("one.brief"), "GOAL changed\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     assert_eq!(orch::begin_unit(&f.store, "one", "terra", &f.repo, false).err().unwrap().kind, "brief_changed");
 }
 
@@ -253,7 +253,7 @@ fn kill_after_verify_no_extra_worker() {
 fn kill_after_review() {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     axiom::engine::policy::set(&f.store, "reviewer", "astra-max").unwrap();
-    fs::write(f.store.join("one.brief"), "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_REVIEW {\"verdict\":\"pass\",\"findings\":[]}\n").unwrap();
+    fs::write(f.store.join("one.brief"), "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_REVIEW {\"verdict\":\"pass\",\"findings\":[]}\n").unwrap();
     crash_cycle(&f, "after_review");
     let cp: Value = serde_json::from_slice(&fs::read(f.store.join("checkpoints/one.json")).expect("checkpoint must survive review crash")).unwrap();
     assert_eq!(cp["stage"], "reviewed");
@@ -376,7 +376,7 @@ fn interrupted_attempt_resume(mode: &str) {
     let f = Fixture::new(&[("one", "echo ok")], "echo ok");
     let gate = f.temp.path().join("usage.gate");
     if mode == "claude_limit_caller_cancel" {
-        fs::write(f.store.join("one.brief"), format!("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_HOLD {}\n", gate.display())).unwrap();
+        fs::write(f.store.join("one.brief"), format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_HOLD {}\n", gate.display())).unwrap();
     }
     let units_before = fs::read(f.store.join("units.tsv")).unwrap();
     let mut previous = None;

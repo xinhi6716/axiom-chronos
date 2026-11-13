@@ -43,7 +43,7 @@ impl Fixture {
                 .success());
         }
         let brief = store.join("one.brief");
-        fs::write(&brief,format!("GOAL test\nSCOPE src/\nVERIFY echo ok\nCONTRACT behavior\nTEST_MATRIX\ns1 | behaviour | src/test.py::test_case | checks behavior | echo ok\nCONTEXT\nFAKE_SELFCHECK {}\nFAKE_SELFCHECK_WRITE {}\n",answer,edit)).unwrap();
+        fs::write(&brief,format!("GOAL test\nRISK trivial\nSCOPE src/\nVERIFY echo ok\nCONTRACT behavior\nTEST_MATRIX\ns1 | behaviour | src/test.py::test_case | checks behavior | echo ok\nCONTEXT\nFAKE_SELFCHECK {}\nFAKE_SELFCHECK_WRITE {}\n",answer,edit)).unwrap();
         fs::write(
             store.join("units.tsv"),
             format!(

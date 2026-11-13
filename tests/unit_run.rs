@@ -48,7 +48,7 @@ impl Fixture {
             let brief = store.join(format!("{id}.brief"));
             fs::write(
                 &brief,
-                format!("GOAL build\nSCOPE src/mod.py\nVERIFY {verify}\n"),
+                format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY {verify}\n"),
             )
             .unwrap();
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
@@ -208,7 +208,7 @@ fn registers_the_unit_in_the_dispatch_call() {
     let f = Fixture::new(&[], "echo accepted");
     fs::create_dir_all(f.store.join("briefs")).unwrap();
     let brief = f.store.join("briefs/new.md");
-    fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     let dispatch = |track: &str| {
         call(
             &f.bridge,

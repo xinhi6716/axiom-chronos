@@ -307,8 +307,37 @@ pub(super) fn resume_keeping(
     hand_back: Option<HandBack>,
     out: &mut dyn Write,
 ) -> Res<i32> {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _signals = Signals::install();
+    let goal = goal::load(&config.home, session)?
+        .ok_or_else(|| Failure::new("not_found", format!("no goal for session {session}")))?;
+    if goal.status == "done" {
+        return Err(Failure::new(
+            "invalid_argument",
+            format!("goal {session} is already done"),
+        ));
+    }
+    let cwd = goal
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| {
+            Failure::new(
+                "invalid_argument",
+                format!("goal {session} has no project directory"),
+            )
+        })?;
+    let launch = Launch {
+        need_bytes: goal.need_bytes,
+        ..Launch::default()
+    };
+    let mut announced = false;
+    if !wait_for_start(config, cwd, Some(session), &launch, out, &mut announced)? {
+        return Ok(75);
+    }
     let (prompt, cwd) = resume_target(config, session, message)?;
-    run_observed(
+    run_observed_locked(
         config,
         "wish",
         &prompt,
@@ -319,7 +348,8 @@ pub(super) fn resume_keeping(
         out,
         Some(session),
         &mut |_| {},
-        &Launch::default(),
+        &launch,
+        &mut announced,
     )
 }
 
@@ -338,9 +368,143 @@ pub(super) fn run_observed(
 ) -> Res<i32> {
     let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _signals = Signals::install();
-    let spawned = spawn_with(config, skill, text, project, max_turns, resume, launch)?;
+    run_observed_locked(
+        config, skill, text, project, max_turns, input, hand_back, out, resume, observe, launch,
+        &mut false,
+    )
+}
+
+fn run_observed_locked(
+    config: &Config,
+    skill: &str,
+    text: &str,
+    project: &Path,
+    max_turns: Option<u32>,
+    input: Box<dyn BufRead + Send>,
+    hand_back: Option<HandBack>,
+    out: &mut dyn Write,
+    resume: Option<&str>,
+    observe: &mut dyn FnMut(&serde_json::Value),
+    launch: &Launch,
+    announced: &mut bool,
+) -> Res<i32> {
+    let spawned = loop {
+        if skill == "wish" && !wait_for_start(config, project, resume, launch, out, announced)? {
+            return Ok(75);
+        }
+        if let Some(id) = resume {
+            if goal::load(&config.home, id)?.is_some_and(|g| g.status == "blocked" && g.reason.is_none()) {
+                goal::reopen(&config.home, id)?;
+            }
+        }
+        match spawn_with(config, skill, text, project, max_turns, resume, launch) {
+            Err(e) if skill == "wish" && e.kind == preflight::REASON => {
+                if !*announced {
+                    writeln!(out, "{}", e.message).map_err(failure)?;
+                    out.flush().map_err(failure)?;
+                    *announced = true;
+                }
+                continue;
+            }
+            result => break result?,
+        }
+    };
     forward_input_keeping(Arc::clone(&spawned.writer), input, hand_back);
     drive(spawned, config, out, &INTERRUPTED, observe)
+}
+
+fn start_check(
+    config: &Config,
+    project: &Path,
+    launch: &Launch,
+) -> Res<(preflight::Need, Option<preflight::Check>)> {
+    let policy = Policy::load(&config.home)?;
+    let need = preflight::need(
+        &policy,
+        preflight::Kind::Wish,
+        launch.need_bytes,
+        Some(project),
+        None,
+    )?;
+    let check = preflight::guard(
+        &config.home,
+        &*preflight::os_probe(),
+        &policy,
+        &[project, &config.home],
+        preflight::Kind::Wish,
+        need,
+    )?;
+    Ok((need, check))
+}
+
+fn record_start_pause(config: &Config, session: Option<&str>, check: &preflight::Check) -> Res<()> {
+    if let Some(id) = session {
+        goal::record_need(&config.home, id, check.need.bytes)?;
+        let _ = goal::disk_pause(&config.home, id, &check.owner_line())?;
+        if let Some(goal) = goal::load(&config.home, id)? {
+            if let Ok(store) = orch::store_for_goal(&config.home, &goal) {
+                if store.is_dir() {
+                    preflight::notify_paused(
+                        &store,
+                        preflight::EVENT_PREFLIGHT_PAUSED,
+                        check,
+                        json!({"session": id}),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_start(
+    config: &Config,
+    project: &Path,
+    session: Option<&str>,
+    launch: &Launch,
+    out: &mut dyn Write,
+    announced: &mut bool,
+) -> Res<bool> {
+    let mut recorded = false;
+    let poll = std::env::var("AXIOM_DISK_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(30000);
+    loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let (_, check) = start_check(config, project, launch)?;
+        match check {
+            None => {
+                if let Some(id) = session {
+                    match goal::resume_disk_space(&config.home, id, &*preflight::os_probe()) {
+                        Err(e) if e.kind == preflight::REASON => continue,
+                        result => result?,
+                    }
+                }
+                return Ok(true);
+            }
+            Some(check) => {
+                if !recorded {
+                    if !*announced {
+                        writeln!(out, "{}", check.owner_line()).map_err(failure)?;
+                        out.flush().map_err(failure)?;
+                        *announced = true;
+                    }
+                    record_start_pause(config, session, &check)?;
+                    recorded = true;
+                }
+                let mut remaining = poll;
+                while remaining > 0 && !INTERRUPTED.load(Ordering::SeqCst) {
+                    let slice = remaining.min(250);
+                    (config.clock.sleep)(Duration::from_millis(slice));
+                    remaining -= slice;
+                }
+            }
+        }
+    }
 }
 
 pub type Writer = Arc<Mutex<Option<BudgetStdin>>>;
@@ -390,6 +554,7 @@ pub struct Spawned {
     advanced_research: bool,
     codex_max_parallel: u64,
     session: Arc<Mutex<Option<String>>>,
+    start_need: Option<u64>,
 }
 
 impl Spawned {
@@ -457,46 +622,17 @@ fn spawn_internal(
     if let Some(store) = session_store(&config.home, &session) {
         budgets::check(&store, Role::Core, "session")?;
     }
-    if preflight_start && skill == "wish" {
-        let policy = Policy::load(&config.home)?;
-        let probe = preflight::os_probe();
-        let need = preflight::need(
-            &policy,
-            preflight::Kind::Wish,
-            launch.need_bytes,
-            Some(project),
-            None,
-        )?;
-        for path in [project, config.home.as_path()] {
-            let check = preflight::check(
-                &config.home,
-                &*probe,
-                &policy,
-                path,
-                preflight::Kind::Wish,
-                need,
-            )?;
-            if !check.ok {
-                let line = check.line();
-                if let Some(id) = resume {
-                    let _ = goal::disk_pause(&config.home, id, &line)?;
-                    if let Some(goal) = goal::load(&config.home, id)? {
-                        if let Ok(store) = orch::store_for_goal(&config.home, &goal) {
-                            if store.is_dir() {
-                                preflight::notify_paused(
-                                    &store,
-                                    preflight::EVENT_PREFLIGHT_PAUSED,
-                                    &check,
-                                    json!({"session": id}),
-                                )?;
-                            }
-                        }
-                    }
-                }
-                return Err(Failure::new(preflight::REASON, line));
-            }
+    let start_need = if preflight_start && skill == "wish" {
+        let (need, check) = start_check(config, project, launch)?;
+        if let Some(check) = check {
+            record_start_pause(config, resume, &check)?;
+            return Err(Failure::new(preflight::REASON, check.owner_line()));
         }
-    }
+        Some(need.bytes)
+    } else {
+        None
+    };
+    if let (Some(id), Some(need)) = (resume, start_need) { goal::record_need(&config.home, id, need)?; }
     let codex_max_parallel = match launch.codex_max_parallel {
         Some(n) => crate::codex::slots::parse(Some(n.to_string())).map_err(Failure::from)?,
         None => crate::codex::slots::from_env()?,
@@ -588,7 +724,7 @@ fn spawn_internal(
         .env("AXIOM_BIN", &config.bin)
         .envs(CACHE_TTL_ENV)
         .env(provenance::ENV, provenance.to_value().to_string())
-        .env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+        .env_remove("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
         .env_remove("AXIOM_PYTHON")
         .env_remove(council::ENV)
         .stdin(Stdio::piped())
@@ -599,6 +735,11 @@ fn spawn_internal(
             child.envs(budgets.env());
             eprintln!("axiom: {}", budgets.notice());
         }
+    }
+    if let Some(need) = start_need {
+        child.env("AXIOM_WISH_START_NEED_BYTES", need.to_string());
+    } else {
+        child.env_remove("AXIOM_WISH_START_NEED_BYTES");
     }
     let mut child = child
         .spawn()
@@ -660,6 +801,7 @@ fn spawn_internal(
         advanced_research,
         codex_max_parallel,
         session,
+        start_need,
     })
 }
 
@@ -814,7 +956,7 @@ pub(super) fn pause_for_low_disk(
     if let Some(batch) = batch {
         let _ = base::proc::kill_pid_tree(batch.pid);
     }
-    let line = low.line();
+    let line = low.owner_line();
     if let Some(goal) = goal::disk_pause(home, session, &line)? {
         if let Ok(store) = orch::store_for_goal(home, &goal) {
             if store.is_dir() {
@@ -1043,12 +1185,14 @@ fn drive_once(
         mut live_model,
         resumed,
         mut pending_switch,
+        start_need,
         ..
     } = spawned;
     let mut switch = None;
     let mut via = if resumed { stage::Via::Resume } else { stage::Via::Initial };
     let mut initialized = false;
     let mut renderer = Renderer::new();
+    let mut background = super::background::BackgroundTasks::default();
     let mut session = None::<String>;
     let mut final_result = false;
     let mut max_turns_cut_off = false;
@@ -1056,10 +1200,21 @@ fn drive_once(
     let mut cause = None;
     let mut reset = None;
     let mut last_refusal = None::<String>;
+    let mut need_recorded = start_need.is_none();
     let mut previous_cost = 0.0;
     let mut model = String::from("unknown");
     let idle_limit = goal::progress::idle_limit();
     let result: Res<i32> = loop {
+        if !need_recorded {
+            let id = shared_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(id) = id {
+                match goal::record_need(&config.home, &id, start_need.unwrap()) {
+                    Ok(goal) => need_recorded = goal.is_some(),
+                    Err(e) if e.kind == "invalid_json" => need_recorded = true,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
         if disk_stop.load(Ordering::SeqCst) {
             tree.kill(&mut child);
             break disk_outcome(out, observe, paused, disk_error);
@@ -1078,6 +1233,7 @@ fn drive_once(
                 let Ok(event) = serde_json::from_slice::<Value>(&bytes) else {
                     continue;
                 };
+                background.observe(&event);
                 if event["type"] == "system" && event["subtype"] == "init" {
                     if let Some(name) = event["model"].as_str() {
                         model = name.to_owned();
@@ -1154,6 +1310,23 @@ fn drive_once(
                 }
                 renderer.event(&event, out);
                 observe(&event);
+                // Results still account for usage above, but are not turn boundaries for
+                // continuation while the CLI can inject background completion turns.
+                if background.open() > 0 && event["subtype"] != "error_max_turns" {
+                    if let Some(store) = session_store(&config.home, shared_session) {
+                        if let Err(e) = budgets::check(&store, Role::Core, "session") {
+                            if e.kind == "budget_exceeded" {
+                                let _ = writeln!(out, "{e}");
+                                writer.lock().unwrap_or_else(|e| e.into_inner()).take();
+                                final_result = true;
+                            } else {
+                                tree.kill(&mut child);
+                                break Err(e);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if max_turns_cut_off {
                     continue;
                 }

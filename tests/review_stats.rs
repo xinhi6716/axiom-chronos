@@ -261,7 +261,7 @@ fn bridge_prompt(home: &Path, data: bool, mode: &str) -> String {
     let mut args=json!({"project":"project","cwd":repo,"role":"astra","sandbox":"read-only","brief":"ORIGINAL BRIEF","output_schema":{"type":"object"}});
     if mode=="save" {args["save_to"]=json!(base.join("astra/plan.json"));}
     if mode=="terra" {
-        let brief=base.join("build.brief"); fs::write(&brief,"GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        let brief=base.join("build.brief"); fs::write(&brief,"GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
         fs::write(base.join("units.tsv"),format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nbuild\tm\tpending\t\t\t\t{}\n",brief.display())).unwrap();
         args=json!({"project":"project","cwd":repo,"role":"terra","unit":"build"});
     }

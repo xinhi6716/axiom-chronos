@@ -28,6 +28,10 @@ gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	used — · remaining unknown
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
@@ -36,6 +40,4 @@ gpui_component::window_border::WindowBorder/root/quota-strip/running-models/runn
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
-gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
-gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex parallel 15 / 48
 gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	Show what is blocking

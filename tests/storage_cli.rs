@@ -4,8 +4,11 @@ use axiom::storage::{Class, Ledger, Owner};
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    sync::mpsc,
+    time::{Duration, Instant},
 };
 
 fn command(home: &Path, args: &[&str]) -> Output {
@@ -226,12 +229,24 @@ fn wish_need_space_exits_75() {
         json!({"reserve_bytes": 10, "estimates": {"wish": 20}}).to_string(),
     )
     .unwrap();
-    fs::write(&disk, "{\"free_bytes\":100}").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
     for skill in ["wish", "research"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        fs::write(&disk, "{\"free_bytes\":100}").unwrap();
+        // Always reap the child on failure or timeout; never touch other processes.
+        struct Guard(Child);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        let mut child = Guard(Command::new(env!("CARGO_BIN_EXE_axiom"))
             .env("AXIOM_HOME", t.path())
             .env("AXIOM_DATA_HOME", t.path())
             .env("AXIOM_FAKE_DISK", &disk)
+            .env("AXIOM_DISK_POLL_MS", "50")
             .env(
                 "AXIOM_CLAUDE_CMD",
                 serde_json::to_string(&common::fake("fake_claude")).unwrap(),
@@ -239,11 +254,50 @@ fn wish_need_space_exits_75() {
             .env("FAKE_CLAUDE_RECORD", &record)
             .args([skill, "--need-space", "1G", "test"])
             .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(75), "{:?}", out);
-        assert!(text(&out).contains("paused"));
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap());
+        let stdout = child.0.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        loop {
+            assert!(Instant::now() < deadline, "{skill} did not pause before the deadline");
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = rx.recv_timeout(remaining).expect("timed out or exited before pause");
+            if line.contains("paused") {
+                break;
+            }
+        }
         assert!(!record.exists());
+        if skill == "wish" {
+            axiom::base::atomic_write(&disk, b"{\"free_bytes\":4294967296}").unwrap();
+        }
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "{skill} did not resume before the deadline");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if skill == "wish" {
+            assert!(status.success(), "{skill} exited {status}");
+            assert!(record.exists(), "{skill} did not start after space returned");
+            fs::remove_file(&record).unwrap();
+        } else {
+            assert_eq!(status.code(), Some(75), "{skill} exited {status}");
+            assert!(!record.exists());
+        }
     }
 }
 #[test]

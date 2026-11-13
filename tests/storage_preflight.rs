@@ -52,6 +52,60 @@ fn n(bytes: u64) -> Need {
 }
 
 #[test]
+fn owner_line_and_multi_path_guard() {
+    struct ByPath;
+    impl Probe for ByPath {
+        fn volume(&self, _: &Path) -> Res<String> {
+            Ok("v".into())
+        }
+        fn free_bytes(&self, path: &Path) -> Res<u64> {
+            Ok(if path.ends_with("short") { 30 } else { 100 })
+        }
+    }
+    let home = tempdir().unwrap();
+    let ok = home.path().join("ok");
+    let short = home.path().join("short");
+    let first_short = home.path().join("other").join("short");
+    let check = preflight::guard(
+        home.path(),
+        &ByPath,
+        &policy(),
+        &[&ok, &short],
+        Kind::Wish,
+        n(40),
+    )
+    .unwrap()
+    .unwrap();
+    let line = check.owner_line();
+    assert!(line.contains(&short.display().to_string()));
+    for text in [
+        "40 B",
+        "30 B",
+        "30 B short",
+        "paused",
+        "resumes when space returns",
+    ] {
+        assert!(line.contains(text), "{line}");
+    }
+    assert!(
+        preflight::guard(home.path(), &ByPath, &policy(), &[&ok], Kind::Wish, n(40))
+            .unwrap()
+            .is_none()
+    );
+    let first = preflight::guard(
+        home.path(),
+        &ByPath,
+        &policy(),
+        &[&first_short, &short],
+        Kind::Wish,
+        n(40),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.path, first_short);
+}
+
+#[test]
 fn parse_size_units() {
     for (s, value) in [
         ("512M", 512 << 20),

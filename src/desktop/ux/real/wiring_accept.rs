@@ -40,7 +40,7 @@ impl Rig {
         let r = Self { home, slots, store };
         r.orch(&["init"]);
         let brief = r.home.path().join("brief.md");
-        fs::write(&brief, "GOAL test\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        fs::write(&brief, "GOAL test\nSCOPE src/a\nVERIFY echo ok\nRISK standard\n").unwrap();
         r.orch(&[
             "unit",
             "add",
@@ -50,6 +50,11 @@ impl Rig {
             "--brief",
             brief.to_str().unwrap(),
         ]);
+        std::fs::write(
+            r.store.join("modules.md"),
+            "## core\nPURPOSE test\nPATHS src/a\nDEPENDS none\nCONTRACT test\nACCEPT test `echo ok`\nROUTING\n  default sol/high standard fixture\n",
+        )
+        .unwrap();
         policy::set(&r.store, "dual_core", "on").unwrap();
         orch::events::append_event(
             &r.store,

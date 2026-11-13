@@ -456,20 +456,6 @@ fn begin_inner(
             return Ok(None);
         }
         let count = rows.iter().filter(|r| r.kind == "run").count();
-        if role == "sol" {
-            let full = super::evidence::full_evidence(store)?;
-            if !full
-                .iter()
-                .rev()
-                .find(|r| r.kind == "full")
-                .is_some_and(|r| r.exit_code != 0)
-            {
-                return Err(Failure::new(
-                    "sol_not_allowed",
-                    "sol requires a failing full test",
-                ));
-            }
-        }
         if astra_required {
             astra_gate(store)?;
         }
@@ -1102,6 +1088,7 @@ fn finish_inner(store: &Path, unit: &str, attempt_id: &str, repo: &Path, role: &
                 }
             }
         } else {
+        super::evidence::guard_verify(store, unit, repo)?;
         let verify_scratch = scratch_dir(store, &[unit, attempt_id, "verify"]);
         crate::storage::ensure_dir(
             &home,

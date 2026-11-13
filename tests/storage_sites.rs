@@ -175,7 +175,7 @@ fn unit_worker_cargo_env_and_worktree() {
         let brief = store.join("brief.txt");
         fs::write(
             &brief,
-            format!("GOAL build\nSCOPE file.txt src/mod.py\nVERIFY \"{}\" -c \"import os; print(os.getenv('CARGO_TARGET_DIR', 'missing'))\"\n", common::python()),
+            format!("GOAL build\nRISK trivial\nSCOPE file.txt src/mod.py\nVERIFY \"{}\" -c \"import os; print(os.getenv('CARGO_TARGET_DIR', 'missing'))\"\n", common::python()),
         )
         .unwrap();
         fs::write(
@@ -606,7 +606,7 @@ fn failed_unit_worker_removes_scratch() {
         0
     );
     let brief = store.join("brief.txt");
-    fs::write(&brief, "GOAL build\nSCOPE file.txt\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE file.txt\nVERIFY echo ok\n").unwrap();
     fs::write(
         store.join("units.tsv"),
         format!(

@@ -2030,7 +2030,7 @@ mod tests {
     #[test]
     fn backdrop_stays_behind_the_crossfade() {
         let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
+            .split("// ux: begin tests")
             .next()
             .unwrap();
         let render = source
@@ -2071,7 +2071,7 @@ mod tests {
     #[test]
     fn orbit_underline_uses_visibility_rule() {
         let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
+            .split("// ux: begin tests")
             .next()
             .unwrap();
         let rail_item = source
@@ -2081,10 +2081,13 @@ mod tests {
             .split("    fn new_wish_button(")
             .next()
             .unwrap();
-        let underline = rail_item
-            .lines()
-            .find(|line| line.contains("ornament::orbit_underline("))
+        let underline_end = rail_item
+            .find("ornament::orbit_underline(")
             .expect("orbit underline");
+        let underline_start = rail_item[..underline_end]
+            .rfind(".when(")
+            .expect("underline condition");
+        let underline = &rail_item[underline_start..underline_end];
         assert!(underline.contains(".when(shows_underline(lit)"));
         assert!(!rail_item.contains(".when(lit > 0.01, |this| this.child(div().absolute()"));
     }
@@ -2092,7 +2095,7 @@ mod tests {
     #[test]
     fn wish_and_keep_working_buttons_use_gold_leaf() {
         let source = include_str!("shell.rs")
-            .split("#[cfg(test)]")
+            .split("// ux: begin tests")
             .next()
             .unwrap();
         for (id, end) in [
@@ -2411,9 +2414,9 @@ mod tests {
 
     #[test]
     fn every_nav_call_site_has_an_emblem() {
-        let source = include_str!("shell.rs");
+        let source = include_str!("shell.rs").split("// ux: begin tests").next().unwrap();
         let labels =
-            regex::Regex::new(r#"self\.nav_item\("nav-[\w-]+", Emblem::\w+, "(\w+)""#).unwrap();
+            regex::Regex::new(r#"self\.nav_item\(\s*"nav-[\w-]+",\s*Emblem::\w+,\s*"(\w+)""#).unwrap();
         assert_eq!(labels.captures_iter(source).count(), 5);
     }
 }

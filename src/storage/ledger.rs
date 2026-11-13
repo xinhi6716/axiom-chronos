@@ -488,7 +488,9 @@ impl Ledger {
                         params![id, pid],
                     )
                     .map_err(err)?;
-            } else if path_starts_with(Path::new(&path), &p) {
+            } else if path_starts_with(Path::new(&path), &p)
+                || path_starts_with(&p, Path::new(&path))
+            {
                 used = true;
             }
         }

@@ -38,10 +38,15 @@ fn fixture() -> Fixture {
     let store = orch::store_for_goal(home.path(), &goal).unwrap();
     assert_eq!(call(&store, &["init"]).exit_code, 0);
     let brief = project.path().join("brief.md");
-    std::fs::write(&brief, "GOAL g\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+    std::fs::write(&brief, "GOAL g\nSCOPE src/a\nVERIFY echo ok\nRISK standard\n").unwrap();
     let brief = brief.to_str().unwrap().to_owned();
     let out = call(&store, &["unit", "add", "u1", "--track", "core", "--brief", &brief]);
     assert_eq!(out.exit_code, 0, "{}", out.stderr);
+    std::fs::write(
+        store.join("modules.md"),
+        "## core\nPURPOSE test\nPATHS src/a\nDEPENDS none\nCONTRACT test\nACCEPT test `echo ok`\nROUTING\n  default sol/high standard fixture\n",
+    )
+    .unwrap();
     Fixture {
         home,
         _project: project,

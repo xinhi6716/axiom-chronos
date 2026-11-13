@@ -253,7 +253,7 @@ fn unit_mode_omits_check_output_and_reports_accept_file() {
     let brief = store.join("a.brief");
     fs::write(
         &brief,
-        "GOAL test\nSCOPE src/mod.py\nVERIFY echo check-marker\n",
+        "GOAL test\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo check-marker\n",
     )
     .unwrap();
     fs::write(
@@ -293,7 +293,7 @@ fn unit_mode_omits_check_output_and_reports_accept_file() {
     let brief = store.join("b.brief");
     fs::write(
         &brief,
-        "GOAL test\nSCOPE src/mod.py\nVERIFY echo raw-verify-marker&& echo error verify failed&& exit 1\n",
+        "GOAL test\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo raw-verify-marker&& echo error verify failed&& exit 1\n",
     )
     .unwrap();
     fs::write(

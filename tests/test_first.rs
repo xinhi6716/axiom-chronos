@@ -37,9 +37,10 @@ impl RunFixture {
         fs::create_dir_all(store.join("inbox")).unwrap();
         fs::write(store.join("modules.md"), format!("## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n{route}\n")).unwrap();
         let path = store.join("u1.brief");
+        let risk = if route.is_empty() { "RISK trivial\n" } else { "" };
         fs::write(
             &path,
-            format!("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n{settings}\n"),
+            format!("GOAL build\n{risk}SCOPE src/mod.py\nVERIFY echo ok\n{settings}\n"),
         )
         .unwrap();
         fs::write(
@@ -127,7 +128,7 @@ unittest.main(verbosity=2)
 "#;
         std::fs::write(f._temp.path().join("test-template"), test).unwrap();
         let command = format!("\"{}\" tests/matrix.py {mode}", common::python());
-        std::fs::write(f.store.join("u1.brief"), format!("GOAL build\nSCOPE src/ tests/\nVERIFY echo verified > verified.txt\nCONTRACT matrix behavior is protected\nTEST_MATRIX\na | behaviour | tests/matrix.py::test_case | checks implementation | {command}\nb | edge | tests/matrix.py::test_case | checks again | {command}\nCONTEXT\nFAKE_SELFCHECK {{\"status\":\"pass\",\"changed\":false,\"fixed\":0,\"findings\":[]}}\n")).unwrap();
+        std::fs::write(f.store.join("u1.brief"), format!("GOAL build\nRISK trivial\nSCOPE src/ tests/\nVERIFY echo verified > verified.txt\nCONTRACT matrix behavior is protected\nTEST_MATRIX\na | behaviour | tests/matrix.py::test_case | checks implementation | {command}\nb | edge | tests/matrix.py::test_case | checks again | {command}\nCONTEXT\nFAKE_SELFCHECK {{\"status\":\"pass\",\"changed\":false,\"fixed\":0,\"findings\":[]}}\n")).unwrap();
         let wrapper = f._temp.path().join("fake.py");
         let original = std::fs::read_to_string(&wrapper).unwrap();
         let hook = format!(r#"

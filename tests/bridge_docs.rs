@@ -42,7 +42,7 @@ fn bridge_documentation_contract() {
             r#"`"needs": null` in a verdict reads as omitted"#,
             "repairs a malformed Argon review once",
             "Unit mode takes `project`, `unit`, `role` and `cwd`, optionally `cycle: true`, plus `track` and `brief_file` to register a new unit in the same call; brief mode is for Astra.",
-            "A registered brief may carry `EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `TIER` (`terra`, `sol`, `astra`; legacy `luna` for terra units only) as their own lines between GOAL and CONTEXT.",
+            "A registered brief may carry `EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `TIER` (`terra`, `sol`, `astra`) together as lines between GOAL and CONTEXT.",
             "With `cycle: true`, the reply is an outcome with `next`, `reason`, `verdict`, `review` entries `{unit, pack}`, `paths` and `module_done`, alongside `accept`, `verify_output` and `report`.",
             r#"`orch` `["module-context", <module>, "--repo", <dir>]` returns bounded module context (16,384 bytes), with `missing` and `incomplete` sections naming sources to consult."#,
             r#"`orch` `["map", "--repo", <dir>]` lints the map and reports all problems together, including `NEW_PATHS` and `SHARED_OWNER`."#,

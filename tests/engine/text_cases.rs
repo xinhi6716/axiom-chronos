@@ -9,6 +9,7 @@ fn required_phrases_are_present() {
     let cases = [
         ("skills/wish/BATCH.md", "A batch that calls Codex sizes its worker pool from `AXIOM_CODEX_MAX_PARALLEL`, minus the slots the wish itself still needs, and never hard-codes a smaller pool."),
         ("skills/wish/SKILL.md", r#""schedule", "next""#),
+        ("skills/wish/SKILL.md", "after each start and each completion notice"),
         ("skills/wish/SKILL.md", r#""setup", "start""#),
         ("skills/wish/SKILL.md", "Core stage models"),
         ("agents/dispatcher.md", r#""activity""#),

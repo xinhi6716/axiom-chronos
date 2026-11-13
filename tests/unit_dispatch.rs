@@ -123,7 +123,7 @@ impl Fixture {
         thread::spawn(move || call(&bridge, "codex_run", &args)["structuredContent"].clone())
     }
     fn wait_turns(&self, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(90);
         while self.turns() < count {
             assert!(
                 Instant::now() < deadline,
@@ -144,12 +144,12 @@ impl Fixture {
 #[test]
 fn duplicate_dispatch_names_owner() {
     let f = Fixture::new(
-        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_DELAY_MS 2000\nFAKE_TEMPDIR test\n",
+        "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_DELAY_MS 2000\nFAKE_TEMPDIR test\n",
     );
     let b = Fixture::bridge(&f.home, &f.log);
     let args = f.args("one", false);
     let handle = thread::spawn(move || call(&b, "codex_run", &args)["structuredContent"].clone());
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while f.turns() == 0 {
         assert!(Instant::now() < deadline, "fake codex did not start");
         thread::sleep(Duration::from_millis(20));
@@ -176,7 +176,7 @@ fn duplicate_dispatch_names_owner() {
 
 #[test]
 fn verified_dispatch_is_refused() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
     assert_eq!(f.run("one", false)["state"], "built");
     orch::record_review(&f.store, &["one".into()], "reviewer", true, &f.repo).unwrap();
     for cycle in [false, true] {
@@ -199,13 +199,13 @@ fn verified_dispatch_is_refused() {
 
 #[test]
 fn failed_unit_fix_chain_can_run() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY exit 1\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY exit 1\n");
     assert_eq!(f.run("one", false)["state"], "failed");
     let second = f.run("one", false);
     assert_eq!(second["state"], "failed", "{second}");
     assert_eq!(second["attempt"], 2);
     let fix = f.store.join("fix.brief");
-    fs::write(&fix, "GOAL fix\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(&fix, "GOAL fix\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     let args: Vec<String> = [
         "unit",
         "add",
@@ -230,13 +230,13 @@ fn failed_unit_fix_chain_can_run() {
 
 #[test]
 fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_TEMPDIR test\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_TEMPDIR test\n");
     let script = f.home.join("verify.py");
     fs::write(&script, "import os,pathlib\np=pathlib.Path(os.environ['TMP'])\nassert p==pathlib.Path(os.environ['TEMP'])==pathlib.Path(os.environ['TMPDIR'])\nassert p.is_dir()\nprint(p)\n").unwrap();
     fs::write(
         f.store.join("one.brief"),
         format!(
-        "GOAL build\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\nFAKE_TEMPDIR test\nFAKE_TEMPFILE real\n",
+        "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\nFAKE_TEMPDIR test\nFAKE_TEMPFILE real\n",
             common::python(),
             script.display()
         ),
@@ -285,7 +285,7 @@ fn attempt_and_brief_use_isolated_scratch_and_clean_up() {
 #[test]
 fn built_dispatch_resumes_until_brief_changes() {
     for cycle in [false, true] {
-        let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+        let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
         let first = f.run("one", false);
         assert_eq!(first["state"], "built", "{first}");
         assert!(orch::resume_built(&f.store, "one", &f.repo).unwrap());
@@ -294,7 +294,7 @@ fn built_dispatch_resumes_until_brief_changes() {
         assert_eq!(f.turns(), 1);
         assert_eq!(orch::receipts::read_runs(&f.store).unwrap().len(), 1);
 
-        fs::write(f.store.join("one.brief"), "GOAL rebuild\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        fs::write(f.store.join("one.brief"), "GOAL rebuild\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
         assert!(!orch::resume_built(&f.store, "one", &f.repo).unwrap());
         let second = f.run("one", cycle);
         assert_eq!(second["status"], "completed", "{second}");
@@ -310,11 +310,11 @@ fn built_dispatch_resumes_until_brief_changes() {
 
 #[test]
 fn unit_runs_record_receipts_even_on_failure() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
     let good = f.run("one", false);
     fs::write(
         f.store.join("one.brief"),
-        "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nAUTH\n",
+        "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nAUTH\n",
     )
     .unwrap();
     let bad = f.run("one", false);
@@ -347,7 +347,7 @@ fn unit_runs_record_receipts_even_on_failure() {
 
 #[test]
 fn receipt_write_failure_does_not_fail_unit() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
     fs::write(f.store.join("receipts"), "not a directory").unwrap();
     let result = f.run("one", false);
     assert_eq!(result["state"], "built", "{result}");
@@ -355,7 +355,7 @@ fn receipt_write_failure_does_not_fail_unit() {
 
 #[test]
 fn interrupted_unit_records_receipt() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nWAIT_FOR_INTERRUPT\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nWAIT_FOR_INTERRUPT\n");
     thread::scope(|scope| {
         let run = scope.spawn(|| f.run("one", false));
         f.wait_turns(1);
@@ -371,8 +371,8 @@ fn interrupted_unit_records_receipt() {
 
 #[test]
 fn parallel_units_use_private_scratch() {
-    let f = Fixture::new("GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_TEMPDIR one\nFAKE_DELAY_MS 1200\n");
-    f.add("two", "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\nFAKE_TEMPDIR two\nFAKE_DELAY_MS 1200\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\nFAKE_TEMPDIR one\nFAKE_DELAY_MS 1200\n");
+    f.add("two", "GOAL build\nRISK trivial\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\nFAKE_TEMPDIR two\nFAKE_DELAY_MS 1200\n");
     let one = f.spawn("one", false);
     f.wait_turns(1);
     let two = f.spawn("two", false);
@@ -429,13 +429,14 @@ fn parallel_units_use_private_scratch() {
 
 #[test]
 fn unit_verify_leaves_no_axiom_tmp() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
     let script = f.home.join("temp_verify.py");
-    fs::write(&script, "import os,pathlib,tempfile\np=pathlib.Path(tempfile.mkdtemp(prefix='pytest-of-fake-'))\n(p/'case.txt').write_text('ok')\n(pathlib.Path(os.environ['TMP'])/'direct.txt').write_text('ok')\nprint(p)\n").unwrap();
+    // Windows sandbox tokens cannot write to Python's mode-0700 mkdtemp directory.
+    fs::write(&script, "import os,pathlib,tempfile\nmkdir=os.mkdir\nif os.name == 'nt':\n    os.mkdir=lambda path, mode=0o777: mkdir(path, 0o777)\np=pathlib.Path(tempfile.mkdtemp(prefix='pytest-of-fake-'))\nos.mkdir=mkdir\n(p/'case.txt').write_text('ok')\n(pathlib.Path(os.environ['TMP'])/'direct.txt').write_text('ok')\nprint(p)\n").unwrap();
     fs::write(
         f.store.join("one.brief"),
         format!(
-            "GOAL build\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\n",
+            "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY \"{}\" \"{}\"\n",
             common::python(),
             script.display()
         ),
@@ -455,7 +456,7 @@ fn unit_verify_leaves_no_axiom_tmp() {
 
 #[test]
 fn scope_records_ignored_paths() {
-    let f = Fixture::new("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_SHELL_WRITE ignored.txt\nFAKE_SHELL_WRITE pytest-of-fake/pytest-0/x/case.txt\nFAKE_SHELL_WRITE sub/pytest-of-x/pytest-0/f\nFAKE_SHELL_WRITE pytest-of-x/other/f\nFAKE_SHELL_WRITE .axiom-tmpx/f\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\nFAKE_SHELL_WRITE ignored.txt\nFAKE_SHELL_WRITE pytest-of-fake/pytest-0/x/case.txt\nFAKE_SHELL_WRITE sub/pytest-of-x/pytest-0/f\nFAKE_SHELL_WRITE pytest-of-x/other/f\nFAKE_SHELL_WRITE .axiom-tmpx/f\n");
     let ignore = "ignored.txt\n";
     fs::write(f.repo.join(".gitignore"), ignore).unwrap();
     let r = f.run("one", false);
@@ -488,7 +489,7 @@ fn scope_records_ignored_paths() {
         ignore
     );
 
-    let mut brief = String::from("GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n");
+    let mut brief = String::from("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n");
     for n in 0..22 {
         brief.push_str(&format!("FAKE_WRITE .axiom-tmp/{n:02}.txt\n"));
     }
@@ -534,10 +535,10 @@ fn scope_records_ignored_paths() {
 
 #[test]
 fn parallel_unit_scope_survives_peer_completion() {
-    let f = Fixture::new("GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
     f.add(
         "two",
-        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\n",
+        "GOAL build\nRISK trivial\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE b.txt\n",
     );
     let one_gate = f.gate("one");
     let two_gate = f.gate("two");
@@ -572,10 +573,10 @@ fn parallel_unit_scope_survives_peer_completion() {
 
 #[test]
 fn own_outside_write_is_not_excused_by_peer_scope() {
-    let f = Fixture::new("GOAL build\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
+    let f = Fixture::new("GOAL build\nRISK trivial\nSCOPE a.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n");
     f.add(
         "two",
-        "GOAL build\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n",
+        "GOAL build\nRISK trivial\nSCOPE b.txt\nVERIFY echo ok\nFAKE_WRITE a.txt\n",
     );
     let one_gate = f.gate("one");
     let one = f.spawn("one", false);

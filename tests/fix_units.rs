@@ -20,7 +20,8 @@ fn setup() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     ok(dir.path(), &["init"], false);
     let brief = dir.path().join("brief.md");
-    fs::write(&brief, "GOAL g\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+    fs::write(dir.path().join("modules.md"), "## core\nPURPOSE x\nPATHS src/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default terra/medium trivial reason\n").unwrap();
     (dir, brief.to_str().unwrap().to_owned())
 }
 
@@ -416,7 +417,7 @@ fn escalates_sol_high_to_xhigh() {
     assert_eq!(v["routing"]["effort"], "xhigh");
     assert_eq!(v["routing"]["rule"], "fix_escalation");
     let record = read_fix(p, "fix").unwrap().unwrap();
-    assert_eq!(record.parent_tier, Tier::Sol);
+    assert_eq!(record.parent_tier, Some(Tier::Sol));
     assert_eq!(record.parent_effort, Some(Effort::High));
     assert!(fs::read_to_string(&brief)
         .unwrap()
@@ -695,7 +696,7 @@ fn fix_dispatch_applies_model_and_effort() {
     fs::create_dir_all(&p).unwrap();
     ok(&p, &["init"], false);
     let b = p.join("brief.md");
-    fs::write(&b, "GOAL g\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(&b, "GOAL g\nRISK standard\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     let b = b.to_str().unwrap();
     fs::write(
         p.join("modules.md"),

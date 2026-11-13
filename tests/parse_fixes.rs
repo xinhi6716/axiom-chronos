@@ -44,7 +44,7 @@ fn brief_multiline_scope_is_complete_or_explicitly_rejected() {
         "VERIFY v",
         "CONTEXT c",
         "EFFORT low",
-        "TIER luna",
+        "TIER terra",
     ] {
         let text = format!("GOAL g\nSCOPE a\n{field}\nnot/a/scope\nVERIFY v\n");
         assert_eq!(parse_brief(&text).unwrap().scope, ["a"], "{field}");

@@ -45,7 +45,7 @@ fn fixture(home: &std::path::Path) {
     let store = home.join("orchestrate/demo");
     fs::create_dir_all(&store).unwrap();
     let brief = store.join("brief.md");
-    fs::write(&brief, "GOAL test\nSCOPE file.txt\nVERIFY test\n").unwrap();
+    fs::write(&brief, "GOAL test\nRISK trivial\nSCOPE file.txt\nVERIFY test\n").unwrap();
     fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tx\tverified\t\t\t\t{}\nu2\tx\tpending\t\t\t\t{}\nu3\tx\tbuilt\t\t\t\t{}\n", brief.display(), brief.display(), brief.display())).unwrap();
     fs::write(home.join("file.txt"), "content").unwrap();
 }
@@ -175,7 +175,7 @@ fn unit_brief_includes_constraints_and_graph_failure_is_nonfatal() {
     fs::write(repo.join("CONSTRAINTS.md"), "- keep the boundary\n").unwrap();
     assert!(std::process::Command::new("git").args(["add", "tracked.txt", "src/mod.py", "CONSTRAINTS.md"]).current_dir(&repo).status().unwrap().success());
     assert!(std::process::Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"]).current_dir(&repo).status().unwrap().success());
-    let brief = "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n";
+    let brief = "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n";
     let brief_path = store.join("unit.brief");
     fs::write(&brief_path, brief).unwrap();
     fs::write(store.join("units.tsv"), format!("id\ttrack\tstate\tbranch\tpr\tsha\tbrief\nu1\tm\tpending\t\t\t\t{}\nu2\tm\tpending\t\t\t\t{}\n", brief_path.display(), brief_path.display())).unwrap();
@@ -191,7 +191,7 @@ fn unit_brief_includes_constraints_and_graph_failure_is_nonfatal() {
     assert_eq!(fs::read_to_string(brief_path).unwrap(), brief);
     let events: Vec<Value> = fs::read_to_string(log).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let turn = events.iter().find(|event| event["method"] == "turn/start").unwrap();
-    assert_eq!(turn["params"]["input"][0]["text"], format!("CONSTRAINTS\n- keep the boundary\n\n{brief}"));
+    assert_eq!(turn["params"]["input"][0]["text"], format!("CONSTRAINTS\n- keep the boundary\n\n{}", brief.replace("RISK trivial\n", "")));
     fs::remove_file(home.join("memory")).unwrap();
     let synced = invoke(&Bridge::new(config(home)), "codex_run", json!({"project":"demo","unit":"u2","cwd":repo,"role":"terra"}));
     check(&synced, "completed");

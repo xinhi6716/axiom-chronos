@@ -20,6 +20,37 @@ fn invalid(message: &str) -> Failure {
 fn string<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
     a.get(key).and_then(Value::as_str)
 }
+// The shared brief parser rejects luna with a textual error. Classify the
+// worker refusal from the brief itself, without depending on that wording.
+fn brief_has_luna_tier(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut in_settings = false;
+    let mut past_context = false;
+    let mut found = false;
+    let mut normalized = String::new();
+    for line in text.lines() {
+        let field = |name: &str| {
+            line.strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        };
+        if !in_settings && !past_context && field("GOAL") {
+            in_settings = true;
+        } else if in_settings && field("CONTEXT") {
+            in_settings = false;
+            past_context = true;
+        }
+        if in_settings && field("TIER") && line["TIER".len()..].trim() == "luna" {
+            found = true;
+            normalized.push_str("TIER terra");
+        } else {
+            normalized.push_str(line);
+        }
+        normalized.push('\n');
+    }
+    found && orch::parse_brief(&normalized).is_ok()
+}
 pub fn codex_run(b: &Bridge, a: &Value) -> Value {
     let cycle = a.get("cycle") == Some(&Value::Bool(true)) && string(a, "unit").is_some();
     let root = if cycle {
@@ -92,6 +123,9 @@ fn register(store: &Path, unit: &str, track: &str, brief_file: &str) -> Res<bool
         .collect();
     let out = orch::run(store, &args, false, false);
     if out.exit_code != 0 {
+        if brief_has_luna_tier(Path::new(brief_file)) {
+            codex::routing::check_floor(Some(codex::routing::Tier::Luna), "")?;
+        }
         let text = if out.stderr.is_empty() {
             out.stdout
         } else {
@@ -147,7 +181,7 @@ fn ensure_review_requirements(root: &Path, unit: &str) -> Res<()> {
 }
 struct UnitGuard(Option<(PathBuf, String, String)>);
 fn resumable_cut(kind: &str) -> bool {
-    matches!(kind, "interrupted" | "timeout" | "token_cap" | "usage_limit" | "usageLimitExceeded")
+    matches!(kind, "interrupted" | "timeout" | "token_cap" | "usage_limit" | "usageLimitExceeded" | "disk_space")
 }
 impl Drop for UnitGuard {
     fn drop(&mut self) {
@@ -483,7 +517,10 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
         return Err(invalid("invalid role"));
     }
     let explicit = string(a, "model").filter(|s| !s.is_empty());
-    if let (Some(r), Some(m)) = (role, explicit) {
+    if let Some(m) = explicit {
+        codex::routing::check_floor(None, m)?;
+    }
+    if let (None, Some(r), Some(m)) = (string(a, "unit"), role, explicit) {
         if !codex::role_matches(r, m) {
             return Err(invalid("model does not match role"));
         }
@@ -595,6 +632,16 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 }
                 return Ok(result);
             }
+            Err(e)
+                if e.kind == "invalid_argument"
+                    && orch::read_units(root)
+                        .ok()
+                        .and_then(|units| units.into_iter().find(|unit| unit.id == u))
+                        .is_some_and(|unit| brief_has_luna_tier(Path::new(&unit.brief))) =>
+            {
+                codex::routing::check_floor(Some(codex::routing::Tier::Luna), "")?;
+                return Err(e);
+            }
             Err(e) => return Err(e),
         };
         match begin {
@@ -695,11 +742,6 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 attempt = n;
                 attempt_id = id;
                 guard.0 = Some((root.to_path_buf(), u.to_owned(), attempt_id.clone()));
-                if value.tier.as_deref() == Some("luna") && (r != "terra" || explicit.is_some()) {
-                    return Err(invalid(
-                        "TIER in a brief applies only to a terra unit dispatched without model",
-                    ));
-                }
                 let server = b.codex()?;
                 let snapshot = codex::routing::for_attempt(
                     &server,
@@ -714,8 +756,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 orch::lifecycle::checkpoint_routing(root, u, &snapshot)?;
                 effort = snapshot
                     .effort
-                    .map(|e| format!("{e:?}").to_lowercase())
-                    .or(value.effort);
+                    .map(|e| format!("{e:?}").to_lowercase());
                 tier = value.tier;
                 brief = value.text;
                 routing_snapshot = Some(snapshot);
@@ -754,6 +795,7 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
                 None => server.resolve_model(tier.as_deref().or(role).unwrap())?,
             }
         };
+        codex::routing::check_floor(None, &model)?;
         resolved = model.clone();
         let mut req = RunRequest {
             brief,
@@ -970,7 +1012,17 @@ fn run(b: &Bridge, a: &Value) -> Res<Value> {
             );
             }
         }
-        let finished = orch::lifecycle::finish_checkpointed(root, u, &attempt_id, Path::new(cwd), r, &model, &report)?;
+        let finished = match orch::lifecycle::finish_checkpointed(root, u, &attempt_id, Path::new(cwd), r, &model, &report) {
+            Ok(finished) => finished,
+            Err(e) if resumable_cut(&e.kind) => {
+                orch::lifecycle::suspend_claim(root, u, &attempt_id)?;
+                guard.0 = None;
+                return Ok(json!({"status":"interrupted", "error":e.to_json(), "unit":u,
+                    "attempt":attempt, "attempt_id":attempt_id, "model":model, "next":"wait",
+                    "usage":report["usage"]}));
+            }
+            Err(e) => return Err(e),
+        };
         if finished.verify_exit.is_some() { crash_point("after_verify"); }
         let graph_sync = match graph::GraphStore::open(b.home()?) {
             Ok(store) => {

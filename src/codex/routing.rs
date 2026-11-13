@@ -14,6 +14,7 @@ pub fn for_attempt(
     use crate::base::Failure;
     if let Some(s) = read_snapshot(store, unit)? {
         if s.attempt_id == attempt_id {
+            check_floor(s.tier, &s.model)?;
             return Ok(s);
         }
     }
@@ -42,14 +43,32 @@ pub fn for_attempt(
     } else {
         None
     };
-    let (tier, effort, risk, rule, reason) = if let Some(f) = fix {
-        (
-            Some(f.tier),
-            Some(f.effort),
-            None,
-            Rule::FixEscalation,
-            f.reason,
+    let brief_tier = brief
+        .tier
+        .as_deref()
+        .map(parse_tier)
+        .transpose()
+        .map_err(invalid)?;
+    let brief_effort = brief
+        .effort
+        .as_deref()
+        .map(parse_effort)
+        .transpose()
+        .map_err(invalid)?;
+    let brief_risk: Option<Risk> = brief
+        .risk
+        .as_ref()
+        .map(|s| serde_json::from_value(serde_json::Value::String(s.clone())))
+        .transpose()
+        .map_err(|e| invalid(format!("{e}")))?;
+    let missing = || {
+        Failure::new(
+            "routing_missing",
+            format!("unit {unit} needs a ROUTING line or a RISK line"),
         )
+    };
+    let (tier, effort, risk, rule, reason) = if let Some(f) = fix {
+        (Some(f.tier), Some(f.effort), None, f.rule, f.reason)
     } else if let Some(line) = map_line {
         let risk = serde_json::from_value(serde_json::Value::String(line.risk))
             .map_err(|e| invalid(format!("{e}")))?;
@@ -64,42 +83,52 @@ pub fn for_attempt(
             },
             line.reason,
         )
+    } else if let (Some(tier), Some(effort)) = (brief_tier, brief_effort) {
+        if let Some(risk) = brief_risk {
+            check_rubric(&Routing {
+                tier,
+                effort,
+                risk: Some(risk),
+                reason: String::new(),
+            })
+            .map_err(|e| Failure::new("routing_rubric", e))?;
+        }
+        (
+            Some(tier),
+            Some(effort),
+            brief_risk,
+            Rule::Brief,
+            String::new(),
+        )
+    } else if let Some(risk) = brief_risk {
+        let r = rubric(risk);
+        (
+            Some(r.tier),
+            Some(r.effort),
+            r.risk,
+            Rule::RiskRubric,
+            r.reason,
+        )
     } else if explicit_model.is_some() {
         (
-            None,
-            brief
-                .effort
-                .as_deref()
-                .map(parse_effort)
-                .transpose()
-                .map_err(invalid)?,
+            brief_tier,
+            Some(brief_effort.ok_or_else(missing)?),
             None,
             Rule::ExplicitModel,
             String::new(),
         )
-    } else if brief.tier.is_some() || brief.effort.is_some() {
-        (
-            Some(parse_tier(brief.tier.as_deref().unwrap_or(role)).map_err(invalid)?),
-            brief
-                .effort
-                .as_deref()
-                .map(parse_effort)
-                .transpose()
-                .map_err(invalid)?,
-            None,
-            Rule::Brief,
-            String::new(),
-        )
+    } else if brief_tier.is_some() || brief_effort.is_some() {
+        return Err(Failure::new(
+            "routing_incomplete",
+            format!("unit {unit} needs both TIER and EFFORT"),
+        ));
     } else {
-        (
-            Some(parse_tier(role).map_err(invalid)?),
-            None,
-            None,
-            Rule::LegacyRole,
-            String::new(),
-        )
+        return Err(missing());
     };
-    if matches!(rule, Rule::FixEscalation | Rule::MapUnit | Rule::MapDefault) {
+    if matches!(
+        rule,
+        Rule::FixEscalation | Rule::PlanException | Rule::MapUnit | Rule::MapDefault
+    ) {
         if explicit_model.is_some() {
             return Err(invalid("explicit model conflicts with routing".into()));
         }
@@ -123,12 +152,10 @@ pub fn for_attempt(
         Some(m) => m.to_owned(),
         None => {
             let name = format!("{:?}", tier.unwrap()).to_lowercase();
-            match settings.models.worker.get(&name) {
-                Some(m) => m.clone(),
-                None => server.resolve_model(&name)?,
-            }
+            server.resolve_model(&name)?
         }
     };
+    check_floor(tier, &model)?;
     let snapshot = RoutingSnapshot {
         unit: unit.into(),
         attempt_id: attempt_id.into(),
@@ -196,6 +223,7 @@ pub enum Rule {
     MapUnit,
     MapDefault,
     Brief,
+    RiskRubric,
     LegacyRole,
     ExplicitModel,
 }
@@ -216,7 +244,8 @@ pub struct RoutingSnapshot {
 pub struct FixRecord {
     pub unit: String,
     pub parent: String,
-    pub parent_tier: Tier,
+    #[serde(default)]
+    pub parent_tier: Option<Tier>,
     pub parent_effort: Option<Effort>,
     pub tier: Tier,
     pub effort: Effort,
@@ -257,6 +286,30 @@ pub fn check_rubric(r: &Routing) -> Result<(), String> {
         && !(r.tier == Tier::Astra || r.tier == Tier::Sol && r.effort >= Effort::Xhigh)
     {
         return Err("risk requires sol/xhigh or astra".into());
+    }
+    Ok(())
+}
+pub fn rubric(risk: Risk) -> Routing {
+    let (tier, effort) = match risk {
+        Risk::Trivial => (Tier::Terra, Effort::Medium),
+        Risk::Standard => (Tier::Sol, Effort::High),
+        Risk::Novel => (Tier::Astra, Effort::Xhigh),
+        _ => (Tier::Sol, Effort::Xhigh),
+    };
+    let name = serde_json::to_value(risk).unwrap();
+    Routing {
+        tier,
+        effort,
+        risk: Some(risk),
+        reason: format!("rubric {}", name.as_str().unwrap()),
+    }
+}
+pub fn check_floor(tier: Option<Tier>, model: &str) -> Res<()> {
+    if tier == Some(Tier::Luna) || model.to_ascii_lowercase().contains("luna") {
+        return Err(crate::base::Failure::new(
+            "model_floor",
+            "workers require the terra model floor",
+        ));
     }
     Ok(())
 }
