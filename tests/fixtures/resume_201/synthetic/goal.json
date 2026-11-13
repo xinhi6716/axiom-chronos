@@ -1,0 +1,1 @@
+{"wish": "Synthetic fixture", "status": "blocked", "reason": "interrupted", "project": "demo", "cwd": "/work/project", "amendments": ["keep amendments"], "provenance": [{"origin": "fixture", "revision": 1}], "future_goal": {"keep": true}}

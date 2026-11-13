@@ -1,0 +1,2 @@
+kind	command	exit_code	commit	ts
+verify	echo fixture	0	tree	2026-01-01

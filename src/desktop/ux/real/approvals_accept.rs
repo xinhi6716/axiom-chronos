@@ -8,6 +8,128 @@ use crate::engine::kinds::*;
 use crate::orch::events::read_events;
 use std::{path::PathBuf, sync::Arc};
 
+fn settled(
+    ticket: &crate::desktop::data::outbox::Ticket,
+) -> crate::desktop::data::outbox::TicketState {
+    use crate::desktop::data::outbox::TicketState;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let state = ticket.state();
+        if state != TicketState::Pending {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ticket did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+struct FlakyApproval {
+    inner: EngineApprovals,
+    attempts: std::sync::atomic::AtomicUsize,
+    failures: usize,
+}
+impl ApprovalService for FlakyApproval {
+    fn pending(&self) -> Vec<ApprovalCard> {
+        self.inner.pending()
+    }
+    fn decide(&self, d: &Decision) -> crate::base::Res<crate::desktop::ux::seams::ApprovalReceipt> {
+        if self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            < self.failures
+        {
+            Err(crate::base::Failure::new(
+                "service_unavailable",
+                "temporarily offline",
+            ))
+        } else {
+            self.inner.decide(d)
+        }
+    }
+}
+
+#[test]
+fn outboxes_share_adapter_and_execute_duplicate_only_once() {
+    use crate::desktop::{data::outbox::TicketState, ux::seams::approvals::approval_outbox_for};
+    let f = Fixture::new();
+    let service = Arc::new(f.service());
+    let card = service.pending().remove(0);
+    let d = decision(&card, "same", Verdict::Approve);
+    let first = approval_outbox_for(service.clone());
+    let second = approval_outbox_for(service);
+    let a = first.submit(d.clone(), &d.key);
+    let duplicate = first.submit(d.clone(), &d.key);
+    let b = second.submit(d.clone(), &d.key);
+    assert!(a.same_ticket(&duplicate));
+    assert_eq!(settled(&a), TicketState::Applied);
+    assert_eq!(settled(&b), TicketState::Applied);
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+    assert_eq!(f.count(APPROVAL_EXECUTED), 1);
+}
+
+#[test]
+fn outbox_retries_refuses_and_retains_failed_tickets() {
+    use crate::desktop::{data::outbox::TicketState, ux::seams::approvals::approval_outbox_for};
+    let f = Fixture::new();
+    let service = Arc::new(FlakyApproval {
+        inner: f.service(),
+        attempts: 0.into(),
+        failures: 1,
+    });
+    let card = service.pending().remove(0);
+    let d = decision(&card, "retry", Verdict::Approve);
+    let outbox = approval_outbox_for(service.clone());
+    assert_eq!(
+        settled(&outbox.submit(d.clone(), &d.key)),
+        TicketState::Applied
+    );
+    assert_eq!(
+        service.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(f.count(APPROVAL_EXECUTING), 1);
+
+    let other = Fixture::new();
+    let service = Arc::new(FlakyApproval {
+        inner: other.service(),
+        attempts: 0.into(),
+        failures: usize::MAX,
+    });
+    let card = service.pending().remove(0);
+    let outbox = approval_outbox_for(service.clone());
+    let d = decision(&card, "failed", Verdict::Approve);
+    let ticket = outbox.submit(d.clone(), &d.key);
+    assert!(matches!(settled(&ticket), TicketState::Failed(reason) if reason.contains("offline")));
+    assert!(outbox.tickets().iter().any(|t| t.same_ticket(&ticket)));
+    assert_eq!(
+        service.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        5
+    );
+    assert_eq!(other.count(APPROVAL_EXECUTING), 0);
+
+    let outbox = approval_outbox_for(Arc::new(other.service()));
+    let mut stale = decision(&card, "stale", Verdict::Approve);
+    stale.payload_version ^= 1;
+    assert!(
+        matches!(settled(&outbox.submit(stale.clone(), &stale.key)), TicketState::Refused(reason) if reason.contains("stale"))
+    );
+    let rejected = decision(
+        &card,
+        "reject",
+        Verdict::Reject {
+            reason: "no".into(),
+        },
+    );
+    assert_eq!(
+        settled(&outbox.submit(rejected.clone(), &rejected.key)),
+        TicketState::Applied
+    );
+    assert_eq!(other.count(APPROVAL_DENIED), 1);
+}
+
 struct Fixture {
     home: tempfile::TempDir,
     store: PathBuf,

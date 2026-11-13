@@ -46,6 +46,37 @@ fn poll(rig: &mut tests::Rig, state: &mut AppState) {
 }
 
 #[test]
+fn feed_records_new_events_once_in_projection_order() {
+    feed::RECEIVED.with(|r| r.borrow_mut().clear());
+    let (mut rig, mut state) = setup();
+    let home = rig._dir.path().to_path_buf();
+    goal(&home, "s1");
+    log(&home, "s1", "100000", true, &[]);
+    let path = home
+        .join("orchestrate/proj")
+        .join(WISH)
+        .join("events.jsonl");
+    let event = |seq| {
+        format!("{}\n", json!({"seq":seq,"ts":"","ts_ms":seq,"kind":"heartbeat","wish":WISH,"module":null,"unit":null,"data":{}}))
+    };
+    write(&path, &(event(1) + &event(2)));
+    poll(&mut rig, &mut state);
+    feed::RECEIVED.with(|r| assert_eq!(&*r.borrow(), &[1, 2]));
+    poll(&mut rig, &mut state);
+    feed::RECEIVED.with(|r| assert_eq!(&*r.borrow(), &[1, 2]));
+    write(
+        &path,
+        &(event(1) + &event(2) + &event(3) + &event(2) + &event(3)),
+    );
+    poll(&mut rig, &mut state);
+    feed::RECEIVED.with(|r| assert_eq!(&*r.borrow(), &[1, 2, 3]));
+    write(&path, &(event(5) + &event(4) + &event(5) + &event(6)));
+    poll(&mut rig, &mut state);
+    feed::RECEIVED.with(|r| assert_eq!(&*r.borrow(), &[1, 2, 3, 5, 6]));
+    assert_eq!(rig.engine.ux_feed.last_seq("s1"), Some(6));
+}
+
+#[test]
 fn disk_poll_populates_activity_notices_council_and_amendments_without_replay() {
     let (mut rig, mut state) = setup();
     let home = rig._dir.path();

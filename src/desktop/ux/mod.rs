@@ -33,8 +33,10 @@ pub enum Page {
     Session(SharedString),
     // p8: begin stub
     Paper(SharedString),
+    Routine,
     // p8: end stub
 }
+impl Page { pub fn kind(&self) -> &'static str { match self { Self::Research => "research", Self::Storage => "storage", Self::Chat => "chat", Self::QuickTask => "quick", Self::Plaza => "plaza", Self::Session(_) => "session", Self::Paper(_) => "paper", Self::Routine => "routine" } } }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReadFilter {
     #[default]
@@ -55,6 +57,7 @@ pub struct Seams {
     pub unit_actions: Option<Arc<dyn UnitActions>>,
     pub optimizer: Option<Arc<dyn OptimizerRunner>>,
     pub github: Option<Arc<dyn GhRunner>>,
+    pub routines: Option<Arc<dyn RoutineSeam>>,
     pub paper: Option<Arc<dyn PaperService>>, // p8:
 }
 impl Seams {
@@ -174,6 +177,7 @@ impl Seams {
                 stdout: "Repository is ready".into(),
                 stderr: String::new(),
             }]))),
+            routines: None,
             paper: None, // p8:
         }
     }

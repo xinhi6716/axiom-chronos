@@ -260,6 +260,69 @@ fn draft(session: &str, id: &str, text: &str) -> Draft {
     }
 }
 #[test]
+fn outbox_preserves_direct_receipt_and_rejected_receipt() {
+    use crate::desktop::{
+        data::outbox::TicketState, ux::seams::interjection::interjection_outbox_for,
+    };
+    struct Recording {
+        inner: Arc<EngineInterjections>,
+        result: Mutex<Option<crate::desktop::ux::seams::Receipt>>,
+    }
+    impl Interjections for Recording {
+        fn send(&self, d: &Draft) -> Res<crate::desktop::ux::seams::Receipt> {
+            let receipt = self.inner.send(d)?;
+            *self.result.lock().unwrap() = Some(receipt.clone());
+            Ok(receipt)
+        }
+        fn receipt(&self, id: &str) -> Option<crate::desktop::ux::seams::Receipt> {
+            self.inner.receipt(id)
+        }
+        fn history(&self, session: &str) -> Vec<crate::desktop::ux::seams::Amendment> {
+            self.inner.history(session)
+        }
+        fn running_work(&self, session: &str) -> crate::desktop::ux::seams::RunningWork {
+            self.inner.running_work(session)
+        }
+        fn pause_batch(&self, session: &str) -> Res<()> {
+            self.inner.pause_batch(session)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (transport, adapter) = setup(dir.path(), &["one"], false);
+    let adapter = Arc::new(adapter);
+    let d = draft("one", "client", "decline it");
+    adapter.send(&d).unwrap();
+    let direct = adapter.send(&d).unwrap();
+    let recording = Arc::new(Recording {
+        inner: adapter.clone(),
+        result: Mutex::new(None),
+    });
+    let outbox = interjection_outbox_for(recording.clone());
+    let ticket = outbox.submit(d.clone(), &d.client_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ticket.state() == TicketState::Pending {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ticket.state(), TicketState::Applied);
+    assert_eq!(*recording.result.lock().unwrap(), Some(direct.clone()));
+    assert_eq!(adapter.send(&d).unwrap(), direct);
+    assert_eq!(transport.sent.lock().unwrap().len(), 1);
+    interjections::classify(dir.path(), "one", "amend").unwrap();
+    interjections::decline(dir.path(), "one", "ij-1", "no thanks").unwrap();
+    let rejected = adapter.send(&d).unwrap();
+    assert!(matches!(rejected.stage, ReceiptStage::Rejected { .. }));
+    let second = interjection_outbox_for(recording.clone()).submit(d.clone(), &d.client_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while second.state() == TicketState::Pending {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(second.state(), TicketState::Applied);
+    assert_eq!(*recording.result.lock().unwrap(), Some(rejected.clone()));
+    assert_eq!(adapter.send(&d).unwrap(), rejected);
+}
+#[test]
 fn sent_received_applied_and_history() {
     let dir = tempfile::tempdir().unwrap();
     let (_, adapter) = setup(dir.path(), &["one"], false);

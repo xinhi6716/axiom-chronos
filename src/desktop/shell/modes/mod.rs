@@ -1,3 +1,5 @@
+mod routine;
+pub use routine::RoutinePage;
 mod chat;
 mod plaza;
 mod quick;

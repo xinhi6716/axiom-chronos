@@ -2,7 +2,7 @@
 //! divider, the state glyphs, the fixed star field and the portrait itself.
 //! The geometry functions are pure, so the drawing can be tested without a window.
 use super::model::UnitState;
-use super::theme::{font, lift_shadow, selection_glow, space, Density, Step, Tokens, TypeSize, RADIUS};
+use crate::desktop::theme::{font, lift_shadow, ornament_tokens as ot, selection_glow, space, Density, Step, Tokens, TypeSize, RADIUS};
 use gpui_kit::base::TestTextExt as _;
 use gpui_kit::*;
 use std::borrow::Cow;
@@ -125,17 +125,17 @@ pub fn portrait(side: f32) -> Img {
 /// The portrait large and dim, for the space behind an empty state. Its edges dissolve into the
 /// canvas, and the bottom fades out fully, so text placed below it sits on the plain canvas.
 pub fn portrait_backdrop(t: &Tokens, side: f32, dark: bool) -> Div {
-    let fade = |angle: f32| linear_gradient(angle, linear_color_stop(t.canvas, 0.0), linear_color_stop(t.canvas.opacity(0.0), 1.0));
-    let edge = relative(0.3);
+    let fade = |angle: f32| linear_gradient(angle, linear_color_stop(t.canvas, 0.0), linear_color_stop(t.canvas.opacity(ot::TRANSPARENT), 1.0));
+    let edge = relative(ot::BACKDROP_EDGE);
     div()
         .relative()
         .flex_none()
         .size(px(side))
-        .child(portrait(side).opacity(if dark { 0.16 } else { 0.12 }))
+        .child(portrait(side).opacity(if dark { ot::BACKDROP_DARK_ALPHA } else { ot::BACKDROP_LIGHT_ALPHA }))
         .child(div().absolute().left_0().right_0().top_0().h(edge).bg(fade(180.0)))
         .child(div().absolute().top_0().bottom_0().left_0().w(edge).bg(fade(90.0)))
         .child(div().absolute().top_0().bottom_0().right_0().w(edge).bg(fade(270.0)))
-        .child(div().absolute().left_0().right_0().bottom_0().h(relative(0.5)).bg(fade(0.0)))
+        .child(div().absolute().left_0().right_0().bottom_0().h(relative(ot::BACKDROP_BOTTOM)).bg(fade(0.0)))
 }
 
 /// A periodic 0..1 swell, 0 at rest. Everything that moves in the app breathes at this pace.
@@ -250,11 +250,11 @@ fn paint_divider(window: &mut Window, bounds: Bounds<Pixels>, line: Hsla, gold: 
     let g = divider_geometry(o.w, o.h, margin);
     let y = (o.y + g.center.1).floor();
     for (a, b) in &g.lines {
-        let bar = Bounds { origin: point(px(o.x + a), px(y)), size: size(px(b - a), px(1.0)) };
+        let bar = Bounds { origin: point(px(o.x + a), px(y)), size: size(px(b - a), ot::DIVIDER_LINE_HEIGHT) };
         window.paint_quad(fill(bar, line));
     }
     let (cx, cy) = (o.x + g.center.0, y + 0.5);
-    let mut b = PathBuilder::stroke(px(1.2));
+    let mut b = PathBuilder::stroke(ot::DIVIDER_STROKE);
     b.move_to(point(px(cx), px(cy - g.half)));
     b.line_to(point(px(cx + g.half), px(cy)));
     b.line_to(point(px(cx), px(cy + g.half)));
@@ -293,7 +293,7 @@ fn stroke(window: &mut Window, points: &[Point<Pixels>], closed: bool, width: f3
 }
 
 fn dot(window: &mut Window, cx: f32, cy: f32, r: f32, color: Hsla) {
-    let bounds = Bounds { origin: point(px(cx - r), px(cy - r)), size: size(px(r * 2.0), px(r * 2.0)) };
+    let bounds = Bounds { origin: point(px(cx - r), px(cy - r)), size: size(px(r * ot::DIAMETER_FACTOR), px(r * ot::DIAMETER_FACTOR)) };
     window.paint_quad(fill(bounds, color).corner_radii(px(r)));
 }
 
@@ -320,7 +320,7 @@ pub fn paint_glyph(window: &mut Window, cx: f32, cy: f32, r: f32, state: UnitSta
         }
         UnitState::Running => {
             let ring = r * (0.62 + 0.26 * breath);
-            stroke(window, &arc(cx, cy, ring, 0.0, 360.0, 40), true, line, color.opacity(0.95 - 0.45 * breath));
+            stroke(window, &arc(cx, cy, ring, 0.0, 360.0, 40), true, line, color.opacity(ot::RUNNING_ALPHA - ot::RUNNING_ALPHA_RANGE * breath));
             dot(window, cx, cy, r * 0.3, color);
         }
         UnitState::Built => {
@@ -374,7 +374,7 @@ pub fn paint_body(window: &mut Window, cx: f32, cy: f32, r: f32, state: UnitStat
     let planet = r * 0.62;
     stroke(window, &ring_points(cx, cy, r, std::f32::consts::PI, TAU), false, 1.0, ring);
     dot(window, cx, cy, planet, fill);
-    stroke(window, &arc(cx, cy, planet, 0.0, 360.0, 36), true, 1.0, color.opacity(0.7));
+    stroke(window, &arc(cx, cy, planet, 0.0, 360.0, 36), true, 1.0, color.opacity(ot::BODY_ALPHA));
     paint_glyph(window, cx, cy, planet * 0.74, state, color, breath);
     stroke(window, &ring_points(cx, cy, r, 0.0, std::f32::consts::PI), false, 1.0, ring);
 }
@@ -475,16 +475,16 @@ pub fn backdrop(t: &Tokens, dark: bool) -> impl IntoElement {
             let scale = i as f32 / n as f32;
             let (w, h) = (b.w * 0.8 * scale, b.h * 0.8 * scale);
             let rect = Box2 { x: b.x + (b.w - w) / 2.0, y: b.y + (b.h - h) / 2.0, w, h };
-            window.paint_quad(fill(rect.bounds(), glow.opacity(alpha)).corner_radii(px(w.min(h) / 2.0)));
+            window.paint_quad(fill(rect.bounds(), glow.opacity(alpha)).corner_radii(px(w.min(h) / ot::HALVE)));
         }
-        let shade: Hsla = rgb(0x000000).into();
+        let shade = ot::VIGNETTE_SHADE;
         for (rect, angle) in [
             (Box2 { x: b.x, y: b.y, w: b.w * 0.3, h: b.h }, 90.0),
             (Box2 { x: b.x + b.w * 0.7, y: b.y, w: b.w * 0.3, h: b.h }, 270.0),
             (Box2 { x: b.x, y: b.y, w: b.w, h: b.h * 0.3 }, 180.0),
             (Box2 { x: b.x, y: b.y + b.h * 0.7, w: b.w, h: b.h * 0.3 }, 0.0),
         ] {
-            let fade = linear_gradient(angle, linear_color_stop(shade.opacity(layers.vignette_alpha), 0.0), linear_color_stop(shade.opacity(0.0), 1.0));
+            let fade = linear_gradient(angle, linear_color_stop(shade.opacity(layers.vignette_alpha), 0.0), linear_color_stop(shade.opacity(ot::TRANSPARENT), 1.0));
             window.paint_quad(fill(rect.bounds(), fade));
         }
         paint_stars(window, (b.x, b.y), &layers.stars, ink);
@@ -591,7 +591,7 @@ fn underline_points(b: Box2, lit: f32) -> Vec<Point<Pixels>> {
     if lit.clamp(0.0, 1.0) <= 0.0 { return Vec::new(); }
     (0..=32).map(|i| {
         let a = std::f32::consts::PI * (0.12 + 0.76 * i as f32 / 32.0);
-        point(px(b.x + b.w / 2.0 + b.w * 0.46 * a.cos()), px(b.y + b.h * 0.12 + b.h * 0.75 * a.sin()))
+        point(px(b.x + b.w / ot::ARC_CENTER + b.w * ot::ARC_WIDTH * a.cos()), px(b.y + b.h * ot::ARC_TOP + b.h * ot::ARC_HEIGHT * a.sin()))
     }).collect()
 }
 
@@ -600,7 +600,7 @@ pub fn orbit_underline(ink: Hsla, lit: f32) -> impl IntoElement {
         let lit = lit.clamp(0.0, 1.0);
         let points = underline_points(Box2::of(bounds), lit);
         if !points.is_empty() { stroke(window, &points, false, 1.0, ink.opacity(ink.a * lit)); }
-    }).w_full().h(px(8.0)).flex_none()
+    }).w_full().h(ot::ARC_ELEMENT_HEIGHT).flex_none()
 }
 
 pub fn ring_sweep(verified: usize, total: usize) -> Option<f32> {
@@ -643,7 +643,8 @@ pub fn gold_fill(t: &Tokens) -> Background {
 }
 
 pub fn gold_glow(t: &Tokens, strength: f32) -> Vec<BoxShadow> {
-    vec![BoxShadow { color: t.gold.opacity(0.24 * strength.clamp(0.0, 1.0)), offset: Point::default(), blur_radius: px(12.0), spread_radius: px(0.0), inset: false }]
+    let strength = strength.clamp(0.0, 1.0);
+    vec![BoxShadow { color: t.gold.opacity(ot::GOLD_GLOW_ALPHA * strength), offset: Point::default(), blur_radius: ot::GOLD_GLOW_BLUR, spread_radius: ot::GOLD_GLOW_SPREAD, inset: false }]
 }
 
 /// The fraction of a bulb occupied by sand.
@@ -720,7 +721,7 @@ pub fn hourglass(t: &Tokens, share_left: Option<f32>, ink: Hsla, side: f32) -> i
             paint_sand(window, origin, &g.lower, lower, gold);
         } else {
             for (a, z) in [(0.38, 0.43), (0.47, 0.53), (0.57, 0.62)] {
-                stroke(window, &[point(px(b.x + a * side), px(b.y + 0.75 * side)), point(px(b.x + z * side), px(b.y + 0.75 * side))], false, 1.0, muted.opacity(0.4));
+                stroke(window, &[point(px(b.x + a * side), px(b.y + ot::HOURGLASS_DASH_Y * side)), point(px(b.x + z * side), px(b.y + ot::HOURGLASS_DASH_Y * side))], false, 1.0, muted.opacity(ot::HOURGLASS_DASH_ALPHA));
             }
         }
         for bulb in [&g.upper, &g.lower] {
@@ -728,7 +729,7 @@ pub fn hourglass(t: &Tokens, share_left: Option<f32>, ink: Hsla, side: f32) -> i
             stroke(window, &points, true, 1.4, ink);
         }
         for y in [0.14, 0.86] {
-            stroke(window, &[point(px(b.x + 0.22 * side), px(b.y + y * side)), point(px(b.x + 0.78 * side), px(b.y + y * side))], false, 1.4, ink);
+            stroke(window, &[point(px(b.x + ot::HOURGLASS_BAR_LEFT * side), px(b.y + y * side)), point(px(b.x + ot::HOURGLASS_BAR_RIGHT * side), px(b.y + y * side))], false, 1.4, ink);
         }
         dot(window, b.x + g.neck.0, b.y + g.neck.1, 0.7, ink);
     }).flex_none().size(px(side))

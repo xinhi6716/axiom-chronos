@@ -5,35 +5,34 @@
 //! three rules hold everywhere: a frame is requested only while something is still moving, a
 //! settled screen asks for nothing and so uses no CPU, and `reduce_motion` shows every animation's
 //! end state at once.
-use gpui_kit::*;
 use gpui_kit::component::{Icon, IconName, Sizable as _, Size};
+pub use gpui_kit::ease_in_out;
 use gpui_kit::prelude::FluentBuilder as _;
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use gpui_kit::*;
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::hash::Hash;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-pub const FRAME_GAP: Duration = Duration::from_millis(33);
+#[cfg(test)]
+mod accept;
+mod spring;
+mod tokens;
+pub use spring::SpringValue;
+pub use tokens::{Dur, Ease, Spring};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameAsk {
-    Now,
-    After(Duration),
-    Paused,
+    Next,
+    Idle,
 }
 
-pub fn next_frame(now: Instant, last: Option<Instant>, active: bool, minimized: bool) -> FrameAsk {
-    if !active || minimized {
-        return FrameAsk::Paused;
-    }
-    let Some(last) = last else { return FrameAsk::Now };
-    let elapsed = now.saturating_duration_since(last);
-    if elapsed >= FRAME_GAP {
-        FrameAsk::Now
+pub fn frame_ask(moving: bool, window_visible: bool, view_visible: bool) -> FrameAsk {
+    if moving && window_visible && view_visible {
+        FrameAsk::Next
     } else {
-        FrameAsk::After(FRAME_GAP - elapsed)
+        FrameAsk::Idle
     }
 }
 
@@ -59,7 +58,15 @@ pub enum Pace {
 
 impl Pace {
     #[cfg(test)]
-    pub const ALL: [Pace; 7] = [Pace::Close, Pace::Glow, Pace::Row, Pace::Screen, Pace::Change, Pace::Open, Pace::Launch];
+    pub const ALL: [Pace; 7] = [
+        Pace::Close,
+        Pace::Glow,
+        Pace::Row,
+        Pace::Screen,
+        Pace::Change,
+        Pace::Open,
+        Pace::Launch,
+    ];
 
     pub const fn duration(self) -> Duration {
         Duration::from_millis(match self {
@@ -71,6 +78,15 @@ impl Pace {
             Pace::Open => 300,
             Pace::Launch => 2400,
         })
+    }
+
+    pub const fn token(self) -> Dur {
+        match self {
+            Pace::Close | Pace::Glow => Dur::Quick,
+            Pace::Row | Pace::Screen | Pace::Change => Dur::Standard,
+            Pace::Open => Dur::Gentle,
+            Pace::Launch => Dur::Slow,
+        }
     }
 
     pub fn seconds(self) -> f32 {
@@ -99,7 +115,13 @@ pub fn mix(a: Hsla, b: Hsla, x: f32) -> Hsla {
         return b;
     }
     let (a, b) = (Rgba::from(a), Rgba::from(b));
-    Rgba { r: lerp(a.r, b.r, x), g: lerp(a.g, b.g, x), b: lerp(a.b, b.b, x), a: lerp(a.a, b.a, x) }.into()
+    Rgba {
+        r: lerp(a.r, b.r, x),
+        g: lerp(a.g, b.g, x),
+        b: lerp(a.b, b.b, x),
+        a: lerp(a.a, b.a, x),
+    }
+    .into()
 }
 
 /// The gentle ease-out everything uses by default: quick to answer, slow to arrive.
@@ -146,7 +168,8 @@ impl Curve {
 /// How every dialog enters and leaves: a short fade with a little travel, over [`Pace::Close`],
 /// which `theme::apply` sets as the kit's dialog duration. Its content then settles with the
 /// spring, through [`settle_in`].
-pub const DIALOG_ENTRANCE: gpui_kit::component::dialog::DialogEntrance = gpui_kit::component::dialog::DialogEntrance::FadeSlide;
+pub const DIALOG_ENTRANCE: gpui_kit::component::dialog::DialogEntrance =
+    gpui_kit::component::dialog::DialogEntrance::FadeSlide;
 
 /// How far a dialog's content rises as it settles.
 const SETTLE_RISE: f32 = 10.0;
@@ -155,12 +178,14 @@ const SETTLE_RISE: f32 = 10.0;
 /// element drives it: it asks for frames only until it lands, and under reduce motion (which the
 /// app keeps in step with its own setting) it is simply there.
 pub fn settle_in(id: impl Into<ElementId>, content: impl IntoElement) -> impl IntoElement {
-    div()
-        .relative()
-        .child(content)
-        .with_animation(id, Animation::new(Pace::Open.duration()).with_easing(|x| Curve::Spring.at(x)), |el, k| {
-            el.top(px(SETTLE_RISE * (1.0 - k))).opacity(lerp(0.3, 1.0, k).min(1.0))
-        })
+    div().relative().child(content).with_animation(
+        id,
+        Animation::new(Pace::Open.duration()).with_easing(|x| Curve::Spring.at(x)),
+        |el, k| {
+            el.top(px(SETTLE_RISE * (1.0 - k)))
+                .opacity(lerp(0.3, 1.0, k).min(1.0))
+        },
+    )
 }
 
 /// The motion clock. Demo scenes freeze it, so one moment of an animation can be captured; a
@@ -173,11 +198,14 @@ pub struct Clock {
 impl Global for Clock {}
 
 pub fn now(cx: &App) -> Instant {
-    cx.try_global::<Clock>().and_then(|clock| clock.frozen).unwrap_or_else(Instant::now)
+    cx.try_global::<Clock>()
+        .and_then(|clock| clock.frozen)
+        .unwrap_or_else(Instant::now)
 }
 
 pub fn is_frozen(cx: &App) -> bool {
-    cx.try_global::<Clock>().is_some_and(|clock| clock.frozen.is_some())
+    cx.try_global::<Clock>()
+        .is_some_and(|clock| clock.frozen.is_some())
 }
 
 /// Demo only: holds every animation at `at`.
@@ -195,6 +223,34 @@ fn progress(since: Instant, pace: Pace, now: Instant) -> f32 {
     now.saturating_duration_since(since).as_secs_f32() / pace.seconds()
 }
 
+// Offset the selected curve with a Hermite basis. It preserves the incoming velocity
+// at retargeting while both the offset and its slope vanish at the destination.
+fn curve_slope(curve: Curve, p: f32) -> f32 {
+    match curve {
+        Curve::EaseOut => 3.0 * (1.0 - p).powi(2),
+        Curve::Smooth => 6.0 * p * (1.0 - p),
+        Curve::Spring => {
+            3.0 * (1.0 - p).powi(2) * (PI * p).cos() + PI * (1.0 - p).powi(3) * (PI * p).sin()
+        }
+    }
+}
+
+fn sample(from: f32, to: f32, velocity: f32, duration: f32, p: f32, curve: Curve) -> (f32, f32) {
+    if p >= 1.0 {
+        return (to, 0.0);
+    }
+    let p = p.max(0.0);
+    let delta = to - from;
+    let offset = velocity * duration - delta * curve_slope(curve, 0.0);
+    let n = if curve == Curve::Spring { 5 } else { 2 };
+    let basis = p * (1.0 - p).powi(n);
+    let slope = (1.0 - p).powi(n - 1) * (1.0 - (n + 1) as f32 * p);
+    (
+        from + delta * curve.at(p) + offset * basis,
+        (delta * curve_slope(curve, p) + offset * slope) / duration,
+    )
+}
+
 /// A figure that glides to each new value instead of jumping: a bar's width, a count, a blend.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tween {
@@ -203,12 +259,20 @@ pub struct Tween {
     start: Option<Instant>,
     pace: Pace,
     curve: Curve,
+    velocity: f32,
 }
 
 impl Tween {
     /// At rest on `value`; the first [`Tween::set`] to another value starts it moving.
     pub fn rest(value: f32, pace: Pace, curve: Curve) -> Self {
-        Self { from: value, to: value, start: None, pace, curve }
+        Self {
+            from: value,
+            to: value,
+            start: None,
+            pace,
+            curve,
+            velocity: 0.0,
+        }
     }
 
     /// How far through its move it is, 0..1; 1 at rest.
@@ -220,23 +284,35 @@ impl Tween {
     }
 
     pub fn value(&self, now: Instant, reduce: bool) -> f32 {
-        let p = self.progress(now, reduce);
-        if p >= 1.0 {
+        if reduce {
             return self.to;
         }
-        lerp(self.from, self.to, self.curve.at(p))
+        self.sample(now).0
     }
 
-    /// Heads for `to` from wherever it is now, so a change mid-move never jumps.
+    fn sample(&self, now: Instant) -> (f32, f32) {
+        sample(
+            self.from,
+            self.to,
+            self.velocity,
+            self.pace.seconds(),
+            self.progress(now, false),
+            self.curve,
+        )
+    }
+
+    /// Retargets without discontinuity in position or velocity.
     pub fn set(&mut self, to: f32, now: Instant, reduce: bool) {
-        if to == self.to {
-            return;
-        }
         if reduce {
             *self = Self::rest(to, self.pace, self.curve);
             return;
         }
-        self.from = self.value(now, reduce);
+        if to == self.to {
+            return;
+        }
+        let (value, velocity) = self.sample(now);
+        self.from = value;
+        self.velocity = velocity;
         self.to = to;
         self.start = Some(now);
     }
@@ -261,17 +337,23 @@ pub struct Glows<K: Eq + Hash + Clone> {
 
 impl<K: Eq + Hash + Clone> Glows<K> {
     pub fn new(pace: Pace) -> Self {
-        Self { tweens: HashMap::new(), pace }
+        Self {
+            tweens: HashMap::new(),
+            pace,
+        }
     }
 
     pub fn set(&mut self, key: &K, target: f32, now: Instant, reduce: bool) {
-        self.tweens.entry(key.clone())
+        self.tweens
+            .entry(key.clone())
             .or_insert_with(|| Tween::rest(0.0, self.pace, Curve::EaseOut))
             .set(target, now, reduce);
     }
 
     pub fn value(&self, key: &K, driver: &mut Driver) -> f32 {
-        self.tweens.get(key).map_or(0.0, |tween| driver.value(tween))
+        self.tweens
+            .get(key)
+            .map_or(0.0, |tween| driver.value(tween))
     }
 
     pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
@@ -285,21 +367,28 @@ impl<K: Eq + Hash + Clone> Glows<K> {
 pub struct Presence {
     shown: bool,
     since: Option<Instant>,
+    from: f32,
+    velocity: f32,
 }
 
 impl Presence {
     pub fn show(&mut self, now: Instant) {
-        if !self.shown {
-            self.shown = true;
-            self.since = Some(now);
-        }
+        self.retarget(true, now);
     }
 
     pub fn hide(&mut self, now: Instant) {
-        if self.shown {
-            self.shown = false;
-            self.since = Some(now);
+        self.retarget(false, now);
+    }
+
+    fn retarget(&mut self, shown: bool, now: Instant) {
+        if self.shown == shown {
+            return;
         }
+        let (value, velocity) = self.sample(now);
+        self.shown = shown;
+        self.from = value;
+        self.velocity = velocity;
+        self.since = Some(now);
     }
 
     fn pace(&self) -> Pace {
@@ -310,22 +399,49 @@ impl Presence {
         }
     }
 
-    /// 0 gone, 1 fully present. While opening the spring passes 1 by a hair before settling.
-    pub fn level(&self, now: Instant, reduce: bool) -> f32 {
+    fn sample(&self, now: Instant) -> (f32, f32) {
         let end = if self.shown { 1.0 } else { 0.0 };
-        let Some(since) = self.since.filter(|_| !reduce) else { return end };
+        let Some(since) = self.since else {
+            return (end, 0.0);
+        };
         let p = progress(since, self.pace(), now);
-        if p >= 1.0 {
-            return end;
-        }
         if self.shown {
-            spring(p)
+            sample(
+                self.from,
+                end,
+                self.velocity,
+                self.pace().seconds(),
+                p,
+                Curve::Spring,
+            )
         } else {
-            1.0 - ease_in(p)
+            // The original closing curve is x².
+            if p >= 1.0 {
+                return (end, 0.0);
+            }
+            let p = p.max(0.0);
+            let offset = self.velocity * self.pace().seconds();
+            let delta = end - self.from;
+            (
+                self.from + delta * ease_in(p) + offset * p * (1.0 - p).powi(2),
+                (2.0 * delta * p + offset * (1.0 - p) * (1.0 - 3.0 * p)) / self.pace().seconds(),
+            )
         }
     }
 
-    /// Whether anything is drawn: while shown, and while it is still leaving.
+    /// 0 gone, 1 fully present; opening may briefly overshoot.
+    pub fn level(&self, now: Instant, reduce: bool) -> f32 {
+        if reduce {
+            if self.shown {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            self.sample(now).0
+        }
+    }
+
     pub fn visible(&self, now: Instant, reduce: bool) -> bool {
         self.shown || !self.settled(now, reduce)
     }
@@ -333,7 +449,10 @@ impl Presence {
 
 impl Settling for Presence {
     fn settled(&self, now: Instant, reduce: bool) -> bool {
-        reduce || self.since.is_none_or(|since| progress(since, self.pace(), now) >= 1.0)
+        reduce
+            || self
+                .since
+                .is_none_or(|since| progress(since, self.pace(), now) >= 1.0)
     }
 }
 
@@ -346,23 +465,46 @@ pub struct Driver {
     reduce: bool,
     held: bool,
     moving: bool,
-    capped: bool,
+    view_visible: bool,
 }
 
 impl Driver {
     pub fn new(reduce: bool, cx: &App) -> Self {
-        Self { now: now(cx), reduce, held: is_frozen(cx), moving: false, capped: false }
+        Self {
+            now: now(cx),
+            reduce,
+            held: is_frozen(cx),
+            moving: false,
+            view_visible: true,
+        }
     }
 
     /// A driver at a given moment, for tests.
     #[cfg(test)]
     pub fn at(now: Instant, reduce: bool) -> Self {
-        Self { now, reduce, held: false, moving: false, capped: false }
+        Self {
+            now,
+            reduce,
+            held: false,
+            moving: false,
+            view_visible: true,
+        }
     }
 
-    pub fn capped(mut self) -> Self {
-        self.capped = true;
+    pub fn capped(self) -> Self {
         self
+    }
+
+    pub fn view_visible(&mut self, on: bool) {
+        self.view_visible = on;
+    }
+
+    pub fn ask(&self, window_visible: bool) -> FrameAsk {
+        frame_ask(
+            self.moving && !self.reduce && !self.held,
+            window_visible,
+            self.view_visible,
+        )
     }
 
     pub fn now(&self) -> Instant {
@@ -399,75 +541,24 @@ impl Driver {
 
     /// Whether the view needs another frame. Never while settled, and never on a frozen clock.
     pub fn wants_frame(&self) -> bool {
-        self.moving && !self.held
+        self.ask(true) == FrameAsk::Next
     }
 
     pub fn finish(self, window: &mut Window) -> bool {
-        if !self.wants_frame() {
-            return false;
+        let wants_frame = self.ask(window.is_visible()) == FrameAsk::Next;
+        if wants_frame {
+            window.request_animation_frame();
         }
-        let ask = self.capped.then(|| next_frame(Instant::now(), Some(self.now), window.is_window_active(), !window.is_visible()));
-        match ask {
-            None | Some(FrameAsk::Now) => window.request_animation_frame(),
-            Some(FrameAsk::Paused) => {}
-            Some(FrameAsk::After(wait)) => defer_redraw(window, window.current_view(), Instant::now() + wait),
-        }
-        true
+        wants_frame
     }
-}
-
-fn want<K: Hash + Eq, V: Hash + Eq>(pending: &mut HashMap<K, HashSet<V>>, window: K, view: V) -> bool {
-    use std::collections::hash_map::Entry;
-    match pending.entry(window) {
-        Entry::Occupied(mut entry) => {
-            entry.get_mut().insert(view);
-            false
-        }
-        Entry::Vacant(entry) => {
-            entry.insert(HashSet::from([view]));
-            true
-        }
-    }
-}
-
-fn take<K: Hash + Eq, V>(pending: &mut HashMap<K, HashSet<V>>, window: &K) -> HashSet<V> {
-    pending.remove(window).unwrap_or_default()
-}
-
-thread_local! {
-    static PENDING_REDRAWS: RefCell<HashMap<WindowId, HashSet<EntityId>>> = RefCell::new(HashMap::new());
-}
-
-/// Lets platform frames pass until `due`, with at most one chain per window.
-fn defer_redraw(window: &Window, view: EntityId, due: Instant) {
-    let window_id = window.window_handle().window_id();
-    if !PENDING_REDRAWS.with(|pending| want(&mut pending.borrow_mut(), window_id, view)) {
-        return;
-    }
-    fn tick(window: &Window, window_id: WindowId, due: Instant) {
-        window.on_next_frame(move |window, cx| {
-            if !window.is_visible() || !window.is_window_active() {
-                PENDING_REDRAWS.with(|pending| take(&mut pending.borrow_mut(), &window_id));
-                return;
-            }
-            if Instant::now() >= due {
-                let views = PENDING_REDRAWS.with(|pending| take(&mut pending.borrow_mut(), &window_id));
-                for view in views {
-                    cx.notify(view);
-                }
-            } else {
-                tick(window, window_id, due);
-            }
-        });
-    }
-    tick(window, window_id, due);
 }
 
 const SPIN_PERIOD: Duration = Duration::from_millis(800);
 static SPIN_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 pub fn spin_phase(elapsed: Duration) -> f32 {
-    let phase = (elapsed.as_nanos() % SPIN_PERIOD.as_nanos()) as f64 / SPIN_PERIOD.as_nanos() as f64;
+    let phase =
+        (elapsed.as_nanos() % SPIN_PERIOD.as_nanos()) as f64 / SPIN_PERIOD.as_nanos() as f64;
     (phase as f32).min(f32::from_bits(1.0f32.to_bits() - 1))
 }
 
@@ -480,7 +571,11 @@ pub struct Spin {
 
 impl Spin {
     pub fn new(icon: IconName) -> Self {
-        Self { icon, size: None, color: None }
+        Self {
+            icon,
+            size: None,
+            color: None,
+        }
     }
 
     pub fn size(mut self, size: Pixels) -> Self {
@@ -498,16 +593,16 @@ impl RenderOnce for Spin {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let now = now(cx);
         let reduced = cx.reduce_motion()
-            || cx.try_global::<super::settings::Store>().is_some_and(|store| store.settings.reduce_motion == Some(true));
+            || cx
+                .try_global::<super::settings::Store>()
+                .is_some_and(|store| store.settings.reduce_motion == Some(true));
         let phase = if reduced || is_frozen(cx) {
             0.0
         } else {
             let epoch = *SPIN_EPOCH.get_or_init(|| now);
             let phase = spin_phase(now.saturating_duration_since(epoch));
-            match next_frame(Instant::now(), Some(now), window.is_window_active(), !window.is_visible()) {
-                FrameAsk::Paused => {}
-                FrameAsk::Now => window.request_animation_frame(),
-                FrameAsk::After(wait) => defer_redraw(window, window.current_view(), Instant::now() + wait),
+            if frame_ask(true, window.is_visible(), true) == FrameAsk::Next {
+                window.request_animation_frame();
             }
             phase
         };
@@ -550,7 +645,10 @@ mod tests {
         let actual = glows.value(&key, &mut Driver::at(later, false));
         let mut uninterrupted = Glows::new(pace);
         uninterrupted.set(&key, 1.0, start, false);
-        assert_eq!(actual, uninterrupted.value(&key, &mut Driver::at(later, false)));
+        assert_eq!(
+            actual,
+            uninterrupted.value(&key, &mut Driver::at(later, false))
+        );
         glows.set(&key, 0.0, middle, false);
         assert_eq!(glows.value(&key, &mut Driver::at(middle, false)), before);
         let mut end = Driver::at(middle + pace.duration(), false);
@@ -578,62 +676,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_views_share_a_window_chain() {
-        let mut pending = HashMap::new();
-        assert!(want(&mut pending, 1, 10));
-        assert!(!want(&mut pending, 1, 20));
-        assert_eq!(pending[&1], HashSet::from([10, 20]));
-        assert!(want(&mut pending, 2, 30));
-        assert_eq!(take(&mut pending, &1), HashSet::from([10, 20]));
-        assert!(want(&mut pending, 1, 10));
-        assert_eq!(take(&mut pending, &1), HashSet::from([10]));
-        assert!(take(&mut pending, &1).is_empty());
-        assert_eq!(take(&mut pending, &2), HashSet::from([30]));
-    }
-
-    #[test]
-    fn external_renders_do_not_multiply_deferred_chains() {
-        let start = Instant::now();
-        let external: Vec<u64> = (0..100).map(|i| 20 + i * 57 + (i * i * 13 % 43)).collect();
-        let last_external = *external.last().unwrap();
-        let mut pending = HashMap::new();
-        let mut chains = Vec::new();
-        let mut draws = Vec::new();
-        for view in 1..=3 {
-            if want(&mut pending, 1, view) {
-                chains.push(start + FRAME_GAP);
-            }
-        }
-
-        for ms in 0..=10_000 {
-            let time = start + Duration::from_millis(ms);
-            if let Ok(i) = external.binary_search(&ms) {
-                if want(&mut pending, 1, (i % 3) + 1) {
-                    chains.push(time + FRAME_GAP);
-                }
-            }
-            if ms % 6 == 0 && chains.first().is_some_and(|due| time >= *due) {
-                chains.remove(0);
-                let views = take(&mut pending, &1);
-                assert_eq!(views, HashSet::from([1, 2, 3]));
-                draws.push(time);
-                for view in views {
-                    if want(&mut pending, 1, view) {
-                        chains.push(time + FRAME_GAP);
-                    }
-                }
-            }
-            assert!(chains.len() <= 1);
-            assert_eq!(pending.len(), chains.len());
-        }
-        let after_external: Vec<_> = draws.iter().filter(|time| **time > start + Duration::from_millis(last_external)).collect();
-        assert!(after_external.len() > 2);
-        assert!(after_external.windows(2).all(|pair| pair[1].duration_since(*pair[0]) >= FRAME_GAP));
-        let last_five_seconds = draws.iter().filter(|time| **time > start + Duration::from_secs(5)).count();
-        assert!((125..=152).contains(&last_five_seconds), "{last_five_seconds} draws");
-    }
-
-    #[test]
     fn spin_phase_wraps_every_eight_tenths_of_a_second() {
         assert_eq!(spin_phase(Duration::ZERO), 0.0);
         assert_eq!(spin_phase(Duration::from_millis(400)), 0.5);
@@ -644,69 +686,6 @@ mod tests {
             assert!((0.0..1.0).contains(&spin_phase(Duration::from_nanos(nanos))));
         }
         assert!((0.0..1.0).contains(&spin_phase(SPIN_PERIOD - Duration::from_nanos(1))));
-    }
-
-    #[test]
-    fn frame_cap_waits_until_the_deadline() {
-        let last = Instant::now();
-        assert!(FRAME_GAP >= Duration::from_millis(33));
-        assert_eq!(next_frame(last, None, true, false), FrameAsk::Now);
-        for ms in 0..=32 {
-            let elapsed = Duration::from_millis(ms);
-            match next_frame(last + elapsed, Some(last), true, false) {
-                FrameAsk::After(wait) => assert_eq!(elapsed + wait, FRAME_GAP),
-                ask => panic!("expected a wait at {ms} ms, got {ask:?}"),
-            }
-        }
-        for ms in [33, 200] {
-            assert_eq!(next_frame(last + Duration::from_millis(ms), Some(last), true, false), FrameAsk::Now);
-        }
-        assert_eq!(next_frame(last, Some(last + Duration::from_millis(1)), true, false), FrameAsk::After(FRAME_GAP));
-    }
-
-    #[test]
-    fn platform_ticks_keep_draws_at_least_one_frame_gap_apart() {
-        let start = Instant::now();
-        let mut last = None;
-        let mut draws = Vec::new();
-        for ms in (0..=10_000).step_by(6) {
-            let tick = start + Duration::from_millis(ms);
-            if next_frame(tick, last, true, false) == FrameAsk::Now {
-                draws.push(tick);
-                last = Some(tick);
-            }
-        }
-        assert!(draws.windows(2).all(|pair| pair[1].duration_since(pair[0]) >= FRAME_GAP));
-        assert!((250..=303).contains(&draws.len()), "{} draws", draws.len());
-    }
-
-    #[test]
-    fn inactive_or_minimized_pauses_and_resumes() {
-        let start = Instant::now();
-        for ms in [0, 33, 200] {
-            let tick = start + Duration::from_millis(ms);
-            for last in [None, Some(start)] {
-                assert_eq!(next_frame(tick, last, false, false), FrameAsk::Paused);
-                assert_eq!(next_frame(tick, last, true, true), FrameAsk::Paused);
-                assert_eq!(next_frame(tick, last, false, true), FrameAsk::Paused);
-            }
-            if ms >= 33 {
-                assert_eq!(next_frame(tick, Some(start), true, false), FrameAsk::Now);
-            }
-        }
-        let mut last = None;
-        let mut draws = Vec::new();
-        for ms in (0..=300).step_by(6) {
-            let active = !(60..180).contains(&ms);
-            let tick = start + Duration::from_millis(ms);
-            if next_frame(tick, last, active, false) == FrameAsk::Now {
-                assert!(active);
-                draws.push(ms);
-                last = Some(tick);
-            }
-        }
-        assert!(draws.iter().all(|&ms| !(60..180).contains(&ms)));
-        assert_eq!(draws.iter().copied().find(|&ms| ms >= 180), Some(180));
     }
 
     #[test]
@@ -726,10 +705,21 @@ mod tests {
     #[test]
     fn every_curve_starts_at_rest_and_lands_exactly() {
         for curve in [Curve::EaseOut, Curve::Smooth, Curve::Spring] {
-            assert!(curve.at(0.0).abs() < 1e-6, "{curve:?} at 0: {}", curve.at(0.0));
-            assert!((curve.at(1.0) - 1.0).abs() < 1e-6, "{curve:?} at 1: {}", curve.at(1.0));
+            assert!(
+                curve.at(0.0).abs() < 1e-6,
+                "{curve:?} at 0: {}",
+                curve.at(0.0)
+            );
+            assert!(
+                (curve.at(1.0) - 1.0).abs() < 1e-6,
+                "{curve:?} at 1: {}",
+                curve.at(1.0)
+            );
             // Outside the range they hold their ends rather than running away.
-            assert!(curve.at(-0.5).abs() < 1e-6 && (curve.at(1.7) - 1.0).abs() < 1e-6, "{curve:?}");
+            assert!(
+                curve.at(-0.5).abs() < 1e-6 && (curve.at(1.7) - 1.0).abs() < 1e-6,
+                "{curve:?}"
+            );
         }
     }
 
@@ -751,14 +741,31 @@ mod tests {
     #[test]
     fn the_spring_overshoots_a_little_once_and_never_bounces() {
         let peak = steps().map(spring).fold(0.0f32, f32::max);
-        assert!(peak > 1.005, "a spring with no overshoot is just an ease: {peak}");
+        assert!(
+            peak > 1.005,
+            "a spring with no overshoot is just an ease: {peak}"
+        );
         assert!(peak < 1.04, "overshoot must stay a soft settle: {peak}");
         // One pass beyond rest, then a monotone return: no second crossing below 1.
         let values: Vec<f32> = steps().map(spring).collect();
-        let first_over = values.iter().position(|&y| y > 1.0).expect("it passes rest");
-        assert!(values[first_over..].iter().all(|&y| y >= 1.0 - 1e-6), "the spring bounces back below rest");
-        let crest = values.iter().cloned().enumerate().fold((0, 0.0), |a, (i, y)| if y > a.1 { (i, y) } else { a }).0;
-        assert!(values[crest..].windows(2).all(|w| w[1] <= w[0] + 1e-6), "after its crest it only settles");
+        let first_over = values
+            .iter()
+            .position(|&y| y > 1.0)
+            .expect("it passes rest");
+        assert!(
+            values[first_over..].iter().all(|&y| y >= 1.0 - 1e-6),
+            "the spring bounces back below rest"
+        );
+        let crest = values
+            .iter()
+            .cloned()
+            .enumerate()
+            .fold((0, 0.0), |a, (i, y)| if y > a.1 { (i, y) } else { a })
+            .0;
+        assert!(
+            values[crest..].windows(2).all(|w| w[1] <= w[0] + 1e-6),
+            "after its crest it only settles"
+        );
         // Before the crest it only rises.
         assert!(values[..crest].windows(2).all(|w| w[1] >= w[0] - 1e-6));
     }
@@ -773,7 +780,10 @@ mod tests {
                 assert!((80..=300).contains(&ms), "{pace:?} {ms} ms");
             }
         }
-        assert!(Pace::Close.duration() < Pace::Open.duration(), "closing is quicker than opening");
+        assert!(
+            Pace::Close.duration() < Pace::Open.duration(),
+            "closing is quicker than opening"
+        );
     }
 
     #[test]
@@ -809,7 +819,11 @@ mod tests {
         assert!(tween.settled(t0, false));
         tween.set(6.0, t0, false);
         assert!(!tween.settled(t0, false));
-        assert_eq!(tween.value(t0, false), 2.0, "a move starts where the value was");
+        assert_eq!(
+            tween.value(t0, false),
+            2.0,
+            "a move starts where the value was"
+        );
         let mid = t0 + Pace::Change.duration() / 2;
         let at_mid = tween.value(mid, false);
         assert!(at_mid > 2.0 && at_mid < 6.0);
@@ -842,7 +856,10 @@ mod tests {
         assert!(overlay.settled(t0, true));
         overlay.hide(t0);
         assert_eq!(overlay.level(t0, true), 0.0);
-        assert!(!overlay.visible(t0, true), "a closed overlay is gone at once");
+        assert!(
+            !overlay.visible(t0, true),
+            "a closed overlay is gone at once"
+        );
 
         let mut driver = Driver::at(t0, true);
         assert_eq!(driver.value(&moving), 4.0);
@@ -865,7 +882,10 @@ mod tests {
         let open = t0 + Pace::Open.duration();
         assert_eq!(overlay.level(open, false), 1.0);
         overlay.hide(open);
-        assert!(overlay.visible(open, false), "it stays drawn while it leaves");
+        assert!(
+            overlay.visible(open, false),
+            "it stays drawn while it leaves"
+        );
         let half = overlay.level(open + Pace::Close.duration() / 2, false);
         assert!(half > 0.0 && half < 1.0);
         let gone = open + Pace::Close.duration();

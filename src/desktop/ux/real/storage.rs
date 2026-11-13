@@ -2,8 +2,11 @@
 //! service-storage-seam.
 use crate::{
     base::{Failure, Res},
-    desktop::ux::seams::{
-        CleanupPlan, CleanupProgress, DiskSpace, StorageItem, StorageReport, StorageService,
+    desktop::{
+        data::io,
+        ux::seams::{
+            CleanupPlan, CleanupProgress, DiskSpace, StorageItem, StorageReport, StorageService,
+        },
     },
     storage::{
         preflight,
@@ -14,7 +17,6 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -79,6 +81,7 @@ struct StoredPlan {
     items: Vec<Planned>,
 }
 
+#[derive(Clone)]
 struct Job {
     paths: Vec<String>,
     audit_offset: usize,
@@ -103,7 +106,7 @@ impl LedgerStorage {
     }
 
     fn audit_len(&self) -> usize {
-        fs::metadata(retention::audit_log(&self.home))
+        io::metadata(retention::audit_log(&self.home))
             .map(|m| m.len() as usize)
             .unwrap_or(0)
     }
@@ -207,6 +210,7 @@ impl StorageService for LedgerStorage {
                 None => return Err(stale()),
             }
         }
+        let audit_offset = self.audit_len();
         let mut jobs = self.jobs.lock().unwrap();
         let job_id = format!("clean-{}-{}", plan_id, jobs.len() + 1);
         let finished = Arc::new(AtomicBool::new(false));
@@ -216,7 +220,7 @@ impl StorageService for LedgerStorage {
             job_id.clone(),
             Job {
                 paths: stored_paths,
-                audit_offset: self.audit_len(),
+                audit_offset,
                 audit_end: audit_end.clone(),
                 finished: finished.clone(),
                 error: error.clone(),
@@ -229,7 +233,7 @@ impl StorageService for LedgerStorage {
             if let Err(e) = retention::execute(&home, &run, now, &cancel) {
                 *error.lock().unwrap() = Some(e.message);
             }
-            let end = fs::metadata(retention::audit_log(&home))
+            let end = io::metadata(retention::audit_log(&home))
                 .map(|m| m.len() as usize)
                 .unwrap_or(0);
             audit_end.store(end, Ordering::SeqCst);
@@ -241,14 +245,17 @@ impl StorageService for LedgerStorage {
     }
 
     fn progress(&self, job: &str) -> Res<CleanupProgress> {
-        let jobs = self.jobs.lock().unwrap();
-        let job = jobs
+        let job = self
+            .jobs
+            .lock()
+            .unwrap()
             .get(job)
+            .cloned()
             .ok_or_else(|| Failure::new("not_found", "Job not found"))?;
         let finished = job.finished.load(Ordering::SeqCst);
         let mut done = Vec::new();
         let mut failed = Vec::new();
-        let log = fs::read(retention::audit_log(&self.home)).unwrap_or_default();
+        let log = io::read(retention::audit_log(&self.home)).unwrap_or_default();
         let end = if finished {
             job.audit_end.load(Ordering::SeqCst)
         } else {

@@ -73,6 +73,63 @@ fn waive(reason: &str, finding: Option<usize>) -> UnitActionKind {
 }
 
 #[test]
+fn outbox_applies_and_refuses_real_unit_actions() {
+    use crate::desktop::{
+        data::outbox::TicketState,
+        ux::seams::unit_actions::{unit_action_outbox_for, UnitAction},
+    };
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let f = fixture();
+    let adapter = Arc::new(actions(&f));
+    let outbox = unit_action_outbox_for(adapter.clone());
+    let action = UnitAction {
+        session: "s1".into(),
+        unit: "u1".into(),
+        kind: UnitActionKind::Retry,
+        key: "retry".into(),
+    };
+    let ticket = outbox.submit(action.clone(), &action.key);
+    let duplicate = outbox.submit(action.clone(), &action.key);
+    assert!(ticket.same_ticket(&duplicate));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ticket.state() == TicketState::Pending {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ticket.state(), TicketState::Applied);
+    assert!(
+        adapter
+            .act("s1", "u1", &action.kind, &action.key)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(
+        orch::read_units(&f.store)
+            .unwrap()
+            .iter()
+            .filter(|u| u.id == "u1-retry1")
+            .count(),
+        1
+    );
+    let refused = UnitAction {
+        key: "refused".into(),
+        kind: waive("why", None),
+        ..action
+    };
+    let ticket = outbox.submit(refused.clone(), &refused.key);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ticket.state() == TicketState::Pending {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(ticket.state(), TicketState::Refused(reason) if reason.contains("no review")));
+    assert!(outbox.tickets().iter().any(|t| t.same_ticket(&ticket)));
+}
+
+#[test]
 fn evidence_reports_diff_review_usage_and_failure() {
     let f = fixture();
     let a = actions(&f);

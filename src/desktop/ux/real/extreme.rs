@@ -3,7 +3,10 @@
 use crate::{
     base::Res,
     codex::extreme,
-    desktop::ux::seams::{FastCost, TurnPolicy, TurnSettings},
+    desktop::{
+        data::io,
+        ux::seams::{FastCost, TurnPolicy, TurnSettings},
+    },
 };
 use std::path::PathBuf;
 
@@ -29,7 +32,11 @@ impl CodexTurnPolicy {
 
 impl TurnPolicy for CodexTurnPolicy {
     fn current(&self) -> TurnSettings {
-        Self::settings(extreme::load(&self.slots_home).on)
+        let setting: extreme::Setting = io::read(extreme::path(&self.slots_home))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self::settings(setting.on)
     }
     fn set_extreme(&self, on: bool) -> TurnSettings {
         match self.try_set_extreme(on) {

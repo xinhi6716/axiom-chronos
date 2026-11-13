@@ -11,6 +11,23 @@ use std::io::{Read, Seek, SeekFrom};
 const READ_BUDGET: u64 = 4 << 20;
 const MAX_NOTICES: usize = 2000;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static RECEIVED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_received(events: &[OrchEvent], after_seq: u64) {
+    let mut last_seq = after_seq;
+    for event in events {
+        if event.seq > last_seq {
+            last_seq = event.seq;
+            crate::desktop::perf::event_received(event.seq);
+            #[cfg(test)]
+            RECEIVED.with(|received| received.borrow_mut().push(event.seq));
+        }
+    }
+}
+
 pub(super) struct Row {
     session: String,
     activity: Vec<OrchEvent>,
@@ -132,6 +149,7 @@ impl Feed {
                     .is_ok_and(|m| m.len() <= READ_BUDGET)
                 {
                     if let Ok(events) = source.events(store, projection.last_seq) {
+                        note_received(&events, projection.last_seq);
                         projection.apply(&events);
                         activity = events;
                     }
@@ -223,6 +241,24 @@ impl Feed {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn received_helper_calls_perf() {
+        fn assert_calls_perf(body: &str) {
+            assert!(body.contains("perf::event_received("));
+        }
+        let source = include_str!("feed.rs");
+        let body = source
+            .split("\nfn note_received(")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert_calls_perf(body);
+        assert!(std::panic::catch_unwind(|| assert_calls_perf("fn note_received() {}"))
+            .is_err());
+    }
 
     #[test]
     fn log_reads_are_bounded_and_recover_after_long_partial_and_truncated_lines() {

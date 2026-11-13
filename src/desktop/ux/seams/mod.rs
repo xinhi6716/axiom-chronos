@@ -6,6 +6,8 @@ pub mod github;
 pub mod interjection;
 pub mod modes;
 pub mod optimizer;
+pub mod routines;
+pub use routines::*;
 pub mod paper; // p8:
 pub mod sessions;
 pub mod storage;

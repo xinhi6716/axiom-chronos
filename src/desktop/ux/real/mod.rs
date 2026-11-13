@@ -4,6 +4,7 @@ pub mod dual_core;
 pub mod extreme;
 pub mod interjections;
 pub mod modes;
+pub mod routines;
 pub mod paper; // p8:
 pub mod storage;
 pub mod unit_actions;

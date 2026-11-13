@@ -1,5 +1,11 @@
 //! The Chronos desktop app. Screens draw `model::AppState`; `live` fills it from disk and the session host.
 // --- research workspace (phase 9) ---
+pub mod layout;
+pub mod components;
+pub mod viz;
+pub mod data;
+pub mod targets;
+pub mod perf;
 pub mod research;
 // --- end research workspace (phase 9) ---
 mod composer;
@@ -48,6 +54,9 @@ use std::time::Duration;
 /// How the app starts. Demo options exist so every screen can be seen and captured without a live wish.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    pub target: Option<String>,
+    pub capture_state: targets::CaptureState,
+    pub perf_log: Option<std::path::PathBuf>,
     pub demo: bool,
     pub confirm_quit: bool,
     pub view: Option<Screen>,
@@ -104,6 +113,9 @@ pub fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--target" => { i += 1; let id = args.get(i).ok_or("--target takes an id")?; if targets::find(id).is_none() { return Err(format!("unknown target: {id}")); } options.target = Some(id.clone()); },
+            "--state" => { i += 1; let value = args.get(i).ok_or("--state takes a value")?; options.capture_state = targets::CaptureState::from_key(value).ok_or_else(|| format!("unknown state: {value}"))?; },
+            "--perf-log" => { i += 1; options.perf_log = Some(args.get(i).ok_or("--perf-log takes a path")?.into()); },
             "--demo" => options.demo = true,
             "--confirm-quit" => options.confirm_quit = true,
             "--light" => options.light = true,
@@ -170,7 +182,20 @@ pub fn state_scene(options: &Options) -> Option<String> {
     if options.demo { options.scene.clone() } else { None }
 }
 
+// `mini::open_mini_at` owns creation outside this module. Preserve its content and
+// the required gpui-kit overlay host while inserting the instrumentation root.
+fn instrument_mini(handle: AnyWindowHandle, cx: &mut App) -> gpui_kit::Result<()> {
+    handle.update(cx, |_, window, cx| {
+        let view = gpui_kit::base::Root::read(window, cx).view().clone();
+        let instrumented = cx.new(|_| perf::Root::new(view));
+        window.replace_root(cx, |window, cx| gpui_kit::base::Root::new(instrumented, window, cx));
+    })
+}
+
 pub fn run(options: Options) -> i32 {
+    let started = std::time::Instant::now();
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_failed = failed.clone();
     // Read before the event loop starts, so no frame ever waits on the disk.
     let ephemeral = options.demo || options.offscreen;
     let mut store = settings::Store::open(ephemeral);
@@ -181,10 +206,12 @@ pub fn run(options: Options) -> i32 {
         }
     }
     if let Some(mode) = options.mode { store.settings.mode = mode; }
+    if options.target.is_some() { store.settings.mode = settings::WindowMode::Full; }
     if let Some(density) = options.density { store.settings.density = density; }
     let prefs = store.settings.clone();
     gpui_kit::application().with_assets(ornament::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        if let Some(path) = options.perf_log.clone() { perf::install(path, started, cx); }
         let mode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()) };
         theme::apply(mode, None, cx);
         i18n::set(if options.english { i18n::Lang::En } else { prefs.language.resolve() }, cx);
@@ -210,12 +237,13 @@ pub fn run(options: Options) -> i32 {
             }
         }
         initial.view = options.view.unwrap_or(prefs.last_screen);
+        let capture = options.target.as_deref().and_then(targets::find);
         let state = cx.new(|_| initial);
         if !options.demo {
             live::connect(state.clone(), cx);
         }
-        let default_size = options.size.unwrap_or_else(|| size(px(1440.), px(900.)));
-        let min_size = size(px(1100.), px(700.));
+        let default_size = options.size.unwrap_or_else(|| size(px(layout::DEFAULT_WINDOW.0), px(layout::DEFAULT_WINDOW.1)));
+        let min_size = size(px(layout::MIN_WINDOW.0), px(layout::MIN_WINDOW.1));
         let bounds = if options.offscreen {
             WindowBounds::Windowed(Bounds { origin: point(px(-3000.), px(-3000.)), size: default_size })
         } else {
@@ -241,13 +269,22 @@ pub fn run(options: Options) -> i32 {
             launch::Launch::none()
         };
         if shell::start_mini_only(ephemeral, prefs.mode, options.confirm_quit) {
-                if let Err(error) = mini::open_mini_at(state.clone(), prefs.mini_on_top, options.offscreen, cx) {
-                    eprintln!("{error}");
-                    cx.quit();
+                match mini::open_mini_at(state.clone(), prefs.mini_on_top, options.offscreen, cx) {
+                    Ok(handle) => if let Err(error) = instrument_mini(handle, cx) {
+                        eprintln!("{error}");
+                        cx.quit();
+                    },
+                    Err(error) => { eprintln!("{error}"); cx.quit(); }
                 }
         } else {
                 gpui_kit::open_window(window, cx, |window, cx| {
-                    cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening))
+                    let shell = cx.new(|cx| shell::Shell::new(state.clone(), may_flash, window, cx).with_launch(opening));
+                    if let Some(t) = &capture {
+                        let prepared = state.update(cx, |state, cx| { let result = targets::prepare(t, options.capture_state, state); cx.notify(); result });
+                        let result = prepared.and_then(|()| shell.update(cx, |shell, cx| shell.apply_target(t, options.capture_state, window, cx)));
+                        if let Err(error) = result { eprintln!("unregistered target: {} ({})", error.target, error.state.key()); run_failed.store(true, std::sync::atomic::Ordering::Relaxed); cx.quit(); }
+                    }
+                    cx.new(|_| perf::Root::new(shell.into()))
                 }).expect("could not open the main window");
         }
         if let Some(seconds) = options.quit_after {
@@ -258,7 +295,7 @@ pub fn run(options: Options) -> i32 {
             .detach();
         }
     });
-    0
+    if failed.load(std::sync::atomic::Ordering::Relaxed) { 1 } else { 0 }
 }
 
 #[cfg(test)]

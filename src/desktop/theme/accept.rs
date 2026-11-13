@@ -161,3 +161,17 @@ fn ornament_negative_control_rejects_stubs() {
         assert!(!raised_card_shadows(&t, 1.0, 0.0).is_empty());
     }
 }
+
+#[test]
+fn ornament_gold_glow_preserves_appearance_and_clamps_strength() {
+    use super::super::ornament::gold_glow;
+    for t in both() {
+        for (strength, alpha) in [(-1.0, 0.0), (0.5, 0.12), (1.0, 0.24), (2.0, 0.24)] {
+            let shadows = gold_glow(&t, strength);
+            assert_eq!(shadows.len(), 1);
+            assert_eq!(shadows[0].color, t.gold.opacity(alpha));
+            assert_eq!(shadows[0].blur_radius, px(12.0));
+            assert_eq!(shadows[0].spread_radius, px(0.0));
+        }
+    }
+}

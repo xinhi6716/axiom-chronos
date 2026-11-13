@@ -72,6 +72,37 @@ pub fn row_height(d: Density) -> Pixels {
     px(match d { Density::Comfortable => 36., Density::Dense => 28. })
 }
 
+/// Visual measurements and colours for the celestial ornaments.
+pub(crate) mod ornament_tokens {
+    use gpui_kit::{px, Hsla, Pixels};
+
+    pub const TRANSPARENT: f32 = 0.0;
+    pub const BACKDROP_EDGE: f32 = 0.3;
+    pub const BACKDROP_BOTTOM: f32 = 0.5;
+    pub const BACKDROP_DARK_ALPHA: f32 = 0.16;
+    pub const BACKDROP_LIGHT_ALPHA: f32 = 0.12;
+    pub const DIVIDER_LINE_HEIGHT: Pixels = px(1.0);
+    pub const DIVIDER_STROKE: Pixels = px(1.2);
+    pub const DIAMETER_FACTOR: f32 = 2.0;
+    pub const RUNNING_ALPHA: f32 = 0.95;
+    pub const RUNNING_ALPHA_RANGE: f32 = 0.45;
+    pub const BODY_ALPHA: f32 = 0.7;
+    pub const HALVE: f32 = 2.0;
+    pub const VIGNETTE_SHADE: Hsla = super::hex(0x000000);
+    pub const ARC_CENTER: f32 = 2.0;
+    pub const ARC_WIDTH: f32 = 0.46;
+    pub const ARC_TOP: f32 = 0.12;
+    pub const ARC_HEIGHT: f32 = 0.75;
+    pub const ARC_ELEMENT_HEIGHT: Pixels = px(8.0);
+    pub const GOLD_GLOW_ALPHA: f32 = 0.24;
+    pub const GOLD_GLOW_BLUR: Pixels = px(12.0);
+    pub const GOLD_GLOW_SPREAD: Pixels = px(0.0);
+    pub const HOURGLASS_DASH_Y: f32 = 0.75;
+    pub const HOURGLASS_DASH_ALPHA: f32 = 0.4;
+    pub const HOURGLASS_BAR_LEFT: f32 = 0.22;
+    pub const HOURGLASS_BAR_RIGHT: f32 = 0.78;
+}
+
 pub const RADIUS: Pixels = px(4.);
 pub const RADIUS_SMALL: Pixels = px(2.);
 pub const TARGET_MIN: Pixels = px(28.);

@@ -1,8 +1,9 @@
 use crate::base::{Failure, Res};
+use crate::desktop::data::outbox::{Outbox, Outcome};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
@@ -47,6 +48,17 @@ pub trait Interjections: Send + Sync + 'static {
     fn history(&self, session: &str) -> Vec<Amendment>;
     fn running_work(&self, session: &str) -> RunningWork;
     fn pause_batch(&self, session: &str) -> Res<()>;
+}
+pub fn interjection_outbox_for(service: Arc<dyn Interjections>) -> Outbox<Draft> {
+    Outbox::new(move |draft: &Draft, key| {
+        if draft.client_id != key {
+            return Outcome::Refused("idempotency key does not match client id".into());
+        }
+        match service.send(draft) {
+            Ok(_) => Outcome::Applied,
+            Err(error) => super::approvals::outbox_failure(error),
+        }
+    })
 }
 #[derive(Default)]
 struct State {

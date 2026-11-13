@@ -219,3 +219,24 @@ fn space_comes_from_the_disk_probe() {
     assert!(storage.report().unwrap().space.is_some());
     assert!(storage.progress("none").is_err());
 }
+
+#[test]
+fn progress_rejects_reads_during_render() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = LedgerStorage::new(home.path());
+    let plan = storage.preview(&[]).unwrap();
+    let job = storage.clean(&plan.id, plan.version, true).unwrap();
+    assert!(storage.progress(&job).is_ok());
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = crate::desktop::components::panel::RenderGuard::new("test.panel");
+        storage.progress(&job).unwrap();
+    }))
+    .expect_err("a render must not read the audit log");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert_eq!(message, Some("io during render test.panel"));
+    assert!(storage.progress(&job).is_ok());
+}

@@ -179,3 +179,21 @@ fn unwritable_slots_home_reports_and_keeps_the_setting() {
         );
     }
 }
+
+#[test]
+fn current_rejects_reads_during_render() {
+    let home = tempfile::tempdir().unwrap();
+    extreme::set(home.path(), true).unwrap();
+    let policy = CodexTurnPolicy::new(home.path().to_path_buf());
+    assert!(policy.current().extreme);
+    let panic = std::panic::catch_unwind(|| {
+        let _guard = crate::desktop::components::panel::RenderGuard::new("test.panel");
+        policy.current();
+    })
+    .expect_err("a render must not read the extreme setting");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert_eq!(message, Some("io during render test.panel"));
+}

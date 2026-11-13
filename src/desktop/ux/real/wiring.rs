@@ -55,6 +55,7 @@ pub fn production(home: &Path, slots_home: &Path) -> Seams {
         sessions: None,
         optimizer: None,
         github: None,
+        routines: Some(Arc::new(super::routines::StoreRoutines::new(home.into()))),
         paper: Some(Arc::new(super::paper::SessionPaper::new(home))), // p8:
     }
 }

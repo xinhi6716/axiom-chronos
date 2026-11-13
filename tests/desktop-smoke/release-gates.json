@@ -1,0 +1,969 @@
+{
+  "version": 1,
+  "budgets": {
+    "frame_p95_ms": 8.3,
+    "frame_p99_ms": 16.7,
+    "frame_max_ms": 33,
+    "event_to_pixel_ms": 250,
+    "idle_cpu_pct_one_core": 0.5,
+    "idle_window_s": 60,
+    "cold_start_p95_s": 2.0,
+    "idle_private_mib": 512,
+    "large_extra_peak_mib": 512,
+    "exe_mib": 150,
+    "large_rows": 60000
+  },
+  "capture": {
+    "langs": [
+      "zh-TW",
+      "en"
+    ],
+    "themes": [
+      "dark",
+      "light"
+    ],
+    "sizes": [
+      "1100x700",
+      "1920x1200"
+    ],
+    "states": [
+      "live",
+      "empty",
+      "error",
+      "action"
+    ]
+  },
+  "layout": {
+    "sizes": [
+      "800x600",
+      "1100x700",
+      "1920x1200",
+      "3440x1440"
+    ],
+    "dpi": [
+      100,
+      150,
+      200
+    ]
+  },
+  "views": [
+    {
+      "id": "run",
+      "group": "shell",
+      "opening": "screen:run",
+      "panels": [
+        "run.overview"
+      ],
+      "actions": [
+        "action:run.make-wish",
+        "action:run.open-wishes"
+      ],
+      "states": [
+        "live",
+        "empty",
+        "error"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "memory",
+      "group": "shell",
+      "opening": "screen:memory",
+      "panels": [
+        "memory.list"
+      ],
+      "actions": [
+        "action:memory.correct",
+        "action:memory.delete"
+      ],
+      "states": [
+        "live",
+        "empty",
+        "error"
+      ],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "usage",
+      "group": "shell",
+      "opening": "screen:usage",
+      "panels": [
+        "usage.summary"
+      ],
+      "actions": [
+        "action:usage.make-wish"
+      ],
+      "states": [
+        "live",
+        "empty",
+        "error"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "palette",
+      "group": "overlays",
+      "opening": "overlay:palette",
+      "panels": [
+        "palette.results"
+      ],
+      "actions": [
+        "action:palette.choose"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "composer",
+      "group": "overlays",
+      "opening": "overlay:composer",
+      "panels": [
+        "composer.form"
+      ],
+      "actions": [
+        "action:composer.start",
+        "action:composer.cancel"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "dialog.close",
+      "group": "overlays",
+      "opening": "dialog:close",
+      "panels": [
+        "dialog.close.prompt"
+      ],
+      "actions": [
+        "action:dialog.close.cancel",
+        "action:dialog.close.confirm"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "dialog.control",
+      "group": "overlays",
+      "opening": "dialog:control",
+      "panels": [
+        "dialog.control.panel"
+      ],
+      "actions": [
+        "action:dialog.control.send",
+        "action:dialog.control.stop"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "dialog.interjection",
+      "group": "overlays",
+      "opening": "dialog:interjection",
+      "panels": [
+        "dialog.interjection.prompt"
+      ],
+      "actions": [
+        "action:dialog.interjection.send"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "dialog.composer",
+      "group": "overlays",
+      "opening": "dialog:composer",
+      "panels": [
+        "dialog.composer.form"
+      ],
+      "actions": [
+        "action:dialog.composer.start",
+        "action:dialog.composer.cancel"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "dialog.evolve",
+      "group": "overlays",
+      "opening": "dialog:evolve",
+      "panels": [
+        "dialog.evolve.prompt"
+      ],
+      "actions": [
+        "action:dialog.evolve.confirm",
+        "action:dialog.evolve.cancel"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "wishes",
+      "group": "wishes",
+      "opening": "screen:wishes",
+      "panels": [
+        "wishes.list"
+      ],
+      "actions": [
+        "action:wishes.make-wish",
+        "action:wishes.mark-all-read"
+      ],
+      "states": [
+        "live",
+        "empty",
+        "error"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "mini",
+      "group": "mini",
+      "opening": "window:mini",
+      "panels": [
+        "mini.body"
+      ],
+      "actions": [
+        "action:mini.pin",
+        "action:mini.back",
+        "action:mini.open-wish"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "focus.graph",
+      "group": "mini",
+      "opening": "window:focus.graph",
+      "panels": [
+        "focus.graph.panel"
+      ],
+      "actions": [
+        "action:focus.graph.exit"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "focus.checklist",
+      "group": "mini",
+      "opening": "window:focus.checklist",
+      "panels": [
+        "focus.checklist.panel"
+      ],
+      "actions": [
+        "action:focus.checklist.exit"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "settings",
+      "group": "sessions_settings",
+      "opening": "screen:doctor",
+      "panels": [
+        "settings.page"
+      ],
+      "actions": [
+        "action:settings.toggle-extreme"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "session",
+      "group": "sessions_settings",
+      "opening": "page:session",
+      "panels": [
+        "session.page"
+      ],
+      "actions": [
+        "action:session.back",
+        "action:session.send",
+        "action:session.takeover",
+        "action:session.handback",
+        "action:session.reconnect"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "research",
+      "group": "research",
+      "opening": "page:research",
+      "panels": [
+        "research.page"
+      ],
+      "actions": [
+        "action:research.back",
+        "action:research.open"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "research.map",
+      "group": "research",
+      "opening": "research_tab:map",
+      "panels": [
+        "research.map.panel"
+      ],
+      "actions": [
+        "action:research.map.open"
+      ],
+      "states": [],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "research.sources",
+      "group": "research",
+      "opening": "research_tab:sources",
+      "panels": [
+        "research.sources.panel"
+      ],
+      "actions": [
+        "action:research.sources.previous",
+        "action:research.sources.next",
+        "action:research.sources.sample"
+      ],
+      "states": [],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "research.evidence",
+      "group": "research",
+      "opening": "research_tab:evidence",
+      "panels": [
+        "research.evidence.panel"
+      ],
+      "actions": [
+        "action:research.evidence.select-layer",
+        "action:research.evidence.select-entity",
+        "action:research.evidence.previous",
+        "action:research.evidence.next",
+        "action:research.evidence.open-dataset",
+        "action:research.evidence.correct"
+      ],
+      "states": [],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "research.dataset",
+      "group": "research",
+      "opening": "research_tab:dataset",
+      "panels": [
+        "research.dataset.panel"
+      ],
+      "actions": [
+        "action:research.dataset.correct"
+      ],
+      "states": [],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "research.exports",
+      "group": "research",
+      "opening": "research_tab:exports",
+      "panels": [
+        "research.exports.panel"
+      ],
+      "actions": [
+        "action:research.exports.csv",
+        "action:research.exports.bundle",
+        "action:research.exports.snapshot"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper",
+      "group": "paper",
+      "opening": "page:paper",
+      "panels": [
+        "paper.page"
+      ],
+      "actions": [
+        "action:paper.back",
+        "action:paper.start",
+        "action:paper.cancel"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper.form",
+      "group": "paper",
+      "opening": "paper_step:form",
+      "panels": [
+        "paper.form.panel"
+      ],
+      "actions": [
+        "action:paper.form.shortlist",
+        "action:paper.form.save-models"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper.shortlist",
+      "group": "paper",
+      "opening": "paper_step:shortlist",
+      "panels": [
+        "paper.shortlist.list"
+      ],
+      "actions": [
+        "action:paper.shortlist.choose"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper.estimate",
+      "group": "paper",
+      "opening": "paper_step:estimate",
+      "panels": [
+        "paper.estimate.summary"
+      ],
+      "actions": [
+        "action:paper.estimate.request",
+        "action:paper.estimate.acknowledge"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper.progress",
+      "group": "paper",
+      "opening": "paper_step:progress",
+      "panels": [
+        "paper.progress.passes"
+      ],
+      "actions": [],
+      "states": [],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "paper.changelog",
+      "group": "paper",
+      "opening": "paper_step:changelog",
+      "panels": [
+        "paper.changelog.log"
+      ],
+      "actions": [],
+      "states": [],
+      "animated": true,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame"
+      ]
+    },
+    {
+      "id": "paper.preview",
+      "group": "paper",
+      "opening": "paper_step:preview",
+      "panels": [
+        "paper.preview.document"
+      ],
+      "actions": [
+        "action:paper.preview.previous",
+        "action:paper.preview.next",
+        "action:paper.preview.open-pdf"
+      ],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "paper.readiness",
+      "group": "paper",
+      "opening": "paper_step:readiness",
+      "panels": [
+        "paper.readiness.status"
+      ],
+      "actions": [],
+      "states": [],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "storage",
+      "group": "modes",
+      "opening": "page:storage",
+      "panels": [
+        "storage.page"
+      ],
+      "actions": [
+        "action:storage.preview",
+        "action:storage.confirm"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "chat",
+      "group": "modes",
+      "opening": "page:chat",
+      "panels": [
+        "chat.page"
+      ],
+      "actions": [
+        "action:chat.send",
+        "action:chat.promote"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "quick",
+      "group": "modes",
+      "opening": "page:quick",
+      "panels": [
+        "quick.page"
+      ],
+      "actions": [
+        "action:quick.start",
+        "action:quick.review",
+        "action:quick.promote"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    },
+    {
+      "id": "plaza",
+      "group": "modes",
+      "opening": "page:plaza",
+      "panels": [
+        "plaza.page"
+      ],
+      "actions": [
+        "action:plaza.send",
+        "action:plaza.round",
+        "action:plaza.debate",
+        "action:plaza.vote",
+        "action:plaza.promote"
+      ],
+      "states": [
+        "live"
+      ],
+      "animated": true,
+      "live": true,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps",
+        "frame",
+        "event_to_pixel"
+      ]
+    },
+    {
+      "id": "routine",
+      "group": "modes",
+      "opening": "page:routine",
+      "panels": [
+        "routine.page"
+      ],
+      "actions": [],
+      "states": [
+        "live"
+      ],
+      "animated": false,
+      "live": false,
+      "gates": [
+        "png",
+        "diff",
+        "layout",
+        "fault",
+        "tokens",
+        "deps"
+      ]
+    }
+  ],
+  "gates": {
+    "png": {
+      "method": "captures/png/manifest.json"
+    },
+    "diff": {
+      "method": "captures/png/manifest.json"
+    },
+    "layout": {
+      "method": "layout_matrix <group>::"
+    },
+    "fault": {
+      "method": "fault_matrix <group>::"
+    },
+    "tokens": {
+      "method": "desktop_architecture tokens::<group>"
+    },
+    "deps": {
+      "method": "desktop_architecture deps::<group>"
+    },
+    "frame": {
+      "method": "perf/results.json"
+    },
+    "event_to_pixel": {
+      "method": "perf/results.json"
+    },
+    "idle_cpu": {
+      "method": "perf/results.json"
+    },
+    "cold_start": {
+      "method": "perf/results.json"
+    },
+    "memory": {
+      "method": "perf/results.json"
+    },
+    "exe_size": {
+      "method": "perf/results.json"
+    }
+  },
+  "global_gates": [
+    "idle_cpu",
+    "cold_start",
+    "memory",
+    "exe_size"
+  ]
+}

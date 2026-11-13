@@ -122,77 +122,77 @@ Decision: reference-only
 Reason: The README describes journal discovery using DOAJ and Scimago data and OpenAlex matching. No licence was found at this commit.
 
 ### nature-figure
-Source: C:/Users/gppup/.claude/skills/nature-figure/SKILL.md
+Source: ~/.claude/skills/nature-figure/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Check figure layout and visual quality against the intended message.
 
 ### nature-writing
-Source: C:/Users/gppup/.claude/skills/nature-writing/SKILL.md
+Source: ~/.claude/skills/nature-writing/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Build an evidence chain linking manuscript claims to supplied evidence and boundaries.
 
 ### nature-polishing
-Source: C:/Users/gppup/.claude/skills/nature-polishing/SKILL.md
+Source: ~/.claude/skills/nature-polishing/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Preserve facts and evidence boundaries while refining prose.
 
 ### nature-statistics
-Source: C:/Users/gppup/.claude/skills/nature-statistics/SKILL.md
+Source: ~/.claude/skills/nature-statistics/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Report experimental units, replication, uncertainty and inference transparently.
 
 ### nature-citation
-Source: C:/Users/gppup/.claude/skills/nature-citation/SKILL.md
+Source: ~/.claude/skills/nature-citation/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Map claims to verified supporting sources.
 
 ### nature-ref-verifier
-Source: C:/Users/gppup/.claude/skills/nature-ref-verifier/SKILL.md
+Source: ~/.claude/skills/nature-ref-verifier/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Verify bibliographic records against reliable sources rather than assuming citations are correct.
 
 ### nature-academic-search
-Source: C:/Users/gppup/.claude/skills/nature-academic-search/SKILL.md
+Source: ~/.claude/skills/nature-academic-search/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Search across sources and verify citations using the appropriate literature workflow.
 
 ### nature-paper2word
-Source: C:/Users/gppup/.claude/skills/nature-paper2word/SKILL.md
+Source: ~/.claude/skills/nature-paper2word/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Check formatting requirements and layout before and after export.
 
 ### nature-response
-Source: C:/Users/gppup/.claude/skills/nature-response/SKILL.md
+Source: ~/.claude/skills/nature-response/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Map each reviewer response and claimed manuscript change to its location.
 
 ### nature-reviewer
-Source: C:/Users/gppup/.claude/skills/nature-reviewer/SKILL.md
+Source: ~/.claude/skills/nature-reviewer/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only
 Reason: Freeze independently isolated reviews before synthesis and ground concerns in evidence.
 
 ### nature-data
-Source: C:/Users/gppup/.claude/skills/nature-data/SKILL.md
+Source: ~/.claude/skills/nature-data/SKILL.md
 Version: local (undated)
 Licence: local personal skill
 Decision: reference-only

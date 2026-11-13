@@ -125,6 +125,17 @@ fn check_hash(bytes: &[u8], expected: &str) -> Result<(), String> {
 }
 
 #[test]
+fn adoption_docs_have_no_personal_paths() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in ["docs/paper-adoption.md", "docs/round5-adoption.zh-TW.md"] {
+        let doc = fs::read_to_string(root.join(path)).unwrap().to_ascii_lowercase();
+        for forbidden in ["gppup", "c:/users/", r"c:\users\"] {
+            assert!(!doc.contains(forbidden), "{path} contains {forbidden}");
+        }
+    }
+}
+
+#[test]
 fn reference_decisions_and_negative_controls() {
     let doc =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/paper-adoption.md"))

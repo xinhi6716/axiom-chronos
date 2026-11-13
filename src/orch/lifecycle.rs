@@ -370,6 +370,11 @@ fn begin_inner(
                 .and_then(|data| serde_json::from_slice(&data).ok())
                 .filter(|cp: &Checkpoint| cp.unit == unit && cp.attempt_id == c.attempt && matches!(cp.stage.as_str(), "claimed" | "worker_done" | "verified" | "selfchecked" | "reviewed"))
                 .ok_or_else(|| Failure::new("outcome_unknown", format!("claim outcome unknown: {text}")))?;
+            // Later checkpoints only finish the existing attempt; a claimed
+            // checkpoint would start a worker again for completed work.
+            if u.state == "verified" && cp.stage == "claimed" {
+                return Err(Failure::new("already_verified", format!("unit {unit} is already verified; nothing to run")));
+            }
             let bytes = std::fs::read(&u.brief).map_err(|e| Failure::new("io", e.to_string()))?;
             if crate::seams::sha256_hex(&bytes) != cp.brief_sha256 {
                 return Err(Failure::new("brief_changed", "brief changed since claim"));
@@ -384,6 +389,17 @@ fn begin_inner(
             save_claims(store, &disk)?;
             active.insert(key(store, unit), Claim { dirty: before, attempt_id: cp.attempt_id.clone(), base: cp.base_tree.clone() });
             return Ok(Some(Begin::Run { brief, attempt: cp.attempt, attempt_id: cp.attempt_id }));
+        }
+        // A legacy store may have no run evidence; changed trees also do not
+        // make an explicitly completed unit eligible for a new execution.
+        if u.state == "verified" {
+            *refused_owner = Some(Owner {
+                wish: wish_of_store(store),
+                module: u.track.clone(),
+                unit: unit.into(),
+                attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+            });
+            return Err(Failure::new("already_verified", format!("unit {unit} is already verified; nothing to run")));
         }
         let brief = unit_brief(store, unit)?;
         if let Some(c) = disk.iter().find(|c| overlaps(&brief.scope, &c.scope)) {

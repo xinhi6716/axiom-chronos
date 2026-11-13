@@ -1397,6 +1397,11 @@ version = "0.0.0"
 dependencies = [
  "axiom-chronos",
  "gpui-kit",
+ "png 0.17.16",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
