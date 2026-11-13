@@ -37,7 +37,24 @@ fn wishes_helpers_match_originals() {
         runs.push(r);
     }
     for text in ["first\n second\tpart", "normal", "  "] { let s = SharedString::from(text); assert_eq!(one_line(&s), old::one_line(&s)); }
-    assert_eq!(one_line_limit("  a\n bcd", 4).as_ref(), "a b");
+    // run_view::one_line is private and run_view.rs is read-only. Pin its source
+    // before comparing the same implementation as a callable reference here.
+    let source = include_str!("../../run_view.rs").replace("\r\n", "\n");
+    assert!(source.contains(concat!(
+        "fn one_line(text: &str, limit: usize) -> SharedString {\n",
+        "    let start: String = text.trim_start().chars().take(limit).collect();\n",
+        "    start.split_whitespace().collect::<Vec<_>>().join(\" \").into()\n",
+        "}"
+    )));
+    fn run_view_one_line(text: &str, limit: usize) -> SharedString {
+        let start: String = text.trim_start().chars().take(limit).collect();
+        start.split_whitespace().collect::<Vec<_>>().join(" ").into()
+    }
+    for text in ["", "  a\n bcd", "first\r\n second\tpart", "  多字節🙂文字", "  normal  text  "] {
+        for limit in [0, 1, 4, 8, 100] {
+            assert_eq!(one_line_limit(text, limit), run_view_one_line(text, limit), "text={text:?}, limit={limit}");
+        }
+    }
     for query in ["", "  REVIEW   Reader", "不存在"] {
         let terms = search_terms(query); assert_eq!(terms, old::search_terms(query));
         assert_eq!(matches_terms(&["Review", "reader"], &terms), old::matches_terms(&["Review", "reader"], &terms));

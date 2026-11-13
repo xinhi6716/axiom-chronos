@@ -11,6 +11,15 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 
+// ---- section G: orch reads (skipped)
+// ux/real/approvals.rs: orch::store::{wish_stores, wish_of_store, is_wish_id}
+// locates and validates stores; orch::events::{read_events, Event, append_event}
+// reads approval state and records decisions, alongside engine::approvals and
+// engine::kinds. These are service I/O and decision handling, not display reads.
+// ux/real/interjections.rs: orch::events::{read_events, Event} reconciles receipts,
+// orch::lock_store serializes store access, and orch::read_units reads running
+// work for the service. These support I/O and state handling, not pure display reads.
+
 // ---- Activity and events
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Projection {
