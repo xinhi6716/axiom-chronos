@@ -452,7 +452,8 @@ fn density_global_falls_back_sets_and_returns(cx: &mut TestAppContext) {
 fn save_on_quit_captures_reduce_motion_and_restore_none_clears_it(cx: &mut TestAppContext) {
     let home = TestHome::new("quit-motion");
     cx.update(|cx| cx.set_reduce_motion(false));
-    let (window, state) = open_with(cx, home.reopen(), |s| s.view = Screen::Doctor);
+    // Keep Preferences visible below the expanded Doctor Budgets card.
+    let (window, state) = open_with_height(cx, home.reopen(), 1600., |s| s.view = Screen::Doctor);
     assert_eq!(prefs(cx).reduce_motion, None);
     assert!(!state.read_with(cx, |s, _| s.reduce_motion));
     click(cx, window, "reduce-motion");
@@ -763,7 +764,8 @@ fn column_widths_survive_a_restart(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn reduce_motion_focus_full_and_density_survive_a_restart(cx: &mut TestAppContext) {
     let home = TestHome::new("preferences-restart");
-    let (window, state) = open_with(cx, home.reopen(), |_| {});
+    // Keep Preferences visible below the expanded Doctor Budgets card.
+    let (window, state) = open_with_height(cx, home.reopen(), 1600., |_| {});
     assert_eq!(prefs(cx).reduce_motion, None);
     assert_eq!(prefs(cx).mode, "Full");
     assert_eq!(prefs(cx).density, Density::Comfortable);

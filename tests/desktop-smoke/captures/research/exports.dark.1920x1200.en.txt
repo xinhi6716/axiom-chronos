@@ -6,6 +6,7 @@ gpui_component::window_border::WindowBorder/root/research-page/research-tab-sour
 gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	Evidence
 gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	Dataset
 gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	Exports
+gpui_component::window_border::WindowBorder/root/research-page/research-exports-panel/research-exports-vault-status	Vault and memory are not in this version
 gpui_component::window_border::WindowBorder/root/research-page/research-exports-panel/research-exports-repro	Repro: Fail: P0
 gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	<tmp>\rram\project
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
@@ -16,6 +17,10 @@ gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
 gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	used — · remaining unknown
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
 gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1

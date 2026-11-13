@@ -379,3 +379,14 @@ fn login_start_comes_from_service_and_sends_changes() {
     set_login_start(&mut state, false);
     assert_eq!(state.errors.last().unwrap().action, crate::desktop::model::Action::Engine);
 }
+
+#[test]
+fn argon_every_round_defaults_on_and_persists() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(crate::council::settings::load(home.path()).unwrap().argon_every_round);
+    set_argon_every_round(home.path(), false).unwrap();
+    assert!(!crate::council::settings::load(home.path()).unwrap().argon_every_round);
+    assert!(home.path().join("settings/council.json").is_file());
+    set_argon_every_round(home.path(), true).unwrap();
+    assert!(crate::council::settings::load(home.path()).unwrap().argon_every_round);
+}

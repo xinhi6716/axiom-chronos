@@ -175,6 +175,9 @@ fn reap(child: &mut Child) {
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
         let r = unsafe { libc::kill(pid as i32, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
@@ -461,6 +464,14 @@ mod tests {
             let _ = child.wait();
             panic!("kill_pid_tree failed: {error:?}");
         }
+    }
+
+    #[test]
+    fn pid_alive_checks_process_ids() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(u32::MAX));
+        #[cfg(unix)]
+        assert!(!pid_alive(0));
     }
 
     #[test]

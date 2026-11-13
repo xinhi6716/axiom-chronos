@@ -3,6 +3,7 @@ tools/installers/install.sh text eol=lf
 *.onnx binary
 tests/fixtures/laya/** -text
 tests/fixtures/phase7/** -text
+tests/fixtures/paper/** -text
 tests/fixtures/self_check_dev/** -text
 engine/paper/academic-humanizer/** -text
 docs/paper-adoption.md text eol=lf

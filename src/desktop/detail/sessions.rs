@@ -67,7 +67,10 @@ impl SessionModel {
     pub(super) fn poll(&mut self) -> bool {
         self.connection = self.service.connection(&self.id);
         self.controller = self.service.controller(&self.id);
-        if self.connection == Connection::Live {
+        if self.connection == Connection::Live
+            || (self.connection == Connection::Closed
+                && self.service.sessions().iter().any(|session| session.id == self.id))
+        {
             match self
                 .service
                 .frames(&self.id, self.frames.last().map_or(0, |f| f.seq))
@@ -75,16 +78,14 @@ impl SessionModel {
                 Ok(frames) => self.frames.extend(frames),
                 Err(e) => self.error = Some(e.message),
             }
-            true
-        } else {
-            false
         }
+        matches!(self.connection, Connection::Connecting | Connection::Live)
     }
     pub(super) fn request_takeover(&mut self) -> bool {
         if self.connection != Connection::Live
             || matches!(
                 self.controller,
-                Controller::Requested { .. } | Controller::You { .. }
+                Controller::Requested { .. } | Controller::You { .. } | Controller::Refused { .. }
             )
         {
             return false;
@@ -252,10 +253,9 @@ impl SessionPage {
                 .await;
             this.update(cx, |this, cx| {
                 if !this.busy
-                    && this
-                        .model
-                        .as_ref()
-                        .is_some_and(|m| m.connection == Connection::Live)
+                    && this.model.as_ref().is_some_and(|m| {
+                        matches!(m.connection, Connection::Connecting | Connection::Live)
+                    })
                 {
                     this.refresh(cx);
                 }
@@ -387,6 +387,7 @@ impl Render for SessionPage {
                                                 m.controller,
                                                 Controller::Requested { .. }
                                                     | Controller::You { .. }
+                                                    | Controller::Refused { .. }
                                             )
                                     }),
                             )
@@ -433,5 +434,50 @@ impl Render for SessionPage {
                 self.model.as_ref().and_then(|m| m.error.clone()),
                 |this, error| this.child(marked("session-error", error)),
             )
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    use crate::desktop::ux::seams::{FakeSessions, SessionKind, WorkerSession};
+    use std::prelude::v1::test;
+    struct GapStream;
+    impl SessionStream for GapStream {
+        fn sessions(&self) -> Vec<WorkerSession> { vec![] }
+        fn frames(&self, _: &str, _: u64) -> crate::base::Res<Vec<Frame>> {
+            Err(crate::base::Failure::new("gap", "some frames are missing"))
+        }
+        fn connection(&self, _: &str) -> Connection { Connection::Live }
+        fn controller(&self, _: &str) -> Controller { Controller::Worker }
+        fn request_takeover(&self, _: &str) -> crate::base::Res<String> { unreachable!() }
+        fn send_input(&self, _: &str, _: &str, _: &str) -> crate::base::Res<()> { unreachable!() }
+        fn hand_back(&self, _: &str, _: &str) -> crate::base::Res<()> { unreachable!() }
+        fn reconnect(&self, _: &str) -> crate::base::Res<()> { unreachable!() }
+    }
+    #[test]
+    fn frame_gap_reason_is_shown() {
+        let mut model = SessionModel::new(Arc::new(GapStream), "s");
+        assert!(model.poll());
+        assert!(model.frames.is_empty());
+        assert_eq!(model.error.as_deref(), Some("some frames are missing"));
+    }
+    #[test]
+    fn refusal_disables_takeover_and_input() {
+        let fake = Arc::new(FakeSessions::new(vec![WorkerSession {
+            id: "s".into(),
+            run: "r".into(),
+            unit: None,
+            title: "s".into(),
+            kind: SessionKind::Terminal,
+        }]));
+        fake.refuse("s", "not supported");
+        let mut model = SessionModel::new(fake.clone(), "s");
+        assert!(model.poll());
+        assert_eq!(model.controller_text(Lang::En), "Refused: not supported");
+        assert!(!model.request_takeover());
+        assert!(!model.send("input"));
+        assert!(!model.hand_back());
+        assert!(fake.inputs("s").is_empty());
     }
 }

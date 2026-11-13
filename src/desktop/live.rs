@@ -418,12 +418,13 @@ pub fn connect_service(
     spawn: Option<PathBuf>,
     cx: &mut App,
 ) {
+    quota::publish_pools(&home, cx);
     let (commands, receiver) = mpsc::channel();
     let inbox = Inbox::default();
     let projects = Locations::from_env().projects;
     let background: Arc<dyn BackgroundService> = Arc::new(ServiceBackground { home: home.clone() });
     let mut engine = Engine::new(
-        home,
+        home.clone(),
         projects,
         Box::new(Config::from_env),
         commands.clone(),
@@ -461,7 +462,7 @@ pub fn connect_service(
             let alive = cx.update(|cx| {
                 let mut spent = Vec::new();
                 let result = state.update(cx, |s, cx| {
-                    spent = apply(s, updates);
+                    spent = apply_batch(&home, s, updates, cx);
                     let viewing = s.run().map(|run| run.session.clone());
                     if viewing != followed {
                         followed = viewing;
@@ -546,6 +547,17 @@ pub fn smoke_read(home: &Path, state: &mut AppState) -> Res<()> {
     let updates = std::mem::take(&mut inbox.lock().updates);
     apply(state, updates);
     Ok(())
+}
+
+fn apply_batch(
+    home: &Path,
+    state: &mut AppState,
+    updates: Vec<Update>,
+    cx: &mut App,
+) -> Vec<crate::board::TokenUse> {
+    let spent = apply(state, updates);
+    quota::publish_pools(home, cx);
+    spent
 }
 
 fn apply(state: &mut AppState, updates: Vec<Update>) -> Vec<crate::board::TokenUse> {
@@ -3400,6 +3412,124 @@ fn early_run(key: &str, entry: &Hosted) -> Run {
 }
 
 #[cfg(test)]
+mod pools_refresh {
+    use super::*;
+    use crate::usage::pools::{self, Pool, PoolStrip};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn with_app(test: impl FnOnce(&mut App) + Send + 'static) {
+        static APP_LOCK: Mutex<()> = Mutex::new(());
+        let _lock = APP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The Windows platform must run and quit on its creating thread, even on failure.
+        std::thread::spawn(move || {
+            let result = Arc::new(Mutex::new(None));
+            let outcome = result.clone();
+            gpui_kit::platform::headless().run(move |cx| {
+                *outcome.lock().unwrap() = Some(catch_unwind(AssertUnwindSafe(|| test(cx))));
+                cx.quit();
+            });
+            if let Err(panic) = result.lock().unwrap().take().expect("app callback did not run") {
+                std::panic::resume_unwind(panic);
+            };
+        })
+        .join()
+        .unwrap();
+    }
+
+    fn used_tokens(cx: &App, pool: Pool) -> Option<u64> {
+        cx.try_global::<PoolStrip>()?
+            .0
+            .iter()
+            .find(|status| status.pool == pool)?
+            .used_tokens
+    }
+
+    // Before wiring: assertion `left == right` failed: live refresh must publish the charged pool (left: None, right: Some(12300)).
+    #[test]
+    fn pools_refresh_publishes_charged_pool() {
+        with_app(|cx| {
+            let home = tempfile::tempdir().unwrap();
+            pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(12_300), None, "test")
+                .unwrap();
+            let mut state = tests::state_with(vec![]);
+
+            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+
+            assert!(state.feeds.quota.loaded);
+            assert_eq!(
+                used_tokens(cx, Pool::HydrogenFlash),
+                Some(12_300),
+                "live refresh must publish the charged pool"
+            );
+        });
+    }
+
+    #[test]
+    fn pools_refresh_keeps_hydrogen_flash_and_argon_separate() {
+        with_app(|cx| {
+            let home = tempfile::tempdir().unwrap();
+            for (model, tokens) in [
+                (pools::HYDROGEN_XHIGH, 100),
+                ("gemini-3.8-flash", 25),
+                ("gemini-4-argon-high", 900),
+            ] {
+                pools::charge(home.path(), model, Some(tokens), None, "test").unwrap();
+            }
+            let mut state = tests::state_with(vec![]);
+
+            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+
+            assert_eq!(cx.try_global::<PoolStrip>().unwrap().0.len(), 2);
+            assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(125));
+            assert_eq!(used_tokens(cx, Pool::Argon), Some(900));
+
+            pools::charge(home.path(), "gemini-4-argon-high", Some(50), None, "test").unwrap();
+            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+
+            assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(125));
+            assert_eq!(used_tokens(cx, Pool::Argon), Some(950));
+        });
+    }
+
+    #[test]
+    fn pools_refresh_without_quota_change_reads_updated_ledger() {
+        with_app(|cx| {
+            let home = tempfile::tempdir().unwrap();
+            let mut state = tests::state_with(vec![]);
+            pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(100), None, "test").unwrap();
+            apply_batch(home.path(), &mut state, vec![Update::Quota(Quotas::default())], cx);
+            assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(100));
+            let quota = state.quota.clone();
+
+            pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(23), None, "test").unwrap();
+            apply_batch(home.path(), &mut state, vec![Update::CodexSlots(Some(2))], cx);
+
+            assert_eq!(state.quota, quota);
+            assert_eq!(state.codex_slots, Some(2));
+            assert_eq!(used_tokens(cx, Pool::HydrogenFlash), Some(123));
+            assert_eq!(used_tokens(cx, Pool::Argon), Some(0));
+        });
+    }
+
+    #[test]
+    fn pools_refresh_negative_control_apply_alone_does_not_publish() {
+        with_app(|cx| {
+            let home = tempfile::tempdir().unwrap();
+            pools::charge(home.path(), pools::HYDROGEN_XHIGH, Some(12_300), None, "test")
+                .unwrap();
+            let mut state = tests::state_with(vec![]);
+
+            apply(&mut state, vec![Update::Quota(Quotas::default())]);
+
+            assert!(state.feeds.quota.loaded);
+            assert_eq!(pools::status(home.path(), 0).unwrap()[0].used_tokens, Some(12_300));
+            assert!(cx.try_global::<PoolStrip>().is_none());
+            assert_ne!(used_tokens(cx, Pool::HydrogenFlash), Some(12_300));
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -5551,8 +5681,9 @@ mod tests {
         assert!(!rig.engine.handle(Command::Reload(FeedKind::Usage)));
         assert!(rig.engine.ledgers.is_empty());
         assert!(!rig.engine.handle(Command::Reload(FeedKind::Checks)));
+        // External environment checks have machine-dependent runtimes; wait for completion.
         assert!(matches!(
-            rig._receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
+            rig._receiver.recv().expect("checks completion"),
             Command::Checks(_)
         ));
         assert!(rig.engine.handle(Command::Reload(FeedKind::Runs)));

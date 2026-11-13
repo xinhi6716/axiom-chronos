@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const TEXT: i18n::Table = &[("Start at login", "登入時啟動")];
+const TEXT: i18n::Table = &[("Start at login", "登入時啟動"), ("Argon every round", "每輪皆使用 Argon")];
 
 /// A service-owned preference row for the settings panel.
 pub fn login_start_row(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -27,7 +27,20 @@ pub fn login_start_row(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let label = i18n::tr(cx, TEXT, "Start at login");
     let checked = state.read(cx).feeds.login_start;
     let state = state.clone();
+    let argon_state = state.clone();
+    let home = base::axiom_home();
+    let argon_on = crate::council::settings::load(&home).unwrap_or_default().argon_every_round;
+    let argon_label = i18n::tr(cx, TEXT, "Argon every round");
     v_flex()
+        .child(div().child(argon_label).child(
+            Switch::new("argon-every-round").checked(argon_on).accessibility_label(argon_label).on_click(move |on, _, cx| {
+                let result = set_argon_every_round(&home, *on);
+                argon_state.update(cx, |state, cx| {
+                    if let Err(error) = result { state.report(super::model::Action::Engine, None, error.message); }
+                    cx.notify();
+                });
+            }),
+        ))
         .py(theme::space(d, Step::Xs))
         .gap(theme::space(d, Step::Xs))
         .child(v_flex().min_w_0().child(div().text_size(theme::font(d, TypeSize::Body)).child(label)))
@@ -39,6 +52,10 @@ pub fn login_start_row(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 });
             }),
         ))
+}
+
+fn set_argon_every_round(home: &Path, on: bool) -> base::Res<()> {
+    crate::council::settings::save(home, &crate::council::settings::CouncilSettings { argon_every_round: on })
 }
 
 /// The service owns this setting; never persist it in the desktop preferences.
@@ -205,7 +222,7 @@ impl BudgetInputs {
     pub fn set(&mut self,index:usize,value:String) { match index {0=>self.fable=value,1=>self.astra=value,2=>self.argon=value,_=>self.rounds=value} }
     pub fn validate(&self) -> Result<crate::council::Budgets,crate::council::budgets::BudgetError> {
         use crate::council::budgets::*;
-        crate::council::Budgets::parse(|key|Some(match key {FABLE_CAP=>self.fable.clone(),ASTRA_CAP=>self.astra.clone(),ARGON_CAP=>self.argon.clone(),_=>self.rounds.clone()}))
+        crate::council::Budgets::parse(|key| match key {FABLE_CAP=>Some(self.fable.clone()),ASTRA_CAP=>Some(self.astra.clone()),ARGON_CAP=>Some(self.argon.clone()),ROUNDS=>Some(self.rounds.clone()),_=>None})
     }
 }
 

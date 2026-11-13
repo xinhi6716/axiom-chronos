@@ -73,10 +73,69 @@ impl ResearchSeams {
             research_home: Some(research_home),
             orch_home: Some(axiom_home.join("orchestrate")),
             goals_home: Some(axiom_home.to_path_buf()),
-            snapshot_consumer: None,
+            snapshot_consumer:
+                crate::research_workspace::paper_handoff::PaperHandoff::production(axiom_home)
+                    .ok()
+                    .map(|handoff| Arc::new(handoff) as Arc<dyn SnapshotConsumer>),
             vault: None,
             page_cache_bytes: 256 * 1024 * 1024,
         }
+    }
+}
+
+#[cfg(test)]
+mod production_seams_tests {
+    use super::ResearchSeams;
+    use std::{ffi::OsString, sync::Mutex};
+
+    static CURL_ENV: Mutex<()> = Mutex::new(());
+
+    struct RestoreEnv(Option<OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("AXIOM_CURL_CMD", value),
+                None => std::env::remove_var("AXIOM_CURL_CMD"),
+            }
+        }
+    }
+
+    #[test]
+    fn production_seams_install_paper_without_vault() {
+        let _lock = CURL_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv(std::env::var_os("AXIOM_CURL_CMD"));
+        let executable = std::env::current_exe().unwrap();
+        std::env::set_var(
+            "AXIOM_CURL_CMD",
+            serde_json::to_string(&[executable]).unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let seams = ResearchSeams::production(tmp.path());
+        assert_eq!(seams.snapshot_consumer.unwrap().name(), "paper");
+        assert!(seams.vault.is_none());
+    }
+
+    #[test]
+    fn production_seams_skip_paper_when_curl_config_is_invalid() {
+        let _lock = CURL_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv(std::env::var_os("AXIOM_CURL_CMD"));
+        std::env::set_var("AXIOM_CURL_CMD", "invalid-json");
+        let tmp = tempfile::tempdir().unwrap();
+        let seams = ResearchSeams::production(tmp.path());
+        assert!(seams.snapshot_consumer.is_none());
+        assert!(seams.vault.is_none());
+    }
+
+    #[test]
+    fn production_seams_skip_paper_when_curl_command_is_missing() {
+        let _lock = CURL_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv(std::env::var_os("AXIOM_CURL_CMD"));
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nonexistent-curl-executable");
+        std::env::set_var("AXIOM_CURL_CMD", serde_json::to_string(&[missing]).unwrap());
+        let seams = ResearchSeams::production(tmp.path());
+        assert!(seams.snapshot_consumer.is_none());
+        assert!(seams.vault.is_none());
     }
 }
 

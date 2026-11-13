@@ -129,7 +129,9 @@ impl Case {
         Ok(argv)
     }
     fn setup(&self, fable: &str, argon: &str) -> Setup {
-        Setup::new(self.member(fable), self.member(argon))
+        let mut setup = Setup::new(self.member(fable), self.member(argon));
+        setup.argon_every_round = false;
+        setup
     }
     fn request(&self) -> council::Request {
         council::Request {

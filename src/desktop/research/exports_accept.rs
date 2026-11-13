@@ -38,6 +38,10 @@ fn deliveries_and_layers_are_localized() {
     for lang in [Lang::En, Lang::ZhTw] {
         let delivered = delivery_text(&Delivery::Delivered { to: "sink".into() }, "paper", lang);
         assert!(delivered.contains("sink"));
+        let paper = delivery_text(&Delivery::Delivered { to: "paper".into() }, "paper", lang);
+        assert!(paper.contains("paper"));
+        assert!(!paper.contains("not connected"));
+        assert!(!paper.contains("尚未連接"));
         let failed = delivery_text(
             &Delivery::Failed {
                 kind: "429".into(),
@@ -58,7 +62,11 @@ fn deliveries_and_layers_are_localized() {
     );
     assert_eq!(
         delivery_text(&Delivery::Unwired, "vault", Lang::En),
-        "Vault is not connected yet, so the snapshot stays here for you to share"
+        "Vault and memory are not in this version"
+    );
+    assert_eq!(
+        delivery_text(&Delivery::Unwired, "vault", Lang::ZhTw),
+        "此版本不包含知識庫與記憶功能"
     );
     let mut view = TabView::default();
     assert_eq!(layer_of(&view), DataLayer::Extracted);

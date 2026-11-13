@@ -9,7 +9,7 @@
 //!   src/desktop/live/accept.rs:171; src/desktop/ux/real/background_accept.rs:20;
 //!   src/desktop/ux/real/extreme_accept.rs:26,28;
 //!   src/desktop/ux/real/interjections_accept.rs:29: AXIOM_TEST_PYTHON first.
-//! - src/host/mod.rs:303: test uses AXIOM_PYTHON, not AXIOM_TEST_PYTHON.
+//! - src/host/mod.rs:303: covered by host_fake_claude_tick_uses_override.
 //! - src/workshop/host.rs:262,266: production manifest matching and PATH probe.
 //! - src/research_workspace/pdf.rs:283,285,306,311,314: production PATH
 //!   probing/default command; its real-process test separately prefers the override.
@@ -34,6 +34,8 @@
 //! - Workshop: cargo reported "1 passed" vacuously: the bare probes failed and
 //!   the test returned without starting anything. The post-fix behavioural test
 //!   requires a marker printed only after the module's done() completes.
+//! - Host: host_fake_claude_tick_uses_override ... FAILED before the host fix:
+//!   "bare Python launch in fake_claude_tick_scenario_ticks_and_answers".
 
 use std::{env, fs, path::Path, process::Command};
 
@@ -90,6 +92,19 @@ fn no_unprotected_bare_python_launch() {
     assert!(flags_bare_launch(
         r#"let python = if cfg!(windows) { "python" } else { "python3" };"#
     ));
+}
+
+#[test]
+fn host_fake_claude_tick_uses_override() {
+    assert!(flags_bare_launch(
+        r#"let python = std::env::var_os("AXIOM_PYTHON")
+            .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());"#
+    ));
+    let name = "fake_claude_tick_scenario_ticks_and_answers";
+    assert!(
+        !flags_bare_launch(test_body(include_str!("../src/host/mod.rs"), name)),
+        "bare Python launch in {name}"
+    );
 }
 
 fn stubs() -> tempfile::TempDir {

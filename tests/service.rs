@@ -34,6 +34,14 @@ macro_rules! client_ok {
 }
 static ENV: Mutex<()> = Mutex::new(());
 const ID: &str = "12345678-1234-1234-1234-123456789abc";
+fn write_storage_policy(home: &std::path::Path) {
+    std::fs::create_dir_all(home.join("storage")).unwrap();
+    std::fs::write(
+        home.join("storage/policy.json"),
+        r#"{"reserve_bytes": 0, "estimates": {"wish": 1}}"#,
+    )
+    .unwrap();
+}
 struct Setup {
     _guard: std::sync::MutexGuard<'static, ()>,
     temp: tempfile::TempDir,
@@ -46,6 +54,7 @@ impl Setup {
         let temp = common::temp();
         let home = temp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
+        write_storage_policy(&home);
         let keys = [
             "FAKE_CLAUDE_SCENARIO",
             "FAKE_CLAUDE_RECORD",
@@ -154,6 +163,28 @@ impl Drop for ChildGuard {
 fn finish(s: service::RunningService, c: &Client) {
     client_ok!(c.home(), c.quit(true));
     assert_eq!(s.wait(), 0);
+}
+fn check_storage_policy(home: &std::path::Path) -> std::io::Result<()> {
+    let data = std::fs::read(home.join("storage/policy.json"))?;
+    let policy: axiom::storage::Policy = serde_json::from_slice(&data)?;
+    assert_eq!(policy.reserve_bytes, 0);
+    assert_eq!(policy.estimates.wish, 1);
+    Ok(())
+}
+// Before the fixture policy helper: this test failed with NotFound (OS error 3).
+#[test]
+fn fixture_home_has_zero_reserve_storage_policy() {
+    let x = Setup::new();
+    check_storage_policy(&x.home).unwrap();
+}
+#[test]
+fn fixture_storage_policy_check_reports_missing_policy() {
+    let x = Setup::new();
+    std::fs::remove_file(x.home.join("storage/policy.json")).unwrap();
+    assert_eq!(
+        check_storage_policy(&x.home).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
 }
 #[test]
 fn service_attach_detach() {
@@ -338,6 +369,13 @@ fn login_start_is_opt_in_and_resumes_interrupted_only() {
 #[test]
 fn service_waits_for_space_then_resumes() {
     let x = Setup::new();
+    let mut policy = axiom::storage::Policy::load(&x.home).unwrap();
+    policy.reserve_bytes = u64::MAX;
+    std::fs::write(
+        x.home.join("storage/policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
     let (s, c, _, _, _) = x.start();
     let mut req = x.req();
     req.need_bytes = Some(u64::MAX);
@@ -380,6 +418,7 @@ fn service_crash_releases_lock_and_preserves_resume() {
     assert!(store.sessions[0].recovered);
     assert_eq!(goal::load(&x.home, ID).unwrap().unwrap().status, "blocked");
     let other = x.temp.path().join("other");
+    write_storage_policy(&other);
     assert!(service::lock::acquire(&other).is_ok());
     let c = client_ok!(x.home, Client::connect(&x.home));
     finish(s, &c);

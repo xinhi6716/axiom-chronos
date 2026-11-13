@@ -29,12 +29,12 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 
 ## Prompt sizes
 
-- engine/agents/dispatcher.md: 9538 bytes
-- engine/DISPATCH.md: 3463 bytes
-- engine/skills/wish/SKILL.md: 7757 bytes
-- total: 20758 bytes (cap 20813)
+- engine/agents/dispatcher.md: 9568 bytes
+- engine/DISPATCH.md: 3402 bytes
+- engine/skills/wish/SKILL.md: 7786 bytes
+- total: 20756 bytes (cap 20813)
 
-Earlier p9-side record: dispatcher.md 9872 bytes, DISPATCH.md 2824 bytes, SKILL.md 8072 bytes; total 20768 bytes (cap 20813).
+Before this round: total 20768 bytes (cap 20813). After this round: dispatcher.md 9568, DISPATCH.md 3402, SKILL.md 7786; total 20756 bytes (cap 20813). Measured after normalizing CRLF to LF, as the test does.
 
 ## Offline graph evaluation
 
@@ -77,7 +77,7 @@ Production desktop wiring is installed by `ux::real::wiring::production` on a no
 | `storage` | wired | `LedgerStorage`. |
 | `background` | wired | `real::background::ServiceBackground`. After startup, `desktop::live::connect_service` installs its own private `ServiceBackground`, outside this wiring's scope. |
 | `modes` | wired | `ModesEngine`; see launch and provider/router details below. |
-| `sessions` | unwired | No real `SessionStream`; shown as unavailable. |
+| `sessions` | wired | `ServiceSessions` over the service snapshot and subscribe (`Client::snapshot`, `Client::subscribe`), client side only. Take-over, input and hand-back return a `Controller::Refused` reason because the protocol has no such operations. |
 | `unit_actions` | wired | `OrchUnitActions`. |
 | `optimizer` | unwired | `None` retains the `ClaudeOptimizer` fallback. |
 | `github` | unwired | `None` retains the `RealGh` fallback. |
@@ -85,42 +85,57 @@ Production desktop wiring is installed by `ux::real::wiring::production` on a no
 Other seams and integrations:
 
 - **Workshop `DecisionRouter` — wired:** `BackendRouter` calls the Claude backend and invokes the Laya observer via `laya::router::observer(home)` for `DecisionKind::Routing`, with `wish_id: None` and subject `workshop:<module>`. Laya is a best-effort shadow observer and never changes the choice. Curation excludes records without a wish ID, so these records never enter training.
-- **Routines `WishLauncher` — unwired caller:** `ServiceLauncher` implements the real launcher, but no production scheduler calls the routines runner.
+- **Routines `WishLauncher` — wired:** the production scheduler in `src/service/scheduler.rs` runs inside the background service (`Server::start`; `Server::start_with_scheduler` injects clock, launcher and approval for tests). Approval is `EnabledRoutineApproval`: it approves `launch_wish` only for a routine enabled in the store when the decision is made, and denies everything else, because no non-interactive person approval exists.
 - **Modes promotion `Launcher` — wired:** `ServiceLauncher` starts wishes through a lazily connected service client. Quick launches use `LazyQuick`, which constructs `QuickLauncher` for the session project.
-- **Modes chat/plaza `Provider` and `Router` — unwired:** `Unavailable` refuses calls because no real implementation exists.
+- **Modes chat/plaza `Provider` and `Router` — wired:** `ModelProvider` and `ModelRouter` in `src/modes/runners.rs` run over the real model runners. Failures are reported as `model_missing`, `quota_exhausted`, `budget_exceeded` or `malformed_reply`, never `unavailable` when a member's command resolves.
 - **Laya `DecisionObserver` — wired:** the configured observer is best-effort shadow; it can be a no-op when disabled or killed, and its prediction does not control the decision.
-- **`SessionStream` — unwired:** no real implementation; the desktop presents it as unavailable.
+- **`SessionStream` — wired:** `ServiceSessions` (see the table row).
 - **Research-program role budgets — wired:** `Role::CouncilMember`, call name `program`, is checked before the program and before each member call; spend is recorded after each reply.
-- **Graph feedback from 2b events — unwired:** plan item C15 was dropped by ruling 1. Existing explicit-feedback ingestion is separate.
+- **Graph feedback from 2b events — wired:** plan item C15. Events are ingested with the correlation id recorded in `FeedbackEvent.source` (`<events.jsonl locator>#<correlation id>`); the struct is unchanged and dedup by source holds.
+- **Workbench paper slot — wired:** `PaperHandoff` is a snapshot consumer that feeds phase 8 evidence.
+- **Hydrogen/Flash and Argon pools — wired:** pool membership by model-id prefix; an exhausted pool is recorded with `until_ms` (provider reset time, else now plus 60 minutes). Argon takes part in every council round (setting `argon_every_round`, default on).
+- **Vault and memory slot — unwired, not in this version:** phase 6 is shelved; the slot shows "not in this version".
+- **Optimizer (`ClaudeOptimizer`) and github (`RealGh`) — unwired:** left on the fallbacks from the earlier round; no real adapter was in scope this round.
 
 Demo and tests keep fakes; an empty demo uses the default empty UX state. Production leaves optimizer and GitHub seams empty so their `ClaudeOptimizer` and `RealGh` fallbacks remain active.
 
 ## Suites
 
 Suites text (final, sequential runs, Windows, CARGO_HOME=E:/codex/.toolchains/cargo, CARGO_BUILD_JOBS=2, CARGO_INCREMENTAL=0, the three suites run one after another and never overlapping):
-- `cargo test --locked --offline --no-fail-fast`: 1680 passed, 0 failed, 4 ignored (sum of per-binary results, nested child summaries excluded).
-- `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 870 passed, 0 failed, 0 ignored.
-- `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml`: 131 passed, 0 failed, 1 ignored (no -j 1 needed, no LNK1318).
+- `cargo test --locked --offline --no-fail-fast`: 2429 passed, 0 failed, 6 ignored (sum of per-binary results, nested child summaries excluded).
+- `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 960 passed, 0 failed, 0 ignored.
+- `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml -j 1`: 184 passed, 0 failed, 1 ignored.
+- Linux (WSL, fresh native clone at d823049a, `cargo test --locked --offline --no-fail-fast`): 2411 passed, 10 failed, 12 ignored; the 10 failures are all ONNX Runtime missing on the host (laya_infer 5, laya_ort 4, laya_router 1), not product regressions (see below). Windows main: 2429 passed plus 1 added test (measure-walk negative control); storage_ledger re-run on Windows green.
 
 Regressions fixed (each reproduced deterministically, then fixed under its module with VERIFY and review):
 1. engine text_cases::required_phrases_are_present and wish_flow a_long_batch_is_piloted_then_waited_on_without_a_model: engine prompt wording lost in the p2b merge, restored in engine/agents/dispatcher.md (unit fix-p2b-prompts-2, which supersedes fix-p2b-prompts).
 2. base::proc::tests::no_bare_command_new_outside_the_helper: a bare Command::new in src/desktop/ux/real/modes_accept.rs, routed through the helper (unit fix-modes-command).
 3. r10_integration prompt_total_matches_files: the recorded dispatcher.md size was 9862, the file is 9872; the record now reads 9872 and total 20768 (unit gates-prompt-sizes).
+4. Four prompt/doc phrase tests: required wording restored (unit fin-prompts-1).
+5. CRLF renormalisation of tests/fixtures/paper: LF bytes restored, protected by `.gitattributes` `-text` and tests/paper_fixture_bytes.rs (unit fin-paper-eol-2).
+6. Host test Python lookup corrected (unit fin-python-1).
+7. Desktop shell source-guard tests, startup seams and live reload corrected (unit fin-desktop-1).
+8. Desktop pool publishing wired through `live::quota::publish_pools`, called from src/desktop/live.rs (unit fin-pools-1).
+9. `base::proc::pid_alive` treated PIDs above i32::MAX as alive on Linux; corrected (unit fin-pidalive-1).
+10. Doctor-page walk tests clicked a Preferences switch below a 900 px window after pool rows grew the Budgets card; the test window is now taller (unit fin-walk-1).
 
-Environmental, not regressions (each passed when re-run alone, 2 to 3 times, and failed only while other builds loaded the machine):
+Environmental and load-sensitive, not regressions:
 - Under overlapped suites the first pass showed 134 main, 3 desktop and 6 desktop-smoke failures, mostly named-pipe os error 5 and os error 1455 and process-tree timing; none remain when the suites run sequentially.
 - tests/setup_steps.rs cancel_from_thread_preserves_other_step_repo_and_cache: the "other" step sleeps 3 seconds and had finished when cancel returned on a loaded machine (1 failure in 5 runs; 4 passes alone).
 - tests/disk_guard.rs low_disk_cleans_then_pauses_with_distinct_reason: failed once in a full run (the binary took 20 s instead of 2 s); passed alone twice.
 - desktop-smoke ux_interjection: one STATUS_ACCESS_VIOLATION in one full run; passed alone 3 of 3 and in the other full run.
 - tests/scheduler_wall_clock.rs failed in one full run and passed in the next.
+- Orch lifecycle_cases ci_failure_opens_sol_like_a_local_failure ("database is locked"), lifecycle_cases sol_and_extra_commands, and program_role_budgets mid_run_exhaustion_stops_later_requests failed once in an earlier full run (2425 passed, 3 failed); all passed alone and in the clean full re-run (2429 passed, 0 failed).
+- WSL host limit: ONNX Runtime 1.20.1 (Linux x64, libonnxruntime.so) is not installed and not available offline; the 10 laya tests stay red on WSL until the owner installs it (`python tools/laya/fetch.py --runtime`, or the onnxruntime-linux-x64-1.20.1 archive, and sets AXIOM_LAYA_ORT_LIB). The earlier git-in-worktree failures were an environment problem (worktree `.git` points at a Windows path) and pass in a native clone. storage_ledger measure_walk_does_not_hold_write_lock is now deterministic (walk hook, negative control measure_walk_lock_check_detects_held_write_lock).
 
 ## Limitations
 
 - Owner-only checks still open: real tray icon, real login registration.
 - The paid live A/B was not run by this integration.
-- SessionStream is unwired.
-- Modes chat/plaza Provider and Router are unavailable (no real implementation).
-- C15 graph feedback from 2b events: follow-up.
+- Vault and memory slot: not in this version (phase 6 shelved).
+- Optimizer and github seams stay on their fallbacks.
+- Astra read-only tools are enforced only by the prompt (`src/codex/run.rs`).
+- The Claude runner charges no usage on unparseable replies (`council/member.rs`).
 - connect_service still installs the private ServiceBackground in desktop::live.
 - Short CJK graph queries s02 and s04 get no seeds.
 - Windows named-pipe os error 5 flakiness under parallel service tests.

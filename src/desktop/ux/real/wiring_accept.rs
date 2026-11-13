@@ -153,7 +153,7 @@ fn background(s: &Seams) -> bool {
 fn modes(s: &Seams) -> bool {
     let m = s.modes.as_ref().unwrap();
     m.chat_send("wiring-chat", "hello")
-        .is_err_and(|e| e.kind == "unavailable")
+        .is_err_and(|e| e.kind != "unavailable")
         && m.plaza_send(
             "wiring-plaza",
             &PlazaAsk::Say {
@@ -161,7 +161,7 @@ fn modes(s: &Seams) -> bool {
                 mentions: vec![],
             },
         )
-        .is_err_and(|e| e.kind == "unavailable")
+        .is_err_and(|e| e.kind != "unavailable")
 }
 fn unit(s: &Seams, store: &Path) -> bool {
     let accepted = s
@@ -228,7 +228,22 @@ fn background_wired() {
 #[test]
 fn modes_wired() {
     let r = Rig::new();
+    let previous = std::env::var_os("AXIOM_CLAUDE_CMD");
+    std::env::set_var(
+        "AXIOM_CLAUDE_CMD",
+        serde_json::to_string(&vec![r
+            .home
+            .path()
+            .join("missing-fake-executable")
+            .to_string_lossy()
+            .to_string()])
+        .unwrap(),
+    );
     assert!(modes(&r.seams()));
+    match previous {
+        Some(v) => std::env::set_var("AXIOM_CLAUDE_CMD", v),
+        None => std::env::remove_var("AXIOM_CLAUDE_CMD"),
+    }
 }
 #[test]
 fn unit_actions() {
@@ -253,7 +268,7 @@ fn unavailable_seams_and_lazy_start() {
     let home = tempfile::tempdir().unwrap();
     let slots = tempfile::tempdir().unwrap();
     let s = production(home.path(), slots.path());
-    assert!(s.sessions.is_none() && s.optimizer.is_none() && s.github.is_none());
+    assert!(s.sessions.is_some() && s.optimizer.is_none() && s.github.is_none());
     assert!(!home.path().join("desktop").exists());
     assert_eq!(
         super::wiring::LazyStart(home.path().into())

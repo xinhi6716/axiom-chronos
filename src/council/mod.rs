@@ -2,6 +2,7 @@
 //! engine settles what they agree on mechanically. The switch is explicit: a session gets the
 //! bridge's `council` tool only when `--advanced-research` launched it.
 pub mod budgets;
+pub mod settings;
 pub use budgets::Budgets;
 mod converge;
 mod member;
@@ -192,6 +193,7 @@ pub struct DegradedMember {
 }
 
 pub struct Setup {
+    pub argon_every_round: bool,
     pub fable: Res<Vec<String>>,
     pub argon: Res<Vec<String>>,
     pub fable_cap_usd: f64,
@@ -204,6 +206,7 @@ pub struct Setup {
 impl Setup {
     pub fn new(fable: Res<Vec<String>>, argon: Res<Vec<String>>) -> Self {
         Self {
+            argon_every_round: true,
             fable,
             argon,
             fable_cap_usd: DEFAULT_FABLE_CAP_USD,
@@ -228,6 +231,12 @@ impl Setup {
         setup.astra_token_cap = budgets.astra_token_cap;
         setup.argon_token_cap = budgets.argon_token_cap;
         setup.rounds = budgets.rounds;
+        setup.argon_every_round = match settings::parse_argon_every_round(budgets::env_value(
+            settings::ARGON_EVERY_ROUND_ENV,
+        ))? {
+            Some(value) => value,
+            None => settings::load(&base::axiom_home())?.argon_every_round,
+        };
         Ok(Some(setup))
     }
 }
@@ -566,13 +575,21 @@ pub fn run_with_events(
         .parent()
         .ok_or_else(|| invalid("plan_path has no parent".into()))?
         .to_path_buf();
-    let key = sha256(format!("{}\0{}", request.brief, sha256(&plan_bytes)).as_bytes());
+    let key = sha256(
+        format!(
+            "{}\0{}\0{}",
+            request.brief,
+            sha256(&plan_bytes),
+            setup.argon_every_round
+        )
+        .as_bytes(),
+    );
     let council_path = dir.join("council.json");
     if let Some(existing) = load_council(&council_path).filter(|c| c.key == key) {
         return finish(&dir, &existing, true);
     }
     let work = dir.join("council");
-    let store =
+    let real_store =
         dir.ancestors()
             .take_while(|p| p.file_name().is_none_or(|name| name != "scratch"))
             .find(|p| {
@@ -586,8 +603,8 @@ pub fn run_with_events(
                 project.parent().is_some_and(|parent| {
                     parent.file_name().is_some_and(|name| name == "orchestrate")
                 }) && (p.join("units.tsv").is_file() || p.join("reports").is_dir())
-            })
-            .unwrap_or(&dir);
+            });
+    let store = real_store.unwrap_or(&dir);
     let (home, owner) = crate::orch::store::storage_context(store);
     crate::storage::ensure_dir(&home, &work, crate::storage::Class::ResearchCache, &owner)?;
     let mut meter = Meter::open(
@@ -598,6 +615,44 @@ pub fn run_with_events(
     let schema2 = turn_schema();
     let schema2_path = work.join("turn.schema.json");
     base::atomic_write(&schema2_path, schema2.to_string().as_bytes()).map_err(io)?;
+    let call_argon = |ask: Ask| -> Answer {
+        if let Err(e) = crate::usage::pools::check(&home, ARGON_MODEL) {
+            return Answer {
+                status: Status::Failed,
+                output: None,
+                raw: None,
+                tokens: 0,
+                detail: Some(e.message),
+            };
+        }
+        let answer = ask_argon(&setup.argon, ask, &schema2_path);
+        let charged = if real_store.is_some() {
+            crate::engine::budgets::record_model(
+                store,
+                &home,
+                crate::engine::budgets::Role::CouncilMember,
+                ARGON_MODEL,
+                None,
+                0,
+                answer.tokens,
+                "council",
+            )
+            .map(|_| ())
+        } else {
+            crate::usage::pools::charge(&home, ARGON_MODEL, Some(answer.tokens), None, "council")
+                .map(|_| ())
+        };
+        if let Err(e) = charged {
+            return Answer {
+                status: Status::Failed,
+                output: None,
+                raw: answer.raw,
+                tokens: answer.tokens,
+                detail: Some(e.message),
+            };
+        }
+        answer
+    };
     let mut seats = [
         Seat::new("astra", "astra"),
         Seat::new("fable", FABLE_MODEL),
@@ -624,7 +679,13 @@ pub fn run_with_events(
                 positions: vec![],
                 turns: vec![],
             };
-            let speakers: &[usize] = if phase == "B" { &[2] } else { &[0, 1] };
+            let speakers: &[usize] = if setup.argon_every_round {
+                &[0, 1, 2]
+            } else if phase == "B" {
+                &[2]
+            } else {
+                &[0, 1]
+            };
             let mut failed = false;
             let mut approved = false;
             for &index in speakers {
@@ -644,6 +705,9 @@ pub fn run_with_events(
                 if seat.status != Status::Ok {
                     reason = format!("{}: {}", seat.name, seat.status.word());
                     failed = true;
+                    if setup.argon_every_round {
+                        continue;
+                    }
                     break;
                 }
                 if index == 0 && seat.tokens >= setup.astra_token_cap {
@@ -672,8 +736,12 @@ pub fn run_with_events(
                     seat.cut("no usage was reported, so its cost cannot be bounded");
                 }
                 let mut schema_for = schema2.clone();
-                if index == 1 && phase == "A" {
+                if (index == 1 || (index == 2 && setup.argon_every_round)) && phase == "A" {
                     schema_for["required"] = json!(["stances", "approved"]);
+                }
+                if index == 2 {
+                    base::atomic_write(&schema2_path, schema_for.to_string().as_bytes())
+                        .map_err(io)?;
                 }
                 let prompt = format!(
                     "{}\nPlan phase agreement: {}. Open plan disputes: {}.",
@@ -685,10 +753,11 @@ pub fn run_with_events(
                         &schema_for,
                         phase,
                         n,
-                        &objections
+                        &objections,
+                        setup.argon_every_round
                     ),
                     phases.first().map(|p: &Phase| p.agreement).unwrap_or(false),
-                    phase_a_open(&claims).join(", ")
+                    phase_a_open(&claims, setup.argon_every_round).join(", ")
                 );
                 let timeout = if phase == "A" && n == 1 {
                     setup.round1_timeout
@@ -752,7 +821,7 @@ pub fn run_with_events(
                             &mut meter,
                         )
                     } else {
-                        ask_argon(&setup.argon, ask, &schema2_path)
+                        call_argon(ask)
                     }
                 };
                 if index == 0 {
@@ -836,18 +905,14 @@ pub fn run_with_events(
                     let repair_prompt = format!("{prompt}\nREPAIR: The previous review failed validation: {first}\nReturn the same review reshaped to match this schema: {schema_for}");
                     let repair_path =
                         work.join(format!("{phase}-r{n}-{}.repair.raw.txt", seat.name));
-                    let mut repaired = ask_argon(
-                        &setup.argon,
-                        Ask {
-                            prompt: repair_prompt,
-                            cwd: &request.cwd,
-                            schema: &schema_for,
-                            timeout,
-                            stop,
-                            raw_path: Some(&repair_path),
-                        },
-                        &schema2_path,
-                    );
+                    let mut repaired = call_argon(Ask {
+                        prompt: repair_prompt,
+                        cwd: &request.cwd,
+                        schema: &schema_for,
+                        timeout,
+                        stop,
+                        raw_path: Some(&repair_path),
+                    });
                     seat.tokens = seat.tokens.saturating_add(repaired.tokens);
                     if repaired.status == Status::Ok && seat.tokens >= cap {
                         repaired.status = Status::BudgetCut;
@@ -929,6 +994,9 @@ pub fn run_with_events(
                             .unwrap_or_default()
                     );
                     failed = true;
+                    if setup.argon_every_round {
+                        continue;
+                    }
                     break;
                 }
                 if let Some(value) = answer.output {
@@ -941,7 +1009,7 @@ pub fn run_with_events(
                     if index == 1 {
                         approved = value["approved"] == true;
                     }
-                    if index == 2 {
+                    if index == 2 && phase == "B" {
                         objections = claims
                             .iter()
                             .filter(|c| {
@@ -965,9 +1033,9 @@ pub fn run_with_events(
             agreement = if phase == "B" {
                 objections.is_empty()
             } else if phase == "A" {
-                approved && phase_a_open(&claims).is_empty()
+                approved && phase_a_open(&claims, setup.argon_every_round).is_empty()
             } else {
-                phase_c_open(&claims, &objections).is_empty()
+                phase_c_open(&claims, &objections, setup.argon_every_round).is_empty()
             };
             if agreement {
                 reason = if phase == "B" {
@@ -979,11 +1047,11 @@ pub fn run_with_events(
             }
         }
         let open = if phase == "A" {
-            phase_a_open(&claims)
+            phase_a_open(&claims, setup.argon_every_round)
         } else if phase == "B" {
             objections.clone()
         } else {
-            phase_c_open(&claims, &objections)
+            phase_c_open(&claims, &objections, setup.argon_every_round)
         };
         phases.push(Phase {
             phase: phase.into(),
@@ -1032,17 +1100,19 @@ pub fn run_with_events(
 fn affirmative(s: Option<&Stance>) -> bool {
     matches!(s, Some(Stance::Author | Stance::Agree | Stance::Concede))
 }
-fn phase_a_open(claims: &[Claim]) -> Vec<String> {
+fn phase_a_open(claims: &[Claim], argon: bool) -> Vec<String> {
     claims
         .iter()
         .filter(|c| {
             c.phase == "A"
-                && (!affirmative(c.stances.get("astra")) || !affirmative(c.stances.get("fable")))
+                && (!affirmative(c.stances.get("astra"))
+                    || !affirmative(c.stances.get("fable"))
+                    || (argon && !affirmative(c.stances.get("argon"))))
         })
         .map(|c| c.id.clone())
         .collect()
 }
-fn phase_c_open(claims: &[Claim], objections: &[String]) -> Vec<String> {
+fn phase_c_open(claims: &[Claim], objections: &[String], argon: bool) -> Vec<String> {
     objections
         .iter()
         .filter(|id| {
@@ -1058,7 +1128,13 @@ fn phase_c_open(claims: &[Claim], objections: &[String]) -> Vec<String> {
             };
             match (resolved("astra"), resolved("fable")) {
                 (Some(a), Some(f)) => {
-                    a.decision != f.decision
+                    (argon
+                        && resolved("argon").is_none_or(|g| {
+                            g.decision != a.decision
+                                || (a.decision.as_deref() == Some("accepted")
+                                    && g.change != a.change)
+                        }))
+                        || a.decision != f.decision
                         || (a.decision.as_deref() == Some("accepted") && a.change != f.change)
                 }
                 _ => true,
@@ -1135,6 +1211,7 @@ fn cross_prompt(
     phase: &str,
     n: u64,
     objections: &[String],
+    argon_every_round: bool,
 ) -> String {
     let mut others: Vec<&str> = MEMBERS.iter().copied().filter(|m| *m != reader).collect();
     others.sort_by_key(|m| sha256(format!("{key}{reader}{m}").as_bytes()));
@@ -1172,7 +1249,9 @@ fn cross_prompt(
         }
     }
     let instruction=match phase {
+        "B" if argon_every_round => "Review the plan and open disputes. Agree or object per claim, with checkable evidence. You may add claims. Give a stance for each claim.",
         "B"=>"You are the sole independent reviewer. Review the final plan or both final positions and their open disputes. Agree or object per claim, with checkable evidence. You may add claims. This is your only review turn. `stances` is a required array with one entry per claim id, for example: {\"stances\":[{\"claim\":\"C1\",\"stance\":\"agree\",\"evidence\":\"src/a.rs:12\"}]}.",
+        "C" if argon_every_round => "Settle every review objection below. For each resolution give accepted with a concrete change, or rejected with a reason. All three members must settle each objection. The original review stays in the record for the core's ruling.",
         "C"=>"Settle every review objection below. For each resolution give accepted with a concrete change, or rejected with a reason. Both participants must settle each objection. The original review stays in the record for the core's ruling.",
         _=>"Agree or rebut per claim with evidence. Revise or defend the plan against the earlier replies. State approved=true only if you approve the whole plan and every rebuttal is closed. To revise one of your own claims, supply an accepted resolution with its complete revised text in change and the reason; otherwise defend it in stance evidence.",
     };

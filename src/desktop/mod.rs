@@ -321,7 +321,7 @@ mod strip_startup_tests {
     fn startup_uses_real_seams_only_outside_demo() {
         let real = initial_state(&Options::default());
         assert!(real.ux.seams.dual_core.is_some());
-        assert!(real.ux.seams.sessions.is_none());
+        assert!(real.ux.seams.sessions.is_some());
         let demo = initial_state(&Options { demo: true, ..Default::default() });
         assert!(demo.ux.seams.dual_core.is_some());
         assert!(demo.ux.seams.sessions.is_some());

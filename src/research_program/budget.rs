@@ -187,3 +187,25 @@ impl Budget {
         }
     }
 }
+
+/// Add the council's per-round Argon calls to a program model list.
+pub fn council_models(models: &mut Vec<String>, home: &Path) -> Res<()> {
+    let setting = crate::council::settings::parse_argon_every_round(
+        crate::council::budgets::env_value(crate::council::settings::ARGON_EVERY_ROUND_ENV),
+    )?.map_or_else(|| crate::council::settings::load(home).map(|s| s.argon_every_round), Ok)?;
+    if setting {
+        let rounds = crate::council::Budgets::from_env()?.rounds;
+        for _ in 0..rounds {
+            models.extend(["argon".to_owned(), "argon".to_owned(), "argon".to_owned()]);
+        }
+    }
+    Ok(())
+}
+
+pub fn estimate_line(estimate: &crate::research_program::history::Estimate, models: &[String]) -> String {
+    let mut line = estimate.line();
+    if models.iter().any(|model| model.eq_ignore_ascii_case("argon")) {
+        line.push_str("; Argon spend lands in the Argon pool");
+    }
+    line
+}

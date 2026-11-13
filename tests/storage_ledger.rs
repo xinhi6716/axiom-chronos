@@ -391,44 +391,77 @@ fn stale_measurement_errors_are_logged_and_do_not_abort() {
 
 #[test]
 fn measure_walk_does_not_hold_write_lock() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    assert!(
+        register_finishes_during_walk(false),
+        "register did not finish while the directory walk was held open"
+    );
+}
+
+#[test]
+fn measure_walk_lock_check_detects_held_write_lock() {
+    assert!(
+        !register_finishes_during_walk(true),
+        "lock check failed to detect a write lock held during the walk"
+    );
+}
+
+fn register_finishes_during_walk(hold_write_lock: bool) -> bool {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
     let t = tempfile::tempdir().unwrap();
-    let root = t.path().join("large");
+    let root = t.path().join("root");
     fs::create_dir_all(&root).unwrap();
-    for i in 0..12000 {
+    for i in 0..50 {
         fs::write(root.join(format!("file-{i}")), b"x").unwrap();
     }
     let l = Ledger::open(t.path()).unwrap();
     l.register(&root, Class::Scratch, &owner("p", None), json!({}))
         .unwrap();
-    let done = Arc::new(AtomicBool::new(false));
-    let signal = Arc::new(Barrier::new(2));
+    let received_registered = Arc::new(AtomicBool::new(false));
+    let (walk_started_tx, walk_started_rx) = mpsc::channel();
+    let (registered_tx, registered_rx) = mpsc::channel();
     let home = t.path().to_owned();
-    let d = done.clone();
-    let s = signal.clone();
+    let received = received_registered.clone();
     let thread = std::thread::spawn(move || {
         let l = Ledger::open(&home).unwrap();
-        s.wait();
-        let result = l.measure(&home.join("large"), 1);
-        d.store(true, Ordering::SeqCst);
-        result
+        l.measure_with_walk_hook(&root, 1, &|| {
+            let db = if hold_write_lock {
+                let db = rusqlite::Connection::open(home.join("storage/ledger.sqlite3")).unwrap();
+                db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                Some(db)
+            } else {
+                None
+            };
+            walk_started_tx.send(()).unwrap();
+            let timeout = if hold_write_lock {
+                Duration::from_millis(300)
+            } else {
+                Duration::from_secs(20)
+            };
+            received.store(
+                registered_rx.recv_timeout(timeout).is_ok(),
+                Ordering::SeqCst,
+            );
+            if let Some(db) = db {
+                db.execute_batch("ROLLBACK").unwrap();
+            }
+        })
     });
-    signal.wait();
-    std::thread::sleep(Duration::from_millis(20));
-    assert!(
-        !done.load(Ordering::SeqCst),
-        "tree walk finished before concurrent write could be tested"
-    );
-    l.register(
+    walk_started_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("directory walk did not start");
+    let registered = l.register(
         &t.path().join("other"),
         Class::Logs,
         &owner("p", None),
         json!({}),
-    )
-    .unwrap();
-    assert!(
-        !done.load(Ordering::SeqCst),
-        "register waited until the directory walk finished"
     );
-    assert_eq!(thread.join().unwrap().unwrap(), Some(12000));
+    // The negative control times out and may drop its receiver before register returns.
+    let _ = registered_tx.send(());
+    let measured = thread.join().unwrap();
+    assert!(registered.is_ok(), "register failed: {registered:?}");
+    assert_eq!(measured.unwrap(), Some(50));
+    received_registered.load(Ordering::SeqCst)
 }
