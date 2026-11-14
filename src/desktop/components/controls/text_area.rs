@@ -3,12 +3,117 @@ use super::button::{ring, Interaction};
 use super::text_field::{input_id, FieldStyle};
 use crate::desktop::components::tokens::{button_colors, radius, ButtonVariant, Radius, Tokens};
 use crate::desktop::motion::{self, Driver};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{
+    IndentInline, InputEvent, OutdentInline, Textarea, TextareaState,
+};
 use gpui_kit::{
-    div, App, ElementId, Entity, Focusable, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
 use std::rc::Rc;
+
+/// Events forwarded from the underlying editor after committed changes or submit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAreaEvent {
+    Change,
+    Submit,
+}
+
+fn area_event(event: &InputEvent, submit_on_enter: bool) -> Option<TextAreaEvent> {
+    match event {
+        InputEvent::Change => Some(TextAreaEvent::Change),
+        InputEvent::PressEnter { shift: false, .. } if submit_on_enter => {
+            Some(TextAreaEvent::Submit)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusDirection {
+    Next,
+    Previous,
+}
+
+fn focus_direction(owned: bool, outdent: bool) -> Option<FocusDirection> {
+    if !owned {
+        None
+    } else if outdent {
+        Some(FocusDirection::Previous)
+    } else {
+        Some(FocusDirection::Next)
+    }
+}
+
+fn move_focus(direction: FocusDirection, window: &mut Window, cx: &mut App) {
+    match direction {
+        FocusDirection::Next => window.focus_next(cx),
+        FocusDirection::Previous => window.focus_prev(cx),
+    }
+}
+
+pub struct TextAreaState {
+    inner: Entity<TextareaState>,
+    submit_on_enter: bool,
+}
+impl EventEmitter<TextAreaEvent> for TextAreaState {}
+impl Focusable for TextAreaState {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.inner.read(cx).focus_handle(cx)
+    }
+}
+impl TextAreaState {
+    pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| {
+            let inner = cx.new(|cx| {
+                let mut state = TextareaState::new(window, cx);
+                state.set_submit_on_enter(true, cx);
+                state
+            });
+            cx.subscribe(&inner, |this: &mut Self, _, event: &InputEvent, cx| {
+                if let Some(event) = area_event(event, this.submit_on_enter) {
+                    cx.emit(event);
+                }
+                cx.notify();
+            })
+            .detach();
+            Self {
+                inner,
+                submit_on_enter: true,
+            }
+        })
+    }
+    pub fn value(&self, cx: &App) -> SharedString {
+        self.inner.read(cx).value()
+    }
+    pub fn set_value(
+        &mut self,
+        value: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.inner
+            .update(cx, |state, cx| state.set_value(value.into(), window, cx));
+    }
+    pub fn set_placeholder(
+        &mut self,
+        text: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.inner
+            .update(cx, |state, cx| state.set_placeholder(text, window, cx));
+    }
+    pub fn set_rows(&mut self, rows: usize, cx: &mut Context<Self>) {
+        self.inner.update(cx, |state, cx| state.set_rows(rows, cx));
+    }
+    pub fn set_submit_on_enter(&mut self, submit: bool, cx: &mut Context<Self>) {
+        self.submit_on_enter = submit;
+        self.inner
+            .update(cx, |state, cx| state.set_submit_on_enter(submit, cx));
+    }
+}
 
 type Submit = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 fn clamp_rows(rows: usize, min: usize, max: usize) -> usize {
@@ -50,6 +155,9 @@ pub struct TextArea {
     max_rows: usize,
     placeholder: Option<SharedString>,
     on_submit: Option<Submit>,
+    owned: bool,
+    configure: bool,
+    rows_configured: bool,
 }
 impl TextArea {
     pub fn new(id: impl Into<ElementId>, state: &Entity<TextareaState>, tokens: &Tokens) -> Self {
@@ -60,15 +168,32 @@ impl TextArea {
             max_rows: 1,
             placeholder: None,
             on_submit: None,
+            owned: false,
+            configure: true,
+            rows_configured: false,
         }
+    }
+    pub fn from_state(
+        id: impl Into<ElementId>,
+        state: &Entity<TextAreaState>,
+        tokens: &Tokens,
+        cx: &App,
+    ) -> Self {
+        let mut area = Self::new(id, &state.read(cx).inner, tokens);
+        area.owned = true;
+        area.configure = false;
+        area
     }
     pub fn rows(mut self, min: usize, max: usize) -> Self {
         self.min_rows = clamp_rows(min, 1, usize::MAX);
         self.max_rows = max.max(self.min_rows);
+        self.configure = true;
+        self.rows_configured = true;
         self
     }
     pub fn placeholder(mut self, text: impl Into<SharedString>) -> Self {
         self.placeholder = Some(text.into());
+        self.configure = true;
         self
     }
     pub fn on_submit(
@@ -91,10 +216,14 @@ impl RenderOnce for TextArea {
             self.max_rows,
             self.placeholder.clone(),
         );
-        if config.read(cx).as_ref() != Some(&desired) {
+        if self.configure && config.read(cx).as_ref() != Some(&desired) {
             self.state.update(cx, |state, cx| {
-                state.set_auto_grow(desired.1, desired.2, cx);
-                state.set_placeholder(desired.3.clone().unwrap_or_default(), window, cx);
+                if !self.owned || self.rows_configured {
+                    state.set_auto_grow(desired.1, desired.2, cx);
+                }
+                if !self.owned || desired.3.is_some() {
+                    state.set_placeholder(desired.3.clone().unwrap_or_default(), window, cx);
+                }
             });
             config.update(cx, |value, _| *value = Some(desired));
         }
@@ -126,6 +255,7 @@ impl RenderOnce for TextArea {
         let out = interaction;
         let input = self.state.clone();
         let submit = self.on_submit;
+        let owned = self.owned;
         div()
             .id(id.clone())
             .rounded(radius(Radius::Md))
@@ -134,6 +264,18 @@ impl RenderOnce for TextArea {
             .border_1()
             .border_color(self.style.tokens.border)
             .shadow(style.ring)
+            .capture_action(move |_: &IndentInline, window, cx| {
+                if let Some(direction) = focus_direction(owned, false) {
+                    cx.stop_propagation();
+                    move_focus(direction, window, cx);
+                }
+            })
+            .capture_action(move |_: &OutdentInline, window, cx| {
+                if let Some(direction) = focus_direction(owned, true) {
+                    cx.stop_propagation();
+                    move_focus(direction, window, cx);
+                }
+            })
             .child(
                 Textarea::new(&self.state)
                     .appearance(false)
@@ -192,6 +334,57 @@ impl RenderOnce for TextArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owned_state_exposes_editor_and_events() {
+        let _: fn(&mut Window, &mut App) -> Entity<TextAreaState> = TextAreaState::new;
+        let _: fn(&TextAreaState, &App) -> SharedString = TextAreaState::value;
+        fn emits<T: gpui_kit::EventEmitter<TextAreaEvent>>() {}
+        emits::<TextAreaState>();
+        assert_eq!(
+            area_event(&InputEvent::Change, true),
+            Some(TextAreaEvent::Change)
+        );
+        let enter = InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        };
+        let shift_enter = InputEvent::PressEnter {
+            secondary: false,
+            shift: true,
+        };
+        assert_eq!(area_event(&enter, true), Some(TextAreaEvent::Submit));
+        assert_eq!(area_event(&shift_enter, true), None);
+        assert_eq!(area_event(&enter, false), None);
+    }
+    #[test]
+    fn owned_tab_actions_choose_focus_direction() {
+        assert_eq!(focus_direction(true, false), Some(FocusDirection::Next));
+        assert_eq!(focus_direction(true, true), Some(FocusDirection::Previous));
+        assert_eq!(focus_direction(false, false), None);
+        assert_eq!(focus_direction(false, true), None);
+    }
+    #[test]
+    fn input_events_respect_enter_modifiers_and_submit_setting() {
+        for submit in [false, true] {
+            assert_eq!(
+                area_event(&InputEvent::Change, submit),
+                Some(TextAreaEvent::Change)
+            );
+            assert_eq!(area_event(&InputEvent::Focus, submit), None);
+            assert_eq!(area_event(&InputEvent::Blur, submit), None);
+            for secondary in [false, true] {
+                for shift in [false, true] {
+                    let event = InputEvent::PressEnter { secondary, shift };
+                    let expected = if submit && !shift {
+                        Some(TextAreaEvent::Submit)
+                    } else {
+                        None
+                    };
+                    assert_eq!(area_event(&event, submit), expected);
+                }
+            }
+        }
+    }
     #[test]
     fn rows_submit_and_field_style() {
         for t in crate::desktop::theme::both() {

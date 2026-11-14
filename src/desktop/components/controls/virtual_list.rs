@@ -3,7 +3,7 @@ use super::toolbar::Toolbar;
 use crate::desktop::components::tokens::{space, Density, Step, Tokens};
 use gpui_kit::{
     div, list, px, AnyElement, App, ElementId, IntoElement, ListAlignment, ListOffset, ListState,
-    ParentElement, RenderOnce, Styled, Window,
+    Div, ParentElement, Pixels, RenderOnce, Styled, Window,
 };
 use std::{ops::Range, rc::Rc};
 
@@ -104,6 +104,7 @@ pub struct VirtualList {
     handle: VirtualListHandle,
     tokens: Tokens,
     render: Rc<dyn Fn(usize) -> AnyElement>,
+    row_width: Option<Pixels>,
 }
 impl VirtualList {
     pub fn new<E: IntoElement>(
@@ -117,7 +118,12 @@ impl VirtualList {
             handle,
             tokens: *tokens,
             render: Rc::new(move |i| render(i).into_any_element()),
+            row_width: None,
         }
+    }
+    pub fn row_width(mut self, width: Pixels) -> Self {
+        self.row_width = Some(width);
+        self
     }
 }
 fn build_row(
@@ -125,12 +131,16 @@ fn build_row(
     heights: &[f32],
     range: &Range<usize>,
     index: usize,
-) -> AnyElement {
-    let row = div().h(px(heights[index]));
+    width: Option<Pixels>,
+) -> Div {
+    let mut row = div().h(px(heights[index]));
+    if let Some(width) = width {
+        row = row.w(width);
+    }
     if range.contains(&index) {
-        row.child(render(index)).into_any_element()
+        row.child(render(index))
     } else {
-        row.into_any_element()
+        row
     }
 }
 fn render_range(handle: &VirtualListHandle, window_height: f32, offset: f32) -> Range<usize> {
@@ -147,8 +157,9 @@ impl RenderOnce for VirtualList {
         );
         let render = self.render;
         let heights = self.handle.heights.clone();
+        let row_width = self.row_width;
         let rows = list(self.handle.state, move |i, _, _| {
-            build_row(&render, &heights, &range, i)
+            build_row(&render, &heights, &range, i, row_width).into_any_element()
         })
         .size_full();
         Toolbar::new(self.id, &self.tokens).child(rows)
@@ -158,6 +169,22 @@ impl RenderOnce for VirtualList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn row_width_is_optional_and_applied_to_all_rows() {
+        let tokens = crate::desktop::theme::night();
+        let handle = VirtualListHandle::uniform(2, 20.);
+        let list = VirtualList::new("test", handle.clone(), &tokens, |_| div());
+        assert_eq!(list.row_width, None);
+        let list = list.row_width(px(120.));
+        assert_eq!(list.row_width, Some(px(120.)));
+        let range = 0..1;
+        for index in 0..2 {
+            let mut row = build_row(&list.render, &handle.heights, &range, index, list.row_width);
+            assert_eq!(row.style().size.width, Some(px(120.).into()));
+            let mut default_row = build_row(&list.render, &handle.heights, &range, index, None);
+            assert_eq!(default_row.style().size.width, None);
+        }
+    }
     #[test]
     fn render_range_uses_window_height_floor_and_offset() {
         let floor = space(Density::Comfortable, Step::Lg).as_f32();
@@ -198,7 +225,7 @@ mod tests {
         let range = h.visible_range(1_000_000., 40., 1);
         assert_eq!(range, 49_999..50_003);
         for i in 0..100_000 {
-            let _ = build_row(&render, &h.heights, &range, i);
+            let _ = build_row(&render, &h.heights, &range, i, None);
         }
         assert_eq!(called.borrow().len(), range.len());
         assert_eq!(*called.borrow(), range.collect::<Vec<_>>());

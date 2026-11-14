@@ -14,6 +14,7 @@ pub struct EmptyState {
     variant: ButtonVariant,
     tokens: Tokens,
     title: SharedString,
+    header: Option<gpui_kit::AnyElement>,
     icon: Option<gpui_kit::AnyElement>,
     line: Option<gpui_kit::AnyElement>,
     action: Option<gpui_kit::AnyElement>,
@@ -29,10 +30,24 @@ impl EmptyState {
             variant: ButtonVariant::Ghost,
             tokens: *tokens,
             title: message.into(),
+            header: None,
             icon: None,
             line: None,
             action: None,
         }
+    }
+    pub fn header(mut self, value: impl IntoElement) -> Self {
+        self.header = Some(value.into_any_element());
+        self
+    }
+    pub fn media(self, value: impl IntoElement) -> Self {
+        self.icon(value)
+    }
+    pub fn description(self, value: impl IntoElement) -> Self {
+        self.line(value)
+    }
+    pub fn content(self, value: impl IntoElement) -> Self {
+        self.action(value)
     }
     pub fn icon(mut self, value: impl IntoElement) -> Self {
         self.icon = Some(value.into_any_element());
@@ -65,6 +80,7 @@ impl EmptyState {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
+    Header,
     Icon,
     Title,
     Line,
@@ -73,6 +89,9 @@ enum Slot {
 impl EmptyState {
     fn into_slots(self) -> (Toolbar, Vec<(Slot, gpui_kit::AnyElement)>) {
         let mut slots = Vec::new();
+        if let Some(header) = self.header {
+            slots.push((Slot::Header, header));
+        }
         if let Some(icon) = self.icon {
             slots.push((Slot::Icon, icon));
         }
@@ -162,6 +181,32 @@ mod slots_tests {
                 .action("action");
             assert!(empty.icon.is_some() && empty.line.is_some() && empty.action.is_some());
             assert_eq!(empty.title.as_ref(), "New title");
+        }
+    }
+}
+
+#[cfg(test)]
+mod wishes_slots_tests {
+    use super::*;
+    #[test]
+    fn named_slots_render_in_order() {
+        for t in crate::desktop::theme::both() {
+            let empty = EmptyState::new("empty", "title", &t)
+                .header("header")
+                .media("media")
+                .description("description")
+                .content("content");
+            let (_, slots) = empty.into_slots();
+            assert_eq!(
+                slots.iter().map(|(slot, _)| *slot).collect::<Vec<_>>(),
+                [
+                    Slot::Header,
+                    Slot::Icon,
+                    Slot::Title,
+                    Slot::Line,
+                    Slot::Action
+                ]
+            );
         }
     }
 }

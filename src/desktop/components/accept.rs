@@ -1,4 +1,28 @@
 #[test]
+fn wishes_tokens_preserve_values() {
+    use super::tokens::*;
+    use gpui_kit::px;
+    use std::time::Duration;
+    for (actual, expected) in [
+        (PROGRESS_RING_STROKE, 4.), (UNREAD_DOT_SIZE, 7.), (SPLIT_HANDLE_WIDTH, 12.),
+        (ICON_STATUS, 13.), (ICON_ROW, 14.), (REM_BASE, 16.), (ICON_EMPTY, 18.),
+        (EMPTY_STATE_ICON_SIZE, 22.), (ENTRY_HEIGHT, 34.), (LOG_TIME_WIDTH, 56.),
+        (LOG_LEVEL_WIDTH, 112.), (NOTE_MIN_WIDTH, 120.), (LOG_OVERSCAN, 240.),
+        (LOG_HEIGHT, 320.), (TOOLTIP_MAX_WIDTH, 340.), (LOG_SCROLL_BACK, 400.),
+        (DIALOG_WIDTH, 420.), (WINDOW_HEIGHT, 700.), (WINDOW_WIDTH, 1100.),
+    ] {
+        assert_eq!(actual, px(expected));
+    }
+    assert_eq!(RESUME_SETTLE, Duration::from_secs(8));
+    assert_eq!(PENDING_TIMEOUT, Duration::from_secs(20));
+    assert_eq!(POLL_INTERVAL, Duration::from_millis(500));
+    assert_eq!(LOG_SETTLE, Duration::from_millis(800));
+    assert_eq!([FRAME_TINT_OPACITY, REVIEW_BACKGROUND_OPACITY, TAG_BACKGROUND_OPACITY,
+        TAG_BORDER_OPACITY, FRAME_BORDER_OPACITY, RAW_STATE_OPACITY],
+        [0.06, 0.1, 0.12, 0.35, 0.6, 0.7]);
+}
+
+#[test]
 fn radii_are_ordered() {
     use super::tokens::{radius, Radius::*};
     assert!(radius(Sm) < radius(Md) && radius(Md) < radius(Lg) && radius(Lg) < radius(Pill));

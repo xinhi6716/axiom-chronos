@@ -11,7 +11,8 @@ use gpui_kit::{
 #[derive(IntoElement)]
 pub struct TextField {
     style: FieldStyle,
-    state: Entity<InputState>,
+    state: Option<Entity<InputState>>,
+    disabled: bool,
 }
 pub(super) struct FieldStyle {
     id: ElementId,
@@ -48,24 +49,50 @@ impl FieldStyle {
 }
 impl TextField {
     pub fn new(id: impl Into<ElementId>, state: &Entity<InputState>, tokens: &Tokens) -> Self {
+        Self::with_state(id, Some(state.clone()), tokens)
+    }
+    fn with_state(
+        id: impl Into<ElementId>,
+        state: Option<Entity<InputState>>,
+        tokens: &Tokens,
+    ) -> Self {
         Self {
             style: FieldStyle::new(id, tokens),
-            state: state.clone(),
+            state,
+            disabled: false,
         }
+    }
+    #[cfg(test)]
+    fn test_new(tokens: &Tokens) -> Self {
+        Self::with_state("field", None, tokens)
+    }
+    fn resolved_disabled(&self) -> bool {
+        self.disabled
+    }
+    fn with_disabled<T>(&self, build: impl FnOnce(bool) -> T) -> T {
+        build(self.resolved_disabled())
     }
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.style.variant = variant;
         self
     }
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
 }
 impl RenderOnce for TextField {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = self
+            .state
+            .as_ref()
+            .expect("TextField requires an input state");
         let id = self.style.id.clone();
         let tokens = self.style.tokens;
         let variant = self.style.variant;
         let interaction =
             window.use_keyed_state(id.clone(), cx, |_, cx| Interaction::new(cx.focus_handle()));
-        let focus = self.state.read(cx).focus_handle(cx);
+        let focus = state.read(cx).focus_handle(cx);
         let mut driver = Driver::new(cx.reduce_motion(), cx);
         let values = interaction.read(cx);
         let style = self.style.style(
@@ -96,12 +123,13 @@ impl RenderOnce for TextField {
             .border_1()
             .border_color(tokens.border)
             .shadow(style.ring)
-            .child(
-                Input::new(&self.state)
+            .child(self.with_disabled(|disabled| {
+                Input::new(state)
                     .id(input_id(&id))
+                    .disabled(disabled)
                     .appearance(false)
-                    .focus_bordered(false),
-            )
+                    .focus_bordered(false)
+            }))
             .on_hover(move |on, _, cx| {
                 let now = motion::now(cx);
                 let reduce = cx.reduce_motion();
@@ -140,6 +168,22 @@ impl RenderOnce for TextField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disabled_is_an_additive_builder() {
+        for t in crate::desktop::theme::both() {
+            for (field, expected) in [
+                (TextField::test_new(&t), false),
+                (TextField::test_new(&t).disabled(true), true),
+                (
+                    TextField::test_new(&t).disabled(true).disabled(false),
+                    false,
+                ),
+            ] {
+                assert_eq!(field.resolved_disabled(), expected);
+                assert_eq!(field.with_disabled(|forwarded| forwarded), expected);
+            }
+        }
+    }
     #[test]
     fn identity_colours_focus_and_motion() {
         for t in crate::desktop::theme::both() {

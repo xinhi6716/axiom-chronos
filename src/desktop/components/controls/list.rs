@@ -6,12 +6,55 @@ use super::{
 use crate::desktop::components::tokens::Tokens;
 use gpui_kit::component::{
     list::{List as KitList, ListDelegate, ListState},
-    IndexPath,
+    IndexPath as KitIndexPath,
 };
 use gpui_kit::{
     div, App, ElementId, Entity, Global, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, Styled, Window,
 };
+
+/// List position. Convert explicitly at kit list delegate and state boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexPath {
+    pub section: usize,
+    pub row: usize,
+    pub column: usize,
+}
+impl IndexPath {
+    pub fn new(row: usize) -> Self {
+        Self {
+            row,
+            ..Self::default()
+        }
+    }
+    pub fn section(mut self, section: usize) -> Self {
+        self.section = section;
+        self
+    }
+}
+impl From<IndexPath> for KitIndexPath {
+    fn from(path: IndexPath) -> Self {
+        Self {
+            section: path.section,
+            row: path.row,
+            column: path.column,
+        }
+    }
+}
+impl From<KitIndexPath> for IndexPath {
+    fn from(path: KitIndexPath) -> Self {
+        Self {
+            section: path.section,
+            row: path.row,
+            column: path.column,
+        }
+    }
+}
+impl From<IndexPath> for ElementId {
+    fn from(path: IndexPath) -> Self {
+        KitIndexPath::from(path).into()
+    }
+}
 
 struct Bindings;
 impl Global for Bindings {}
@@ -47,14 +90,14 @@ fn page_size(page: usize) -> usize {
 fn normalize_query(query: &str) -> &str {
     query.trim()
 }
-fn can_confirm(counts: &[usize], current: Option<IndexPath>) -> bool {
+fn can_confirm(counts: &[usize], current: Option<KitIndexPath>) -> bool {
     navigate_index(counts, current, 0).is_some()
 }
 fn navigate_index(
     counts: &[usize],
-    current: Option<IndexPath>,
+    current: Option<KitIndexPath>,
     direction: isize,
-) -> Option<IndexPath> {
+) -> Option<KitIndexPath> {
     let total = counts.iter().fold(0usize, |sum, &n| sum.saturating_add(n));
     if total == 0 {
         return None;
@@ -78,7 +121,7 @@ fn navigate_index(
     let mut row = target;
     for (section, &count) in counts.iter().enumerate() {
         if row < count {
-            return Some(IndexPath::new(row).section(section));
+            return Some(KitIndexPath::new(row).section(section));
         }
         row -= count;
     }
@@ -174,7 +217,7 @@ mod tests {
     use super::*;
     #[test]
     fn confirm_requires_valid_selection() {
-        let at = |section, row| Some(IndexPath::new(row).section(section));
+        let at = |section, row| Some(KitIndexPath::new(row).section(section));
         assert_eq!(navigate_index(&[2, 0, 3], at(2, 1), 0), at(2, 1));
         assert_eq!(navigate_index(&[2, 0, 3], at(2, 3), 0), None);
         assert_eq!(navigate_index(&[0, 0], at(0, 0), 0), None);
@@ -185,7 +228,7 @@ mod tests {
     #[test]
     fn page_steps_cross_sections_and_clamp() {
         let counts = [2, 0, 3, 2];
-        let at = |section, row| Some(IndexPath::new(row).section(section));
+        let at = |section, row| Some(KitIndexPath::new(row).section(section));
         assert_eq!(page_size(0), 1);
         assert_eq!(page_size(3), 3);
         let page = page_size(3) as isize;
@@ -205,7 +248,7 @@ mod tests {
     fn navigation_sections_and_stale_selection() {
         for _ in crate::desktop::theme::both() {
             let counts = [2, 0, 3];
-            let at = |section, row| Some(IndexPath::new(row).section(section));
+            let at = |section, row| Some(KitIndexPath::new(row).section(section));
             assert_eq!(navigate_index(&counts, at(0, 1), 1), at(2, 0));
             assert_eq!(navigate_index(&counts, at(2, 0), -1), at(0, 1));
             assert_eq!(navigate_index(&counts, at(0, 0), 3), at(2, 1));
@@ -216,6 +259,36 @@ mod tests {
             assert_eq!(navigate_index(&counts, at(99, 0), isize::MAX), at(2, 2));
             assert_eq!(navigate_index(&[0, 0], at(0, 0), 1), None);
             assert_eq!(navigate_index(&counts, at(99, 0), 0), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod index_path_tests {
+    use crate::desktop::components::IndexPath;
+    // Type-check the same conversions used by the kit state and delegate.
+    #[allow(dead_code)]
+    fn state_and_delegate<D: gpui_kit::component::list::ListDelegate>(
+        state: &mut gpui_kit::component::list::ListState<D>,
+        delegate: &mut D,
+        path: IndexPath,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<gpui_kit::component::list::ListState<D>>,
+    ) {
+        state.set_selected_index(Some(path.into()), window, cx);
+        let _ = delegate.render_item(path.into(), window, cx);
+        let _: Option<IndexPath> = state.selected_index().map(Into::into);
+    }
+    #[test]
+    fn index_path_round_trips_at_kit_boundaries() {
+        let path = IndexPath::new(7).section(2);
+        assert_eq!((path.section, path.row), (2, 7));
+        let kit: gpui_kit::component::IndexPath = path.into();
+        assert_eq!((kit.section, kit.row), (2, 7));
+        assert_eq!(IndexPath::from(kit), path);
+        let _: gpui_kit::ElementId = path.into();
+        for tokens in crate::desktop::theme::both() {
+            let _row = crate::desktop::components::ListItem::new(path, "row", &tokens);
         }
     }
 }

@@ -12,6 +12,7 @@ pub struct Kbd {
     id: ElementId,
     keys: Vec<SharedString>,
     tokens: Tokens,
+    text_size: TypeSize,
 }
 impl Kbd {
     fn resolved_style(
@@ -31,7 +32,7 @@ impl Kbd {
             self.tokens.border,
             self.tokens.raised,
             self.tokens.text,
-            font(d, TypeSize::Caption),
+            font(d, self.text_size),
         )
     }
 
@@ -40,10 +41,15 @@ impl Kbd {
             id: id.into(),
             keys: Vec::new(),
             tokens: *tokens,
+            text_size: TypeSize::Caption,
         }
     }
     pub fn key(mut self, label: impl Into<SharedString>) -> Self {
         self.keys.push(label.into());
+        self
+    }
+    pub fn text_size(mut self, size: TypeSize) -> Self {
+        self.text_size = size;
         self
     }
 }
@@ -69,6 +75,20 @@ impl Kbd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caption_option_uses_caption_token() {
+        let t = theme::night();
+        let kbd = Kbd::new("caption", &t).text_size(TypeSize::Caption);
+        assert_eq!(
+            kbd.resolved_style(theme::Density::Dense).5,
+            font(theme::Density::Dense, TypeSize::Caption)
+        );
+        let body = Kbd::new("body", &t).text_size(TypeSize::Body);
+        assert_eq!(
+            body.resolved_style(theme::Density::Dense).5,
+            font(theme::Density::Dense, TypeSize::Body)
+        );
+    }
     #[test]
     fn resolved_keycap_style_and_labels() {
         for t in theme::both() {

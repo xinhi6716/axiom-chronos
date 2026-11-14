@@ -4,6 +4,9 @@ pub use button::Button;
 mod icon_button;
 pub use icon_button::IconButton;
 
+mod copy_button;
+pub use copy_button::CopyButton;
+
 mod badge;
 pub use badge::Badge;
 
@@ -11,7 +14,7 @@ mod chip;
 pub use chip::Chip;
 
 mod tooltip;
-pub use tooltip::Tooltip;
+pub use tooltip::{tooltip, Tooltip};
 
 mod list_row;
 pub use list_row::ListRow;

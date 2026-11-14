@@ -51,6 +51,12 @@ impl Tabs {
         self.selected = index;
         self
     }
+    pub fn selected_index(self, index: usize) -> Self {
+        self.selected(index)
+    }
+    pub fn on_click(self, callback: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_select(move |index, window, cx| callback(&index, window, cx))
+    }
     pub fn on_select(mut self, callback: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_select = Some(Rc::new(callback));
         self
@@ -113,6 +119,24 @@ mod tests {
                 assert!(tabs.item_button(2).is_none());
                 assert_eq!(selection(usize::MAX, tabs.items.len()), None);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod wishes_api_tests {
+    use super::*;
+    #[test]
+    fn selected_index_and_click_wire_items() {
+        for t in crate::desktop::theme::both() {
+            let tabs = Tabs::new("tabs", &t)
+                .item("a", "A")
+                .item("b", "B")
+                .selected_index(1)
+                .on_click(|_, _, _| {});
+            assert!(tabs.on_select.is_some());
+            assert_eq!(tabs.item_button(1).unwrap().toggled, Some(true));
+            assert_eq!(tabs.item_button(0).unwrap().toggled, Some(false));
         }
     }
 }

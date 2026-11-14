@@ -5,6 +5,7 @@ pub use crate::desktop::theme::{
     Tokened, Tokens, TypeSize,
 };
 use gpui_kit::{point, px, BoxShadow, Hsla, Pixels, Point};
+use std::time::Duration;
 
 pub const PROGRESS_HEIGHT: Pixels = px(8.);
 pub const PROGRESS_RING_SIZE: Pixels = px(40.);
@@ -13,6 +14,35 @@ pub const STATUS_DOT_SIZE: Pixels = px(8.);
 pub const SPLIT_HANDLE_WIDTH: Pixels = px(12.);
 pub const SPLIT_HANDLE_LENGTH: Pixels = px(40.);
 pub const SPLIT_KEY_STEP: Pixels = px(8.);
+
+// Wishes, detail and control view dimensions and timing.
+pub const UNREAD_DOT_SIZE: Pixels = px(7.);
+pub const ICON_STATUS: Pixels = px(13.);
+pub const ICON_ROW: Pixels = px(14.);
+pub const REM_BASE: Pixels = px(16.);
+pub const ICON_EMPTY: Pixels = px(18.);
+pub const EMPTY_STATE_ICON_SIZE: Pixels = px(22.);
+pub const ENTRY_HEIGHT: Pixels = px(34.);
+pub const LOG_TIME_WIDTH: Pixels = px(56.);
+pub const LOG_LEVEL_WIDTH: Pixels = px(112.);
+pub const NOTE_MIN_WIDTH: Pixels = px(120.);
+pub const LOG_OVERSCAN: Pixels = px(240.);
+pub const LOG_HEIGHT: Pixels = px(320.);
+pub const TOOLTIP_MAX_WIDTH: Pixels = px(340.);
+pub const LOG_SCROLL_BACK: Pixels = px(400.);
+pub const DIALOG_WIDTH: Pixels = px(420.);
+pub const WINDOW_HEIGHT: Pixels = px(700.);
+pub const WINDOW_WIDTH: Pixels = px(1100.);
+pub const RESUME_SETTLE: Duration = Duration::from_secs(8);
+pub const PENDING_TIMEOUT: Duration = Duration::from_secs(20);
+pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
+pub const LOG_SETTLE: Duration = Duration::from_millis(800);
+pub const FRAME_TINT_OPACITY: f32 = 0.06;
+pub const REVIEW_BACKGROUND_OPACITY: f32 = 0.1;
+pub const TAG_BACKGROUND_OPACITY: f32 = 0.12;
+pub const TAG_BORDER_OPACITY: f32 = 0.35;
+pub const FRAME_BORDER_OPACITY: f32 = 0.6;
+pub const RAW_STATE_OPACITY: f32 = 0.7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {

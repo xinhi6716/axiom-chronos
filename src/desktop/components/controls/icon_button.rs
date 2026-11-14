@@ -26,6 +26,30 @@ impl IconButton {
         self.button = self.button.variant(variant);
         self
     }
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.button = self.button.disabled(disabled);
+        self
+    }
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.button = self.button.selected(selected);
+        self
+    }
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.button = self.button.loading(loading);
+        self
+    }
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.button = self.button.tooltip(text);
+        self
+    }
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.button = self.button.accessibility_label(label);
+        self
+    }
+    pub(super) fn min_size(mut self, size: gpui_kit::Pixels) -> Self {
+        self.button.min_size = Some(size);
+        self
+    }
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
         self.button = self.button.track_focus(focus);
         self
@@ -47,6 +71,19 @@ impl RenderOnce for IconButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extended_options_reach_button() {
+        let t = crate::desktop::theme::night();
+        let b = IconButton::new("i", IconName::Copy, "Copy", &t)
+            .accessibility_label("Copy value")
+            .tooltip("Copy")
+            .selected(true)
+            .loading(true)
+            .disabled(true);
+        assert!(!b.button.tab_stop());
+        assert!(!b.button.accepts_click());
+        assert_eq!(b.button.tooltip.as_deref(), Some("Copy"));
+    }
     use crate::desktop::components::tokens::button_colors;
     use crate::desktop::motion::{Spring, SpringValue};
     #[test]

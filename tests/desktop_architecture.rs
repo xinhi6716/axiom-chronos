@@ -577,6 +577,8 @@ fn component_widget(path: &[&str]) -> bool {
         "ButtonCustomVariant",
         "InputEvent",
         "InputState",
+        "TextareaState",
+        "IndexPath",
         "MoveDown",
         "OutdentInline",
         "IndentInline",
@@ -950,6 +952,12 @@ mod deps {
 }
 mod classify {
     use super::*;
+    #[test]
+    fn component_state_and_index_are_not_widgets() {
+        assert!(!component_widget(&["gpui_kit", "component", "input", "TextareaState"]));
+        assert!(!component_widget(&["gpui_kit", "component", "IndexPath"]));
+        assert!(component_widget(&["gpui_kit", "component", "input", "Textarea"]));
+    }
     #[test]
     fn all_files_and_unknown() {
         let fs = files();

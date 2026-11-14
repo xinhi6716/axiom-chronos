@@ -3,6 +3,7 @@ use crate::desktop::components::tokens::{button_colors, radius, ButtonVariant, R
 use crate::desktop::motion::{self, Driver, Settling, Spring, SpringValue};
 use gpui_kit::component::button::{Button as KitButton, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::{Disableable as _, Selectable as _};
 use gpui_kit::{
     div, App, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, MouseButton,
     ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
@@ -103,6 +104,13 @@ pub struct Button {
     pub(super) id: ElementId,
     label: SharedString,
     icon: Option<gpui_kit::component::IconName>,
+    icon_only: bool,
+    accessibility_label: Option<SharedString>,
+    disabled: bool,
+    selected: bool,
+    loading: bool,
+    gold_leaf: bool,
+    pub(super) min_size: Option<gpui_kit::Pixels>,
     pub(super) variant: ButtonVariant,
     pub(super) tokens: Tokens,
     focus: Option<FocusHandle>,
@@ -115,7 +123,10 @@ pub struct Button {
 
 impl Button {
     pub(super) fn tab_stop(&self) -> bool {
-        true
+        !self.disabled
+    }
+    pub(super) fn accepts_click(&self) -> bool {
+        !self.disabled && !self.loading
     }
     pub(super) fn style(
         &self,
@@ -138,6 +149,13 @@ impl Button {
             id: id.into(),
             label: label.into(),
             icon: None,
+            icon_only: false,
+            accessibility_label: None,
+            disabled: false,
+            selected: false,
+            loading: false,
+            gold_leaf: false,
+            min_size: None,
             variant: ButtonVariant::Primary,
             tokens: *tokens,
             focus: None,
@@ -150,13 +168,39 @@ impl Button {
     }
     pub(super) fn icon_only(mut self, icon: gpui_kit::component::IconName) -> Self {
         self.icon = Some(icon);
+        self.icon_only = true;
+        self
+    }
+    pub fn leading_icon(mut self, icon: gpui_kit::component::IconName) -> Self {
+        self.icon = Some(icon);
+        self.icon_only = false;
+        self
+    }
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+    pub fn gold_leaf(mut self) -> Self {
+        self.gold_leaf = true;
         self
     }
     pub(super) fn rounded(mut self, rounded: Radius) -> Self {
         self.rounded = rounded;
         self
     }
-    pub(super) fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
         self
     }
@@ -217,19 +261,32 @@ impl RenderOnce for Button {
             .color(background)
             .foreground(colors.foreground)
             .hover(background)
-            .active(background);
+            .active(if self.selected {
+                colors.pressed
+            } else {
+                background
+            });
         let hover_state = state.clone();
         let down_state = state.clone();
         let up_state = state.clone();
         let out_state = state;
+        let accepts_click = self.accepts_click();
+        let tab_stop = self.tab_stop();
         let id = self.id;
         let mut button = KitButton::new(id.clone())
-            .accessibility_label(self.label.clone())
+            .accessibility_label(
+                self.accessibility_label
+                    .unwrap_or_else(|| self.label.clone()),
+            )
             .rounded(radius(self.rounded))
             .custom(variant)
             .track_focus(&focus)
+            .tab_stop(tab_stop)
             .focus_ring(false)
             .shadow(style.ring)
+            .disabled(self.disabled)
+            .selected(self.selected)
+            .loading(self.loading)
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let now = motion::now(cx);
                 let reduce = cx.reduce_motion();
@@ -254,11 +311,22 @@ impl RenderOnce for Button {
                     cx.notify();
                 });
             });
-        button = if let Some(icon) = self.icon {
-            button.icon(icon)
-        } else {
-            button.label(self.label)
-        };
+        if self.gold_leaf {
+            button = crate::desktop::theme::gold_leaf(button, &self.tokens);
+        }
+        if let Some(size) = self.min_size {
+            button = button.min_w(size).min_h(size);
+        }
+        let has_icon = self.icon.is_some();
+        if let Some(icon) = self.icon {
+            button = button.icon(icon);
+        }
+        if !self.icon_only {
+            button = button.label(self.label);
+        }
+        if self.loading && !has_icon {
+            button = button.child("…");
+        }
         if let Some(tooltip) = self.tooltip {
             button = button.tooltip(tooltip);
         }
@@ -268,7 +336,7 @@ impl RenderOnce for Button {
         for child in self.children {
             button = button.child(child);
         }
-        if let Some(callback) = self.on_click {
+        if let Some(callback) = self.on_click.filter(|_| accepts_click) {
             button = button.on_click(move |event, window, cx| callback(event, window, cx));
         }
         hover_container(id, button, move |on, _, cx| {
@@ -285,6 +353,28 @@ impl RenderOnce for Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extended_states_and_label_are_preserved() {
+        let t = crate::desktop::theme::night();
+        let b = Button::new("extended", "Visible", &t)
+            .leading_icon(gpui_kit::component::IconName::Plus)
+            .accessibility_label("Accessible")
+            .tooltip("Tip")
+            .selected(true)
+            .loading(true)
+            .disabled(true)
+            .gold_leaf();
+        assert_eq!(b.accessibility_label.as_deref(), Some("Accessible"));
+        assert!(b.icon.is_some() && b.selected && b.loading && b.disabled && b.gold_leaf);
+        assert!(!b.tab_stop());
+        assert!(!b.accepts_click());
+        let enabled = Button::new("enabled", "Enabled", &t);
+        assert!(enabled.tab_stop() && enabled.accepts_click());
+        let disabled = Button::new("disabled", "Disabled", &t).disabled(true);
+        assert!(!disabled.tab_stop() && !disabled.accepts_click());
+        let loading = Button::new("loading", "Loading", &t).loading(true);
+        assert!(loading.tab_stop() && !loading.accepts_click());
+    }
     #[test]
     fn identity_and_variant_are_preserved() {
         let t = crate::desktop::theme::night();
