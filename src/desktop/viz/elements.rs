@@ -5,6 +5,33 @@ use gpui_kit::*;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+// Geometry, in logical pixels.
+/// The orbit's view box. Members ride an ellipse centred in it.
+const ORBIT_WIDTH: f32 = 320.;
+const ORBIT_HEIGHT: f32 = 240.;
+const ORBIT_CENTRE_X: f32 = ORBIT_WIDTH / 2.;
+const ORBIT_CENTRE_Y: f32 = ORBIT_HEIGHT / 2.;
+/// The radii of the ellipse the orbit's members ride.
+const ORBIT_RADIUS_X: f32 = 105.;
+const ORBIT_RADIUS_Y: f32 = 85.;
+const ORBIT_RING_WIDTH: f32 = ORBIT_RADIUS_X * 2.;
+const ORBIT_RING_HEIGHT: f32 = ORBIT_RADIUS_Y * 2.;
+/// A member's label column, centred on its point and starting this far above it.
+const ORBIT_LABEL_WIDTH: f32 = 90.;
+const ORBIT_LABEL_HALF: f32 = ORBIT_LABEL_WIDTH / 2.;
+const ORBIT_LABEL_RISE: f32 = 16.;
+/// A member's dot: its size at zero weight, and what full weight adds.
+const ORBIT_DOT_BASE: f32 = 8.;
+const ORBIT_DOT_GROWTH: f32 = 12.;
+/// The binary star's tether: its length when the stars touch, and what full separation adds.
+const STAR_TETHER_BASE: f32 = 20.;
+const STAR_TETHER_GROWTH: f32 = 70.;
+const CHART_HEIGHT: f32 = 160.;
+/// The width of chart lines and of the Unknown markers' strokes.
+const CHART_STROKE: f32 = 2.;
+/// How much of its line's colour an area chart's fill keeps.
+const AREA_FILL_OPACITY: f32 = 0.25;
+
 fn tone(t: &theme::Tokens, tone: Tone) -> Hsla {
     match tone {
         Tone::Neutral => t.muted,
@@ -138,13 +165,13 @@ pub fn orbit(
 ) -> impl IntoElement {
     let active = members.iter().any(|m| m.state == OrbitState::Speaking);
     let turn = phase(driver, active) * std::f32::consts::TAU;
-    let mut view = div().id(id).relative().w(px(320.)).h(px(240.)).child(
+    let mut view = div().id(id).relative().w(px(ORBIT_WIDTH)).h(px(ORBIT_HEIGHT)).child(
         div()
             .absolute()
-            .left(px(55.))
-            .top(px(35.))
-            .w(px(210.))
-            .h(px(170.))
+            .left(px(ORBIT_CENTRE_X - ORBIT_RADIUS_X))
+            .top(px(ORBIT_CENTRE_Y - ORBIT_RADIUS_Y))
+            .w(px(ORBIT_RING_WIDTH))
+            .h(px(ORBIT_RING_HEIGHT))
             .rounded_full()
             .border_1()
             .border_color(t.orbit),
@@ -163,16 +190,16 @@ pub fn orbit(
             div()
                 .id(item_id(&member.id))
                 .absolute()
-                .left(px(160. + 105. * angle.cos() - 45.))
-                .top(px(120. + 85. * angle.sin() - 16.))
-                .w(px(90.))
+                .left(px(ORBIT_CENTRE_X + ORBIT_RADIUS_X * angle.cos() - ORBIT_LABEL_HALF))
+                .top(px(ORBIT_CENTRE_Y + ORBIT_RADIUS_Y * angle.sin() - ORBIT_LABEL_RISE))
+                .w(px(ORBIT_LABEL_WIDTH))
                 .text_center()
                 .text_size(theme::font(d, theme::TypeSize::Caption))
                 .text_color(t.text)
                 .child(
                     div()
                         .mx_auto()
-                        .size(px(8. + 12. * weight))
+                        .size(px(ORBIT_DOT_BASE + ORBIT_DOT_GROWTH * weight))
                         .rounded_full()
                         .bg(color),
                 )
@@ -219,7 +246,7 @@ pub fn binary_star(
         )
         .child(
             div()
-                .w(px(20. + 70. * gap))
+                .w(px(STAR_TETHER_BASE + STAR_TETHER_GROWTH * gap))
                 .h(theme::space(d, theme::Step::Xs))
                 .bg(t.orbit)
                 .child(div().w(relative(agreement)).h_full().bg(t.gold)),
@@ -328,13 +355,10 @@ pub fn chart(
             let width = f32::from(bounds.size.width);
             let height = f32::from(bounds.size.height);
             let project = |ts: i64, value: f64| {
-                point(
-                    px(x + width
-                        * ((ts as f64 - min_x as f64) / (max_x as f64 - min_x as f64).max(1.))
-                            as f32),
-                    px(y + height
-                        * (1. - ((value - min_y) / (max_y - min_y).max(f64::EPSILON)) as f32)),
-                )
+                let across =
+                    ((ts as f64 - min_x as f64) / (max_x as f64 - min_x as f64).max(1.)) as f32;
+                let down = 1. - ((value - min_y) / (max_y - min_y).max(f64::EPSILON)) as f32;
+                point(px(x + width * across), px(y + height * down))
             };
             let baseline = project(min_x, 0.).y;
             for (i, samples) in series.iter().enumerate() {
@@ -343,14 +367,15 @@ pub fn chart(
                     let points: Vec<_> = segment.iter().map(|(ts, v)| project(*ts, *v)).collect();
                     if kind == ChartKind::Bar {
                         let bar_width = (width / samples.count as f32 * 0.6).max(1.);
+                        let half_bar = px(bar_width).half();
                         for p in &points {
                             let mut path = PathBuilder::fill();
                             path.add_polygon(
                                 &[
-                                    point(p.x - px(bar_width / 2.), baseline),
-                                    point(p.x - px(bar_width / 2.), p.y),
-                                    point(p.x + px(bar_width / 2.), p.y),
-                                    point(p.x + px(bar_width / 2.), baseline),
+                                    point(p.x - half_bar, baseline),
+                                    point(p.x - half_bar, p.y),
+                                    point(p.x + half_bar, p.y),
+                                    point(p.x + half_bar, baseline),
                                 ],
                                 true,
                             );
@@ -360,17 +385,17 @@ pub fn chart(
                         }
                     } else {
                         if kind == ChartKind::Area && points.len() > 1 {
-                            let mut area = vec![point(points[0].x, baseline)];
+                            let mut area = vec![point(points.first().unwrap().x, baseline)];
                             area.extend(points.iter().copied());
                             area.push(point(points.last().unwrap().x, baseline));
                             let mut path = PathBuilder::fill();
                             path.add_polygon(&area, true);
                             if let Ok(path) = path.build() {
-                                window.paint_path(path, color.opacity(0.25));
+                                window.paint_path(path, color.opacity(AREA_FILL_OPACITY));
                             }
                         }
                         if points.len() > 1 {
-                            let mut path = PathBuilder::stroke(px(2.));
+                            let mut path = PathBuilder::stroke(px(CHART_STROKE));
                             path.add_polygon(&points, false);
                             if let Ok(path) = path.build() {
                                 window.paint_path(path, color);
@@ -386,7 +411,7 @@ pub fn chart(
                     let center = f32::from(project(ts, 0.).x).clamp(x + radius, x + width - radius);
                     let cy = y + radius + 2.;
                     for (a, b) in [(-radius, radius), (radius, -radius)] {
-                        let mut path = PathBuilder::stroke(px(2.));
+                        let mut path = PathBuilder::stroke(px(CHART_STROKE));
                         path.add_polygon(
                             &[
                                 point(px(center - radius), px(cy + a)),
@@ -403,7 +428,7 @@ pub fn chart(
         },
     )
     .w_full()
-    .h(px(160.));
+    .h(px(CHART_HEIGHT));
     div()
         .id(id)
         .flex()

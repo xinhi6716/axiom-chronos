@@ -21,6 +21,7 @@ mod spring;
 mod tokens;
 pub use spring::SpringValue;
 pub use tokens::{Dur, Ease, Spring};
+use tokens::SPIN_PERIOD;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameAsk {
@@ -173,6 +174,8 @@ pub const DIALOG_ENTRANCE: gpui_kit::component::dialog::DialogEntrance =
 
 /// How far a dialog's content rises as it settles.
 const SETTLE_RISE: f32 = 10.0;
+/// The opacity a dialog's content starts from as it settles.
+const SETTLE_FADE_FROM: f32 = 0.3;
 
 /// Content that settles into place with the soft spring as its dialog opens. gpui's animation
 /// element drives it: it asks for frames only until it lands, and under reduce motion (which the
@@ -182,8 +185,9 @@ pub fn settle_in(id: impl Into<ElementId>, content: impl IntoElement) -> impl In
         id,
         Animation::new(Pace::Open.duration()).with_easing(|x| Curve::Spring.at(x)),
         |el, k| {
-            el.top(px(SETTLE_RISE * (1.0 - k)))
-                .opacity(lerp(0.3, 1.0, k).min(1.0))
+            let rise = SETTLE_RISE * (1.0 - k);
+            let alpha = lerp(SETTLE_FADE_FROM, 1.0, k).min(1.0);
+            el.top(px(rise)).opacity(alpha)
         },
     )
 }
@@ -553,7 +557,6 @@ impl Driver {
     }
 }
 
-const SPIN_PERIOD: Duration = Duration::from_millis(800);
 static SPIN_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 pub fn spin_phase(elapsed: Duration) -> f32 {

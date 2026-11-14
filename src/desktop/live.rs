@@ -44,8 +44,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const ACTIVE_POLL: Duration = Duration::from_secs(1);
-const IDLE_POLL: Duration = Duration::from_secs(5);
+const ACTIVE_POLL_SECS: u64 = 1;
+const ACTIVE_POLL: Duration = Duration::from_secs(ACTIVE_POLL_SECS);
+const IDLE_POLL_SECS: u64 = 5;
+const IDLE_POLL: Duration = Duration::from_secs(IDLE_POLL_SECS);
 /// An open goal with no activity for this long, and nothing in flight, has lost its process.
 const QUIET_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// The same, while a tool call is open or the last turn ended in an error such as a usage limit:
@@ -53,8 +55,20 @@ const QUIET_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// offered Resume would be run twice.
 const LONG_QUIET_LIMIT: Duration = Duration::from_secs(6 * 60 * 60);
 /// Reading a transcript can take seconds, so a live run's ledger is refreshed this rarely.
-const LEDGER_EVERY: Duration = Duration::from_secs(60);
-const MEMORY_EVERY: Duration = Duration::from_secs(60);
+const LEDGER_EVERY_SECS: u64 = 60;
+const LEDGER_EVERY: Duration = Duration::from_secs(LEDGER_EVERY_SECS);
+const MEMORY_EVERY_SECS: u64 = 60;
+const MEMORY_EVERY: Duration = Duration::from_secs(MEMORY_EVERY_SECS);
+/// The shortest gap between two board summaries of the same run.
+const BOARD_MIN_GAP_SECS: u64 = 120;
+/// While the service is on, the engine loop wakes at least this often to read its subscription.
+const SERVICE_WAKE_MS: u64 = 200;
+/// How long the rate-limit listener waits for an event before it checks whether to stop.
+const RATE_EVENT_WAIT_MS: u64 = 200;
+/// How long connecting to the service may take when it has to be started first.
+const SERVICE_SPAWN_TIMEOUT_SECS: u64 = 10;
+/// After a failed service connection (other than a gap), the next attempt waits this long.
+const SERVICE_RETRY_SECS: u64 = 2;
 const MEMORY_SHOWN: i64 = 500;
 const LOG_LINES_KEPT: usize = 2000;
 const LOG_LINE_CHARS: usize = 400;
@@ -861,7 +875,7 @@ impl Engine {
             // ux: begin feed state init
             ux_feed: feed::Feed::default(),
             // ux: end
-            board_scheduler: crate::board::Scheduler::new(Duration::from_secs(120)),
+            board_scheduler: crate::board::Scheduler::new(Duration::from_secs(BOARD_MIN_GAP_SECS)),
             board_cache: Arc::new(Mutex::new(crate::board::Cache::new())),
             board_model: None,
             board_worker: None,
@@ -943,7 +957,7 @@ impl Engine {
             let now = Instant::now();
             let wake = next_wake(now, next_poll, self.board_scheduler.next_wake(now));
             let wake = if self.service_enabled {
-                wake.min(Duration::from_millis(200))
+                wake.min(Duration::from_millis(SERVICE_WAKE_MS))
             } else {
                 wake
             };
@@ -1324,7 +1338,7 @@ impl Engine {
                         let listening = listening.clone();
                         std::thread::spawn(move || {
                             while !stop.load(Ordering::Acquire) {
-                                match events.recv_timeout(Duration::from_millis(200)) {
+                                match events.recv_timeout(Duration::from_millis(RATE_EVENT_WAIT_MS)) {
                                     Ok(message)
                                         if message.get("method").and_then(Value::as_str)
                                             == Some("account/rateLimits/updated") =>
@@ -1696,7 +1710,7 @@ impl Engine {
                 Some(client) => client.clone(),
                 None => match &self.service_spawn {
                     Some(exe) => {
-                        Client::connect_or_spawn(&self.home, exe, Duration::from_secs(10))?
+                        Client::connect_or_spawn(&self.home, exe, Duration::from_secs(SERVICE_SPAWN_TIMEOUT_SECS))?
                     }
                     None => Client::connect(&self.home)?,
                 },
@@ -1719,7 +1733,7 @@ impl Engine {
                     + if e.kind == "gap" {
                         Duration::ZERO
                     } else {
-                        Duration::from_secs(2)
+                        Duration::from_secs(SERVICE_RETRY_SECS)
                     };
                 if e.kind != "gap" {
                     self.warn_service(e.message);
@@ -2248,7 +2262,7 @@ impl Engine {
         self.board_cancel.store(true, Ordering::Release);
         self.board_cancel = Arc::new(AtomicBool::new(false));
         if choice == crate::board::Choice::Off || self.board_choice == crate::board::Choice::Off {
-            self.board_scheduler = crate::board::Scheduler::new(Duration::from_secs(120));
+            self.board_scheduler = crate::board::Scheduler::new(Duration::from_secs(BOARD_MIN_GAP_SECS));
             self.board_known.clear();
             self.board_flights.clear();
         }

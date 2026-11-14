@@ -187,14 +187,14 @@ fn scripted_optimizer_and_github() {
     ]);
     assert_eq!(
         optimizer
-            .propose("x", crate::desktop::i18n::Lang::En)
+            .propose("x", crate::desktop::ux::seams::ProposalLang::En)
             .unwrap_err()
             .kind,
         "timeout"
     );
     assert_eq!(
         optimizer
-            .propose("x", crate::desktop::i18n::Lang::En)
+            .propose("x", crate::desktop::ux::seams::ProposalLang::En)
             .unwrap(),
         proposal
     );

@@ -80,8 +80,8 @@ fn waive(reason: &str, finding: Option<usize>) -> UnitActionKind {
 #[test]
 fn outbox_applies_and_refuses_real_unit_actions() {
     use crate::desktop::{
-        data::outbox::TicketState,
-        ux::seams::unit_actions::{unit_action_outbox_for, UnitAction},
+        data::{outbox::TicketState, unit_action_outbox_for},
+        ux::seams::unit_actions::UnitAction,
     };
     use std::{
         sync::Arc,

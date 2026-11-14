@@ -527,7 +527,7 @@ fn live_history_falls_back_to_amendments(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn outbox_dialog_deduplicates_and_tracks_receipt(cx: &mut TestAppContext) {
-    use axiom::desktop::ux::seams::interjection_outbox_for;
+    use axiom::desktop::data::interjection_outbox_for;
     let seam = Arc::new(CountingSeam::default());
     let mut state = demo::state();
     let run = &mut state.runs[state.current.unwrap()];
@@ -570,7 +570,7 @@ fn outbox_dialog_deduplicates_and_tracks_receipt(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn outbox_refusal_shows_error_and_preserves_draft(cx: &mut TestAppContext) {
-    use axiom::desktop::ux::seams::interjection_outbox_for;
+    use axiom::desktop::data::interjection_outbox_for;
     let seam = Arc::new(CountingSeam::default());
     seam.fail_send.store(true, Ordering::SeqCst);
     let mut state = demo::state();

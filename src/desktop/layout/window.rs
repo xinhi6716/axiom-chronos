@@ -1,4 +1,4 @@
-use gpui_kit::{point, px, Bounds, Pixels, Size};
+use gpui_kit::{point, Bounds, Half, Pixels, Size};
 
 pub fn recover(
     saved: Option<Bounds<Pixels>>,
@@ -57,11 +57,11 @@ pub fn recover(
         .filter(|d| valid_rect(d))
         .map(|d| {
             point(
-                d.origin.x + (d.size.width - default.width) / 2.,
-                d.origin.y + (d.size.height - default.height) / 2.,
+                d.origin.x + (d.size.width - default.width).half(),
+                d.origin.y + (d.size.height - default.height).half(),
             )
         })
-        .unwrap_or_else(|| point(px(0.), px(0.)));
+        .unwrap_or_default();
     Bounds {
         origin,
         size: default,

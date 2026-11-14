@@ -1,9 +1,9 @@
 use crate::base::{Failure, Res};
-use crate::desktop::data::outbox::{Outbox, Outcome};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
@@ -49,16 +49,12 @@ pub trait Interjections: Send + Sync + 'static {
     fn running_work(&self, session: &str) -> RunningWork;
     fn pause_batch(&self, session: &str) -> Res<()>;
 }
-pub fn interjection_outbox_for(service: Arc<dyn Interjections>) -> Outbox<Draft> {
-    Outbox::new(move |draft: &Draft, key| {
-        if draft.client_id != key {
-            return Outcome::Refused("idempotency key does not match client id".into());
-        }
-        match service.send(draft) {
-            Ok(_) => Outcome::Applied,
-            Err(error) => super::approvals::outbox_failure(error),
-        }
-    })
+/// Milliseconds since the Unix epoch, for the fake's receipts (0 if the clock is before it).
+fn wall_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 #[derive(Default)]
 struct State {
@@ -190,7 +186,7 @@ impl Interjections for FakeInterjections {
         if let Some(r) = s.receipts.get(&d.client_id) {
             return Ok(r.clone());
         }
-        let at = super::super::wall_ms();
+        let at = wall_ms();
         let r = Receipt {
             client_id: d.client_id.clone(),
             session: d.session.clone(),

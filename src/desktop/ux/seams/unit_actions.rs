@@ -1,9 +1,5 @@
 use crate::base::{Failure, Res};
-use crate::desktop::data::outbox::{Outbox, Outcome};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Mutex};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitEvidence {
     pub diff: Option<String>,
@@ -42,18 +38,6 @@ pub trait UnitActions: Send + Sync + 'static {
         kind: &UnitActionKind,
         key: &str,
     ) -> Res<ActionReceipt>;
-}
-pub fn unit_action_outbox_for(service: Arc<dyn UnitActions>) -> Outbox<UnitAction> {
-    Outbox::new(move |action: &UnitAction, key| {
-        if action.key != key {
-            return Outcome::Refused("idempotency key does not match unit action".into());
-        }
-        match service.act(&action.session, &action.unit, &action.kind, key) {
-            Ok(receipt) if receipt.accepted => Outcome::Applied,
-            Ok(receipt) => Outcome::Refused(receipt.message),
-            Err(error) => super::approvals::outbox_failure(error),
-        }
-    })
 }
 #[derive(Default)]
 struct State {

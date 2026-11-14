@@ -13,7 +13,7 @@ fn optimize_with_timeout(
     let original_for_run = original.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(runner.propose(&original_for_run, lang));
+        let _ = tx.send(runner.propose(&original_for_run, lang.into()));
     });
     match rx.recv_timeout(timeout) {
         Ok(Ok(proposal)) => Ok(proposal),
@@ -482,7 +482,7 @@ mod tests {
 
     struct BlockingOptimizer(AtomicUsize);
     impl OptimizerRunner for BlockingOptimizer {
-        fn propose(&self, _: &str, _: Lang) -> Res<Proposal> {
+        fn propose(&self, _: &str, _: crate::desktop::ux::seams::ProposalLang) -> Res<Proposal> {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 std::thread::sleep(Duration::from_millis(150));
             }

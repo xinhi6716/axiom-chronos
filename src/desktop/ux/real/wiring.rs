@@ -12,9 +12,9 @@ use super::{
 };
 use crate::{
     base::Res,
-    desktop::ux::{
-        seams::{approval_outbox_for, interjection_outbox_for, unit_action_outbox_for},
-        Seams,
+    desktop::{
+        data::{approval_outbox_for, interjection_outbox_for, unit_action_outbox_for},
+        ux::Seams,
     },
     modes::runners::{ModelProvider, ModelRouter},
     service::{
