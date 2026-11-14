@@ -5,7 +5,7 @@ use crate::{
     orch::{self, events},
 };
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::Path,
@@ -72,22 +72,45 @@ fn hold(store: &Path) -> Res<Option<String>> {
         .ok_or_else(|| Failure::new("invalid_argument", "invalid store path"))?;
     goal::accept_hold(home, project)
 }
-fn states(store: &Path) -> Res<HashMap<String, String>> {
+/// Each module's latest claim, release or verified event. A release made while the module still
+/// waited on an unverified dependency is dropped, so the module is unclaimed again and is
+/// auto-claimed once its DEPENDS are verified. A release made while it was ready (its dispatcher
+/// stopped without `module_done`) stays `module_released` until the core claims it, so a failing
+/// dispatcher is not restarted in a loop.
+fn states(store: &Path, map: &orch::Map) -> Res<HashMap<String, String>> {
+    let all = events::read_events(store, 0)?;
     let mut result = HashMap::new();
-    for e in events::read_events(store, 0)? {
-        if let Some(m) = e.module {
-            if [
-                events::MODULE_CLAIMED,
-                events::MODULE_RELEASED,
-                events::MODULE_VERIFIED,
-            ]
-            .contains(&e.kind.as_str())
-            {
-                result.insert(m, e.kind);
-            }
+    for (i, e) in all.iter().enumerate() {
+        let Some(m) = &e.module else {
+            continue;
+        };
+        if e.kind == events::MODULE_RELEASED && !release_holds(map, &all[..i], m, &e.data) {
+            result.remove(m);
+        } else if [
+            events::MODULE_CLAIMED,
+            events::MODULE_RELEASED,
+            events::MODULE_VERIFIED,
+        ]
+        .contains(&e.kind.as_str())
+        {
+            result.insert(m.clone(), e.kind.clone());
         }
     }
     Ok(result)
+}
+fn release_holds(map: &orch::Map, before: &[events::Event], module: &str, data: &Value) -> bool {
+    if let Some(ready) = data.get("ready").and_then(Value::as_bool) {
+        return ready;
+    }
+    // A release written before `ready` was recorded: a dependency that was verified then had
+    // reported module_verified.
+    map.modules.iter().find(|m| m.id == module).map_or(true, |m| {
+        m.depends.iter().all(|d| {
+            before
+                .iter()
+                .any(|e| e.kind == events::MODULE_VERIFIED && e.module.as_deref() == Some(d))
+        })
+    })
 }
 pub fn module_verified(store: &Path, module: &str) -> Res<bool> {
     let units = orch::read_units(store)?;
@@ -113,13 +136,25 @@ pub fn module_verified(store: &Path, module: &str) -> Res<bool> {
         if orch::derive_state(&rows, orch::needs_accept(store, &u.id)?) != "verified" {
             return Ok(false);
         }
-        let review = rows.iter().rposition(|r| r.kind == "review");
-        let run = rows.iter().rposition(|r| r.kind == "run").unwrap_or(0);
-        if !review.is_some_and(|r| {
-            rows[run + 1..r]
-                .iter()
-                .any(|e| e.kind == "accept" && e.exit_code == 0)
-        }) {
+        // After the last run, a passing review and a passing accept must both have seen the
+        // unit's latest snapshot, in either order: re-running ACCEPT on reviewed, unchanged code
+        // keeps the module verified, and a review of older files does not count.
+        let rest = &rows[rows.iter().rposition(|r| r.kind == "run").map_or(0, |i| i + 1)..];
+        let Some(latest) = rest
+            .iter()
+            .rev()
+            .find(|r| r.kind == "verify" || r.kind == "accept")
+            .map(|r| r.commit.as_str())
+        else {
+            return Ok(false);
+        };
+        let accepted = rest
+            .iter()
+            .any(|r| r.kind == "accept" && r.exit_code == 0 && r.commit == latest);
+        let reviewed = rest.iter().enumerate().any(|(n, r)| {
+            r.kind == "review" && r.commit == latest && orch::evidence::review_passes(rest, n)
+        });
+        if !(accepted && reviewed) {
             return Ok(false);
         }
     }
@@ -127,7 +162,7 @@ pub fn module_verified(store: &Path, module: &str) -> Res<bool> {
 }
 pub fn claimed_modules(store: &Path) -> Res<Vec<String>> {
     let map = map(store)?;
-    let state = states(store)?;
+    let state = states(store, &map)?;
     let mut out = Vec::new();
     for m in map.modules {
         if state
@@ -146,7 +181,7 @@ pub fn claim_ready(store: &Path) -> Res<Vec<String>> {
         if hold(store)?.is_some() {
             return Ok(vec![]);
         }
-        let state = states(store)?;
+        let state = states(store, &map)?;
         let mut active = Vec::new();
         for m in &map.modules {
             if state
@@ -205,7 +240,7 @@ pub fn claim(store: &Path, module: &str) -> Res<()> {
                 format!("{module} is verified"),
             ));
         }
-        if states(store)?
+        if states(store, &map)?
             .get(module)
             .is_some_and(|s| s == events::MODULE_CLAIMED)
         {
@@ -257,12 +292,18 @@ pub fn release(store: &Path, module: &str, reason: &str) -> Res<()> {
                 format!("{module} is not claimed"),
             ));
         }
+        let mut ready = true;
+        for m in map(store)?.modules.iter().filter(|m| m.id == module) {
+            for d in &m.depends {
+                ready &= module_verified(store, d)?;
+            }
+        }
         events::append_event(
             store,
             events::MODULE_RELEASED,
             Some(module),
             None,
-            json!({"reason":reason}),
+            json!({"reason":reason,"ready":ready}),
         )?;
         events::close_open_activities(store, Some(module), "cancelled")?;
         Ok(())
@@ -277,7 +318,7 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
         let all = events::read_events(store, after)?;
         observed = observed.max(all.last().map_or(after, |e| e.seq));
         let m = map(store)?;
-        let state = states(store)?;
+        let state = states(store, &m)?;
         let held = hold(store)?;
         let mut running = vec![];
         let mut verified = vec![];
@@ -323,7 +364,7 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
             {
                 orch::with_lock(store, false, || {
                     // A concurrent core claim must not be overwritten by this snapshot.
-                    if states(store)?.get(&module.id).is_some_and(|s| s == events::MODULE_RELEASED) {
+                    if states(store, &m)?.get(&module.id).is_some_and(|s| s == events::MODULE_RELEASED) {
                         orch::store::add_adjudication_locked(store, "stuck", &module.id)?;
                     }
                     Ok(())
