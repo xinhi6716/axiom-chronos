@@ -3,6 +3,12 @@ use std::prelude::v1::test;
 use crate::desktop::{palette, demo, model::{MenuAction, MenuTarget}, ux::Page};
 
 #[test]
+fn legacy_context_menu_is_palettes() {
+    assert_eq!(gpui_kit::Action::name(&LegacyContextMenu), "chronos::ContextMenu");
+    assert_eq!(std::any::TypeId::of::<LegacyContextMenu>(), std::any::TypeId::of::<palette::ContextMenu>());
+}
+
+#[test]
 fn context_menu_action() {
     assert_eq!(gpui_kit::Action::name(&ContextMenu), "chronos_keys::ContextMenu");
     let _binding = gpui_kit::KeyBinding::new("shift-f10", ContextMenu, Some("!Input"));
@@ -102,7 +108,13 @@ fn no_view_imports(source: &str) -> bool {
         match tree {
             syn::UseTree::Path(p) => { path.push(p.ident.to_string()); let found = uses(&p.tree, path); path.pop(); found }
             syn::UseTree::Name(n) => { path.push(n.ident.to_string()); let found = forbidden(path); path.pop(); found }
-            syn::UseTree::Rename(n) => { path.push(n.ident.to_string()); let found = forbidden(path); path.pop(); found }
+            syn::UseTree::Rename(n) => {
+                path.push(n.ident.to_string());
+                let allowed = path.iter().map(String::as_str).eq(["crate", "desktop", "palette", "ContextMenu"])
+                    && n.rename == "LegacyContextMenu";
+                let found = !allowed && forbidden(path);
+                path.pop(); found
+            }
             syn::UseTree::Glob(_) => forbidden(path),
             syn::UseTree::Group(g) => g.items.iter().any(|item| uses(item, path)),
         }
@@ -123,4 +135,7 @@ fn no_view_imports(source: &str) -> bool {
 fn no_view_paths_and_negative_control() {
     assert!(no_view_imports(include_str!("keys.rs")));
     assert!(!no_view_imports("use crate::desktop::palette::Area;"));
+    assert!(!no_view_imports("use crate::desktop::palette::ContextMenu;"));
+    assert!(!no_view_imports("use crate::desktop::palette::Area as LegacyContextMenu;"));
+    assert!(!no_view_imports("use crate::desktop::palette::ContextMenu as Other;"));
 }

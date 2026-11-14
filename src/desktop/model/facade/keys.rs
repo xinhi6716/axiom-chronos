@@ -11,6 +11,8 @@ use gpui_kit::component::{IconName, IndexPath};
 use gpui_kit::*;
 use std::rc::Rc;
 
+pub use crate::desktop::palette::ContextMenu as LegacyContextMenu;
+
 gpui_kit::actions!(chronos_keys, [ContextMenu]);
 
 /// Where a shortcut works.
