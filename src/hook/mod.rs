@@ -851,12 +851,14 @@ pub fn handle(event: &Value, home: Option<&Path>, headless: bool) -> Option<Valu
             let agent = event.get("agent_id").is_some();
             let input = event.get("tool_input").unwrap_or(&Value::Null);
             let subagent = input.get("subagent_type").and_then(Value::as_str);
-            // The CLI accepts the string and runs the agent in the foreground, so a batch waits
-            // for its slowest dispatcher.
-            if matches!(tool, "Agent" | "Task")
-                && input.get("run_in_background").is_some_and(Value::is_string)
-            {
-                return deny("run_in_background must be the JSON boolean true (no quotes); the string runs the agent in the foreground. Send the call again with the boolean.");
+            // The CLI accepts a string and runs the agent in the foreground, so a batch waits for
+            // its slowest dispatcher. Any other non-boolean is refused the same way.
+            if matches!(tool, "Agent" | "Task") {
+                match input.get("run_in_background") {
+                    Some(Value::String(_)) => return deny("run_in_background must be the JSON boolean true (no quotes); the string runs the agent in the foreground. Send the call again with the boolean."),
+                    Some(v) if !v.is_boolean() => return deny("run_in_background must be the JSON boolean true or false. Send the call again with the boolean."),
+                    _ => {}
+                }
             }
             if matches!(tool, "Agent" | "Task") {
                 if let Some((name, role, store)) = subagent.and_then(|name| {

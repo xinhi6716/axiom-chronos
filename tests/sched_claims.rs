@@ -98,13 +98,24 @@ fn module_gate_counts_accept_and_review_on_the_latest_snapshot_in_either_order()
 
 #[test]
 fn module_gate_ignores_a_review_of_an_older_snapshot() {
-    let review_of_verify_tree_after_accept_saw_other_files = [
+    let review_before_an_accept_that_saw_changed_files = [
         ("run", "tree:1"),
         ("verify", "tree:1"),
-        ("accept", "tree:2"),
+        ("accept", "tree:1"),
         ("review", "tree:1"),
+        ("accept", "tree:2"),
     ];
-    assert!(!gate(&review_of_verify_tree_after_accept_saw_other_files));
+    assert!(!gate(&review_before_an_accept_that_saw_changed_files));
+    let review_of_files_before_the_last_run = [
+        ("run", "tree:1"),
+        ("verify", "tree:1"),
+        ("accept", "tree:1"),
+        ("review", "tree:1"),
+        ("run", "tree:2"),
+        ("verify", "tree:2"),
+        ("accept", "tree:2"),
+    ];
+    assert!(!gate(&review_of_files_before_the_last_run));
 }
 
 const DEPENDENT_MAP: &str = "## a\nPURPOSE x\nPATHS a/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n## b\nPURPOSE x\nPATHS b/\nDEPENDS a\nCONTRACT x\nACCEPT test `echo ok`\n";
@@ -168,22 +179,14 @@ fn module_released_while_ready_stays_stuck_for_the_core() {
         assert!(reply.start.is_empty(), "{reply:?}");
         assert_eq!(reply.stuck.len(), 1, "{reply:?}");
         assert_eq!(reply.stuck[0].module, "b");
+        assert_eq!(reply.stuck[0].reason, "released");
+        assert_eq!(reply.stuck[0].claim, "schedule claim b");
     }
     assert!(scheduler::claimed_modules(&store).unwrap().is_empty());
 }
 
 #[test]
-fn release_from_an_older_engine_is_auto_claimed_when_its_dependency_never_reported_verified() {
-    let temp = common::temp();
-    let store = module_with_unit(temp.path(), DEPENDENT_MAP, "a");
-    write_rows(&store, &A_VERIFIED);
-    for kind in [events::MODULE_CLAIMED, events::MODULE_RELEASED] {
-        events::append_event(&store, kind, Some("b"), None, json!({"reason":"stale"})).unwrap();
-    }
-    let reply = scheduler::next(&store, None, Duration::ZERO).unwrap();
-    assert!(reply.start.contains(&"b".to_string()), "{reply:?}");
-    assert!(reply.stuck.is_empty(), "{reply:?}");
-
+fn release_without_a_ready_flag_from_an_older_engine_is_auto_claimed() {
     let temp = common::temp();
     let store = module_with_unit(temp.path(), DEPENDENT_MAP, "a");
     write_rows(&store, &A_VERIFIED);
@@ -192,11 +195,12 @@ fn release_from_an_older_engine_is_auto_claimed_when_its_dependency_never_report
         events::append_event(&store, kind, Some("b"), None, json!({"reason":"stale"})).unwrap();
     }
     let reply = scheduler::next(&store, None, Duration::ZERO).unwrap();
-    assert!(!reply.start.contains(&"b".to_string()), "{reply:?}");
-    assert_eq!(reply.stuck.len(), 1, "{reply:?}");
+    assert_eq!(reply.start, vec!["b"], "{reply:?}");
+    assert!(reply.stuck.is_empty(), "{reply:?}");
 }
 
 const STRING_FLAG: &str = "run_in_background must be the JSON boolean true (no quotes); the string runs the agent in the foreground. Send the call again with the boolean.";
+const NON_BOOLEAN_FLAG: &str = "run_in_background must be the JSON boolean true or false. Send the call again with the boolean.";
 
 #[test]
 fn hook_denies_a_string_background_flag_and_passes_the_boolean_to_the_claim_check() {
@@ -236,6 +240,13 @@ fn hook_denies_a_string_background_flag_and_passes_the_boolean_to_the_claim_chec
             Some(json!(STRING_FLAG)),
             "{tool}"
         );
+        for flag in [json!(1), json!(null), json!({}), json!([true])] {
+            assert_eq!(
+                reason(&event(tool, "chronos:dispatcher", "Build fast", flag.clone()), Some(home)),
+                Some(json!(NON_BOOLEAN_FLAG)),
+                "{tool} {flag}"
+            );
+        }
         assert_eq!(
             reason(&event(tool, "chronos:dispatcher", "Build fast", json!(true)), Some(home)),
             None,
