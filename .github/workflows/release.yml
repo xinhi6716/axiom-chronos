@@ -72,4 +72,5 @@ jobs:
         run: |
           notes="docs/releases/${TAG#v}.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
-          gh release create "$TAG" dist/* --verify-tag --title "Axiom Chronos ${TAG#v}" --notes-file "$notes"
+          pre=""; case "$TAG" in *-*) pre="--prerelease";; esac
+          gh release create "$TAG" dist/* --verify-tag --title "Axiom Chronos ${TAG#v}" --notes-file "$notes" $pre
