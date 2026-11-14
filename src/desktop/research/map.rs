@@ -36,6 +36,7 @@ pub(super) fn map_funnel(
 }
 
 pub struct MapPanel {
+    panic_pending: bool,
     wb: Entity<Workbench>,
     sizes: Option<Vec<f32>>,
 }
@@ -45,13 +46,14 @@ impl MapPanel {
         let feed = wb.read(cx).map_feed.clone();
         feed.observe(cx);
         Self {
+            panic_pending: false,
             wb,
             sizes: persist::sizes("research.map", cx),
         }
     }
 }
-impl Render for MapPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl MapPanel {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let snapshot = self.wb.read(cx).map_feed.snapshot();
@@ -232,5 +234,34 @@ impl Render for MapPanel {
                 ),
         );
         panel
+    }
+}
+
+impl Render for MapPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).map_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.map.panel", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.map.panel", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).map_feed.retry();
+                cx.notify();
+            }))
+            .content(move |window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.render_content(window, cx).into_any_element()
+                })
+            })
     }
 }

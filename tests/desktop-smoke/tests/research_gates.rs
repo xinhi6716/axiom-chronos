@@ -698,3 +698,361 @@ fn tree_hash_negative_control() {
         .unwrap();
     assert_ne!(tree_hash(&root), before);
 }
+
+// Kept under `research` so the release-gate test filter includes these tests.
+mod research {
+    use super::*;
+    use axiom::{
+        desktop::research::{LoadState, Workbench},
+        seams::SystemClock,
+    };
+    use gpui_kit::Entity;
+
+    fn open(
+        cx: &mut TestAppContext,
+        root: &Path,
+        store: Option<&Path>,
+        home: &Path,
+    ) -> Entity<Workbench> {
+        let wb = cx.new(|cx| Workbench::new(seams(home), None, Arc::new(SystemClock), cx));
+        wb.update(cx, |wb, cx| {
+            wb.open_paths(root.to_owned(), store.map(Path::to_owned), cx)
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            cx.run_until_parked();
+            match wb.read_with(cx, |wb, _| wb.load.clone()) {
+                LoadState::Ready => return wb,
+                LoadState::Failed { kind, message } => panic!("open failed: {kind}: {message}"),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "open timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    // The port has one ordered worker. A view update after a command is a
+    // barrier proving that command has finished before hashing the tree.
+    fn barrier(cx: &mut TestAppContext, wb: &Entity<Workbench>, marker: usize) {
+        let port = wb.read_with(cx, |wb, _| wb.port.clone());
+        let mut view = port.view(Tab::Map);
+        view.offset = marker;
+        port.set_view(Tab::Map, view);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while port.view(Tab::Map).offset != marker {
+            assert!(
+                Instant::now() < deadline,
+                "worker barrier {marker} timed out"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn hash_unchanged_by_every_action(cx: &mut TestAppContext) {
+        let copy = fixture_copy("rram");
+        let home = temp_dir();
+        let destination = temp_dir();
+        let before = tree_hash(&copy);
+        let wb = open(cx, &copy.join("project"), Some(&copy.join("store")), &home);
+        let port = wb.read_with(cx, |wb, _| wb.port.clone());
+        barrier(cx, &wb, 1);
+        assert_eq!(tree_hash(&copy), before, "open");
+        macro_rules! action {
+            ($name:literal, $marker:expr, $call:expr) => {{
+                $call;
+                barrier(cx, &wb, $marker);
+                assert_eq!(tree_hash(&copy), before, $name);
+            }};
+        }
+        action!("sample", 2, port.sample("total".into(), 2, 7));
+        assert!(!port.sources().unwrap().sample.is_empty());
+        action!("locate_page", 3, port.locate_page("E1".into()));
+        assert!(port
+            .evidence()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == "E1" && item.target.is_some()));
+        action!("render_page", 4, port.render_page("E1".into()));
+        assert!(port
+            .evidence()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == "E1" && item.image.is_some()));
+        action!("export_csv", 5, port.export_csv(destination.clone()));
+        action!("export_bundle", 6, port.export_bundle(destination.clone()));
+        action!(
+            "export_snapshot",
+            7,
+            port.export_snapshot(destination.clone())
+        );
+        let exports = port.exports().unwrap();
+        for name in ["csv", "bundle", "snapshot"] {
+            assert!(
+                exports
+                    .results
+                    .iter()
+                    .any(|item| item.action == name && item.path.is_some() && !item.busy),
+                "{name}: {exports:?}"
+            );
+        }
+        action!("refresh", 8, port.refresh());
+        assert_eq!(port.load_state(), LoadState::Ready);
+
+        // The public research module does not re-export the correction DTO,
+        // so this exercises the rejected default request without relying on
+        // an engine or seam implementation type.
+        assert!(port.evidence().is_ok());
+        action!("correct", 9, port.correct(Default::default()));
+        assert_eq!(port.evidence().unwrap_err().kind, "invalid_argument");
+        action!("select_entity", 11, port.select_entity("device_A".into()));
+        action!(
+            "set_filters",
+            12,
+            port.set_filters(Tab::Dataset, Vec::new())
+        );
+
+        let raw = fixture_copy("rawonly");
+        let raw_home = temp_dir();
+        let raw_before = tree_hash(&raw);
+        let raw_wb = open(cx, &raw, None, &raw_home);
+        let raw_port = raw_wb.read_with(cx, |wb, _| wb.port.clone());
+        raw_port.correct(axiom::desktop::ux::seams::research::Correction {
+            target: "evidence:RE1".into(),
+            field: "raw_file".into(),
+            after: "runs/device_A.csv".into(),
+            who: "tester".into(),
+            why: "review".into(),
+        });
+        barrier(cx, &raw_wb, 10);
+        let store =
+            axiom::research_workspace::annotations::AnnotationStore::open(&raw_home, "rawonly")
+                .unwrap();
+        assert_eq!(store.corrections(Some("evidence:RE1")).len(), 1);
+        assert_eq!(tree_hash(&raw), raw_before, "successful correction");
+    }
+
+    #[test]
+    fn hash_detects_a_changed_source() {
+        let copy = fixture_copy("rawonly");
+        let before = tree_hash(&copy);
+        OpenOptions::new()
+            .append(true)
+            .open(copy.join("data/raw_measurements.csv"))
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
+        assert_ne!(tree_hash(&copy), before);
+    }
+
+    #[gpui_kit::test]
+    fn fault_in_one_tab_does_not_mask_another(cx: &mut TestAppContext) {
+        let copy = fixture_copy("rram");
+        let wb = open(
+            cx,
+            &copy.join("project"),
+            Some(&copy.join("store")),
+            &temp_dir(),
+        );
+        let port = wb.read_with(cx, |wb, _| wb.port.clone());
+        barrier(cx, &wb, 1);
+        let mut view = port.view(Tab::Evidence);
+        view.node = Some("raw".into());
+        port.set_view(Tab::Evidence, view);
+        port.locate_page("E101".into());
+        barrier(cx, &wb, 2);
+        assert!(
+            port.evidence()
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.id == "E101" && item.target.is_some() && item.notice.is_none()),
+            "E101 must resolve before the source is removed"
+        );
+        fs::remove_file(copy.join("project/external/hf02/pulse_run1.csv")).unwrap();
+        let before = tree_hash(&copy);
+        port.locate_page("E101".into());
+        barrier(cx, &wb, 3);
+        let evidence = port.evidence().unwrap();
+        assert!(
+            evidence
+                .items
+                .iter()
+                .any(|item| item.id == "E101" && item.notice.is_some()),
+            "missing-source error not shown for E101"
+        );
+        assert_eq!(port.load_state(), LoadState::Ready);
+        assert!(port.map().is_ok());
+        assert!(port.sources().is_ok());
+        assert!(port.dataset().is_ok());
+        assert!(port.exports().is_ok());
+        assert_eq!(tree_hash(&copy), before);
+
+        let broken = fixture_copy("rram");
+        fs::write(
+            broken.join("project/data/literature_inventory.csv"),
+            b"\xff",
+        )
+        .unwrap();
+        fs::remove_file(broken.join("project/data/measurements.csv")).unwrap();
+        fs::write(broken.join("store/units.tsv"), b"\xff").unwrap();
+        let broken_before = tree_hash(&broken);
+        let broken_wb = open(
+            cx,
+            &broken.join("project"),
+            Some(&broken.join("store")),
+            &temp_dir(),
+        );
+        barrier(cx, &broken_wb, 4);
+        let broken_port = broken_wb.read_with(cx, |wb, _| wb.port.clone());
+        assert_eq!(broken_port.load_state(), LoadState::Ready);
+        assert!(
+            broken_port.sources().is_err(),
+            "unreadable inventory must surface"
+        );
+        assert!(
+            broken_port.dataset().is_err(),
+            "missing measurements must surface"
+        );
+        assert!(broken_port.evidence().is_err());
+        let map = broken_port.map().unwrap();
+        assert!(
+            map.notices
+                .iter()
+                .any(|notice| notice.kind == "store_unavailable"),
+            "unreadable store index must surface"
+        );
+        assert!(broken_port.exports().is_ok());
+        assert_eq!(broken_port.view(Tab::Map).offset, 4);
+        assert_eq!(tree_hash(&broken), broken_before);
+
+        let invalid = fixture_copy("rawonly");
+        fs::write(invalid.join("research-manifest.json"), b"{ invalid").unwrap();
+        let invalid_before = tree_hash(&invalid);
+        let invalid_wb =
+            cx.new(|cx| Workbench::new(seams(&temp_dir()), None, Arc::new(SystemClock), cx));
+        invalid_wb.update(cx, |wb, cx| wb.open_paths(invalid.clone(), None, cx));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            cx.run_until_parked();
+            if matches!(
+                invalid_wb.read_with(cx, |wb, _| wb.load.clone()),
+                LoadState::Failed { .. }
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "invalid manifest did not fail");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        barrier(cx, &invalid_wb, 5);
+        let invalid_port = invalid_wb.read_with(cx, |wb, _| wb.port.clone());
+        assert!(matches!(
+            invalid_port.load_state(),
+            LoadState::Failed { .. }
+        ));
+        assert!(invalid_port.map().is_err());
+        assert!(invalid_port.sources().is_err());
+        assert!(invalid_port.evidence().is_err());
+        assert!(invalid_port.dataset().is_err());
+        assert!(invalid_port.exports().is_ok());
+        assert_eq!(invalid_port.view(Tab::Map).offset, 5);
+        assert_eq!(tree_hash(&invalid), invalid_before);
+    }
+    fn tab_degrades_alone(cx: &mut TestAppContext, tab: Tab) {
+        use axiom::desktop::{
+            components::panel::PanelState,
+            data::faults::{self, Fault, FaultPlan},
+        };
+        use std::collections::HashMap;
+        let _guard = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+        cx.update(|cx| faults::install(FaultPlan::default(), cx));
+        let copy = fixture_copy("rram");
+        let wb = open(
+            cx,
+            &copy.join("project"),
+            Some(&copy.join("store")),
+            &temp_dir(),
+        );
+        barrier(cx, &wb, 31);
+        let port = wb.read_with(cx, |wb, _| wb.port.clone());
+        let views: Vec<_> = [
+            Tab::Map,
+            Tab::Sources,
+            Tab::Evidence,
+            Tab::Dataset,
+            Tab::Exports,
+        ]
+        .into_iter()
+        .map(|t| (t, port.view(t)))
+        .collect();
+        let panel = format!("research.{}.panel", tab.key());
+        cx.update(|cx| faults::install(FaultPlan(HashMap::from([(panel, Fault::Corrupt)])), cx));
+        wb.update(cx, |wb, _| match tab {
+            Tab::Map => wb.map_feed.retry(),
+            Tab::Sources => wb.sources_feed.retry(),
+            Tab::Evidence => wb.evidence_feed.retry(),
+            Tab::Dataset => wb.dataset_feed.retry(),
+            Tab::Exports => wb.exports_feed.retry(),
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            cx.executor().advance_clock(Duration::from_millis(60));
+            cx.run_until_parked();
+            let states = wb.read_with(cx, |wb, _| {
+                [
+                    wb.map_feed.snapshot().state,
+                    wb.sources_feed.snapshot().state,
+                    wb.evidence_feed.snapshot().state,
+                    wb.dataset_feed.snapshot().state,
+                    wb.exports_feed.snapshot().state,
+                ]
+            });
+            let tabs = [
+                Tab::Map,
+                Tab::Sources,
+                Tab::Evidence,
+                Tab::Dataset,
+                Tab::Exports,
+            ];
+            if tabs.iter().zip(&states).all(|(t, state)| {
+                if *t == tab {
+                    matches!(state, PanelState::Corrupt { .. })
+                } else {
+                    *state == PanelState::Ready
+                }
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{tab:?}: {states:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(port.load_state(), LoadState::Ready);
+        for (t, view) in views {
+            assert_eq!(port.view(t), view);
+        }
+        cx.update(|cx| faults::install(FaultPlan::default(), cx));
+    }
+
+    #[gpui_kit::test]
+    fn tab_degrades_alone_map(cx: &mut TestAppContext) {
+        tab_degrades_alone(cx, Tab::Map);
+    }
+    #[gpui_kit::test]
+    fn tab_degrades_alone_sources(cx: &mut TestAppContext) {
+        tab_degrades_alone(cx, Tab::Sources);
+    }
+    #[gpui_kit::test]
+    fn tab_degrades_alone_evidence(cx: &mut TestAppContext) {
+        tab_degrades_alone(cx, Tab::Evidence);
+    }
+    #[gpui_kit::test]
+    fn tab_degrades_alone_dataset(cx: &mut TestAppContext) {
+        tab_degrades_alone(cx, Tab::Dataset);
+    }
+    #[gpui_kit::test]
+    fn tab_degrades_alone_exports(cx: &mut TestAppContext) {
+        tab_degrades_alone(cx, Tab::Exports);
+    }
+}

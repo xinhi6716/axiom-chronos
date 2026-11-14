@@ -66,6 +66,9 @@ use std::{
 
 trait FeedValue: Clone + PartialEq + Send + 'static {
     fn append_delta(&self, newer: &Self) -> Option<Box<dyn FnOnce(&mut Self) + Send>>;
+    fn capability(_error: &Failure) -> Option<Self> {
+        None
+    }
 }
 impl<T: Clone + PartialEq + Send + 'static> FeedValue for Vec<T> {
     fn append_delta(&self, newer: &Self) -> Option<Box<dyn FnOnce(&mut Self) + Send>> {
@@ -79,6 +82,20 @@ impl<T: Clone + PartialEq + Send + 'static> FeedValue for Vec<T> {
 macro_rules! display_feed {
     ($kind:ty, $rows:ident) => {
         impl FeedValue for $kind {
+            fn capability(error: &Failure) -> Option<Self> {
+                if error.kind != "not_capable"
+                    && !(error.kind == "missing_artifact"
+                        && error.message == "Measurements missing")
+                {
+                    return None;
+                }
+                let mut display = Self::default();
+                display.notices.push(dto::ResearchNotice {
+                    kind: error.kind.clone(),
+                    message: error.message.clone(),
+                });
+                Some(display)
+            }
             fn append_delta(&self, newer: &Self) -> Option<Box<dyn FnOnce(&mut Self) + Send>> {
                 let mut new_meta = newer.clone();
                 new_meta.$rows.clear();
@@ -164,7 +181,10 @@ impl<T: FeedValue> Source<T> for SlotSource<T> {
     fn poll(&mut self, cursor: Cursor) -> Res<(Delta<T>, Cursor)> {
         let inner = self.slot.0.lock().unwrap_or_else(|e| e.into_inner());
         let next = Cursor(inner.version);
-        let value = inner.result.clone()?;
+        let value = match inner.result.clone() {
+            Ok(value) => value,
+            Err(error) => T::capability(&error).ok_or(error)?,
+        };
         if cursor == next {
             return Ok((Delta::Unchanged, next));
         }
@@ -179,7 +199,7 @@ impl<T: FeedValue> Source<T> for SlotSource<T> {
         Ok((delta, next))
     }
     fn missing_is_empty(&self) -> bool {
-        false
+        true
     }
 }
 #[cfg(test)]
@@ -190,6 +210,7 @@ fn spawn_worker(f: impl FnOnce() + Send + 'static) {
 
 #[derive(Default)]
 struct Outputs {
+    page: Slot<Vec<()>>,
     map: Slot<dto::MapDisplay>,
     sources: Slot<dto::SourcesDisplay>,
     evidence: Slot<dto::EvidenceDisplay>,
@@ -201,6 +222,7 @@ struct Outputs {
 }
 
 pub struct ResearchFeeds {
+    pub page: crate::desktop::data::Feed<Vec<()>>,
     pub map: crate::desktop::data::Feed<dto::MapDisplay>,
     pub sources: crate::desktop::data::Feed<dto::SourcesDisplay>,
     pub evidence: crate::desktop::data::Feed<dto::EvidenceDisplay>,
@@ -293,17 +315,23 @@ impl ResearchAdapter {
         const FEED_PERIOD_MS: u64 = 100;
         let period = Duration::from_millis(FEED_PERIOD_MS);
         ResearchFeeds {
+            page: crate::desktop::data::Feed::spawn(
+                "research.page",
+                self.outputs.page.source(),
+                period,
+                cx,
+            ),
             map: self.map_feed(cx),
             sources: self.sources_feed(cx),
             evidence: self.evidence_feed(cx),
             dataset: crate::desktop::data::Feed::spawn(
-                "research.dataset",
+                "research.dataset.panel",
                 self.outputs.dataset.source(),
                 period,
                 cx,
             ),
             exports: crate::desktop::data::Feed::spawn(
-                "research.exports",
+                "research.exports.panel",
                 self.outputs.exports.source(),
                 period,
                 cx,
@@ -316,7 +344,7 @@ impl ResearchAdapter {
     ) -> crate::desktop::data::Feed<dto::DatasetDisplay> {
         const FEED_PERIOD_MS: u64 = 100;
         crate::desktop::data::Feed::spawn(
-            "research.dataset",
+            "research.dataset.panel",
             self.outputs.dataset.source(),
             Duration::from_millis(FEED_PERIOD_MS),
             cx,
@@ -328,7 +356,7 @@ impl ResearchAdapter {
     ) -> crate::desktop::data::Feed<dto::ExportsDisplay> {
         const FEED_PERIOD_MS: u64 = 100;
         crate::desktop::data::Feed::spawn(
-            "research.exports",
+            "research.exports.panel",
             self.outputs.exports.source(),
             Duration::from_millis(FEED_PERIOD_MS),
             cx,
@@ -340,7 +368,7 @@ impl ResearchAdapter {
     ) -> crate::desktop::data::Feed<dto::SourcesDisplay> {
         const FEED_PERIOD_MS: u64 = 100;
         crate::desktop::data::Feed::spawn(
-            "research.sources",
+            "research.sources.panel",
             self.outputs.sources.source(),
             Duration::from_millis(FEED_PERIOD_MS),
             cx,
@@ -352,7 +380,7 @@ impl ResearchAdapter {
     ) -> crate::desktop::data::Feed<dto::EvidenceDisplay> {
         const FEED_PERIOD_MS: u64 = 100;
         crate::desktop::data::Feed::spawn(
-            "research.evidence",
+            "research.evidence.panel",
             self.outputs.evidence.source(),
             Duration::from_millis(FEED_PERIOD_MS),
             cx,
@@ -364,7 +392,7 @@ impl ResearchAdapter {
     ) -> crate::desktop::data::Feed<dto::MapDisplay> {
         const FEED_PERIOD_MS: u64 = 100;
         crate::desktop::data::Feed::spawn(
-            "research.map",
+            "research.map.panel",
             self.outputs.map.source(),
             Duration::from_millis(FEED_PERIOD_MS),
             cx,

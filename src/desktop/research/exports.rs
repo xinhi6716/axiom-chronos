@@ -45,6 +45,7 @@ enum Action {
     Snapshot,
 }
 pub struct ExportsPanel {
+    panic_pending: bool,
     wb: Entity<Workbench>,
     dest: Entity<InputState>,
     error: Option<String>,
@@ -55,6 +56,7 @@ impl ExportsPanel {
         let dest = cx.new(|cx| InputState::new(window, cx));
         cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         Self {
+            panic_pending: false,
             wb,
             dest,
             error: None,
@@ -80,8 +82,8 @@ impl ExportsPanel {
         });
     }
 }
-impl Render for ExportsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ExportsPanel {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let gap = theme::space(Density::default(), Step::Sm);
@@ -245,5 +247,34 @@ impl Render for ExportsPanel {
                 .child(div().flex_1().child(right)),
         );
         panel
+    }
+}
+
+impl Render for ExportsPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).exports_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.exports.panel", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.exports.panel", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).exports_feed.retry();
+                cx.notify();
+            }))
+            .content(move |window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.render_content(window, cx).into_any_element()
+                })
+            })
     }
 }

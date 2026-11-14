@@ -71,6 +71,7 @@ fn row_text(row: &DatasetRow, lang: Lang) -> String {
     }
 }
 pub struct DatasetPanel {
+    panic_pending: bool,
     wb: Entity<Workbench>,
     actions: Entity<Actions>,
     inputs: Vec<Entity<InputState>>,
@@ -131,6 +132,7 @@ impl DatasetPanel {
         })
         .detach();
         Self {
+            panic_pending: false,
             wb,
             actions,
             inputs,
@@ -141,8 +143,8 @@ impl DatasetPanel {
         }
     }
 }
-impl Render for DatasetPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl DatasetPanel {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let gap = theme::space(Density::default(), Step::Sm);
@@ -152,6 +154,7 @@ impl Render for DatasetPanel {
         let mut panel = div()
             .id("research-dataset-panel")
             .test_support()
+            .w_full()
             .flex()
             .flex_col()
             .w_full()
@@ -213,6 +216,12 @@ impl Render for DatasetPanel {
             results = results.child(marked("research-dataset-error", reason.clone()));
         }
         if let Some(display) = snapshot.value {
+            for notice in &display.notices {
+                results = results.child(marked(
+                    "research-dataset-error",
+                    format!("{}: {}", notice.kind, notice.message),
+                ));
+            }
             if display.preview {
                 results = results.child(marked(
                     "research-dataset-preview-notice",
@@ -442,7 +451,7 @@ impl Render for DatasetPanel {
                 div()
                     .flex()
                     .w_full()
-                    .child(div().w(px(left)).child(filters))
+                    .child(div().w(px(left)).flex_shrink_0().child(filters))
                     .child(
                         div()
                             .id("research-dataset-split-frame")
@@ -454,5 +463,34 @@ impl Render for DatasetPanel {
             .child(actions::correction_form(&self.actions, window, cx))
             .child(actions::receipts(&self.actions, cx));
         panel
+    }
+}
+
+impl Render for DatasetPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).dataset_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.dataset.panel", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.dataset.panel", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).dataset_feed.retry();
+                cx.notify();
+            }))
+            .content(move |window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.render_content(window, cx).into_any_element()
+                })
+            })
     }
 }

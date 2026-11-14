@@ -271,12 +271,7 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
         seams(&temp_dir()),
     );
     click(cx, window, "research-tab-sources");
-    wait_for(
-        cx,
-        window,
-        "research-sources-error",
-        "Sources could not be loaded",
-    );
+    wait_retry(cx, window, "retry:research.sources.panel");
 
     let large = fixture_copy("rram");
     let inventory = large.join("project/data/literature_inventory.csv");
@@ -409,7 +404,10 @@ fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
     let configuration = seams(&home);
     cx.update(|cx| {
         faults::install(
-            FaultPlan(HashMap::from([("research.sources".into(), Fault::Corrupt)])),
+            FaultPlan(HashMap::from([(
+                "research.sources.panel".into(),
+                Fault::Corrupt,
+            )])),
             cx,
         )
     });
@@ -422,7 +420,7 @@ fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
         configuration,
     );
     click(cx, window, "research-tab-sources");
-    wait_for(cx, window, "research-sources-error", "");
+    wait_retry(cx, window, "retry:research.sources.panel");
     click(cx, window, "research-tab-map");
     wait_for(cx, window, "research-map-status", "");
     cx.update(|cx| faults::install(FaultPlan::default(), cx));

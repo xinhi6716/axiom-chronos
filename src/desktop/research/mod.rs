@@ -136,6 +136,7 @@ pub struct Workbench {
     pub port: Arc<dyn crate::desktop::ux::seams::research::ResearchPort>,
     map_adapter: adapter::ResearchAdapter,
     map_pending: bool,
+    page_feed: crate::desktop::data::Feed<Vec<()>>,
     pub map_feed: crate::desktop::data::Feed<crate::desktop::ux::seams::research::MapDisplay>,
     pub sources_feed:
         crate::desktop::data::Feed<crate::desktop::ux::seams::research::SourcesDisplay>,
@@ -179,6 +180,7 @@ impl Workbench {
         }
         let adapter = adapter::ResearchAdapter::new(seams.clone(), interjections.clone());
         let feeds = adapter.feeds(cx);
+        feeds.page.observe(cx);
         feeds.sources.observe(cx);
         feeds.evidence.observe(cx);
         feeds.dataset.observe(cx);
@@ -210,6 +212,7 @@ impl Workbench {
             port,
             map_adapter: adapter,
             map_pending: false,
+            page_feed: feeds.page,
             map_feed: feeds.map,
             sources_feed: feeds.sources,
             evidence_feed: feeds.evidence,
@@ -641,6 +644,7 @@ fn form_ref(root: &str, store: &str) -> Option<ResearchRef> {
 pub struct ResearchPage {
     state: Entity<AppState>,
     wb: Entity<Workbench>,
+    panic_pending: bool,
     path: Entity<InputState>,
     store: Entity<InputState>,
     map: Entity<map::MapPanel>,
@@ -658,6 +662,7 @@ impl ResearchPage {
         Self {
             state,
             wb,
+            panic_pending: false,
             path,
             store,
             map,
@@ -679,8 +684,8 @@ impl ResearchPage {
         self.wb.update(cx, |wb, cx| wb.open(r, cx));
     }
 }
-impl Render for ResearchPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ResearchPage {
+    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let wb = self.wb.read(cx);
@@ -722,18 +727,12 @@ impl Render for ResearchPage {
         let view_state = view_state_text(&wb.tab_view(current), lang);
         let recent = wb.prefs.recent.clone();
         let notice = wb.notice_text.clone();
-        let panel: AnyElement = if matches!(wb.load, LoadState::Indexing { .. })
-            && matches!(current, Tab::Sources | Tab::Evidence | Tab::Exports)
-        {
-            marked("research-indexing", load.clone()).into_any_element()
-        } else {
-            match current {
-                Tab::Map => self.map.clone().into_any_element(),
-                Tab::Sources => self.sources.clone().into_any_element(),
-                Tab::Evidence => self.evidence.clone().into_any_element(),
-                Tab::Dataset => self.dataset.clone().into_any_element(),
-                Tab::Exports => self.exports.clone().into_any_element(),
-            }
+        let panel: AnyElement = match current {
+            Tab::Map => self.map.clone().into_any_element(),
+            Tab::Sources => self.sources.clone().into_any_element(),
+            Tab::Evidence => self.evidence.clone().into_any_element(),
+            Tab::Dataset => self.dataset.clone().into_any_element(),
+            Tab::Exports => self.exports.clone().into_any_element(),
         };
         let mut rail = div()
             .flex()
@@ -883,5 +882,32 @@ impl Render for ResearchPage {
             )
             .child(tr(lang, "Recent"))
             .child(list)
+    }
+}
+
+impl Render for ResearchPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).page_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.page", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == crate::desktop::components::panel::PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = crate::desktop::components::panel::PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.page", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).page_feed.retry();
+                cx.notify();
+            }))
+            .content(move |_, cx| {
+                handle.update(cx, |this, cx| this.render_content(cx).into_any_element())
+            })
     }
 }

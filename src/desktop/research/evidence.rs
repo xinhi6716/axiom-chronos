@@ -134,6 +134,7 @@ fn clickable(
 }
 
 pub struct EvidencePanel {
+    panic_pending: bool,
     wb: Entity<Workbench>,
     actions: Entity<Actions>,
     sizes: Option<Vec<f32>>,
@@ -145,6 +146,7 @@ impl EvidencePanel {
         cx.observe(&actions, |_, _, cx| cx.notify()).detach();
         cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         Self {
+            panic_pending: false,
             wb,
             actions,
             sizes: persist::sizes("research.evidence", cx),
@@ -152,8 +154,8 @@ impl EvidencePanel {
         }
     }
 }
-impl Render for EvidencePanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl EvidencePanel {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let gap = theme::space(Density::default(), Step::Sm);
@@ -481,5 +483,34 @@ impl Render for EvidencePanel {
                     .child(div().flex_1().child(contradictions).child(page)),
             )
             .child(actions::correction_form(&self.actions, window, cx))
+    }
+}
+
+impl Render for EvidencePanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).evidence_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.evidence.panel", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.evidence.panel", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).evidence_feed.retry();
+                cx.notify();
+            }))
+            .content(move |window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.render_content(window, cx).into_any_element()
+                })
+            })
     }
 }

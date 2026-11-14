@@ -166,6 +166,7 @@ fn raw_only_and_restored_selection(cx: &mut TestAppContext) {
         seams(&home, Arc::new(FakeRenderer::new())),
     );
     click(cx, w, "research-tab-evidence");
+    wait_for(cx, w, "research-evidence-layer-raw", "Raw");
     click(cx, w, "research-evidence-layer-raw");
     let lines = wait_for(
         cx,
@@ -320,7 +321,7 @@ fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
     cx.update(|cx| {
         faults::install(
             FaultPlan(HashMap::from([(
-                "research.evidence".into(),
+                "research.evidence.panel".into(),
                 Fault::Corrupt,
             )])),
             cx,
@@ -335,7 +336,7 @@ fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
         configuration,
     );
     click(cx, window, "research-tab-evidence");
-    wait_for(cx, window, "research-evidence-degraded", "");
+    wait_retry(cx, window, "retry:research.evidence.panel");
     click(cx, window, "research-tab-map");
     wait_for(cx, window, "research-map-status", "");
     cx.update(|cx| faults::install(FaultPlan::default(), cx));

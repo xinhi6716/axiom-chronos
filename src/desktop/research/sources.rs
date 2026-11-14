@@ -112,6 +112,7 @@ fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
         .child(text.clone().test_text(text))
 }
 pub struct SourcesPanel {
+    panic_pending: bool,
     wb: Entity<Workbench>,
     actions: Entity<Actions>,
     sizes: Option<Vec<f32>>,
@@ -122,14 +123,15 @@ impl SourcesPanel {
         cx.observe(&actions, |_, _, cx| cx.notify()).detach();
         cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         Self {
+            panic_pending: false,
             wb,
             actions,
             sizes: persist::sizes("research.sources", cx),
         }
     }
 }
-impl Render for SourcesPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl SourcesPanel {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
         let gap = theme::space(Density::default(), Step::Sm);
@@ -174,6 +176,16 @@ impl Render for SourcesPanel {
                 tr(lang, "Loading sources…").into(),
             ));
         };
+        if display
+            .notices
+            .iter()
+            .any(|notice| notice.kind == "not_capable")
+        {
+            return panel.child(marked(
+                "research-sources-error",
+                tr(lang, "This research does not have literature sources.").into(),
+            ));
+        }
         if display.nodes.is_empty() {
             let text = match &wb.load {
                 LoadState::Failed { message, .. } => {
@@ -374,5 +386,34 @@ impl Render for SourcesPanel {
             panel = panel.child(actions::receipts(&self.actions, cx));
         }
         panel
+    }
+}
+
+impl Render for SourcesPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let feed = self.wb.read(cx).sources_feed.clone();
+        let mut state = feed.snapshot().state;
+        let active = crate::desktop::data::faults::active("research.sources.panel", cx)
+            == Some(crate::desktop::data::faults::Fault::Panic);
+        if active && state == PanelState::Ready {
+            self.panic_pending = true;
+        }
+        if self.panic_pending && !active {
+            state = PanelState::Failed {
+                reason: "panel rendering failed".into(),
+            };
+        }
+        let handle = cx.entity().clone();
+        crate::desktop::components::panel::Panel::new("research.sources.panel", &state)
+            .retry(cx.listener(|this, _, _, cx| {
+                this.panic_pending = false;
+                this.wb.read(cx).sources_feed.retry();
+                cx.notify();
+            }))
+            .content(move |window, cx| {
+                handle.update(cx, |this, cx| {
+                    this.render_content(window, cx).into_any_element()
+                })
+            })
     }
 }

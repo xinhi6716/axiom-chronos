@@ -207,7 +207,10 @@ fn registered_research_targets_open_their_actual_tab(cx: &mut TestAppContext) {
                 "{id} did not open {panel}"
             );
             for element in target.panels.iter().chain(target.actions.iter()) {
-                assert!(window.try_find(*element).is_some(), "{id} missing {element}");
+                assert!(
+                    window.try_find(*element).is_some(),
+                    "{id} missing {element}"
+                );
             }
         })
         .unwrap();
@@ -226,12 +229,12 @@ fn map_feed_faults_do_not_disable_dataset(cx: &mut TestAppContext) {
     use axiom::desktop::data::faults::{self, Fault, FaultPlan};
     use std::collections::HashMap;
     for (fault, marker) in [
-        (Fault::Corrupt, "research-map-error"),
-        (Fault::Stale { age_ms: 60_000 }, "research-map-feed-stale"),
+        (Fault::Corrupt, "retry:research.map.panel"),
+        (Fault::Stale { age_ms: 60_000 }, "retry:research.map.panel"),
     ] {
         cx.update(|cx| {
             faults::install(
-                FaultPlan(HashMap::from([("research.map".into(), fault)])),
+                FaultPlan(HashMap::from([("research.map.panel".into(), fault)])),
                 cx,
             )
         });
@@ -248,7 +251,11 @@ fn map_feed_faults_do_not_disable_dataset(cx: &mut TestAppContext) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             cx.executor().advance_clock(Duration::from_millis(60));
-            if visible(&capture(cx, window), marker) {
+            frame(cx, window);
+            if cx
+                .update_window(window, |_, w, _| w.try_find(marker.to_owned()).is_some())
+                .unwrap()
+            {
                 break;
             }
             assert!(

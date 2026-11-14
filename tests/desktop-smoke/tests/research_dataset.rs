@@ -187,7 +187,7 @@ fn raw_and_missing(cx: &mut TestAppContext) {
     session::save(&home, &prefs).unwrap();
     let (window, _) = open_research(cx, Lang::En, ThemeMode::Light, (1920., 1200.), &root, seams);
     click(cx, window, "research-tab-dataset");
-    wait_for(cx, window, "research-dataset-error", "missing_artifact");
+    wait_retry(cx, window, "retry:research.dataset.panel");
 }
 #[gpui_kit::test]
 fn restores_nonzero_offset(cx: &mut TestAppContext) {

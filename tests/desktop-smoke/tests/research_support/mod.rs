@@ -252,3 +252,19 @@ pub fn visible(lines: &[(String, String)], id: &str) -> bool {
         .iter()
         .any(|(p, _)| p.split('/').any(|part| part == id))
 }
+
+pub fn wait_retry(cx: &mut TestAppContext, window: AnyWindowHandle, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        cx.executor().advance_clock(Duration::from_millis(60));
+        frame(cx, window);
+        if cx
+            .update_window(window, |_, w, _| w.try_find(id.to_owned()).is_some())
+            .unwrap()
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "waiting for {id}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
