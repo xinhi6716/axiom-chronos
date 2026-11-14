@@ -4,13 +4,17 @@ use super::super::{
         Connection, Controller, FakeSessions, Frame, SessionKind, SessionStream, WorkerSession,
     },
 };
-use super::sessions::SessionModel;
+use super::sessions::{
+    SessionModel, SessionSnapshot, SessionSource, BACK_ID, HANDBACK_ID, MAX_FRAMES, PANEL_ID,
+    RECONNECT_ID, SEND_ID, TAKEOVER_ID,
+};
 use crate::base::Res;
+use crate::desktop::data::{feed::FeedCore, Cursor, Source};
 use std::{
     prelude::v1::test,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -110,6 +114,7 @@ fn bilingual_statuses_and_refusal() {
 struct CountingSessions {
     fake: Arc<FakeSessions>,
     frame_calls: AtomicUsize,
+    cursors: Mutex<Vec<u64>>,
 }
 impl SessionStream for CountingSessions {
     fn sessions(&self) -> Vec<WorkerSession> {
@@ -117,6 +122,7 @@ impl SessionStream for CountingSessions {
     }
     fn frames(&self, id: &str, after: u64) -> Res<Vec<Frame>> {
         self.frame_calls.fetch_add(1, Ordering::SeqCst);
+        self.cursors.lock().unwrap().push(after);
         self.fake.frames(id, after)
     }
     fn connection(&self, id: &str) -> Connection {
@@ -144,6 +150,7 @@ fn lost_and_closed_stop_frame_polling_and_reconnect_resumes() {
     let service = Arc::new(CountingSessions {
         fake: fake.clone(),
         frame_calls: AtomicUsize::new(0),
+        cursors: Mutex::new(Vec::new()),
     });
     let mut model = SessionModel::new(service.clone(), "terminal");
     fake.push("terminal", "first");
@@ -178,4 +185,117 @@ fn lost_and_closed_stop_frame_polling_and_reconnect_resumes() {
     assert!(!closed.poll());
     assert_eq!(closed.connection, Connection::Closed);
     assert_eq!(service.frame_calls.load(Ordering::SeqCst), 2);
+}
+
+fn poll_feed(source: &mut SessionSource, core: &FeedCore<SessionSnapshot>) {
+    let generation = core.begin_poll();
+    let result = source.poll(core.cursor());
+    assert!(core.apply(generation, result, 0, None));
+}
+
+#[test]
+fn feed_uses_incremental_cursor_without_duplicates() {
+    let fake = fake();
+    let service = Arc::new(CountingSessions {
+        fake: fake.clone(),
+        frame_calls: AtomicUsize::new(0),
+        cursors: Mutex::new(Vec::new()),
+    });
+    let mut source = SessionSource::new(service.clone(), "terminal");
+    let core = FeedCore::new(true, None);
+    fake.push("terminal", "one");
+    poll_feed(&mut source, &core);
+    fake.push("terminal", "two");
+    poll_feed(&mut source, &core);
+    poll_feed(&mut source, &core);
+    assert_eq!(*service.cursors.lock().unwrap(), vec![0, 1, 2]);
+    assert_eq!(core.cursor(), Cursor(2));
+    assert_eq!(
+        core.snapshot()
+            .value
+            .unwrap()
+            .frames
+            .iter()
+            .map(|f| f.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one", "two"]
+    );
+}
+
+#[test]
+fn feed_bounds_transcript_and_keeps_cursor() {
+    let fake = fake();
+    let mut source = SessionSource::new(fake.clone(), "terminal");
+    let core = FeedCore::new(true, None);
+    for n in 0..MAX_FRAMES {
+        fake.push("terminal", &n.to_string());
+    }
+    poll_feed(&mut source, &core);
+    for n in MAX_FRAMES..MAX_FRAMES + 5 {
+        fake.push("terminal", &n.to_string());
+    }
+    poll_feed(&mut source, &core);
+    let snapshot = core.snapshot().value.unwrap();
+    assert_eq!(snapshot.frames.len(), MAX_FRAMES);
+    assert_eq!(snapshot.frames.first().unwrap().text, "5");
+    assert_eq!(
+        snapshot.frames.last().unwrap().text,
+        (MAX_FRAMES + 4).to_string()
+    );
+    assert_eq!(core.cursor(), Cursor((MAX_FRAMES + 5) as u64));
+}
+
+#[test]
+fn target_ids_are_rendered_from_constants() {
+    let target = crate::desktop::targets::find("session").unwrap();
+    assert_eq!(target.panels, &[PANEL_ID]);
+    assert_eq!(
+        target.actions,
+        &[BACK_ID, SEND_ID, TAKEOVER_ID, HANDBACK_ID, RECONNECT_ID]
+    );
+    let source = include_str!("sessions.rs");
+    let render = source
+        .split("impl Render for SessionPage")
+        .nth(1)
+        .unwrap()
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
+    assert!(render.contains("Panel::new(PANEL_ID, &snapshot.state)"));
+    assert!(render.contains(".id(PANEL_ID)"));
+    for id in [
+        "BACK_ID",
+        "SEND_ID",
+        "TAKEOVER_ID",
+        "HANDBACK_ID",
+        "RECONNECT_ID",
+    ] {
+        assert!(render.contains(id));
+    }
+    for id in target.panels.iter().chain(target.actions) {
+        assert!(!render.contains(id));
+    }
+}
+
+#[test]
+fn initial_fault_recovers_full_transcript_from_unadvanced_cursor() {
+    use crate::desktop::components::panel::PanelState;
+    use crate::desktop::data::faults::Fault;
+
+    let service = fake();
+    service.push("terminal", "first");
+    let mut source = SessionSource::new(service, "terminal");
+    let core = FeedCore::new(true, None);
+    let generation = core.begin_poll();
+    assert!(core.apply(
+        generation,
+        source.poll(core.cursor()),
+        0,
+        Some(Fault::Corrupt)
+    ));
+    assert!(matches!(core.snapshot().state, PanelState::Corrupt { .. }));
+    assert_eq!(core.cursor(), Cursor(0));
+    poll_feed(&mut source, &core);
+    assert_eq!(core.snapshot().state, PanelState::Ready);
+    assert_eq!(core.snapshot().value.unwrap().frames[0].text, "first");
 }
