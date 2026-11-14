@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -368,15 +368,153 @@ pub fn fixed_unit(store: &Path, unit: &str) -> Res<Option<String>> {
         .find(|row| row.kind == crate::orch::FIXES_KIND)
         .map(|row| row.command))
 }
-static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Gate>>> = OnceLock::new();
 const LOCK_WAIT: Duration = Duration::from_secs(30);
+/// The longest call name a lock file records.
+const CALL_CHARS: usize = 160;
+thread_local! {
+    static CALL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+/// Names the call this thread runs until dropped; a store lock taken meanwhile records it.
+pub struct CallScope {
+    previous: Option<String>,
+}
+impl Drop for CallScope {
+    fn drop(&mut self) {
+        CALL.with(|c| *c.borrow_mut() = self.previous.take());
+    }
+}
+pub fn call_scope(call: &str) -> CallScope {
+    let previous = CALL.with(|c| c.replace(Some(one_line(call))));
+    CallScope { previous }
+}
+fn one_line(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(CALL_CHARS)
+        .collect()
+}
+/// The call named by `call_scope`, else this process's command line.
+fn current_call() -> String {
+    CALL.with(|c| c.borrow().clone()).unwrap_or_else(|| {
+        // args_os: `std::env::args` panics on an argument that is not Unicode.
+        let mut args = std::env::args_os();
+        let program = args.next().map(|p| {
+            Path::new(&p)
+                .file_stem()
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let line = program
+            .into_iter()
+            .chain(args.map(|a| a.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        one_line(&line)
+    })
+}
+/// Who holds a store lock: line one of the lock file is the pid, then `call <name>` and
+/// `started <time>`. A lock file written before the record holds the pid alone.
+#[derive(Clone, Debug, PartialEq)]
+struct Holder {
+    pid: String,
+    call: String,
+    started: String,
+}
+impl Holder {
+    fn me() -> Holder {
+        Holder {
+            pid: std::process::id().to_string(),
+            call: current_call(),
+            started: base::now_iso(),
+        }
+    }
+    fn parse(text: &str) -> Holder {
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let mut holder = Holder {
+            pid: lines.next().unwrap_or("unknown").to_string(),
+            call: String::new(),
+            started: String::new(),
+        };
+        for line in lines {
+            if let Some(call) = line.strip_prefix("call ") {
+                holder.call = call.trim().to_string();
+            } else if let Some(started) = line.strip_prefix("started ") {
+                holder.started = started.trim().to_string();
+            }
+        }
+        holder
+    }
+    fn record(&self) -> String {
+        format!("{}\ncall {}\nstarted {}\n", self.pid, self.call, self.started)
+    }
+    /// The call and start time, or empty for a lock file that records only a pid.
+    fn about(&self) -> String {
+        match (self.call.is_empty(), self.started.is_empty()) {
+            (false, false) => format!("{}, since {}", self.call, self.started),
+            (false, true) => self.call.clone(),
+            (true, false) => format!("since {}", self.started),
+            (true, true) => String::new(),
+        }
+    }
+}
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.about() {
+            about if about.is_empty() => write!(f, "pid {}", self.pid),
+            about => write!(f, "pid {} ({about})", self.pid),
+        }
+    }
+}
+/// Lets one thread of this process at a time take a store's lock file, and names that thread.
+#[derive(Default)]
+struct Gate {
+    holder: Mutex<Option<(Holder, std::thread::ThreadId)>>,
+    free: std::sync::Condvar,
+}
+struct GateGuard(&'static Gate);
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        *self.0.holder.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.0.free.notify_one();
+    }
+}
+/// Waits for the other threads of this process until `deadline`, like a wait on another process.
+/// A thread that already holds the lock is refused at once, as it would wait for itself.
+fn enter(gate: &'static Gate, me: &Holder, deadline: Instant) -> Res<GateGuard> {
+    let thread = std::thread::current().id();
+    let mut holder = gate.holder.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some((other, owner)) = holder.as_ref() {
+        if *owner == thread {
+            return Err(fail(format!(
+                "store lock held by {other} in this same thread, which cannot wait for itself"
+            )));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(fail(format!(
+                "store lock held by {other} in another thread of this process"
+            )));
+        }
+        holder = gate
+            .free
+            .wait_timeout(holder, deadline - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    *holder = Some((me.clone(), thread));
+    Ok(GateGuard(gate))
+}
 struct LockFile {
     path: PathBuf,
-    pid: String,
+    record: String,
 }
 impl Drop for LockFile {
     fn drop(&mut self) {
-        if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
+        if std::fs::read_to_string(&self.path).is_ok_and(|s| s == self.record) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -384,7 +522,7 @@ impl Drop for LockFile {
 /// Holds the lock of a store until dropped; the file goes before the next thread may enter.
 pub struct StoreLock {
     _file: LockFile,
-    _threads: MutexGuard<'static, ()>,
+    _threads: GateGuard,
 }
 /// True when `holder` is a pid and no process runs under it.
 fn dead(holder: &str) -> bool {
@@ -418,8 +556,9 @@ fn abandoned(marker: &Path) -> Option<String> {
 /// saw the same dead holder cannot delete the fresh lock one of them has just taken. A marker
 /// whose claimant died is passed over by claiming one named after that claimant, which is just
 /// as exclusive, so a crash mid-reclaim never keeps the lock from being reclaimed.
-fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
-    let mut name = format!("lock.{holder}.stale");
+/// `raw` is the lock file as read when its holder, `pid`, was found dead.
+fn clear_dead_lock(path: &Path, pid: &str, raw: &str, force: bool) -> bool {
+    let mut name = format!("lock.{pid}.stale");
     let mut markers = Vec::new();
     loop {
         let marker = path.with_extension(&name);
@@ -448,32 +587,33 @@ fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
             }
         }
     }
-    let cleared = std::fs::read_to_string(path).is_ok_and(|s| s.trim() == holder)
-        && std::fs::remove_file(path).is_ok();
+    let cleared =
+        std::fs::read_to_string(path).is_ok_and(|s| s == raw) && std::fs::remove_file(path).is_ok();
     for marker in &markers {
         let _ = std::fs::remove_file(marker);
     }
     cleared
 }
 fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
+    let deadline = Instant::now() + wait;
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let threads: &'static Mutex<()> = *LOCKS
+    let gate: &'static Gate = *LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
-        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
-    let threads = threads.lock().unwrap_or_else(|e| e.into_inner());
+        .or_insert_with(|| Box::leak(Box::new(Gate::default())));
+    let me = Holder::me();
+    let threads = enter(gate, &me, deadline)?;
     let path = store.join(".orch.lock");
-    let pid = std::process::id().to_string();
+    let record = me.record();
     let create = || -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)?;
-        writeln!(file, "{pid}")
+        file.write_all(record.as_bytes())
     };
-    let deadline = Instant::now() + wait;
     let mut pause = 1;
     loop {
         match create() {
@@ -486,35 +626,32 @@ fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<
                     && Instant::now() < deadline => {}
             Err(e) => return Err(io(e)),
         }
-        let holder = std::fs::read_to_string(&path).unwrap_or_default();
-        let holder = if holder.trim().is_empty() {
-            "unknown"
-        } else {
-            holder.trim()
-        };
-        let dead = dead(holder);
-        if dead && clear_dead_lock(&path, holder, force) {
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        let holder = Holder::parse(&raw);
+        let dead = dead(&holder.pid);
+        if dead && clear_dead_lock(&path, &holder.pid, &raw, force) {
+            let left = match holder.about() {
+                about if about.is_empty() => String::new(),
+                about => format!(" left by {about}"),
+            };
             note.push_str(&format!(
-                "replacing stale store lock (pid {holder} is dead)
-"
+                "replacing stale store lock (pid {} is dead){left}\n",
+                holder.pid
             ));
             continue;
         }
         if !dead && force && std::fs::remove_file(&path).is_ok() {
-            note.push_str(&format!(
-                "stealing store lock held by pid {holder}
-"
-            ));
+            note.push_str(&format!("stealing store lock held by {holder}\n"));
             continue;
         }
-        if holder == pid || Instant::now() >= deadline {
-            return Err(fail(format!("store lock held by pid {holder}")));
+        if holder.pid == me.pid || Instant::now() >= deadline {
+            return Err(fail(format!("store lock held by {holder}")));
         }
         std::thread::sleep(Duration::from_millis(pause));
         pause = (pause * 2).min(50);
     }
     Ok(StoreLock {
-        _file: LockFile { path, pid },
+        _file: LockFile { path, record },
         _threads: threads,
     })
 }
@@ -731,6 +868,207 @@ fn supersede_rows(
     let row = rows.iter_mut().find(|u| u.id == id).unwrap();
     row.state = format!("{SUPERSEDED}:{by}");
     Ok((row.clone(), cross_track))
+}
+/// What `unit add --fixes` writes, decided from one reading of the units.
+enum FixPlan {
+    /// The chain already has two fix units: record the adjudication, then refuse.
+    Rounds(Failure),
+    Write {
+        rows: Vec<Unit>,
+        record: crate::codex::routing::FixRecord,
+        brief_text: String,
+        updated: String,
+    },
+}
+/// Every check of `unit add <row> --fixes <old>` on `rows` except the readiness scan, in the
+/// order the command makes them. It writes nothing.
+fn plan_fix(
+    store: &Path,
+    mut rows: Vec<Unit>,
+    row: &Unit,
+    old: &str,
+    explicit: Option<(crate::codex::routing::Tier, crate::codex::routing::Effort)>,
+    reason: Option<&str>,
+) -> Res<FixPlan> {
+    use crate::codex::routing::{
+        self, Escalation, FixRecord, Risk, Routing, Rule,
+    };
+    if !rows.iter().any(|u| u.id == old) {
+        return Err(Failure::new("not_found", format!("unit {old} not found")));
+    }
+    if rows.iter().any(|u| u.id == row.id) {
+        return Err(fail(format!("unit {} already exists", row.id)));
+    }
+    let chain = rows
+        .iter()
+        .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == old))
+        .map(|u| u.id.clone())
+        .collect::<Vec<_>>();
+    rows.push(row.clone());
+    supersede_rows(store, &mut rows, old, &row.id)?;
+    let mut fix_units = Vec::new();
+    for unit in &chain {
+        if fixed_unit(store, unit)?.is_some() {
+            fix_units.push(unit.as_str());
+        }
+    }
+    if fix_units.len() >= 2 {
+        return Ok(FixPlan::Rounds(Failure::new("fix_rounds", format!(
+            "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
+            fix_units.join(", ")
+        ))));
+    }
+    let parent = rows.iter().find(|u| u.id == old).unwrap();
+    let snapshot = routing::read_snapshot(store, old)?;
+    let map_text = match std::fs::read_to_string(store.join("modules.md")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io(e)),
+    };
+    let line = crate::orch::parse::parse_map(&map_text)
+        .ok()
+        .and_then(|m| m.modules.into_iter().find(|m| m.id == parent.track))
+        .and_then(|m| {
+            m.routing
+                .iter()
+                .find(|r| r.key == old)
+                .or_else(|| m.routing.iter().find(|r| r.key == "default"))
+                .cloned()
+        });
+    let invalid = |e| Failure::new("invalid_argument", e);
+    let missing = || Failure::new(
+        "routing_missing",
+        format!("routing_missing: parent unit {old} needs a routing decision and risk (ROUTING or RISK)"),
+    );
+    let (parent_tier, parent_effort) =
+        if let Some(s) = snapshot.as_ref().filter(|s| s.tier.is_some()) {
+            (s.tier, s.effort)
+        } else if snapshot.as_ref().is_some_and(|s| {
+            s.rule == Rule::ExplicitModel && s.tier.is_none()
+        }) {
+            if explicit.is_none() {
+                return Err(Failure::new("routing_missing", format!("routing_missing: parent unit {old} has an explicit model without a tier; supply --routing <tier>/<effort> --reason")));
+            }
+            (None, snapshot.as_ref().unwrap().effort)
+        } else if let Some(l) = &line {
+            (
+                Some(routing::parse_tier(&l.tier).map_err(invalid)?),
+                Some(routing::parse_effort(&l.effort).map_err(invalid)?),
+            )
+        } else {
+            return Err(missing());
+        };
+    let risk = if let Some(r) = snapshot.as_ref().and_then(|s| s.risk) {
+        r
+    } else if let Some(l) = &line {
+        serde_json::from_value(serde_json::Value::String(l.risk.clone()))
+            .map_err(|e| invalid(format!("{e}")))?
+    } else {
+        let text = std::fs::read_to_string(&parent.brief).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound || parent.brief.is_empty() {
+                missing()
+            } else {
+                io(e)
+            }
+        })?;
+        let parent_brief = parse_brief(&text).map_err(invalid)?;
+        let value = parent_brief.risk.ok_or_else(missing)?;
+        serde_json::from_value::<Risk>(serde_json::Value::String(value))
+            .map_err(|e| invalid(format!("{e}")))?
+    };
+    let (route, rule) = if let Some((tier, effort)) = explicit {
+        let r = Routing {
+            tier,
+            effort,
+            risk: Some(risk),
+            reason: reason.unwrap().trim().into(),
+        };
+        routing::check_rubric(&r).map_err(|e| {
+            Failure::new("routing_rubric", format!("routing_rubric: {e}"))
+        })?;
+        (r, Rule::PlanException)
+    } else {
+        match routing::escalate(parent_tier.ok_or_else(missing)?, parent_effort) {
+            Escalation::Next(r) => (r, Rule::FixEscalation),
+            Escalation::Saturated => {
+                return Err(Failure::new(
+                    "escalation_saturated",
+                    "escalation_saturated: parent routing is saturated",
+                ))
+            }
+        }
+    };
+    let brief_text = std::fs::read_to_string(&row.brief).map_err(io)?;
+    let parsed = parse_brief(&brief_text).map_err(invalid)?;
+    if parsed
+        .tier
+        .as_deref()
+        .is_some_and(|s| routing::parse_tier(s).ok() != Some(route.tier))
+        || parsed.effort.as_deref().is_some_and(|s| {
+            routing::parse_effort(s).ok() != Some(route.effort)
+        })
+    {
+        return Err(Failure::new(
+            "routing_mismatch",
+            "routing_mismatch: brief conflicts with routing",
+        ));
+    }
+    let tier = serde_json::to_value(route.tier)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let effort = serde_json::to_value(route.effort)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut additions = String::new();
+    if parsed.tier.is_none() {
+        additions.push_str(&format!("TIER {tier}\n"));
+    }
+    if parsed.effort.is_none() {
+        additions.push_str(&format!("EFFORT {effort}\n"));
+    }
+    let mut updated = String::new();
+    for part in brief_text.split_inclusive('\n') {
+        updated.push_str(part);
+        if part
+            .strip_prefix("GOAL")
+            .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+            && !additions.is_empty()
+        {
+            if !part.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(&additions);
+            additions.clear();
+        }
+    }
+    let record = FixRecord {
+        unit: row.id.clone(),
+        parent: old.to_string(),
+        parent_tier,
+        parent_effort,
+        tier: route.tier,
+        effort: route.effort,
+        rule,
+        reason: route.reason,
+    };
+    Ok(FixPlan::Write {
+        rows,
+        record,
+        brief_text,
+        updated,
+    })
+}
+/// The add response computes readiness: reject existing invalid data before changing either
+/// the units or evidence files. It reads the evidence of every unit, so it runs without the lock.
+fn fix_readiness_scan(store: &Path, unit: &str) -> Res<()> {
+    crate::orch::evidence(store, unit)?;
+    crate::orch::ready_units(store)?;
+    crate::orch::waiting_units(store)?;
+    Ok(())
 }
 fn push(
     store: &Path,
@@ -1298,6 +1636,7 @@ fn status(store: &Path) -> Res<(serde_json::Value, String)> {
     ))
 }
 pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
+    let _call = call_scope(&format!("orch {}", args.join(" ")));
     let mut note = String::new();
     let mut ledger_missing = false;
     let mut extra_output = None;
@@ -1411,189 +1750,53 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 if fixes.is_none() {
                     validate_add_brief(store, &row)?;
                 }
-                let fix_routing = locked(store, force, &mut note, || {
-                    if fixes.is_some() {
-                        validate_add_brief(store, &row)?;
+                // The readiness scan of `--fixes` reads the evidence of every unit, so it runs
+                // before the lock, on a plan that is then made again under the lock from the units
+                // as they are by then. A plan that fails here is left to the lock to refuse.
+                let mut scanned = false;
+                if let Some(old) = &fixes {
+                    let planned = validate_add_brief(store, &row)
+                        .and_then(|_| read_units(store))
+                        .and_then(|rows| plan_fix(store, rows, &row, old, explicit, reason_arg));
+                    if let Ok(FixPlan::Write { .. }) = planned {
+                        fix_readiness_scan(store, &row.id)?;
+                        scanned = true;
                     }
-                    let mut rows = read_units(store)?;
-                    if let Some(old) = &fixes {
-                        if !rows.iter().any(|u| u.id == *old) {
-                            return Err(Failure::new("not_found", format!("unit {old} not found")));
+                }
+                let fix_routing = loop {
+                    let added = locked(store, force, &mut note, || {
+                        if fixes.is_some() {
+                            validate_add_brief(store, &row)?;
                         }
-                    }
-                    if rows.iter().any(|u| u.id == row.id) {
-                        return Err(fail(format!("unit {} already exists", row.id)));
-                    }
-                    let chain = if let Some(old) = &fixes {
-                        rows.iter()
-                            .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == *old))
-                            .map(|u| u.id.clone())
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    };
-                    rows.push(row.clone());
-                    if let Some(old) = &fixes {
-                        supersede_rows(store, &mut rows, old, &row.id)?;
-                        let mut fix_units = Vec::new();
-                        for unit in &chain {
-                            if fixed_unit(store, unit)?.is_some() {
-                                fix_units.push(unit.as_str());
+                        let mut rows = read_units(store)?;
+                        let Some(old) = &fixes else {
+                            if rows.iter().any(|u| u.id == row.id) {
+                                return Err(fail(format!("unit {} already exists", row.id)));
                             }
-                        }
-                        if fix_units.len() >= 2 {
-                            add_adjudication_locked(store, "fix_rounds", old)?;
-                            return Err(Failure::new("fix_rounds", format!(
-                                "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
-                                fix_units.join(", ")
-                            )));
-                        }
-                        use crate::codex::routing::{
-                            self, Escalation, FixRecord, Risk, Routing, Rule,
+                            rows.push(row.clone());
+                            save_units(store, &rows)?;
+                            return Ok(Some(None));
                         };
-                        let parent = rows.iter().find(|u| u.id == *old).unwrap();
-                        let snapshot = routing::read_snapshot(store, old)?;
-                        let map_text = match std::fs::read_to_string(store.join("modules.md")) {
-                            Ok(s) => s,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                            Err(e) => return Err(io(e)),
-                        };
-                        let line = crate::orch::parse::parse_map(&map_text)
-                            .ok()
-                            .and_then(|m| m.modules.into_iter().find(|m| m.id == parent.track))
-                            .and_then(|m| {
-                                m.routing
-                                    .iter()
-                                    .find(|r| r.key == *old)
-                                    .or_else(|| m.routing.iter().find(|r| r.key == "default"))
-                                    .cloned()
-                            });
-                        let invalid = |e| Failure::new("invalid_argument", e);
-                        let missing = || Failure::new(
-                            "routing_missing",
-                            format!("routing_missing: parent unit {old} needs a routing decision and risk (ROUTING or RISK)"),
-                        );
-                        let (parent_tier, parent_effort) =
-                            if let Some(s) = snapshot.as_ref().filter(|s| s.tier.is_some()) {
-                                (s.tier, s.effort)
-                            } else if snapshot.as_ref().is_some_and(|s| {
-                                s.rule == Rule::ExplicitModel && s.tier.is_none()
-                            }) {
-                                if explicit.is_none() {
-                                    return Err(Failure::new("routing_missing", format!("routing_missing: parent unit {old} has an explicit model without a tier; supply --routing <tier>/<effort> --reason")));
+                        let (rows, record, brief_text, updated) =
+                            match plan_fix(store, rows, &row, old, explicit, reason_arg)? {
+                                FixPlan::Rounds(error) => {
+                                    add_adjudication_locked(store, "fix_rounds", old)?;
+                                    return Err(error);
                                 }
-                                (None, snapshot.as_ref().unwrap().effort)
-                            } else if let Some(l) = &line {
-                                (
-                                    Some(routing::parse_tier(&l.tier).map_err(invalid)?),
-                                    Some(routing::parse_effort(&l.effort).map_err(invalid)?),
-                                )
-                            } else {
-                                return Err(missing());
+                                FixPlan::Write {
+                                    rows,
+                                    record,
+                                    brief_text,
+                                    updated,
+                                } => (rows, record, brief_text, updated),
                             };
-                        let risk = if let Some(r) = snapshot.as_ref().and_then(|s| s.risk) {
-                            r
-                        } else if let Some(l) = &line {
-                            serde_json::from_value(serde_json::Value::String(l.risk.clone()))
-                                .map_err(|e| invalid(format!("{e}")))?
-                        } else {
-                            let text = std::fs::read_to_string(&parent.brief).map_err(|e| {
-                                if e.kind() == std::io::ErrorKind::NotFound || parent.brief.is_empty() {
-                                    missing()
-                                } else {
-                                    io(e)
-                                }
-                            })?;
-                            let parent_brief = parse_brief(&text).map_err(invalid)?;
-                            let value = parent_brief.risk.ok_or_else(missing)?;
-                            serde_json::from_value::<Risk>(serde_json::Value::String(value))
-                                .map_err(|e| invalid(format!("{e}")))?
-                        };
-                        let (route, rule) = if let Some((tier, effort)) = explicit {
-                            let r = Routing {
-                                tier,
-                                effort,
-                                risk: Some(risk),
-                                reason: reason_arg.unwrap().trim().into(),
-                            };
-                            routing::check_rubric(&r).map_err(|e| {
-                                Failure::new("routing_rubric", format!("routing_rubric: {e}"))
-                            })?;
-                            (r, Rule::PlanException)
-                        } else {
-                            match routing::escalate(parent_tier.ok_or_else(missing)?, parent_effort) {
-                                Escalation::Next(r) => (r, Rule::FixEscalation),
-                                Escalation::Saturated => {
-                                    return Err(Failure::new(
-                                        "escalation_saturated",
-                                        "escalation_saturated: parent routing is saturated",
-                                    ))
-                                }
-                            }
-                        };
-                        let brief_text = std::fs::read_to_string(&row.brief).map_err(io)?;
-                        let parsed = parse_brief(&brief_text).map_err(invalid)?;
-                        if parsed
-                            .tier
-                            .as_deref()
-                            .is_some_and(|s| routing::parse_tier(s).ok() != Some(route.tier))
-                            || parsed.effort.as_deref().is_some_and(|s| {
-                                routing::parse_effort(s).ok() != Some(route.effort)
-                            })
-                        {
-                            return Err(Failure::new(
-                                "routing_mismatch",
-                                "routing_mismatch: brief conflicts with routing",
-                            ));
+                        if !scanned {
+                            // The plan before the lock failed but this one passes: scan, unlocked.
+                            return Ok(None);
                         }
-                        let tier = serde_json::to_value(route.tier)
-                            .unwrap()
-                            .as_str()
-                            .unwrap()
-                            .to_owned();
-                        let effort = serde_json::to_value(route.effort)
-                            .unwrap()
-                            .as_str()
-                            .unwrap()
-                            .to_owned();
-                        let mut additions = String::new();
-                        if parsed.tier.is_none() {
-                            additions.push_str(&format!("TIER {tier}\n"));
-                        }
-                        if parsed.effort.is_none() {
-                            additions.push_str(&format!("EFFORT {effort}\n"));
-                        }
-                        let mut updated = String::new();
-                        for part in brief_text.split_inclusive('\n') {
-                            updated.push_str(part);
-                            if part
-                                .strip_prefix("GOAL")
-                                .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
-                                && !additions.is_empty()
-                            {
-                                if !part.ends_with('\n') {
-                                    updated.push('\n');
-                                }
-                                updated.push_str(&additions);
-                                additions.clear();
-                            }
-                        }
-                        let record = FixRecord {
-                            unit: row.id.clone(),
-                            parent: old.clone(),
-                            parent_tier,
-                            parent_effort,
-                            tier: route.tier,
-                            effort: route.effort,
-                            rule,
-                            reason: route.reason,
-                        };
+                        use crate::codex::routing;
                         // Validate existing evidence before either write.
                         crate::orch::evidence(store, &row.id)?;
-                        // The add response computes readiness; reject existing invalid data
-                        // before changing either the units or evidence files.
-                        crate::orch::ready_units(store)?;
-                        crate::orch::waiting_units(store)?;
                         let original_units = std::fs::read(store.join("units.tsv")).map_err(io)?;
                         let evidence_path = store
                             .join("reports")
@@ -1657,12 +1860,16 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                             }
                             return Err(error);
                         }
-                        Ok(Some(record))
-                    } else {
-                        save_units(store, &rows)?;
-                        Ok(None)
+                        Ok(Some(Some(record)))
+                    })?;
+                    match added {
+                        Some(record) => break record,
+                        None => {
+                            fix_readiness_scan(store, &row.id)?;
+                            scanned = true;
+                        }
                     }
-                })?;
+                };
                 let next = crate::orch::next_step_for(store, &row.id)?;
                 let mut value = serde_json::to_value(&row).unwrap();
                 value["next"] = serde_json::json!(next);
@@ -2249,6 +2456,237 @@ mod tests {
             lock_files(t.path()).is_empty(),
             "{:?}",
             lock_files(t.path())
+        );
+    }
+
+    /// A thread of this process that never releases the store lock must not freeze the
+    /// other threads: their wait ends with an error at the deadline, like a wait on another
+    /// process does.
+    #[test]
+    fn a_thread_that_never_lets_go_ends_another_threads_wait_with_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().to_path_buf();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let _call = call_scope("orch unit add pn-usage-2 --fixes pn-usage");
+                let lock = lock_store(&store).unwrap();
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                drop(lock);
+            }
+        });
+        held_rx.recv().unwrap();
+        let wait = Duration::from_millis(300);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let started = Instant::now();
+                let result = acquire(&store, false, &mut String::new(), wait).map(drop);
+                let _ = done_tx.send((result, started.elapsed()));
+            }
+        });
+        let (result, elapsed) = done_rx
+            .recv_timeout(wait + Duration::from_secs(10))
+            .expect("a waiter must not hang behind a holder in its own process");
+        let refused = result.expect_err("a held lock refuses the waiter");
+        assert!(elapsed >= wait, "{elapsed:?}");
+        assert!(
+            refused
+                .message
+                .contains(&format!("store lock held by pid {}", std::process::id())),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains(
+                "(orch unit add pn-usage-2 --fixes pn-usage, since 20"
+            ) && refused.message.ends_with("in another thread of this process"),
+            "{}",
+            refused.message
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        drop(acquire(&store, false, &mut String::new(), wait).expect("released"));
+    }
+
+    #[test]
+    fn a_thread_that_takes_the_lock_it_holds_is_refused_at_once() {
+        let t = tempfile::tempdir().unwrap();
+        let _call = call_scope("orch handoff --next x");
+        let held = lock_store(t.path()).unwrap();
+        let started = Instant::now();
+        let refused = acquire(t.path(), false, &mut String::new(), Duration::from_secs(30))
+            .err()
+            .expect("a nested take refuses");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            refused.message.contains(&format!(
+                "store lock held by pid {} (orch handoff --next x, since 20",
+                std::process::id()
+            )) && refused.message.contains("this same thread"),
+            "{}",
+            refused.message
+        );
+        drop(held);
+        drop(lock_store(t.path()).expect("released"));
+    }
+
+    fn live_process() -> std::process::Child {
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_lock_file_names_its_holder_and_waiters_report_it() {
+        let short = Duration::from_millis(150);
+        let t = tempfile::tempdir().unwrap();
+        let lock = t.path().join(".orch.lock");
+
+        // A live holder from another process: the refusal names its pid, call and start.
+        let mut holder = live_process();
+        std::fs::write(
+            &lock,
+            format!(
+                "{}\ncall orch unit add pn-usage-2 --fixes pn-usage\nstarted 2026-11-14T13:37:59Z\n",
+                holder.id()
+            ),
+        )
+        .unwrap();
+        let refused = acquire(t.path(), false, &mut String::new(), short)
+            .err()
+            .expect("a live holder keeps the lock");
+        assert!(
+            refused.message.contains(&format!(
+                "store lock held by pid {} (orch unit add pn-usage-2 --fixes pn-usage, since 2026-11-14T13:37:59Z)",
+                holder.id()
+            )),
+            "{}",
+            refused.message
+        );
+        assert!(!refused.message.contains('\n'), "{}", refused.message);
+        drop(holder.stdin.take());
+        holder.wait().unwrap();
+
+        // A dead holder's record is reclaimed by its pid.
+        std::fs::write(
+            &lock,
+            "4294967295\ncall orch verify u1 --repo r\nstarted 2026-11-14T13:00:00Z\n",
+        )
+        .unwrap();
+        let mut note = String::new();
+        let held = acquire(t.path(), false, &mut note, short).expect("a dead holder is replaced");
+        assert!(
+            note.contains("replacing stale store lock (pid 4294967295 is dead)"),
+            "{note}"
+        );
+        assert!(note.contains("orch verify u1 --repo r"), "{note}");
+
+        // The lock this process holds records its pid, its call and when it started.
+        let text = std::fs::read_to_string(&lock).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some(std::process::id().to_string().as_str()), "{text}");
+        assert!(
+            lines.clone().any(|l| l.starts_with("call ") && l.len() > "call ".len()),
+            "{text}"
+        );
+        assert!(
+            lines.any(|l| l
+                .strip_prefix("started ")
+                .is_some_and(|s| s.starts_with("20") && s.ends_with('Z'))),
+            "{text}"
+        );
+        drop(held);
+        assert!(!lock.exists());
+    }
+
+    /// `unit add --fixes` scans the evidence of every unit; that scan runs before the store
+    /// lock, which is held only to re-check the units and write.
+    #[test]
+    fn unit_add_fixes_holds_the_store_lock_briefly_on_a_large_store() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const UNITS: usize = 800;
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let call = |args: &[&str]| {
+            run(
+                p,
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                false,
+                false,
+            )
+        };
+        assert_eq!(call(&["init"]).exit_code, 0);
+        let brief = p.join("brief.md");
+        std::fs::write(&brief, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        let fix = p.join("fix.md");
+        std::fs::write(&fix, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        std::fs::write(
+            p.join("modules.md"),
+            "## core\nPURPOSE x\nPATHS src/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default terra/medium trivial reason\n",
+        )
+        .unwrap();
+        let brief = brief.to_str().unwrap();
+        let mut units = format!("{HEADER}\n");
+        for i in 0..UNITS {
+            units.push_str(&format!("u{i}\tcore\tpending\t\t\t\t{brief}\n"));
+        }
+        units.push_str(&format!("origin\tcore\tpending\t\t\t\t{brief}\n"));
+        std::fs::write(p.join("units.tsv"), units).unwrap();
+
+        let lock = p.join(".orch.lock");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let probe = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                let (mut longest, mut since) = (Duration::ZERO, None::<Instant>);
+                while !stop.load(Ordering::Relaxed) {
+                    if lock.exists() {
+                        longest = longest.max(since.get_or_insert_with(Instant::now).elapsed());
+                    } else {
+                        since = None;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                longest
+            }
+        });
+        let started = Instant::now();
+        let out = call(&[
+            "unit",
+            "add",
+            "fix",
+            "--track",
+            "core",
+            "--brief",
+            fix.to_str().unwrap(),
+            "--fixes",
+            "origin",
+        ]);
+        let total = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        let held = probe.join().unwrap();
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+        let rows = read_units(p).unwrap();
+        assert_eq!(rows.len(), UNITS + 2);
+        assert_eq!(rows[UNITS].superseded_by(), Some("fix"));
+        assert_eq!(fixed_unit(p, "fix").unwrap().as_deref(), Some("origin"));
+        eprintln!("unit add --fixes held the store lock {held:?} of {total:?}");
+        assert!(
+            held < Duration::from_secs(2),
+            "the store lock was held for {held:?} of {total:?}"
         );
     }
 }
