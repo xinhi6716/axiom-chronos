@@ -44,7 +44,7 @@ That lockfile adds the existing `ttf-parser` and `windows 0.61.3` packages to th
 
 Rust computes the physical layout and emits TikZ, compiled by Tectonic to vector PDF. Plotters was not added: it is absent from Cargo.lock, the build is offline, and text measured with `ttf-parser` supports the layout checks. Only line, scatter, error_bar and bar plots are implemented; other plot types, log axes and multi-panel layouts are not supported yet. See `docs/paper-figures.md` for the limits of the audits.
 
-Runtime Tectonic resolution is `AXIOM_TECTONIC_CMD`, then `paper/settings.json`, then PATH. Tectonic is present on this machine at `E:\codex\.toolchains\tectonic-0.17.0\tectonic.exe`; the test probe also recognizes that path.
+Runtime Tectonic resolution is `AXIOM_TECTONIC_CMD`, then `paper/settings.json`, then PATH. Tectonic 0.17.0 was present in a local toolchain folder on the development machine; the test probe also recognizes that location.
 
 The direct dependencies are `ttf-parser` 0.25 and optional Windows `windows` 0.61.3, enabled by `app` with features `Data_Pdf`, `Foundation`, `Storage`, and `Storage_Streams`. Both were already in Cargo.lock. No new crates.
 
@@ -61,7 +61,7 @@ The statuses in `engine/paper/templates/registry.json` are:
 
 ## Suite results
 
-Runs use `CARGO_HOME=E:/codex/.toolchains/cargo`, `CARGO_BUILD_JOBS=2`, and `CARGO_INCREMENTAL=0`; outputs are in scratch. Counts exclude nested child-test summaries.
+Runs use a local `CARGO_HOME`, `CARGO_BUILD_JOBS=2`, and `CARGO_INCREMENTAL=0`; outputs are in scratch. Counts exclude nested child-test summaries.
 
 - `cargo test --locked --offline --no-fail-fast`: 1,812 passed, 135 failed, 5 ignored. The 134 baseline failures are exactly the named main-suite failures listed in `docs/integration-3.0.md`; all 134 failed again. The additional failure is `tests/scheduler_wall_clock.rs::scheduler_wall_clock_acceptance`, detailed below. The run used no `models_and_binary_configuration` skip.
 - `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 883 passed, 3 failed, 0 ignored. All three failures are in the desktop-lib baseline and reported Windows access denied (os error 5): `desktop::live::accept::service_snapshot_rebuild_gap_resync_and_disk_pause`, `desktop::live::tests::service_background_reattaches_hosted_session_keys`, and `desktop::ux::real::background_accept::detach_keeps_wishes_running_and_only_quit_stops_the_service`.

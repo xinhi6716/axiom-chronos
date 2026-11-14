@@ -103,7 +103,7 @@ Demo and tests keep fakes; an empty demo uses the default empty UX state. Produc
 
 ## Suites
 
-Suites text (final, sequential runs, Windows, CARGO_HOME=E:/codex/.toolchains/cargo, CARGO_BUILD_JOBS=2, CARGO_INCREMENTAL=0, the three suites run one after another and never overlapping):
+Suites text (final, sequential runs, Windows, a local CARGO_HOME, CARGO_BUILD_JOBS=2, CARGO_INCREMENTAL=0, the three suites run one after another and never overlapping):
 - `cargo test --locked --offline --no-fail-fast`: 2429 passed, 0 failed, 6 ignored (sum of per-binary results, nested child summaries excluded).
 - `cargo test --locked --offline --no-fail-fast --features app --lib desktop::`: 960 passed, 0 failed, 0 ignored.
 - `cargo test --locked --offline --no-fail-fast --manifest-path tests/desktop-smoke/Cargo.toml -j 1`: 184 passed, 0 failed, 1 ignored.
