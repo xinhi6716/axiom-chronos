@@ -114,6 +114,7 @@ impl LedgerStorage {
 
 impl StorageService for LedgerStorage {
     fn report(&self) -> Res<StorageReport> {
+        let _ = io::metadata(&self.home);
         let ledger = Ledger::open(&self.home)?;
         let policy = Policy::load(&self.home)?;
         let now = now_ms();
@@ -129,6 +130,7 @@ impl StorageService for LedgerStorage {
     }
 
     fn preview(&self, ids: &[String]) -> Res<CleanupPlan> {
+        let _ = io::metadata(&self.home);
         let ledger = Ledger::open(&self.home)?;
         let policy = Policy::load(&self.home)?;
         let now = now_ms();
@@ -303,6 +305,7 @@ impl StorageService for LedgerStorage {
     }
 
     fn space(&self) -> Option<DiskSpace> {
+        let _ = io::metadata(&self.home);
         let free_bytes = preflight::os_probe().free_bytes(&self.home).ok()?;
         // The probe reports free space only, and a zero total means the total is unknown.
         Some(DiskSpace {

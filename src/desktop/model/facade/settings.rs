@@ -47,6 +47,7 @@ pub struct UxPrefs {
     pub usage_wish: Option<String>,
     pub usage_compare: Option<String>,
     pub drafts: BTreeMap<String, String>,
+    pub draft_ids: BTreeMap<String, String>,
     pub last_mode: ModeKind,
 }
 impl UxPrefs {
@@ -87,6 +88,15 @@ impl UxPrefs {
                         .collect()
                 })
                 .unwrap_or_default(),
+            draft_ids: v
+                .get("draft_ids")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
             last_mode: match string("last_mode").as_deref() {
                 Some("chat") => ModeKind::Chat,
                 Some("quick_task") => ModeKind::QuickTask,
@@ -101,7 +111,17 @@ impl UxPrefs {
             .iter()
             .map(|(k, v)| (k.clone(), json!({"key":v.key,"archived":v.archived})))
             .collect();
-        json!({"extreme":self.extreme,"read":read,"read_filter":match self.read_filter { ReadFilter::All=>"all",ReadFilter::Unread=>"unread",ReadFilter::Archived=>"archived" },"usage_wish":self.usage_wish,"usage_compare":self.usage_compare,"drafts":self.drafts,"last_mode":match self.last_mode { ModeKind::Wish=>"wish",ModeKind::Chat=>"chat",ModeKind::QuickTask=>"quick_task",ModeKind::Plaza=>"plaza" }})
+        json!({"extreme":self.extreme,"read":read,"read_filter":match self.read_filter { ReadFilter::All=>"all",ReadFilter::Unread=>"unread",ReadFilter::Archived=>"archived" },"usage_wish":self.usage_wish,"usage_compare":self.usage_compare,"drafts":self.drafts,"draft_ids":self.draft_ids,"last_mode":match self.last_mode { ModeKind::Wish=>"wish",ModeKind::Chat=>"chat",ModeKind::QuickTask=>"quick_task",ModeKind::Plaza=>"plaza" }})
+    }
+    pub fn draft_client_id(&mut self, session: &str, make: impl FnOnce() -> String) -> String {
+        self.draft_ids.entry(session.to_owned()).or_insert_with(make).clone()
+    }
+    pub fn rotate_draft_client_id(&mut self, session: &str, id: String) {
+        self.draft_ids.insert(session.to_owned(), id);
+    }
+    pub fn clear_draft(&mut self, session: &str) {
+        self.drafts.remove(session);
+        self.draft_ids.remove(session);
     }
 }
 

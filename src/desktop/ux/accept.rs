@@ -17,6 +17,7 @@ fn prefs_round_trip_and_independent_damage() {
         usage_wish: Some("wish".into()),
         usage_compare: Some("other".into()),
         drafts: [("s".into(), "draft".into())].into(),
+        draft_ids: [("s".into(), "client-id".into())].into(),
         last_mode: ModeKind::Plaza,
     };
     assert_eq!(prefs::UxPrefs::parse(&prefs.to_json()), prefs);
@@ -27,6 +28,62 @@ fn prefs_round_trip_and_independent_damage() {
     assert_eq!(p.drafts.len(), 1);
     assert_eq!(p.read_filter, ReadFilter::All);
     assert_eq!(p.last_mode, ModeKind::Chat);
+}
+
+#[test]
+fn draft_client_id_persists_rotates_and_clears() {
+    let mut prefs = prefs::UxPrefs::default();
+    prefs.drafts.insert("s".into(), "text".into());
+    prefs.drafts.insert("other".into(), "other text".into());
+    assert_eq!(prefs.draft_client_id("s", || "first".into()), "first");
+    assert_eq!(
+        prefs.draft_client_id("s", || panic!("id already exists")),
+        "first"
+    );
+    assert_eq!(
+        prefs.draft_client_id("other", || "other id".into()),
+        "other id"
+    );
+    let mut prefs = prefs::UxPrefs::parse(&prefs.to_json());
+    assert_eq!(
+        prefs.draft_client_id("s", || panic!("id must survive")),
+        "first"
+    );
+    prefs.rotate_draft_client_id("s", "second".into());
+    assert_eq!(
+        prefs.draft_client_id("s", || panic!("id was rotated")),
+        "second"
+    );
+    prefs.clear_draft("s");
+    assert!(!prefs.drafts.contains_key("s"));
+    assert_eq!(prefs.draft_client_id("s", || "third".into()), "third");
+    assert_eq!(
+        prefs.drafts.get("other").map(String::as_str),
+        Some("other text")
+    );
+    assert_eq!(
+        prefs.draft_client_id("other", || panic!("other id must remain")),
+        "other id"
+    );
+}
+
+#[test]
+fn damaged_draft_client_ids_are_ignored() {
+    let mut prefs = prefs::UxPrefs::parse(&serde_json::json!({
+        "draft_ids": {"good": "saved", "number": 3, "null": null, "object": {}}
+    }));
+    assert_eq!(prefs.draft_ids.len(), 1);
+    assert_eq!(
+        prefs.draft_client_id("good", || panic!("valid id must remain")),
+        "saved"
+    );
+    assert_eq!(prefs.draft_client_id("number", || "new".into()), "new");
+    assert!(prefs::UxPrefs::parse(&serde_json::json!({"draft_ids": 5}))
+        .draft_ids
+        .is_empty());
+    assert!(prefs::UxPrefs::parse(&serde_json::json!({}))
+        .draft_ids
+        .is_empty());
 }
 
 #[test]

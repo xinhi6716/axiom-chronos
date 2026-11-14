@@ -130,20 +130,34 @@ fn no_view_paths_and_negative_control() {
 
 
 #[test]
-fn private_original_helpers_remain_identical() {
+fn private_helpers_behave_and_old_module_has_no_helpers() {
     let old = include_str!("../../settings.rs");
-    let new = include_str!("settings.rs");
-    for name in ["same_path", "push_recent", "recovered_bounds"] {
-        fn helper<'a>(source: &'a str, name: &str) -> &'a str {
-            let start = source.find(&format!("fn {name}(")).unwrap();
-            let end = source[start..].find("\n}").unwrap() + start + 2;
-            &source[start..end]
-        }
-        assert_eq!(helper(old, name), helper(new, name), "{name}");
+    for declaration in ["fn same_path(", "fn push_recent(", "fn recovered_bounds("] {
+        assert!(!old.contains(declaration), "{declaration}");
     }
     let mut recent = Vec::new();
     for path in ["a", "b", "a"] { push_recent(&mut recent, path.into()); }
     assert_eq!(recent, vec![PathBuf::from("a"), PathBuf::from("b")]);
+    recent.clear();
+    for i in 0..MAX_RECENT_PROJECTS + 2 { push_recent(&mut recent, PathBuf::from(i.to_string())); }
+    let expected: Vec<_> = (2..MAX_RECENT_PROJECTS + 2).rev().map(|i| PathBuf::from(i.to_string())).collect();
+    assert_eq!(recent, expected);
     assert!(same_path(Path::new("a"), Path::new("a")));
     assert!(!same_path(Path::new("a"), Path::new("b")));
+    assert_eq!(same_path(Path::new("A/B"), Path::new("a\\b")), cfg!(windows));
+
+    let display = Bounds { origin: point(px(100.), px(200.)), size: size(px(1000.), px(800.)) };
+    let default = size(px(1200.), px(700.));
+    let min = size(px(400.), px(300.));
+    let fallback = Bounds { origin: point(px(100.), px(250.)), size: size(px(1000.), px(700.)) };
+    let saved = WindowPlacement { x: 200., y: 250., width: 600., height: 400., maximized: false };
+    let saved_rect = Bounds { origin: point(px(200.), px(250.)), size: size(px(600.), px(400.)) };
+    let mut settings = Settings::default();
+    assert!(matches!(recovered_bounds(&settings, &[display], default, min), WindowBounds::Windowed(rect) if rect == fallback));
+    settings.window = Some(saved);
+    assert!(matches!(recovered_bounds(&settings, &[display], default, min), WindowBounds::Windowed(rect) if rect == saved_rect));
+    settings.window = Some(WindowPlacement { maximized: true, ..saved });
+    assert!(matches!(recovered_bounds(&settings, &[display], default, min), WindowBounds::Maximized(rect) if rect == saved_rect));
+    settings.window = Some(WindowPlacement { x: 3000., y: 3000., ..saved });
+    assert!(matches!(recovered_bounds(&settings, &[display], default, min), WindowBounds::Windowed(rect) if rect == fallback));
 }

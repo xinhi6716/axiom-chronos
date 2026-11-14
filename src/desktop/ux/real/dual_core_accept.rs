@@ -36,6 +36,24 @@ fn topic(t: &str) -> gpui_kit::SharedString {
 }
 
 #[test]
+fn state_rejects_reads_during_render() {
+    let (home, _project, _store) = setup();
+    let source = EventDualCore::new(home.path().to_path_buf());
+    assert_eq!(source.state("s1"), DualCore::Off);
+
+    let panic = std::panic::catch_unwind(|| {
+        let _guard = crate::desktop::components::panel::RenderGuard::new("test.panel");
+        source.state("s1");
+    })
+    .expect_err("a render must not read the session state");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert!(message.is_some_and(|message| message.contains("io during render test.panel")));
+}
+
+#[test]
 fn off_without_policy_or_event_and_for_unknown_session() {
     let (home, _p, store) = setup();
     assert_eq!(state(&home), DualCore::Off);

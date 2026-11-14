@@ -102,7 +102,9 @@ impl<A: Send + 'static> Outbox<A> {
         let key = key.into();
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ticket) = shared.tickets.get(&key) {
-            return ticket.clone();
+            if matches!(ticket.state(), TicketState::Pending | TicketState::Applied) {
+                return ticket.clone();
+            }
         }
         let ticket = Ticket(Arc::new(Mutex::new(TicketState::Pending)));
         shared.tickets.insert(key.clone(), ticket.clone());

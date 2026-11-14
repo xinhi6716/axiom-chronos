@@ -57,6 +57,7 @@ pub fn project(store: &Path) -> DualCore {
 
 impl DualCoreSource for EventDualCore {
     fn state(&self, session: &str) -> DualCore {
+        let _ = crate::desktop::data::io::metadata(&self.home);
         match session_store(&self.home, session) {
             Ok(store) => project(&store),
             Err(_) => DualCore::Off,

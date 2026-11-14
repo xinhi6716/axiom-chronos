@@ -150,11 +150,93 @@ fn outbox_deduplicates_retries_and_retains() {
     assert!(a.same_ticket(&duplicate));
     assert_eq!(settled(&a), TicketState::Applied);
     assert_eq!(count.load(Ordering::SeqCst), 2);
+    let applied_duplicate = outbox.submit(9, "a");
+    assert!(a.same_ticket(&applied_duplicate));
+    assert_eq!(count.load(Ordering::SeqCst), 2);
     let b = outbox.submit(2, "b");
     let c = outbox.submit(3, "c");
     assert_eq!(settled(&b), TicketState::Refused("no".into()));
     assert_eq!(settled(&c), TicketState::Failed("bad".into()));
+    let b_retry = outbox.submit(1, "b");
+    let c_retry = outbox.submit(1, "c");
+    assert!(!b.same_ticket(&b_retry));
+    assert!(!c.same_ticket(&c_retry));
+    assert_eq!(settled(&b_retry), TicketState::Applied);
+    assert_eq!(settled(&c_retry), TicketState::Applied);
+    assert_eq!(b.state(), TicketState::Refused("no".into()));
+    assert_eq!(c.state(), TicketState::Failed("bad".into()));
     assert_eq!(outbox.tickets().len(), 3);
+    assert!(outbox
+        .tickets()
+        .iter()
+        .any(|ticket| ticket.same_ticket(&b_retry)));
+    assert!(outbox
+        .tickets()
+        .iter()
+        .any(|ticket| ticket.same_ticket(&c_retry)));
+}
+
+#[test]
+fn outbox_terminal_retry_keeps_key_and_runs_again() {
+    for refused in [false, true] {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let outbox = Outbox::with_max_attempts(
+            move |action: &u8, key: &str| {
+                recorded.lock().unwrap().push((*action, key.to_owned()));
+                if *action == 1 {
+                    if refused {
+                        Outcome::Refused("no".into())
+                    } else {
+                        Outcome::Retry("bad".into())
+                    }
+                } else {
+                    Outcome::Applied
+                }
+            },
+            1,
+        );
+        let first = outbox.submit(1, "stable");
+        let expected = if refused {
+            TicketState::Refused("no".into())
+        } else {
+            TicketState::Failed("bad".into())
+        };
+        assert_eq!(settled(&first), expected);
+        let retry = outbox.submit(2, "stable");
+        assert!(!first.same_ticket(&retry));
+        assert_eq!(settled(&retry), TicketState::Applied);
+        assert_eq!(first.state(), expected);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(1, "stable".into()), (2, "stable".into())]
+        );
+        assert_eq!(outbox.tickets().len(), 1);
+        assert!(outbox.tickets()[0].same_ticket(&retry));
+    }
+}
+
+#[test]
+fn outbox_pending_resubmit_is_deduplicated() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let outbox = Outbox::new(move |_: &u8, _: &str| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        started_tx.send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+        Outcome::Applied
+    });
+    let first = outbox.submit(1, "pending");
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let duplicate = outbox.submit(2, "pending");
+    assert!(first.same_ticket(&duplicate));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    release_tx.send(()).unwrap();
+    assert_eq!(settled(&first), TicketState::Applied);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 #[test]
 fn io_render_guard_and_negative_control() {

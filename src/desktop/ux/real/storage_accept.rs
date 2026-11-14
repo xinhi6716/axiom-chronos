@@ -220,6 +220,49 @@ fn space_comes_from_the_disk_probe() {
     assert!(storage.progress("none").is_err());
 }
 
+fn assert_render_read_panics(f: impl FnOnce()) {
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = crate::desktop::components::panel::RenderGuard::new("test.panel");
+        f();
+    }))
+    .expect_err("a render must not read storage");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert!(message.is_some_and(|message| message.contains("io during render test.panel")));
+}
+
+#[test]
+fn report_rejects_reads_during_render() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = LedgerStorage::new(home.path());
+    assert!(storage.report().is_ok());
+    assert_render_read_panics(|| {
+        let _ = storage.report();
+    });
+}
+
+#[test]
+fn preview_rejects_reads_during_render() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = LedgerStorage::new(home.path());
+    assert!(storage.preview(&[]).is_ok());
+    assert_render_read_panics(|| {
+        let _ = storage.preview(&[]);
+    });
+}
+
+#[test]
+fn space_rejects_reads_during_render() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = LedgerStorage::new(home.path());
+    assert!(storage.space().is_some());
+    assert_render_read_panics(|| {
+        let _ = storage.space();
+    });
+}
+
 #[test]
 fn progress_rejects_reads_during_render() {
     let home = tempfile::tempdir().unwrap();
