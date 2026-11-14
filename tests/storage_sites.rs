@@ -210,7 +210,6 @@ fn unit_worker_cargo_env_and_worktree() {
         );
         assert_eq!(result["structuredContent"]["state"], "built", "{result}");
         let verify = fs::read_to_string(store.join("reports/u.verify.txt")).unwrap();
-        assert_eq!(verify.trim() != "missing", cargo);
         let audit = fs::read_to_string(storage::retention::audit_log(home)).unwrap();
         let records: Vec<Value> = audit
             .lines()
@@ -271,6 +270,15 @@ fn unit_worker_cargo_env_and_worktree() {
         if cargo {
             assert_eq!(roots[1], env["CARGO_TARGET_DIR"]);
         }
+        // VERIFY inherits the runner's environment: the engine injects the shared
+        // target only for an eligible Cargo repository and otherwise leaves any
+        // inherited CARGO_TARGET_DIR untouched.
+        let expected = if cargo {
+            env["CARGO_TARGET_DIR"].as_str().unwrap().to_owned()
+        } else {
+            std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "missing".into())
+        };
+        assert_eq!(verify.trim(), expected.trim());
         assert_eq!(
             Ledger::open(home)
                 .unwrap()
