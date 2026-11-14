@@ -2,13 +2,13 @@ use super::super::{
     i18n::{fill, translate, Lang, Table},
     model::{Action, AppState},
     motion,
-    settings::{Settings, Store},
+    model::facade::settings::{Settings, Store},
     theme::{self, Density, Step, Tokens, TypeSize},
     ux::seams::{FastCost, TurnPolicy, TurnSettings},
 };
 use gpui_kit::{
     base::{TestSupportExt as _, TestTextExt as _},
-    component::{switch::Switch, tooltip::Tooltip, v_flex},
+    component::v_flex,
     *,
 };
 use std::{
@@ -129,9 +129,9 @@ pub fn extreme_on(cx: &App) -> bool {
     Store::current(cx).ux.extreme
 }
 pub fn cinnabar(t: &Tokens) -> Hsla {
-    motion::mix(t.fail, t.gold, 0.2)
+    motion::mix(t.fail, t.gold, super::super::components::REVIEW_BACKGROUND_OPACITY)
 }
-pub const FLASH: Duration = Duration::from_millis(600);
+pub const FLASH: Duration = super::super::components::Dur::Slow.get();
 pub fn flash_level(flash: Option<Instant>, now: Instant, reduce: bool) -> f32 {
     if reduce {
         return 0.;
@@ -152,7 +152,7 @@ pub fn strip_toggle(
     on_toggle: Rc<dyn Fn(bool, &mut Window, &mut App)>,
 ) -> AnyElement {
     let color = if on {
-        motion::mix(cinnabar(t), t.gold, flash.clamp(0., 1.) * 0.3)
+        motion::mix(cinnabar(t), t.gold, flash.clamp(0., 1.) * super::super::components::TAG_BORDER_OPACITY)
     } else {
         t.muted
     };
@@ -170,7 +170,7 @@ pub fn strip_toggle(
         .id("extreme-toggle")
         .test_support()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+        .tooltip(move |window, cx| super::super::components::tooltip("extreme-tip", tip, None, window, cx))
         .on_click(move |_, window, cx| on_toggle(!on, window, cx))
         .child(
             canvas(
@@ -191,7 +191,7 @@ pub fn strip_toggle(
                     .into_iter()
                     .map(|(a, b)| point(px(x + a * s), px(y + b * s)))
                     .collect();
-                    let mut path = PathBuilder::stroke(px(1.4));
+                    let mut path = PathBuilder::stroke(super::super::components::radius(super::super::components::Radius::Sm));
                     path.add_polygon(&points, false);
                     if let Ok(path) = path.build() {
                         window.paint_path(path, color);
@@ -208,8 +208,8 @@ pub fn strip_current(on: bool, flash: f32, t: &Tokens) -> Option<AnyElement> {
             .id("extreme-current")
             .test_support()
             .w_full()
-            .h(px(2.))
-            .bg(motion::mix(cinnabar(t), t.gold, flash.clamp(0., 1.) * 0.3))
+            .h(super::super::components::radius(super::super::components::Radius::Sm))
+            .bg(motion::mix(cinnabar(t), t.gold, flash.clamp(0., 1.) * super::super::components::TAG_BORDER_OPACITY))
             .into_any_element()
     })
 }
@@ -253,10 +253,9 @@ pub fn settings_row(
                 .child(cost.clone().test_text(cost)),
         )
         .child(
-            Switch::new("extreme-switch")
+            super::super::components::Toggle::new("action:settings.toggle-extreme", translate(lang, T, "Extreme mode"), t)
                 .checked(on)
-                .accessibility_label(translate(lang, T, "Extreme mode"))
-                .on_click(move |on, window, cx| on_toggle(*on, window, cx)),
+                .on_change(move |on, window, cx| on_toggle(on, window, cx)),
         )
         .into_any_element()
 }

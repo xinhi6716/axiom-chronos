@@ -1,6 +1,7 @@
 mod ux_support;
 
 use axiom::desktop::{
+    data::faults::{self, Fault, FaultPlan},
     demo,
     i18n::Lang,
     model::Screen,
@@ -13,7 +14,7 @@ use axiom::desktop::{
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, TestAppContext};
 use std::{
-    ffi::OsString,
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,6 +30,39 @@ fn item(id: &str, reclaimable: bool) -> StorageItem {
         bytes: 1024,
         measured: true,
         reclaimable,
+    }
+}
+
+#[gpui_kit::test]
+fn settings_and_storage_faults_retry_without_hiding_quota(cx: &mut TestAppContext) {
+    for panel in ["settings.page", "storage.page"] {
+        for fault in [Fault::Corrupt, Fault::Panic] {
+            cx.update(|cx| faults::install(FaultPlan(HashMap::from([(panel.to_owned(), fault)])), cx));
+            let mut state = demo::state();
+            state.ux.seams.storage = Some(storage());
+            if panel == "storage.page" { state.ux.page = Some(Page::Storage); }
+            let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Doctor);
+            let retry = format!("retry:{panel}");
+            let has = |cx: &mut TestAppContext, id: &str| cx.update_window(window, |_, window, _| {
+                window.try_find(gpui_kit::ElementId::Name(id.to_owned().into())).is_some()
+            }).unwrap();
+            for _ in 0..20 {
+                if has(cx, &retry) { break; }
+                tick(cx, window, Duration::from_millis(60));
+                std::thread::sleep(Duration::from_millis(55));
+            }
+            assert!(has(cx, &retry), "{panel} did not show retry");
+            assert!(has(cx, "quota-strip"));
+            cx.update(|cx| faults::install(FaultPlan::default(), cx));
+            click(cx, window, retry);
+            let content = if panel == "settings.page" { "settings-extreme" } else { "storage-title" };
+            for _ in 0..20 {
+                if has(cx, content) { break; }
+                tick(cx, window, Duration::from_millis(60));
+                std::thread::sleep(Duration::from_millis(55));
+            }
+            assert!(has(cx, content), "{panel} did not recover");
+        }
     }
 }
 fn storage() -> Arc<FakeStorage> {
@@ -70,7 +104,7 @@ fn preview(cx: &mut TestAppContext, window: AnyWindowHandle, lang: Lang) {
     for label in labels {
         assert!(shows(cx, window, "storage-group", label));
     }
-    assert!(shows(cx, window, "storage-row", "cache"));
+    assert!(shows(cx, window, "storage-row", "cache"), "{:?}", ux_support::capture(cx, window));
     click(cx, window, ("storage-group-choice", 1_usize));
     assert!(shows(cx, window, "storage-row", "project"));
     click(cx, window, ("storage-group-choice", 2_usize));
@@ -81,14 +115,14 @@ fn preview(cx: &mut TestAppContext, window: AnyWindowHandle, lang: Lang) {
     assert!(shows(
         cx,
         window,
-        "storage-preview",
+        "storage-preview-label",
         if lang == Lang::En {
             "Review cleanup"
         } else {
             "檢視清理項目"
         }
     ));
-    click(cx, window, "storage-preview");
+    click(cx, window, "action:storage.preview");
     let lines = ux_support::capture(cx, window);
     let plans: Vec<_> = lines
         .iter()
@@ -98,7 +132,7 @@ fn preview(cx: &mut TestAppContext, window: AnyWindowHandle, lang: Lang) {
     assert_eq!(plans[0].text, "/data/a — 1.0 KiB /data/b — 1.0 KiB");
     assert!(ux_support::shows(
         &lines,
-        "storage-confirm",
+        "storage-confirm-label",
         if lang == Lang::En {
             "Delete 2 items (2.0 KiB)"
         } else {
@@ -125,7 +159,7 @@ fn storage_cleanup_flow(cx: &mut TestAppContext) {
         assert!(shows(
             cx,
             window,
-            "settings-storage",
+            "settings-storage-label",
             if lang == Lang::En {
                 "Storage…"
             } else {
@@ -137,7 +171,7 @@ fn storage_cleanup_flow(cx: &mut TestAppContext) {
         let window = open_storage(cx, lang, &fake);
         preview(cx, window, lang);
         fake.touch();
-        click(cx, window, "storage-confirm");
+        click(cx, window, "action:storage.confirm");
         assert!(shows(cx, window, "storage-failures", "Storage changed"));
         assert!(fake.deleted().is_empty());
 
@@ -149,7 +183,7 @@ fn storage_cleanup_flow(cx: &mut TestAppContext) {
                 fake.fail_item("a");
             }
             assert!(fake.deleted().is_empty());
-            click(cx, window, "storage-confirm");
+            click(cx, window, "action:storage.confirm");
             fake.step();
             tick(cx, window, Duration::from_millis(400));
             assert!(shows(
@@ -189,10 +223,8 @@ fn storage_cleanup_flow(cx: &mut TestAppContext) {
     }
 }
 
-// AXIOM_HOME is process-wide and is restored even if an assertion fails.
 struct Home {
     path: PathBuf,
-    prior: Option<OsString>,
 }
 impl Home {
     fn new() -> Self {
@@ -203,18 +235,11 @@ impl Home {
         let path =
             std::env::temp_dir().join(format!("axiom-ux-storage-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
-        let prior = std::env::var_os("AXIOM_HOME");
-        std::env::set_var("AXIOM_HOME", &path);
-        Self { path, prior }
+        Self { path }
     }
 }
 impl Drop for Home {
     fn drop(&mut self) {
-        if let Some(prior) = &self.prior {
-            std::env::set_var("AXIOM_HOME", prior);
-        } else {
-            std::env::remove_var("AXIOM_HOME");
-        }
         std::fs::remove_dir_all(&self.path).unwrap();
     }
 }
@@ -256,17 +281,17 @@ fn settings_extreme_and_storage_entry(cx: &mut TestAppContext) {
             if settings_path.exists() {
                 std::fs::remove_file(&settings_path).unwrap();
             }
-            cx.update(|cx| cx.set_global(Store::open(false)));
+            cx.update(|cx| cx.set_global(Store::at(Some(settings_path.clone()))));
             let before = policy.begin_turn();
             assert!(!before.extreme);
-            click(cx, window, "extreme-switch");
+            click(cx, window, "action:settings.toggle-extreme");
             assert!(cx.update(|cx| Store::current(cx).ux.extreme));
             assert!(policy.current().extreme);
             let after = policy.begin_turn();
             assert!(after.extreme);
             assert_eq!(policy.turns(), vec![before, after]);
             tick(cx, window, Duration::from_secs(1));
-            cx.update(|cx| cx.set_global(Store::open(false)));
+            cx.update(|cx| cx.set_global(Store::at(Some(settings_path.clone()))));
             assert!(
                 cx.update(|cx| Store::current(cx).ux.extreme),
                 "saved extreme survives reopening"
@@ -281,7 +306,7 @@ fn settings_extreme_and_storage_entry(cx: &mut TestAppContext) {
             assert!(shows(
                 cx,
                 window,
-                "settings-storage",
+                "settings-storage-label",
                 if lang == Lang::En {
                     "Storage…"
                 } else {
