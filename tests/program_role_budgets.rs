@@ -25,7 +25,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(limit: &str) -> Self {
+    fn new(limit: Option<&str>) -> Self {
         let temp = common::temp();
         let repo = temp.path().join("repo");
         let store = orch::store_for(temp.path(), "demo").unwrap();
@@ -50,7 +50,9 @@ impl Fixture {
         let bridge =
             Bridge::new(config).with_council(council::Setup::new(Ok(member.clone()), Ok(member)));
         bridge.note_project_cwd("demo", repo.to_str().unwrap());
-        policy::set(&store, "budget.council_member", limit).unwrap();
+        if let Some(limit) = limit {
+            policy::set(&store, "budget.council_member", limit).unwrap();
+        }
         Self {
             _temp: temp,
             store,
@@ -87,7 +89,7 @@ fn lines(path: &Path) -> usize {
 
 #[test]
 fn exhausted_refuses_before_any_member() {
-    let f = Fixture::new("0");
+    let f = Fixture::new(Some("0"));
     let result = f.call();
     assert_eq!(result["status"], "refused", "{result}");
     assert_eq!(result["error"]["kind"], "budget_exceeded");
@@ -98,7 +100,7 @@ fn exhausted_refuses_before_any_member() {
 
 #[test]
 fn budget_left_records_program_spend() {
-    let f = Fixture::new("1000");
+    let f = Fixture::new(Some("1000"));
     let result = f.call();
     assert_ne!(result["status"], "refused", "{result}");
     let spend: Vec<_> = f
@@ -117,9 +119,12 @@ fn budget_left_records_program_spend() {
 
 #[test]
 fn mid_run_exhaustion_stops_later_requests() {
-    let baseline = Fixture::new("1000");
+    // Any council_member budget refuses every call after the first unpriced spend,
+    // so a budgeted baseline depends on which member wins the race. Only an
+    // unbudgeted run gives a fixed request count to compare against.
+    let baseline = Fixture::new(None);
     baseline.call();
-    let f = Fixture::new("0.0000001");
+    let f = Fixture::new(Some("0.0000001"));
     f.call();
     let events = f.events();
     let first_spend = events
