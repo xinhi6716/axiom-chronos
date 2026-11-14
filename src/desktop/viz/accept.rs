@@ -1,12 +1,76 @@
 use super::super::{motion, theme};
 use super::data::{
-    BinaryStar, Bounded, ChartKind, ChartSpec, Filtered, FunnelStage, OrbitMember, OrbitState,
-    Selection, Series, StarPhase, TimelineItem, Tone,
+    BinaryStar, Bounded, ChartKind, ChartSpec, ChartValue, Filtered, FunnelStage, OrbitMember,
+    OrbitState, Selection, Series, StarPhase, TimelineItem, Tone,
 };
 use super::elements::{self, item_id, phase, series_id, stage_id, unit_interval};
 use gpui_kit::{Element, ElementId, IntoElement};
 use std::prelude::v1::test;
 use std::time::Instant;
+
+#[test]
+fn chart_unknown_is_a_gap_with_a_marker_not_a_zero() {
+    let mut series = Series::new(5);
+    series.push(1, 3.);
+    series.push(2, 4.);
+    series.push_value(3, ChartValue::Unknown);
+    series.push(4, 6.);
+    series.push(5, 7.);
+    assert_eq!(series.count(), 4);
+    assert_eq!(series.sum(), 20.);
+    assert_eq!(
+        series
+            .iter_points()
+            .map(|(k, v)| (k, v))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, ChartValue::Known(3.)),
+            (2, ChartValue::Known(4.)),
+            (3, ChartValue::Unknown),
+            (4, ChartValue::Known(6.)),
+            (5, ChartValue::Known(7.)),
+        ]
+    );
+    let samples = elements::chart_samples(&series);
+    assert_eq!(
+        samples.segments,
+        vec![vec![(1, 3.), (2, 4.)], vec![(4, 6.), (5, 7.)]]
+    );
+    assert_eq!(samples.unknown, vec![3]);
+    assert_eq!(elements::chart_bounds(&[samples]), Some((1, 5, 0., 7.)));
+    assert_eq!(
+        elements::unknown_marker_color(&theme::night()),
+        theme::night().muted
+    );
+
+    series.push_value(5, ChartValue::Unknown);
+    series.push(3, 9.);
+    assert_eq!(series.sum(), 22.);
+    series.push_value(6, ChartValue::Unknown);
+    assert_eq!(
+        series.iter_points().map(|(k, _)| k).collect::<Vec<_>>(),
+        vec![2, 3, 4, 5, 6]
+    );
+    assert_eq!(series.sum(), 19.);
+    let mut unknown_only = Series::new(2);
+    unknown_only.push_value(12, ChartValue::Unknown);
+    let samples = elements::chart_samples(&unknown_only);
+    assert!(samples.segments.is_empty());
+    assert_eq!(samples.unknown, vec![12]);
+    assert_eq!(elements::chart_bounds(&[samples]), Some((12, 12, 0., 0.)));
+
+    unknown_only.push(13, 0.);
+    unknown_only.push(14, 2.); // Evicts the unknown, not the known zero.
+    unknown_only.push_value(11, ChartValue::Unknown); // Too old for the window.
+    assert_eq!(
+        unknown_only.iter_points().collect::<Vec<_>>(),
+        vec![(13, ChartValue::Known(0.)), (14, ChartValue::Known(2.)),]
+    );
+    assert!(elements::chart_samples(&unknown_only).unknown.is_empty());
+    let mut zero_capacity = Series::new(0);
+    zero_capacity.push_value(1, ChartValue::Unknown);
+    assert_eq!(zero_capacity.iter_points().count(), 0);
+}
 
 fn check(series: &Series, values: &[f64]) {
     let sum: f64 = values.iter().sum();

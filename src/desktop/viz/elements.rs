@@ -233,6 +233,64 @@ pub fn binary_star(
         .child(div().id("star-b").child(star.b_label.clone()))
 }
 
+pub(super) struct ChartSamples {
+    pub segments: Vec<Vec<(i64, f64)>>,
+    pub unknown: Vec<i64>,
+    count: usize,
+}
+
+pub(super) fn chart_samples(series: &Series) -> ChartSamples {
+    let mut samples = ChartSamples {
+        segments: Vec::new(),
+        unknown: Vec::new(),
+        count: 0,
+    };
+    let mut segment = Vec::new();
+    for (ts, value) in series.iter_points() {
+        match value {
+            ChartValue::Known(value) if value.is_finite() => {
+                samples.count += 1;
+                segment.push((ts, value));
+            }
+            ChartValue::Unknown => {
+                samples.count += 1;
+                if !segment.is_empty() {
+                    samples.segments.push(std::mem::take(&mut segment));
+                }
+                samples.unknown.push(ts);
+            }
+            ChartValue::Known(_) => {} // Preserve the existing handling of non-finite values.
+        }
+    }
+    if !segment.is_empty() {
+        samples.segments.push(segment);
+    }
+    samples
+}
+
+pub(super) fn chart_bounds(series: &[ChartSamples]) -> Option<(i64, i64, f64, f64)> {
+    let mut bounds: Option<(i64, i64, f64, f64)> = None;
+    for samples in series {
+        for &ts in &samples.unknown {
+            let b = bounds.get_or_insert((ts, ts, 0., 0.));
+            b.0 = b.0.min(ts);
+            b.1 = b.1.max(ts);
+        }
+        for &(ts, value) in samples.segments.iter().flatten() {
+            let b = bounds.get_or_insert((ts, ts, 0., 0.));
+            b.0 = b.0.min(ts);
+            b.1 = b.1.max(ts);
+            b.2 = b.2.min(value);
+            b.3 = b.3.max(value);
+        }
+    }
+    bounds
+}
+
+pub(super) fn unknown_marker_color(t: &theme::Tokens) -> Hsla {
+    t.muted
+}
+
 pub fn chart(
     id: impl Into<ElementId>,
     spec: &ChartSpec,
@@ -242,21 +300,13 @@ pub fn chart(
     let series: Vec<_> = spec
         .series
         .iter()
-        .map(|(name, values)| {
-            (
-                name.clone(),
-                values
-                    .iter()
-                    .filter(|(_, v)| v.is_finite())
-                    .map(|(k, v)| (*k, *v))
-                    .collect::<Vec<_>>(),
-            )
-        })
+        .map(|(_, values)| chart_samples(values))
         .collect();
     let kind = spec.kind;
     let colors = [t.gold, t.run, t.ok, t.review, t.fail];
+    let marker_color = unknown_marker_color(t);
     let mut legend = div().flex().gap(theme::space(d, theme::Step::Sm));
-    for (i, (name, _)) in series.iter().enumerate() {
+    for (i, (name, _)) in spec.series.iter().enumerate() {
         legend = legend.child(
             div()
                 .id(series_id(i))
@@ -264,22 +314,15 @@ pub fn chart(
                 .child(name.clone()),
         );
     }
+    if series.iter().any(|samples| !samples.unknown.is_empty()) {
+        legend = legend.child(div().text_color(marker_color).child("× Unknown"));
+    }
     let drawing = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let values: Vec<_> = series
-                .iter()
-                .flat_map(|(_, values)| values.iter())
-                .collect();
-            let Some(first) = values.first() else { return };
-            let (mut min_x, mut max_x, mut min_y, mut max_y) =
-                (first.0, first.0, first.1.min(0.), first.1.max(0.));
-            for value in values {
-                min_x = min_x.min(value.0);
-                max_x = max_x.max(value.0);
-                min_y = min_y.min(value.1);
-                max_y = max_y.max(value.1);
-            }
+            let Some((min_x, max_x, min_y, max_y)) = chart_bounds(&series) else {
+                return;
+            };
             let x = f32::from(bounds.origin.x);
             let y = f32::from(bounds.origin.y);
             let width = f32::from(bounds.size.width);
@@ -294,45 +337,65 @@ pub fn chart(
                 )
             };
             let baseline = project(min_x, 0.).y;
-            for (i, (_, samples)) in series.iter().enumerate() {
-                if samples.is_empty() {
-                    continue;
-                }
-                let points: Vec<_> = samples.iter().map(|(ts, v)| project(*ts, *v)).collect();
+            for (i, samples) in series.iter().enumerate() {
                 let color = colors[i % colors.len()];
-                if kind == ChartKind::Bar {
-                    let bar_width = (width / samples.len() as f32 * 0.6).max(1.);
-                    for p in &points {
-                        let mut path = PathBuilder::fill();
+                for segment in &samples.segments {
+                    let points: Vec<_> = segment.iter().map(|(ts, v)| project(*ts, *v)).collect();
+                    if kind == ChartKind::Bar {
+                        let bar_width = (width / samples.count as f32 * 0.6).max(1.);
+                        for p in &points {
+                            let mut path = PathBuilder::fill();
+                            path.add_polygon(
+                                &[
+                                    point(p.x - px(bar_width / 2.), baseline),
+                                    point(p.x - px(bar_width / 2.), p.y),
+                                    point(p.x + px(bar_width / 2.), p.y),
+                                    point(p.x + px(bar_width / 2.), baseline),
+                                ],
+                                true,
+                            );
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color);
+                            }
+                        }
+                    } else {
+                        if kind == ChartKind::Area && points.len() > 1 {
+                            let mut area = vec![point(points[0].x, baseline)];
+                            area.extend(points.iter().copied());
+                            area.push(point(points.last().unwrap().x, baseline));
+                            let mut path = PathBuilder::fill();
+                            path.add_polygon(&area, true);
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color.opacity(0.25));
+                            }
+                        }
+                        if points.len() > 1 {
+                            let mut path = PathBuilder::stroke(px(2.));
+                            path.add_polygon(&points, false);
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color);
+                            }
+                        }
+                    }
+                }
+            }
+            // Draw markers last, in a fixed lane rather than at a data value or zero.
+            for samples in &series {
+                for &ts in &samples.unknown {
+                    let radius = (width.min(height).max(0.) / 2.).min(4.);
+                    let center = f32::from(project(ts, 0.).x).clamp(x + radius, x + width - radius);
+                    let cy = y + radius + 2.;
+                    for (a, b) in [(-radius, radius), (radius, -radius)] {
+                        let mut path = PathBuilder::stroke(px(2.));
                         path.add_polygon(
                             &[
-                                point(p.x - px(bar_width / 2.), baseline),
-                                point(p.x - px(bar_width / 2.), p.y),
-                                point(p.x + px(bar_width / 2.), p.y),
-                                point(p.x + px(bar_width / 2.), baseline),
+                                point(px(center - radius), px(cy + a)),
+                                point(px(center + radius), px(cy + b)),
                             ],
-                            true,
+                            false,
                         );
                         if let Ok(path) = path.build() {
-                            window.paint_path(path, color);
-                        }
-                    }
-                } else {
-                    if kind == ChartKind::Area && points.len() > 1 {
-                        let mut area = vec![point(points[0].x, baseline)];
-                        area.extend(points.iter().copied());
-                        area.push(point(points.last().unwrap().x, baseline));
-                        let mut path = PathBuilder::fill();
-                        path.add_polygon(&area, true);
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, color.opacity(0.25));
-                        }
-                    }
-                    if points.len() > 1 {
-                        let mut path = PathBuilder::stroke(px(2.));
-                        path.add_polygon(&points, false);
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, color);
+                            window.paint_path(path, marker_color);
                         }
                     }
                 }

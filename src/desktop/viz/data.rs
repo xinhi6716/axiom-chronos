@@ -1,5 +1,5 @@
 //! Bounded display data, independent of the UI.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub struct Bounded<K: Ord + Clone, T> {
@@ -54,12 +54,22 @@ impl Ord for Ordered {
     }
 }
 
-/// Aggregates for the retained window. Floating-point arithmetic follows IEEE 754.
+/// A chart sample whose value may be unavailable.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChartValue {
+    Known(f64),
+    Unknown,
+}
+
+/// Aggregates for known values in the retained window. Unknown samples occupy
+/// window capacity but do not contribute to aggregates or `iter`/`window`.
+/// Floating-point arithmetic follows IEEE 754.
 /// When the window contains a non-finite value, `sum` and `mean` recompute the
 /// sum over the window in O(cap) time.
 #[derive(Clone, Debug)]
 pub struct Series {
     window: Bounded<i64, f64>,
+    unknown: BTreeSet<i64>,
     bins: Vec<i128>,
     nonfinite: usize,
     values: BTreeMap<Ordered, usize>,
@@ -68,6 +78,7 @@ impl Series {
     pub fn new(cap: usize) -> Self {
         Self {
             window: Bounded::new(cap),
+            unknown: BTreeSet::new(),
             bins: vec![0; 2046],
             nonfinite: 0,
             values: BTreeMap::new(),
@@ -181,32 +192,65 @@ impl Series {
         }
     }
     pub fn push(&mut self, ts: i64, value: f64) {
+        self.push_value(ts, ChartValue::Known(value));
+    }
+    /// Insert or replace a sample; known and unknown samples share the capacity.
+    pub fn push_value(&mut self, ts: i64, value: ChartValue) {
         if self.window.cap == 0 {
             return;
         }
-        if self.window.len() == self.window.cap
-            && self
-                .window
-                .items
-                .first_key_value()
-                .is_some_and(|(first, _)| ts < *first)
+        let first = self
+            .window
+            .items
+            .keys()
+            .next()
+            .copied()
+            .into_iter()
+            .chain(self.unknown.first().copied())
+            .min();
+        if self.window.len() + self.unknown.len() == self.window.cap
+            && first.is_some_and(|first| ts < first)
         {
             return;
         }
         if let Some(old) = self.window.items.remove(&ts) {
             self.remove_value(old);
         }
-        self.window.items.insert(ts, value);
-        if value.is_finite() {
-            self.add(value, 1);
-        } else {
-            self.nonfinite += 1;
+        self.unknown.remove(&ts);
+        match value {
+            ChartValue::Known(value) => {
+                self.window.items.insert(ts, value);
+                if value.is_finite() {
+                    self.add(value, 1);
+                } else {
+                    self.nonfinite += 1;
+                }
+                *self.values.entry(Ordered(value)).or_default() += 1;
+            }
+            ChartValue::Unknown => {
+                self.unknown.insert(ts);
+            }
         }
-        *self.values.entry(Ordered(value)).or_default() += 1;
-        if self.window.items.len() > self.window.cap {
-            let (_, old) = self.window.items.pop_first().expect("over capacity");
-            self.remove_value(old);
+        if self.window.len() + self.unknown.len() > self.window.cap {
+            let first_known = self.window.items.keys().next().copied();
+            let first_unknown = self.unknown.first().copied();
+            if first_unknown.is_some_and(|u| first_known.is_none_or(|k| u < k)) {
+                self.unknown.pop_first();
+            } else {
+                let (_, old) = self.window.items.pop_first().expect("over capacity");
+                self.remove_value(old);
+            }
         }
+    }
+    /// All retained samples in timestamp order, including unknown values.
+    pub fn iter_points(&self) -> impl Iterator<Item = (i64, ChartValue)> {
+        let mut points: Vec<_> = self
+            .iter()
+            .map(|(ts, value)| (*ts, ChartValue::Known(*value)))
+            .chain(self.unknown.iter().map(|ts| (*ts, ChartValue::Unknown)))
+            .collect();
+        points.sort_unstable_by_key(|(ts, _)| *ts);
+        points.into_iter()
     }
     pub fn window(&self) -> &Bounded<i64, f64> {
         &self.window
