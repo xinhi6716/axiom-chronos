@@ -67,6 +67,13 @@ fn tick(cx: &mut TestAppContext, window: AnyWindowHandle) {
     cx.executor().advance_clock(Duration::from_millis(600));
     ux_support::capture(cx, window);
 }
+fn wait_attempts(cx: &mut TestAppContext, window: AnyWindowHandle, seam: &CountingSeam, count: usize) {
+    for _ in 0..200 {
+        if seam.attempts.lock().unwrap().len() >= count { tick(cx, window); return; }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("outbox did not reach seam {count} times");
+}
 fn shows(cx: &mut TestAppContext, window: AnyWindowHandle, id: &str, text: &str) -> bool {
     ux_support::shows(&ux_support::capture(cx, window), id, text)
 }
@@ -90,6 +97,7 @@ fn panel_receipts_pause_replan_and_recovery(cx: &mut TestAppContext) {
             },
         );
         state.ux.seams.interjections = Some(seam.clone());
+        state.ux.seams.interjection_outbox = None;
         let (window, _) = ux_support::open(cx, lang, state, Screen::Run);
         let settings_dir = std::env::temp_dir().join(format!(
             "axiom-interjection-settings-{}-{:?}",
@@ -177,10 +185,12 @@ fn panel_receipts_pause_replan_and_recovery(cx: &mut TestAppContext) {
         seam.fake.set_pause_failure(false);
         seam.fail_send.store(true, Ordering::SeqCst);
         click(cx, window, "interject-send");
+        wait_attempts(cx, window, &seam, 1);
         assert_eq!(seam.attempts.lock().unwrap()[0].client_id, failed_id);
         seam.fail_send.store(false, Ordering::SeqCst);
         click(cx, window, "interject-send");
         click(cx, window, "interject-send");
+        wait_attempts(cx, window, &seam, 2);
         let sent = seam.fake.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].client_id, failed_id);
@@ -269,6 +279,7 @@ fn panel_receipts_pause_replan_and_recovery(cx: &mut TestAppContext) {
             .unwrap();
         input(cx, window, "second amendment");
         click(cx, window, "interject-send");
+        wait_attempts(cx, window, &seam, 3);
         let second = seam.fake.sent().last().unwrap().client_id.clone();
         seam.fake.advance(
             &second,
@@ -385,10 +396,12 @@ fn restarted_history_polls_all_unfinished_rows_until_final(cx: &mut TestAppConte
         ..Default::default()
     });
     state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = None;
     let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
     click(cx, window, "open-interjection");
     input(cx, window, "new amendment");
     click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 1);
     let latest = seam.fake.sent()[0].client_id.clone();
     seam.fake.advance(
         &latest,
@@ -510,4 +523,198 @@ fn live_history_falls_back_to_amendments(cx: &mut TestAppContext) {
     click(cx, window, "open-interjection");
     assert!(shows(cx, window, "amendment-history", "original amendment"));
     assert!(shows(cx, window, "amendment-history", "—"));
+}
+
+#[gpui_kit::test]
+fn outbox_dialog_deduplicates_and_tracks_receipt(cx: &mut TestAppContext) {
+    use axiom::desktop::ux::seams::interjection_outbox_for;
+    let seam = Arc::new(CountingSeam::default());
+    let mut state = demo::state();
+    let run = &mut state.runs[state.current.unwrap()];
+    run.status = RunStatus::Active;
+    run.hosted = true;
+    state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = Some(interjection_outbox_for(seam.clone()));
+    let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
+    click(cx, window, "open-interjection");
+    input(cx, window, "through outbox");
+    click(cx, window, "interject-send");
+    click(cx, window, "interject-send");
+    for _ in 0..100 {
+        if !seam.attempts.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seam.attempts.lock().unwrap().len(), 1);
+    tick(cx, window);
+    assert!(shows(cx, window, "interject-receipt", "Sent"));
+    let id = seam.attempts.lock().unwrap()[0].client_id.clone();
+    seam.fake.advance(&id, ReceiptStage::Received);
+    tick(cx, window);
+    assert!(shows(
+        cx,
+        window,
+        "interject-receipt",
+        "Received by the core"
+    ));
+    seam.fake.advance(
+        &id,
+        ReceiptStage::Applied {
+            first_action: "plan".into(),
+        },
+    );
+    tick(cx, window);
+    assert!(shows(cx, window, "interject-receipt", "Applied: plan"));
+}
+
+#[gpui_kit::test]
+fn outbox_refusal_shows_error_and_preserves_draft(cx: &mut TestAppContext) {
+    use axiom::desktop::ux::seams::interjection_outbox_for;
+    let seam = Arc::new(CountingSeam::default());
+    seam.fail_send.store(true, Ordering::SeqCst);
+    let mut state = demo::state();
+    let run = &mut state.runs[state.current.unwrap()];
+    run.status = RunStatus::Active;
+    run.hosted = true;
+    state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = Some(interjection_outbox_for(seam.clone()));
+    let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
+    click(cx, window, "open-interjection");
+    input(cx, window, "keep failed draft");
+    click(cx, window, "interject-send");
+    for _ in 0..100 {
+        if !seam.attempts.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..10 {
+        tick(cx, window);
+        if shows(cx, window, "interject-error", "Send failed") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(shows(cx, window, "interject-error", "Send failed"));
+    assert!(shows(cx, window, "interject-receipt", "Rejected"));
+    assert!(shows(cx, window, "interject-preview", "keep failed draft"));
+    let id = seam.attempts.lock().unwrap()[0].client_id.clone();
+    cx.update_window(window, |_, window, cx| window.press("escape", cx)).unwrap();
+    ux_support::capture(cx, window);
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    click(cx, window, "open-interjection");
+    assert!(shows(cx, window, "interject-preview", "keep failed draft"));
+    seam.fail_send.store(false, Ordering::SeqCst);
+    click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 2);
+    assert_eq!(seam.attempts.lock().unwrap()[1].client_id, id);
+    for _ in 0..10 {
+        tick(cx, window);
+        if shows(cx, window, "interject-receipt", "Sent") { break; }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(shows(cx, window, "interject-receipt", "Sent"));
+}
+
+#[gpui_kit::test]
+fn reopening_sent_draft_reuses_key_and_applied_clears_it(cx: &mut TestAppContext) {
+    let seam = Arc::new(CountingSeam::default());
+    let mut state = demo::state();
+    let run = &mut state.runs[state.current.unwrap()];
+    run.status = RunStatus::Active;
+    run.hosted = true;
+    let session = run.session.to_string();
+    state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = None;
+    let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
+    click(cx, window, "open-interjection");
+    input(cx, window, "same draft");
+    click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 1);
+    let id = seam.attempts.lock().unwrap()[0].client_id.clone();
+    cx.update_window(window, |_, window, cx| window.press("escape", cx)).unwrap();
+    ux_support::capture(cx, window);
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    click(cx, window, "open-interjection");
+    assert!(shows(cx, window, "interject-preview", "same draft"));
+    let reopened_id = cx.update(|cx| Store::current(cx).ux.draft_ids.get(&session).cloned());
+    assert_eq!(reopened_id.as_deref(), Some(id.as_str()));
+    click(cx, window, "interject-send");
+    tick(cx, window);
+    assert_eq!(seam.attempts.lock().unwrap().len(), 1);
+    seam.fake.advance(&id, ReceiptStage::Applied { first_action: "done".into() });
+    tick(cx, window);
+    assert!(shows(cx, window, "interject-receipt", "Applied: done"));
+    cx.update(|cx| {
+        let prefs = &Store::current(cx).ux;
+        assert!(!prefs.drafts.contains_key(&session));
+        assert!(!prefs.draft_ids.contains_key(&session));
+    });
+}
+
+#[gpui_kit::test]
+fn editing_sent_draft_rotates_panel_identity(cx: &mut TestAppContext) {
+    let seam = Arc::new(CountingSeam::default());
+    let mut state = demo::state();
+    let run = &mut state.runs[state.current.unwrap()];
+    run.status = RunStatus::Active;
+    run.hosted = true;
+    let session = run.session.to_string();
+    state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = None;
+    let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
+    click(cx, window, "open-interjection");
+    input(cx, window, "first");
+    click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 1);
+    assert!(shows(cx, window, "interject-receipt", "Sent"));
+    input(cx, window, " changed");
+    click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 2);
+    let attempts = seam.attempts.lock().unwrap();
+    assert_ne!(attempts[0].client_id, attempts[1].client_id);
+    assert_ne!(attempts[0].text, attempts[1].text);
+    cx.update(|cx| {
+        let prefs = &Store::current(cx).ux;
+        assert_eq!(prefs.draft_ids.get(&session), Some(&attempts[1].client_id));
+        assert_eq!(prefs.drafts.get(&session), Some(&attempts[1].text));
+    });
+}
+
+#[gpui_kit::test]
+fn failed_ticket_preserves_panel_draft_and_identity(cx: &mut TestAppContext) {
+    use axiom::desktop::data::outbox::{Outbox, Outcome};
+    let seam = Arc::new(CountingSeam::default());
+    let service = seam.clone();
+    let outbox = Outbox::with_max_attempts(move |draft: &Draft, _| {
+        service.attempts.lock().unwrap().push(draft.clone());
+        Outcome::Retry("offline".into())
+    }, 1);
+    let mut state = demo::state();
+    let run = &mut state.runs[state.current.unwrap()];
+    run.status = RunStatus::Active;
+    run.hosted = true;
+    let session = run.session.to_string();
+    state.ux.seams.interjections = Some(seam.clone());
+    state.ux.seams.interjection_outbox = Some(outbox);
+    let (window, _) = ux_support::open(cx, Lang::En, state, Screen::Run);
+    click(cx, window, "open-interjection");
+    input(cx, window, "keep offline draft");
+    click(cx, window, "interject-send");
+    wait_attempts(cx, window, &seam, 1);
+    for _ in 0..20 {
+        tick(cx, window);
+        if shows(cx, window, "interject-error", "offline") { break; }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(shows(cx, window, "interject-error", "offline"));
+    let attempts = seam.attempts.lock().unwrap();
+    cx.update(|cx| {
+        let prefs = &Store::current(cx).ux;
+        assert_eq!(prefs.drafts.get(&session), Some(&attempts[0].text));
+        assert_eq!(prefs.draft_ids.get(&session), Some(&attempts[0].client_id));
+    });
 }

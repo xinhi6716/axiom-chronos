@@ -6,27 +6,22 @@ mod interjection_accept;
 // ux: end
 
 use super::i18n::{fill, tr, translate, Lang, Table};
-use super::model::*;
+use super::model::{AppState, Backend, LogLevel, LogLine, NeedKind, Run, RunStatus, Selection, TextSource, UnitState, WishRequest, YOU};
+use super::components::{self, DialogFrame, Button, ButtonVariant, Icon, IconButton, IconColor, Kbd, TextArea, TextAreaEvent, TextAreaState};
 use super::motion;
 use super::theme::{self, Step, Tokened as _, Tokens, TypeSize};
 use crate::base::Res;
-use crate::session::local_offset_secs;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::{Dialog, DialogFooter};
-use gpui_kit::component::input::{IndentInline, InputEvent, OutdentInline, Textarea, TextareaState};
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-pub(super) const RUNNING_ENTRY_HEIGHT: Pixels = px(56.);
+pub(super) const RUNNING_ENTRY_HEIGHT: Pixels = super::model::facade::work::RUNNING_ENTRY_HEIGHT;
 
 const T: Table = &[
     ("Stop", "停止"),
@@ -88,8 +83,8 @@ const T: Table = &[
     ("unit {}", "單元 {}"),
 ];
 
-const LOG_HEIGHT: Pixels = px(320.);
-const PENDING_TIMEOUT: Duration = Duration::from_secs(20);
+const LOG_HEIGHT: Pixels = components::tokens::LOG_HEIGHT;
+const PENDING_TIMEOUT: Duration = components::tokens::PENDING_TIMEOUT;
 const REPORT_LIMIT: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,16 +251,14 @@ fn you_line(text: &str, time: SharedString, you: &'static str) -> LogLine {
     }
 }
 
+#[cfg(test)]
 fn clock(local_secs: i64) -> String {
     let day = local_secs.rem_euclid(86_400);
     format!("{:02}:{:02}:{:02}", day / 3600, day % 3600 / 60, day % 60)
 }
 
 pub(super) fn now_clock() -> SharedString {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    clock(secs + i64::from(local_offset_secs(secs))).into()
+    super::model::facade::work::now_clock()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,7 +323,7 @@ struct LogPanel {
 
 impl LogPanel {
     fn new(cx: &mut App) -> Self {
-        let list = ListState::new(0, ListAlignment::Top, px(240.));
+        let list = ListState::new(0, ListAlignment::Top, components::tokens::LOG_OVERSCAN);
         list.set_follow_mode(FollowMode::Tail);
         Self {
             open: false,
@@ -453,7 +446,7 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
         let confirmed = confirmed.clone();
         let muted = cx.tokens().muted;
         dialog
-            .w(px(420.))
+            .w(components::tokens::DIALOG_WIDTH)
             .close_button(false)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
@@ -461,17 +454,15 @@ pub(super) fn ask(question: Ask, window: &mut Window, cx: &mut App, confirmed: i
             .title(question.title)
             .child(motion::settle_in("ask-detail", div().text_size(theme::font(d, TypeSize::Body)).text_color(muted).child(question.detail)))
             .footer(
-                DialogFooter::new()
+                h_flex().gap(theme::space(d, Step::Sm))
                     .child(
-                        Button::new("ask-back")
-                            .label(question.back)
+                        Button::new("ask-back", question.back, &cx.tokens())
                             .track_focus(&back_focus)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
-                        Button::new("ask-confirm")
-                            .map(|b| if question.danger { b.danger() } else { super::theme::gold_leaf(b, &cx.tokens()) })
-                            .label(question.confirm)
+                        Button::new("ask-confirm", question.confirm, &cx.tokens())
+                            .variant(if question.danger { ButtonVariant::Danger } else { ButtonVariant::Primary })
                             .track_focus(&confirm_focus)
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
@@ -495,7 +486,7 @@ struct Facts {
 
 pub struct Control {
     state: Entity<AppState>,
-    input: Entity<TextareaState>,
+    input: Entity<TextAreaState>,
     session: Option<SharedString>,
     entry: Entry,
     drafts: HashMap<SharedString, String>,
@@ -513,21 +504,16 @@ pub struct Control {
 
 impl Control {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            let mut input = TextareaState::new(window, cx);
-            input.set_rows(2, cx);
-            input.set_submit_on_enter(true, cx);
-            input
-        });
+        let input = TextAreaState::new(window, cx);
+        input.update(cx, |input, cx| { input.set_rows(2, cx); input.set_submit_on_enter(true, cx); });
         let subscriptions = vec![
             cx.observe_in(&state, window, |this, _, window, cx| this.sync(window, cx)),
-            cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
+            cx.subscribe_in(&input, window, |this, _, event: &TextAreaEvent, window, cx| match event {
+                TextAreaEvent::Change => {
                     this.notice = None;
                     cx.notify();
                 }
-                InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
-                _ => {}
+                TextAreaEvent::Submit => this.submit(window, cx),
             }),
         ];
         cx.defer_in(window, |this, window, cx| {
@@ -592,7 +578,7 @@ impl Control {
             // Only the provisional id changed. It is the same run, so the draft stays in the box.
             self.session = session;
         } else if session != self.session {
-            let draft = self.input.read(cx).value();
+            let draft = self.input.read(cx).value(cx);
             if let Some(old) = self.session.take() {
                 if draft.trim().is_empty() {
                     self.drafts.remove(&old);
@@ -640,7 +626,7 @@ impl Control {
         if self.entry != Entry::Interjection {
             return;
         }
-        let text = addressed_draft(&self.input.read(cx).value(), &address.text, self.inserted.as_deref());
+        let text = addressed_draft(&self.input.read(cx).value(cx), &address.text, self.inserted.as_deref());
         self.inserted = Some(address.text.to_string());
         self.input.update(cx, |input, cx| input.set_value(text, window, cx));
         self.input.read(cx).focus_handle(cx).focus(window, cx);
@@ -702,13 +688,13 @@ impl Control {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.facts(cx).map(|f| f.offer.entry) {
             Some(Entry::Interjection) => self.send(window, cx),
-            Some(Entry::Reply) if sendable(&self.input.read(cx).value()).is_some() => self.resume(window, cx),
+            Some(Entry::Reply) if sendable(&self.input.read(cx).value(cx)).is_some() => self.resume(window, cx),
             _ => {}
         }
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.input.read(cx).value();
+        let text = self.input.read(cx).value(cx);
         let Some(message) = sendable(&text) else { return };
         if self.pending.is_some() {
             return;
@@ -780,7 +766,7 @@ impl Control {
             cx.notify();
             return;
         }
-        let text = self.input.read(cx).value();
+        let text = self.input.read(cx).value(cx);
         let reply = (facts.offer.entry == Entry::Reply).then(|| sendable(&text)).flatten();
         if let Some(reply) = reply {
             self.append_you(reply, cx);
@@ -830,15 +816,12 @@ impl Control {
             }
         }
         let view = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
-            view.update(cx, |this, cx| this.fill_report(dialog.entrance(motion::DIALOG_ENTRANCE), window, cx))
-        });
-    }
-
-    fn fill_report(&mut self, dialog: Dialog, _window: &mut Window, cx: &mut Context<Self>) -> Dialog {
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            view.update(cx, |this, cx| {
+        let dialog = dialog.entrance(motion::DIALOG_ENTRANCE);
         let d = theme::density(cx);
         let t = cx.tokens();
-        let Some(report) = &self.report else { return dialog };
+        let Some(report) = &this.report else { return dialog };
         let path = report.path.clone();
         let copied = match &report.text {
             ReportText::Ready { text, .. } => Some(text.clone()),
@@ -867,19 +850,17 @@ impl Control {
             .title(div().text_size(theme::font(d, TypeSize::Title)).child(tr(cx, T, "Report")))
             .child(body)
             .footer(
-                DialogFooter::new()
+                h_flex().gap(theme::space(d, Step::Sm))
                     .when_some(path, |this, path| {
                         this.child(
-                            Button::new("report-open")
-                                .icon(IconName::ExternalLink)
-                                .label(tr(cx, T, "Open in editor"))
+                            Button::new("report-open", tr(cx, T, "Open in editor"), &t)
+                                .leading_icon(IconName::ExternalLink)
                                 .on_click(move |_, _, cx| cx.open_with_system(&path)),
                         )
                     })
                     .child(
-                        Button::new("report-copy")
-                            .icon(IconName::Copy)
-                            .label(tr(cx, T, "Copy"))
+                        Button::new("report-copy", tr(cx, T, "Copy"), &t)
+                            .leading_icon(IconName::Copy)
                             .disabled(copied.is_none())
                             .on_click(move |_, _, cx| {
                                 if let Some(text) = &copied {
@@ -888,19 +869,19 @@ impl Control {
                             }),
                     )
                     .child(
-                        Button::new("report-close")
-                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
-                            .label(tr(cx, T, "Close"))
+                        Button::new("report-close", tr(cx, T, "Close"), &t).gold_leaf()
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     ),
             )
+            })
+        });
     }
 
     /// Demo only: puts the bar into a named state so it can be captured.
     fn apply_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scene) = self.state.read(cx).scene.clone() else { return };
         let scene = scene.strip_suffix("-min").map_or(scene.as_str(), |base| {
-            window.resize(size(px(1100.), px(700.)));
+            window.resize(size(components::tokens::WINDOW_WIDTH, components::tokens::WINDOW_HEIGHT));
             base
         });
         let select = |status: RunStatus, this: &mut Self, cx: &mut Context<Self>| {
@@ -945,15 +926,15 @@ impl Control {
                 self.toggle_log(window, cx);
                 let paused = scene == "log-paused";
                 cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_millis(800)).await;
+                    cx.background_executor().timer(components::tokens::LOG_SETTLE).await;
                     let _ = this.update(cx, |this, cx| {
                         if paused {
-                            this.log.list.scroll_by(px(-400.));
+                            this.log.list.scroll_by(-components::tokens::LOG_SCROLL_BACK);
                         }
                         cx.notify();
                     });
                     for _ in 0..4 {
-                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        cx.background_executor().timer(components::tokens::POLL_INTERVAL).await;
                         let _ = this.update(cx, |this, cx| this.grow_log(3, cx));
                     }
                 })
@@ -981,22 +962,18 @@ impl Control {
 
     fn log_toggle(&self, log_lines: usize, cx: &mut Context<Self>) -> Button {
         let open = self.log.open;
-        Button::new("control-log")
-            .ghost()
-            .small()
-            .icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
-            .label(format!("{} {log_lines}", tr(cx, T, "Event log")))
+        Button::new("control-log", format!("{} {log_lines}", tr(cx, T, "Event log")), &cx.tokens())
+            .variant(ButtonVariant::Ghost)
+            .leading_icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
             .tooltip(tr(cx, T, if open { "Hide the event log" } else { "Show the event log" }))
             .selected(open)
             .on_click(cx.listener(|this, _, window, cx| this.toggle_log(window, cx)))
     }
 
     fn folder_button(&self, cx: &mut Context<Self>) -> Button {
-        Button::new("control-folder")
-            .ghost()
-            .small()
-            .icon(IconName::FolderOpen)
-            .label(tr(cx, T, "Open folder"))
+        Button::new("control-folder", tr(cx, T, "Open folder"), &cx.tokens())
+            .variant(ButtonVariant::Ghost)
+            .leading_icon(IconName::FolderOpen)
             .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx)))
     }
 
@@ -1007,10 +984,10 @@ impl Control {
             .gap(theme::space(d, Step::Sm))
             .text_size(theme::font(d, TypeSize::Caption))
             .text_color(t.muted)
-            .child(Kbd::new(Keystroke::parse("enter").expect("valid keystroke")).text_size(theme::font(d, TypeSize::Caption)))
+            .child(Kbd::new("enter-key", &t).key("Enter"))
             .child(tr(cx, T, "send"))
             .child(div().w(theme::space(d, Step::Sm)))
-            .child(Kbd::new(Keystroke::parse("shift-enter").expect("valid keystroke")).text_size(theme::font(d, TypeSize::Caption)))
+            .child(Kbd::new("shift-enter-key", &t).key("Shift").key("Enter"))
             .child(tr(cx, T, "new line"))
     }
 
@@ -1023,34 +1000,30 @@ impl Control {
                 .gap(theme::space(d, Step::Sm))
                 .text_size(theme::font(d, TypeSize::Caption))
                 .text_color(t.fail)
-                .child(Icon::new(IconName::CircleAlert).size(theme::font(d, TypeSize::Caption)))
+                .child(Icon::new("notice-icon", IconName::CircleAlert, &t).size(Step::Sm).color(IconColor::Danger))
                 .child(tr(cx, T, notice.text())),
         )
     }
 
-    fn entry_box(&self, height: Pixels) -> impl IntoElement {
+    fn entry_box(&self, height: Pixels, cx: &App) -> impl IntoElement {
         div()
             .flex_1()
             .min_w_0()
-            .capture_action(|_: &IndentInline, window, cx| {
-                cx.stop_propagation();
-                window.focus_next(cx);
+            .h(height)
+            .capture_key_down(|event, window, cx| {
+                escape_entry_tab(event, || {
+                    cx.stop_propagation();
+                    window.focus_next(cx);
+                });
             })
-            .capture_action(|_: &OutdentInline, window, cx| {
-                cx.stop_propagation();
-                window.focus_prev(cx);
-            })
-            .child(Textarea::new(&self.input).small().h(height))
+            .child(TextArea::from_state("control-entry", &self.input, &cx.tokens(), cx))
     }
 
     fn resume_button(&self, id: &'static str, label: &'static str, window: &Window, cx: &mut Context<Self>) -> Button {
         let _ = window;
         let resuming = matches!(&self.pending, Some(p) if p.kind == PendingKind::Resuming);
-        Button::new(id)
-            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
-            .small()
-            .icon(IconName::Play)
-            .label(if resuming { tr(cx, T, "Resuming…") } else { tr(cx, T, label) })
+        Button::new(id, if resuming { tr(cx, T, "Resuming…") } else { tr(cx, T, label) }, &cx.tokens())
+            .gold_leaf().leading_icon(IconName::Play)
             .loading(resuming)
             .disabled(self.pending.is_some())
             .on_click(cx.listener(|this, _, window, cx| this.resume(window, cx)))
@@ -1059,11 +1032,8 @@ impl Control {
     fn stop_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let stopping = matches!(&self.pending, Some(p) if p.kind == PendingKind::Stopping);
         let t = cx.tokens();
-        Button::new("control-stop")
-            .ghost()
-            .small()
-            .icon(Icon::new(IconName::Square).text_color(t.fail))
-            .label(if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop") })
+        Button::new("action:dialog.control.stop", if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop") }, &t)
+            .variant(ButtonVariant::Ghost).leading_icon(IconName::Square)
             .loading(stopping)
             .disabled(self.pending.is_some())
             .on_click(cx.listener(|this, _, window, cx| this.ask_stop(window, cx)))
@@ -1081,7 +1051,7 @@ impl Control {
                     .flex_1()
                     .min_w_0()
                     .gap(theme::space(d, Step::Sm))
-                    .child(Icon::new(IconName::Pause).size(theme::font(d, TypeSize::Heading)).text_color(t.status(facts.status)))
+                    .child(Icon::new("limit-icon", IconName::Pause, &t).size(Step::Lg).color(IconColor::Warning))
                     .child(
                         v_flex()
                             .min_w_0()
@@ -1100,7 +1070,7 @@ impl Control {
         }
         // ux: end
         let d = theme::density(cx);
-        let blank = sendable(&self.input.read(cx).value()).is_none();
+        let blank = sendable(&self.input.read(cx).value(cx)).is_none();
         let _ = window;
         v_flex()
             .size_full()
@@ -1128,12 +1098,10 @@ impl Control {
                     .min_h_0()
                     .items_end()
                     .gap(theme::space(d, Step::Sm))
-                    .child(self.entry_box(RUNNING_ENTRY_HEIGHT))
+                    .child(self.entry_box(RUNNING_ENTRY_HEIGHT, cx))
                     .child(
-                        Button::new("control-send")
-                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
-                            .icon(IconName::ArrowUp)
-                            .label(tr(cx, T, "Send"))
+                        Button::new("action:dialog.control.send", tr(cx, T, "Send"), &cx.tokens())
+                            .gold_leaf().leading_icon(IconName::ArrowUp)
                             .disabled(blank || self.pending.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     ),
@@ -1153,7 +1121,7 @@ impl Control {
                     .flex_1()
                     .min_w_0()
                     .gap(theme::space(d, Step::Sm))
-                    .child(Icon::new(IconName::SquareTerminal).size(theme::font(d, TypeSize::Heading)).text_color(t.muted))
+                    .child(Icon::new("terminal-icon", IconName::SquareTerminal, &t).size(Step::Lg).color(IconColor::Muted))
                     .child(
                         v_flex()
                             .min_w_0()
@@ -1168,14 +1136,13 @@ impl Control {
     fn need_header(&mut self, facts: &Facts, icon: IconName, fallback_title: &'static str, fallback_note: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let d = theme::density(cx);
         let t = cx.tokens();
-        let color = t.status(facts.status);
         let (title, note) = facts.need.clone().unwrap_or_else(|| (tr(cx, T, fallback_title).into(), tr(cx, T, fallback_note).into()));
         let tip = note.clone();
         h_flex()
             .flex_1()
             .min_w_0()
             .gap(theme::space(d, Step::Sm))
-            .child(Icon::new(icon).size(theme::font(d, TypeSize::Title)).text_color(color))
+            .child(Icon::new("need-icon", icon, &t).size(Step::Xl).color(IconColor::Warning))
             .child(
                 v_flex()
                     .flex_1()
@@ -1187,7 +1154,7 @@ impl Control {
                             .text_size(theme::font(d, TypeSize::Caption))
                             .text_color(t.muted)
                             .truncate()
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .tooltip(move |window, cx| components::tooltip("control-tooltip", tip.clone(), None, window, cx))
                             .child(note),
                     ),
             )
@@ -1232,7 +1199,7 @@ impl Control {
                     .min_h_0()
                     .items_end()
                     .gap(theme::space(d, Step::Sm))
-                    .child(self.entry_box(px(34.)))
+                    .child(self.entry_box(components::tokens::ENTRY_HEIGHT, cx))
                     .child(self.resume_button("control-resume", "Resume", window, cx)),
             )
             .into_any_element()
@@ -1278,7 +1245,7 @@ impl Control {
                     .flex_1()
                     .min_w_0()
                     .gap(theme::space(d, Step::Sm))
-                    .child(Icon::new(IconName::CircleCheck).size(theme::font(d, TypeSize::Heading)).text_color(t.ok))
+                    .child(Icon::new("done-icon", IconName::CircleCheck, &t).size(Step::Lg).color(IconColor::Success))
                     .child(
                         v_flex()
                             .min_w_0()
@@ -1303,11 +1270,8 @@ impl Control {
                     .when(facts.offer.report != ReportOffer::Hidden, |this| {
                         let ready = facts.offer.report == ReportOffer::Ready;
                         this.child(
-                            Button::new("control-report")
-                                .ghost()
-                                .small()
-                                .icon(IconName::FileText)
-                                .label(tr(cx, T, "View report"))
+                            Button::new("control-report", tr(cx, T, "View report"), &t)
+                                .variant(ButtonVariant::Ghost).leading_icon(IconName::FileText)
                                 .disabled(!ready)
                                 .when(!ready, |b| b.tooltip(tr(cx, T, "This run did not write a report")))
                                 .on_click(cx.listener(|this, _, window, cx| this.open_report(window, cx))),
@@ -1316,11 +1280,8 @@ impl Control {
                     .child(self.log_toggle(facts.log_lines, cx))
                     .child(div().w(theme::space(d, Step::Xs)))
                     .child(
-                        Button::new("control-another")
-                            .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
-                            .small()
-                            .icon(IconName::Plus)
-                            .label(tr(cx, T, "Make another wish"))
+                        Button::new("control-another", tr(cx, T, "Make another wish"), &t)
+                            .gold_leaf().leading_icon(IconName::Plus)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, cx| s.set_composing(true, cx));
                             })),
@@ -1336,9 +1297,9 @@ impl Control {
         let mono = cx.theme().mono_font_family.clone();
         let source = line.source.clone();
         let text = if matches!(line.source.as_ref(), YOU | "你") {
-            super::plain_text::Plain { shown: line.text.clone(), original: None }
+            super::model::facade::work::Plain { shown: line.text.clone(), original: None }
         } else {
-            super::plain_text::plain(cx, &line.text)
+            super::model::facade::work::plain(cx, &line.text)
         };
         h_flex()
             .id(("log-row", ix))
@@ -1349,7 +1310,7 @@ impl Control {
             .py(theme::space(d, Step::Xs))
             .text_size(theme::font(d, TypeSize::Caption))
             .hover(|this| this.bg(t.raised))
-            .child(div().w(px(56.)).flex_none().text_color(t.muted).font_family(mono).child(line.time.clone()))
+            .child(div().w(components::tokens::LOG_TIME_WIDTH).flex_none().text_color(t.muted).font_family(mono).child(line.time.clone()))
             .child(
                 div().id(("log-level-icon", ix)).pt(theme::space(d, Step::Xs))
                     .tooltip({
@@ -1357,24 +1318,24 @@ impl Control {
                             LogLevel::Info => "Info", LogLevel::Ok => "OK",
                             LogLevel::Warn => "Warnings", LogLevel::Error => "Errors",
                         });
-                        move |window, cx| Tooltip::new(label).build(window, cx)
+                        move |window, cx| components::tooltip("control-level-tooltip", label, None, window, cx)
                     })
-                    .child(Icon::new(level_icon(line.level)).size(theme::font(d, TypeSize::Caption)).text_color(t.log(line.level))),
+                    .child(Icon::new(("level-icon", ix), level_icon(line.level), &t).size(Step::Sm).color(match line.level { LogLevel::Info => IconColor::Info, LogLevel::Ok => IconColor::Success, LogLevel::Warn => IconColor::Warning, LogLevel::Error => IconColor::Danger })),
             )
             .child(
                 div()
                     .id(("log-source", ix))
-                    .w(px(112.))
+                    .w(components::tokens::LOG_LEVEL_WIDTH)
                     .flex_none()
                     .truncate()
                     .text_color(t.muted)
-                    .tooltip(move |window, cx| Tooltip::new(source.clone()).build(window, cx))
+                    .tooltip(move |window, cx| components::tooltip("control-tooltip", source.clone(), None, window, cx))
                     .child(source_label(&line.source, cx)),
             )
             .child(
                 div().id(("log-text", ix)).flex_1().min_w_0().text_color(t.text)
                     .when_some(text.original, |this, original| {
-                        this.tooltip(move |window, cx| Tooltip::new(original.clone()).build(window, cx))
+                        this.tooltip(move |window, cx| components::tooltip("control-tooltip", original.clone(), None, window, cx))
                     })
                     .child(text.shown),
             )
@@ -1397,11 +1358,9 @@ impl Control {
         let unread = self.log.unread;
         let paused = !self.log.list.is_following_tail() && !empty;
         let levels = LEVELS.iter().enumerate().map(|(i, &level)| {
-            Button::new(("log-level", i))
-                .ghost()
-                .xsmall()
+            Button::new(("log-level", i), format!("{} {}", tr(cx, T, level.label()), counts[i]), &t)
+                .variant(ButtonVariant::Ghost)
                 .selected(self.log.level == level)
-                .label(format!("{} {}", tr(cx, T, level.label()), counts[i]))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_level(level, cx)))
         });
         let list = list(self.log.list.clone(), cx.processor(Self::render_log_row)).size_full();
@@ -1411,7 +1370,7 @@ impl Control {
             .absolute()
             .left_0()
             .right_0()
-            .bottom(relative(1.))
+            .bottom_full()
             .h(LOG_HEIGHT)
             .bg(t.surface)
             .border_1()
@@ -1439,15 +1398,11 @@ impl Control {
                             .gap(theme::space(d, Step::Sm))
                             .when(paused, |this| {
                                 this.child(
-                                    Button::new("log-latest")
-                                        .map(|b| super::theme::gold_leaf(b, &cx.tokens()))
-                                        .xsmall()
-                                        .icon(IconName::ArrowDown)
-                                        .label(if unread > 0 {
+                                    Button::new("log-latest", if unread > 0 {
                                             format!("{} · {}", tr(cx, T, "Jump to latest"), tr(cx, T, "{n} new").replace("{n}", &unread.to_string()))
                                         } else {
                                             tr(cx, T, "Jump to latest").to_owned()
-                                        })
+                                        }, &t).gold_leaf().leading_icon(IconName::ArrowDown)
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.log.list.set_follow_mode(FollowMode::Tail);
                                             this.log.unread = 0;
@@ -1456,10 +1411,8 @@ impl Control {
                                 )
                             })
                             .child(
-                                Button::new("log-close")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Close)
+                                IconButton::new("log-close", IconName::Close, tr(cx, T, "Hide the event log"), &t)
+                                    .variant(ButtonVariant::Ghost)
                                     .tooltip(tr(cx, T, "Hide the event log"))
                                     .on_click(cx.listener(|this, _, window, cx| this.toggle_log(window, cx))),
                             ),
@@ -1495,7 +1448,7 @@ impl Control {
             "down" => self.log.list.scroll_by(px(LINE)),
             "pageup" => self.log.list.scroll_by(px(-PAGE)),
             "pagedown" => self.log.list.scroll_by(px(PAGE)),
-            "home" => self.log.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) }),
+            "home" => self.log.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: Pixels::default() }),
             "end" => {
                 self.log.list.set_follow_mode(FollowMode::Tail);
                 self.log.unread = 0;
@@ -1549,6 +1502,16 @@ impl Backend for SceneBackend {
     }
 }
 
+fn escape_entry_tab(event: &KeyDownEvent, next: impl FnOnce()) -> bool {
+    let modifiers = event.keystroke.modifiers;
+    if event.keystroke.key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform {
+        next();
+        true
+    } else {
+        false
+    }
+}
+
 impl Render for Control {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let d = theme::density(cx);
@@ -1574,7 +1537,7 @@ impl Render for Control {
             },
         };
         let log = (self.log.open && facts.is_some()).then(|| self.render_log(window, cx));
-        div()
+        DialogFrame::new("dialog.control.panel", &t).child(div()
             .size_full()
             .relative()
             .px(theme::space(d, Step::Md))
@@ -1583,7 +1546,7 @@ impl Render for Control {
             .border_t_1()
             .border_color(t.border)
             .child(body)
-            .children(log.map(deferred))
+            .children(log.map(deferred)))
     }
 }
 
@@ -1592,6 +1555,27 @@ mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
     use std::prelude::v1::test;
+
+    #[test]
+    fn entry_tab_and_shift_tab_advance_focus() {
+        let mut advances = 0;
+        for shift in [false, true] {
+            let event = KeyDownEvent {
+                keystroke: Keystroke { key: "tab".into(), modifiers: Modifiers { shift, ..Default::default() }, ..Default::default() },
+                is_held: false,
+                prefer_character_input: false,
+            };
+            assert!(escape_entry_tab(&event, || advances += 1));
+        }
+        assert_eq!(advances, 2);
+        let event = KeyDownEvent {
+            keystroke: Keystroke { key: "tab".into(), modifiers: Modifiers { control: true, ..Default::default() }, ..Default::default() },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(!escape_entry_tab(&event, || advances += 1));
+        assert_eq!(advances, 2);
+    }
 
     fn production_source() -> &'static str {
         include_str!("control.rs").split("#[cfg(test)]").next().unwrap()
