@@ -140,6 +140,25 @@ use std::{
 };
 
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts";
+/// Test-only counts of the store reads made on this thread, so tests can bound what one call reads.
+#[cfg(test)]
+pub(crate) mod read_count {
+    use std::cell::Cell;
+    thread_local! {
+        static EVIDENCE: Cell<usize> = const { Cell::new(0) };
+        static MAP: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn evidence() {
+        EVIDENCE.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn map() {
+        MAP.with(|c| c.set(c.get() + 1));
+    }
+    /// The evidence files read and the modules.md parses made since the last call.
+    pub(crate) fn take() -> (usize, usize) {
+        (EVIDENCE.replace(0), MAP.replace(0))
+    }
+}
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
 }
@@ -147,6 +166,8 @@ fn invalid(s: impl Into<String>) -> Failure {
     Failure::new("invalid_argument", s)
 }
 fn rows(store: &Path, name: &str) -> Res<Vec<Evidence>> {
+    #[cfg(test)]
+    read_count::evidence();
     let path = store.join("reports").join(format!("{name}.evidence.tsv"));
     let text = match crate::storage::archive::read_to_string(&path) {
         Ok(s) => s,
@@ -319,6 +340,8 @@ pub fn base_snapshot(repo: &Path, scope: &[String]) -> String {
     snapshot(repo, scope)
 }
 fn map(store: &Path) -> Res<super::Map> {
+    #[cfg(test)]
+    read_count::map();
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
     parse_map(&text).map_err(invalid)
 }

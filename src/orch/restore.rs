@@ -368,6 +368,8 @@ pub fn module_context(store: &Path, module: &str, repo: &Path) -> crate::base::R
         ));
     }
     let map_path = store.join("modules.md");
+    #[cfg(test)]
+    super::evidence::read_count::map();
     let text = std::fs::read_to_string(&map_path)
         .map_err(|e| Failure::new("io", format!("cannot read {}: {e}", map_path.display())))?;
     let map = crate::orch::parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
@@ -442,22 +444,18 @@ pub fn module_context(store: &Path, module: &str, repo: &Path) -> crate::base::R
             !tagged || names_id(d, &m.id) || names_path(d, &m.paths, false)
         })
         .collect();
+    // One scan serves every unit, so the store is read once instead of once per unit.
+    let scan = super::lifecycle::Scan::new(store)?;
     let mut units = Vec::new();
-    for u in crate::orch::read_units(store)?
-        .into_iter()
-        .filter(|u| u.track == module)
-    {
+    for u in scan.units().iter().filter(|u| u.track == module) {
         let state = if u.superseded_by().is_some() {
             u.state.clone()
         } else {
-            crate::orch::derive_state(
-                &crate::orch::evidence(store, &u.id)?,
-                crate::orch::needs_accept(store, &u.id)?,
-            )
+            scan.state(u)?
         };
         units.push(ContextUnit {
-            next: crate::orch::next_step_for(store, &u.id)?,
-            unit: u.id,
+            next: scan.next_step(&u.id)?,
+            unit: u.id.clone(),
             state,
         });
     }
