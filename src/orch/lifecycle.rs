@@ -114,6 +114,34 @@ fn write_checkpoint(store: &Path, cp: &Checkpoint) -> Res<()> {
     let data = serde_json::to_vec(cp).map_err(|e| Failure::new("io", e.to_string()))?;
     base::atomic_write(&path, &data).map_err(|e| Failure::new("io", e.to_string()))
 }
+/// Whether a unit can finish on its last VERIFY without a new worker run:
+/// built, with an unchanged brief and that VERIFY passing on its files now.
+fn reusable(store: &Path, u: &Unit, scope: &[String], rows: &[Evidence], repo: &Path, needs_accept: bool) -> Res<bool> {
+    // A matching scope tree alone cannot justify reusing a changed brief.
+    Ok(derive_state(rows, needs_accept) == "built"
+        && completed_brief_matches(store, &u.id, Path::new(&u.brief))?
+        && rows.iter().rev().find(|r| r.kind == "verify").is_some_and(|r| {
+            r.exit_code == 0 && !r.commit.is_empty() && snapshot(repo, scope) == r.commit
+        }))
+}
+/// Whether a unit that units.tsv records as verified is reusable because
+/// evidence appended after its own evidence verified it reopened it. Without
+/// that, units.tsv is the record: legacy evidence may never derive verified.
+fn completed_reusable(store: &Path, unit: &str, u: &Unit, rows: &[Evidence], repo: &Path) -> Res<bool> {
+    let needs = needs_accept(store, unit)?;
+    if !(1..rows.len()).any(|n| derive_state(&rows[..n], needs) == "verified") {
+        return Ok(false);
+    }
+    reusable(store, u, &unit_brief(store, unit)?.scope, rows, repo, needs)
+}
+fn verified_owner(store: &Path, u: &Unit, rows: &[Evidence]) -> Owner {
+    Owner {
+        wish: wish_of_store(store),
+        module: u.track.clone(),
+        unit: u.id.clone(),
+        attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+    }
+}
 fn completed_brief_matches(store: &Path, unit: &str, brief_path: &Path) -> Res<bool> {
     let saved: Option<Value> = std::fs::read(store.join("reports").join(format!("{unit}.json")))
         .ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -610,14 +638,14 @@ fn begin_inner(
             return Ok(Some(Begin::Run { brief, attempt: cp.attempt, attempt_id: cp.attempt_id }));
         }
         // A legacy store may have no run evidence; changed trees also do not
-        // make an explicitly completed unit eligible for a new execution.
-        if u.state == "verified" {
-            *refused_owner = Some(Owner {
-                wish: wish_of_store(store),
-                module: u.track.clone(),
-                unit: unit.into(),
-                attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
-            });
+        // make an explicitly completed unit eligible for a new execution
+        // (tests/resume_201.rs). units.tsv only caches the state, so evidence
+        // recorded after the unit's own evidence verified it, such as a new
+        // VERIFY that awaits ACCEPT, can leave it built. It may then finish
+        // on that VERIFY without a worker, never with one.
+        let completed = u.state == "verified";
+        if completed && !matches!(completed_reusable(store, unit, u, &rows, repo), Ok(true)) {
+            *refused_owner = Some(verified_owner(store, u, &rows));
             return Err(Failure::new("already_verified", format!("unit {unit} is already verified; nothing to run")));
         }
         let brief = unit_brief(store, unit)?;
@@ -662,12 +690,7 @@ fn begin_inner(
                 .find(|r| r.kind == "verify")
                 .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
         {
-            let owner = Owner {
-                wish: wish_of_store(store),
-                module: u.track.clone(),
-                unit: unit.into(),
-                attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
-            };
+            let owner = verified_owner(store, u, &rows);
             let text = owner_text(&owner);
             *refused_owner = Some(owner);
             return Err(Failure::new(
@@ -675,19 +698,9 @@ fn begin_inner(
                 format!("unit {unit} is already verified: {text}; nothing to run"),
             ));
         }
-        // A matching scope tree alone cannot justify reusing a changed brief.
-        if derive_state(&rows, needs_accept(store, unit)?) == "built"
-            && completed_brief_matches(store, unit, Path::new(&u.brief))?
-            && rows
-                .iter()
-                .rev()
-                .find(|r| r.kind == "verify")
-                .is_some_and(|r| {
-                    r.exit_code == 0
-                        && !r.commit.is_empty()
-                        && snapshot(repo, &brief.scope) == r.commit
-                })
-        {
+        // A completed unit passed the check above only because it was reusable;
+        // it is not checked again, so a later tree change cannot start a worker.
+        if completed || reusable(store, u, &brief.scope, &rows, repo, needs_accept(store, unit)?)? {
             return Ok(None);
         }
         let count = rows.iter().filter(|r| r.kind == "run").count();
