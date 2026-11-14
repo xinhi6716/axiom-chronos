@@ -6,42 +6,29 @@ const TABLE: Table = &[
     ("Moved", "移動"),
     ("Style", "樣式"),
 ];
-pub fn render(status: Option<&PaperStatus>, lang: Lang) -> Vec<AnyElement> {
+pub fn render(status: Option<&PaperView>, lang: Lang) -> Vec<AnyElement> {
     status
         .into_iter()
-        .flat_map(|s| s.passes.iter())
+        .flat_map(|s| &s.changelog)
         .enumerate()
-        .map(|(i, p)| {
-            let mut log = v_flex().id(("paper-changelog-slot", i)).child(format!(
-                "{} · {}",
-                p.pass.number(),
-                p.member
-            ));
-            for c in &p.change_log {
-                log = log.child(marked(
+        .map(|(i, c)| {
+            let mut row = v_flex()
+                .id(("paper-changelog-slot", i))
+                .child(format!("{} · {}", c.pass, c.member));
+            if c.validation {
+                row = row.child(marked("paper-validation", c.reason.clone()));
+            } else {
+                let kind = TABLE
+                    .iter()
+                    .find(|(key, _)| *key == c.kind)
+                    .map(|(en, zh)| if lang == Lang::En { *en } else { *zh })
+                    .unwrap_or(&c.kind);
+                row = row.child(marked(
                     "paper-changelog",
-                    format!(
-                        "{} · {} · {}",
-                        c.location,
-                        i18n::translate(
-                            lang,
-                            TABLE,
-                            match c.kind {
-                                crate::paper::ChangeKind::Added => "Added",
-                                crate::paper::ChangeKind::Removed => "Removed",
-                                crate::paper::ChangeKind::Edited => "Edited",
-                                crate::paper::ChangeKind::Moved => "Moved",
-                                crate::paper::ChangeKind::Style => "Style",
-                            }
-                        ),
-                        c.reason
-                    ),
+                    format!("{} · {} · {}", c.location, kind, c.reason),
                 ));
             }
-            for v in &p.validation {
-                log = log.child(marked("paper-validation", v.clone()));
-            }
-            log.into_any_element()
+            row.into_any_element()
         })
         .collect()
 }

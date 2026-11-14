@@ -4,7 +4,7 @@ use crate::desktop::{
     ornament::{self, Celestial},
     theme::Tokens,
 };
-use crate::paper::PassId;
+
 const TABLE: Table = &[
     ("OK", "完成"),
     ("Missing", "缺失"),
@@ -14,19 +14,19 @@ const TABLE: Table = &[
     ("Malformed", "格式錯誤"),
     ("Failed", "失敗"),
 ];
-pub(super) fn glyph(pass: PassId) -> (&'static str, Celestial) {
+pub(super) fn glyph(pass: u8) -> (&'static str, Celestial) {
     let m = match pass {
-        PassId::AstraDraft => CouncilMember::Astra,
-        PassId::FableRevise | PassId::FableStyle => CouncilMember::Fable,
-        PassId::GeminiRevise => return ("Gemini", Celestial::Gemini),
+        1 => CouncilMember::Astra,
+        2 | 4 => CouncilMember::Fable,
+        3 => return ("Gemini", Celestial::Gemini),
+        _ => return ("", Celestial::Star),
     };
     let (name, glyph, _) = council_member(m);
     (name, glyph)
 }
-pub fn render(status: Option<&PaperStatus>, lang: Lang, t: &Tokens) -> Vec<AnyElement> {
+pub fn render(status: Option<&PaperView>, lang: Lang, t: &Tokens) -> Vec<AnyElement> {
     let Some(s) = status else { return vec![] };
-    PassId::ALL
-        .into_iter()
+    (1u8..=4)
         .map(|p| {
             let (name, g) = glyph(p);
             let symbol = match g {
@@ -39,26 +39,26 @@ pub fn render(status: Option<&PaperStatus>, lang: Lang, t: &Tokens) -> Vec<AnyEl
             let state = s
                 .passes
                 .iter()
-                .find(|r| r.pass == p)
+                .find(|r| r.number == p)
                 .map(|r| {
                     i18n::translate(
                         lang,
                         TABLE,
-                        match r.status {
-                            crate::council::Status::Ok => "OK",
-                            crate::council::Status::Missing => "Missing",
-                            crate::council::Status::Quota => "Quota",
-                            crate::council::Status::Timeout => "Timeout",
-                            crate::council::Status::BudgetCut => "Budget cut",
-                            crate::council::Status::Malformed => "Malformed",
-                            crate::council::Status::Failed => "Failed",
+                        match r.status.as_str() {
+                            "Ok" => "OK",
+                            "Missing" => "Missing",
+                            "Quota" => "Quota",
+                            "Timeout" => "Timeout",
+                            "BudgetCut" => "Budget cut",
+                            "Malformed" => "Malformed",
+                            _ => "Failed",
                         },
                     )
                     .to_owned()
                 })
                 .unwrap_or_else(|| "—".into());
             gpui_kit::component::h_flex()
-                .id(("paper-pass-slot", p.number() as usize))
+                .id(("paper-pass-slot", p as usize))
                 .gap(crate::desktop::theme::space(
                     crate::desktop::theme::Density::default(),
                     crate::desktop::theme::Step::Xs,

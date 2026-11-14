@@ -1,7 +1,9 @@
 use super::*;
-use crate::paper::models::PassModels;
-use crate::paper::{AccessWanted, Money, Quartile, QuartileScheme, Requirements};
-use gpui_kit::component::input::{Input, InputState};
+use crate::desktop::theme::Tokens;
+use crate::desktop::ux::seams::{
+    AccessWanted, Money, PassModels, Quartile, QuartileScheme, Requirements, ShortlistInput,
+};
+use gpui_kit::component::input::InputState;
 use std::path::PathBuf;
 const TABLE: Table = &[
     ("Abstract", "摘要"),
@@ -61,10 +63,13 @@ impl Form {
         window: &mut Window,
         cx: &mut Context<PaperPage>,
     ) {
-        for (input, pass) in self.models.iter().zip(crate::paper::PassId::ALL) {
-            input.update(cx, |i, cx| {
-                i.set_value(models.get(pass).to_owned(), window, cx)
-            });
+        for (input, value) in self.models.iter().zip([
+            &models.astra_draft,
+            &models.fable_revise,
+            &models.gemini_revise,
+            &models.fable_style,
+        ]) {
+            input.update(cx, |i, cx| i.set_value(value.to_owned(), window, cx));
         }
     }
     fn pass_models(&self, cx: &App) -> PassModels {
@@ -130,14 +135,37 @@ impl Form {
         pending: bool,
         cx: &mut Context<PaperPage>,
     ) -> AnyElement {
-        let mut fields =
-            v_flex()
-                .id("paper-form")
-                .test_support()
-                .gap(crate::desktop::theme::space(
-                    crate::desktop::theme::density(cx),
-                    crate::desktop::theme::Step::Xs,
-                ));
+        let t = cx.tokens();
+        let caption = crate::desktop::theme::font(
+            crate::desktop::theme::density(cx),
+            crate::desktop::theme::TypeSize::Caption,
+        );
+        let fields = self.render_fields(lang, caption, &t, cx);
+        let tiers = self.render_tiers(lang, &t, cx);
+        let access = self.render_access(lang, &t, cx);
+        let actions = self.render_actions(lang, models_loaded, pending, &t, cx);
+        v_flex()
+            .child(actions)
+            .child(fields)
+            .child(tiers)
+            .child(access)
+            .child(
+                div()
+                    .text_size(caption)
+                    .line_height(caption * (4. / 3.))
+                    .child(tr(lang, "JCR file path (optional)")),
+            )
+            .child(TextField::new("paper-jcr", &self.inputs[6], &t))
+            .into_any_element()
+    }
+    fn render_fields(
+        &self,
+        lang: Lang,
+        caption: Pixels,
+        t: &Tokens,
+        cx: &mut Context<PaperPage>,
+    ) -> AnyElement {
+        let mut columns = [v_flex().flex_1().min_w_0(), v_flex().flex_1().min_w_0()];
         for (i, label) in [
             "Abstract",
             "Keywords (comma separated)",
@@ -149,17 +177,63 @@ impl Form {
         .iter()
         .enumerate()
         {
-            fields = fields.child(
-                gpui_kit::component::h_flex()
-                    .gap(crate::desktop::theme::space(
-                        crate::desktop::theme::density(cx),
-                        crate::desktop::theme::Step::Xs,
-                    ))
-                    .child(tr(lang, label))
-                    .child(Input::new(&self.inputs[i]).id(("paper-input", i))),
+            let column = i / 5;
+            columns[column] = std::mem::replace(&mut columns[column], v_flex()).child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_size(caption)
+                            .line_height(caption * (4. / 3.))
+                            .child(tr(lang, label)),
+                    )
+                    .child(div().min_w_0().child(TextField::new(
+                        ("paper-input", i),
+                        &self.inputs[i],
+                        t,
+                    ))),
             );
         }
+        for (i, label) in [
+            "Pass 1 · Astra model",
+            "Pass 2 · Fable model",
+            "Pass 3 · Gemini model",
+            "Pass 4 · Fable model",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let column = (i + 6) / 5;
+            columns[column] = std::mem::replace(&mut columns[column], v_flex()).child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_size(caption)
+                            .line_height(caption * (4. / 3.))
+                            .child(tr(lang, label)),
+                    )
+                    .child(div().min_w_0().child(TextField::new(
+                        ("paper-model", i),
+                        &self.models[i],
+                        t,
+                    ))),
+            );
+        }
+        let [left, right] = columns;
+        let fields = gpui_kit::component::h_flex()
+            .items_start()
+            .id("paper-form")
+            .test_support()
+            .gap(crate::desktop::theme::space(
+                crate::desktop::theme::density(cx),
+                crate::desktop::theme::Step::Xs,
+            ))
+            .child(left)
+            .child(right);
+        fields.into_any_element()
+    }
+    fn render_tiers(&self, lang: Lang, t: &Tokens, cx: &mut Context<PaperPage>) -> AnyElement {
         let mut tiers = gpui_kit::component::h_flex()
+            .flex_wrap()
             .gap(crate::desktop::theme::space(
                 crate::desktop::theme::density(cx),
                 crate::desktop::theme::Step::Xs,
@@ -178,9 +252,12 @@ impl Form {
             let label = [tr(lang, "Any"), "Q1", "Q2", "Q3", "Q4"][i];
             let selected = self.tier == q;
             tiers = tiers.child(
-                Button::new(("paper-tier", i))
-                    .label(label)
-                    .selected(selected)
+                Button::new(("paper-tier", i), label, t)
+                    .variant(if selected {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.form.tier = q.clone();
                         cx.notify();
@@ -192,19 +269,28 @@ impl Form {
             .enumerate()
         {
             tiers = tiers.child(
-                Button::new(("paper-scheme", i))
-                    .label(if i == 0 { "SJR" } else { "JCR" })
-                    .selected(self.scheme == scheme)
+                Button::new(("paper-scheme", i), if i == 0 { "SJR" } else { "JCR" }, t)
+                    .variant(if self.scheme == scheme {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.form.scheme = scheme.clone();
                         cx.notify();
                     })),
             );
         }
-        let mut access = gpui_kit::component::h_flex().gap(crate::desktop::theme::space(
-            crate::desktop::theme::density(cx),
-            crate::desktop::theme::Step::Xs,
-        ));
+        tiers.into_any_element()
+    }
+    fn render_access(&self, lang: Lang, t: &Tokens, cx: &mut Context<PaperPage>) -> AnyElement {
+        let mut access =
+            gpui_kit::component::h_flex()
+                .flex_wrap()
+                .gap(crate::desktop::theme::space(
+                    crate::desktop::theme::density(cx),
+                    crate::desktop::theme::Step::Xs,
+                ));
         for (i, a) in [
             AccessWanted::OpenAccess,
             AccessWanted::Subscription,
@@ -215,9 +301,12 @@ impl Form {
         {
             let label = tr(lang, ["Open access", "Subscription", "Either"][i]);
             access = access.child(
-                Button::new(("paper-access", i))
-                    .label(label)
-                    .selected(self.access == a)
+                Button::new(("paper-access", i), label, t)
+                    .variant(if self.access == a {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.form.access = a.clone();
                         cx.notify();
@@ -225,69 +314,88 @@ impl Form {
             );
         }
         access = access.child(
-            Button::new("paper-no-fee")
-                .label(tr(lang, "No fee"))
-                .selected(self.no_fee)
+            Button::new("paper-no-fee", tr(lang, "No fee"), t)
+                .variant(if self.no_fee {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.form.no_fee = !this.form.no_fee;
                     cx.notify();
                 })),
         );
-        for (i, label) in [
-            "Pass 1 · Astra model",
-            "Pass 2 · Fable model",
-            "Pass 3 · Gemini model",
-            "Pass 4 · Fable model",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            fields = fields.child(
-                gpui_kit::component::h_flex()
-                    .child(tr(lang, label))
-                    .child(Input::new(&self.models[i]).id(("paper-model", i))),
-            );
-        }
-        fields
+        access.into_any_element()
+    }
+    fn render_actions(
+        &self,
+        lang: Lang,
+        models_loaded: bool,
+        pending: bool,
+        t: &Tokens,
+        cx: &mut Context<PaperPage>,
+    ) -> AnyElement {
+        gpui_kit::component::h_flex()
+            .flex_wrap()
             .child(
-                Button::new("paper-save-models")
-                    .label(tr(lang, "Save models"))
-                    .disabled(!models_loaded || pending)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.models_loaded || this.pending {
-                            return;
-                        }
-                        let models = this.form.pass_models(cx);
-                        this.estimate = None;
-                        this.ack = false;
-                        this.estimate_epoch
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        this.ignore_status_estimate = true;
-                        this.action(cx, move |s, id| s.set_models(&id, models).map(|_| None));
-                    })),
-            )
-            .child(tiers)
-            .child(access)
-            .child(tr(lang, "JCR file path (optional)"))
-            .child(Input::new(&self.inputs[6]).id("paper-jcr"))
-            .child(
-                Button::new("paper-shortlist")
-                    .label(tr(lang, "Find journals"))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| match this.form.request(cx) {
-                            Ok((req, jcr)) => {
+                div()
+                    .id("action:paper.form.save-models")
+                    .test_support()
+                    .child(
+                        Button::new("paper-save-models", tr(lang, "Save models"), t)
+                            .variant(if models_loaded && !pending {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.models_loaded || this.pending {
+                                    return;
+                                }
+                                let models = this.form.pass_models(cx);
                                 this.estimate = None;
                                 this.ack = false;
+                                this.estimate_epoch
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                this.ignore_status_estimate = true;
                                 this.action(cx, move |s, id| {
-                                    s.request_shortlist(&id, req, jcr).map(|_| None)
+                                    s.set_models(&id, models).map(|_| None)
                                 });
-                            }
-                            Err(()) => {
-                                this.error =
-                                    Some(tr(lang, "Invalid APC amount or currency").into());
-                                cx.notify();
-                            }
-                        }),
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("action:paper.form.shortlist")
+                    .test_support()
+                    .child(
+                        Button::new("paper-shortlist", tr(lang, "Find journals"), t).on_click(
+                            cx.listener(move |this, _, _, cx| match this.form.request(cx) {
+                                Ok((req, jcr)) => {
+                                    this.estimate = None;
+                                    this.estimate_stale = false;
+                                    this.ack = false;
+                                    this.estimate_epoch
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    this.ignore_status_estimate = true;
+                                    this.action(cx, move |s, id| {
+                                        s.request_shortlist(
+                                            &id,
+                                            ShortlistInput {
+                                                requirements: req,
+                                                jcr,
+                                            },
+                                        )
+                                        .map(|_| None)
+                                    });
+                                }
+                                Err(()) => {
+                                    this.error =
+                                        Some(tr(lang, "Invalid APC amount or currency").into());
+                                    cx.notify();
+                                }
+                            }),
+                        ),
                     ),
             )
             .into_any_element()

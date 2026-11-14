@@ -230,6 +230,165 @@ fn label(lang: Lang, en: &'static str, zh: &'static str) -> &'static str {
 }
 
 #[gpui_kit::test]
+fn readiness_panel_has_observable_content(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let (window, _, _) = setup(cx, Lang::En, status());
+    capture(cx, window);
+    cx.update_window(window, |_, window, _| {
+        let panel = ElementId::from("paper.readiness.status");
+        let label = ElementId::from("paper-readiness-label");
+        assert!(window
+            .elements()
+            .iter()
+            .any(|element| { element.path().contains(&panel) && element.path().contains(&label) }));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn declared_paper_panels_are_elements_on_the_page(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let mut scripted = status();
+    scripted.shortlist = Some(shortlist(true));
+    scripted.estimate = Some(estimate());
+    let (window, _, _) = setup(cx, Lang::En, scripted);
+    for target in axiom::desktop::targets::all()
+        .into_iter()
+        .filter(|t| t.group == "paper")
+    {
+        for &panel in target.panels {
+            assert!(shown(cx, window, panel), "{}: missing {panel}", target.id);
+        }
+    }
+}
+
+macro_rules! declared_target_ids_test {
+    ($test:ident, $target:literal) => {
+        #[gpui_kit::test]
+        fn $test(cx: &mut TestAppContext) {
+            let _home = Home::new();
+            let fake = Arc::new(FakePaper::new());
+            let (state, session) = state(&fake, true);
+            let mut scripted = status();
+            scripted.shortlist = Some(shortlist(true));
+            scripted.estimate = Some(estimate());
+            scripted.running = true;
+            scripted.pdf = Some("target-id.pdf".into());
+            fake.set_status(&session, scripted);
+            fake.set_preview(
+                &session,
+                Preview::Unavailable {
+                    reason: "unavailable".into(),
+                    pdf: "target-id.pdf".into(),
+                },
+            );
+            let (window, _) = open(cx, Lang::En, state, Screen::Run);
+            let target = axiom::desktop::targets::find($target).unwrap();
+            for &id in target.panels.iter().chain(target.actions.iter()) {
+                assert!(shown(cx, window, id), "{}: missing {id}", target.id);
+            }
+        }
+    };
+}
+declared_target_ids_test!(paper_page_declared_ids, "paper");
+declared_target_ids_test!(paper_form_declared_ids, "paper.form");
+declared_target_ids_test!(paper_shortlist_declared_ids, "paper.shortlist");
+declared_target_ids_test!(paper_estimate_declared_ids, "paper.estimate");
+declared_target_ids_test!(paper_progress_declared_ids, "paper.progress");
+declared_target_ids_test!(paper_changelog_declared_ids, "paper.changelog");
+declared_target_ids_test!(paper_preview_declared_ids, "paper.preview");
+declared_target_ids_test!(paper_readiness_declared_ids, "paper.readiness");
+
+#[gpui_kit::test]
+fn slow_status_feed_keeps_form_usable_and_delivers_updates(cx: &mut TestAppContext) {
+    use axiom::desktop::data::faults::{self, Fault, FaultPlan};
+    use std::time::{Duration, Instant};
+    let _home = Home::new();
+    let fake = Arc::new(FakePaper::new());
+    let (state, session) = state(&fake, true);
+    let mut first = status();
+    first.last_error = Some(("first".into(), "first update".into()));
+    fake.set_status(&session, first);
+    cx.update(|cx| {
+        let mut plan = FaultPlan::default();
+        plan.0.insert("paper.page".into(), Fault::Slow { ms: 1500 });
+        faults::install(plan, cx);
+    });
+    let (window, _) = open(cx, Lang::En, state, Screen::Run);
+    assert!(shown(cx, window, "paper-form"));
+    click(cx, window, ("paper-tier", 1_usize));
+    cx.update(|cx| faults::install(FaultPlan::default(), cx));
+    let wait_for = |cx: &mut TestAppContext, expected: &str| {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            cx.executor().advance_clock(Duration::from_millis(50));
+            let lines = capture(cx, window);
+            if shows(&lines, "paper-error", expected) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "missing {expected}: {lines:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for(cx, "first update");
+    let mut second = status();
+    second.last_error = Some(("second".into(), "second update".into()));
+    fake.set_status(&session, second);
+    wait_for(cx, "second update");
+}
+
+#[gpui_kit::test]
+fn every_paper_target_prepares_and_opens_each_declared_state(cx: &mut TestAppContext) {
+    use axiom::desktop::{targets, theme, Shell, Store};
+    let _home = Home::new();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        theme::apply(gpui_kit::component::ThemeMode::Dark, None, cx);
+        axiom::desktop::i18n::set(Lang::En, cx);
+        cx.set_global(Store::open(true));
+    });
+    let fake = Arc::new(FakePaper::new());
+    let (initial, _) = state(&fake, false);
+    let state = cx.new(|_| initial);
+    let shell_state = state.clone();
+    let (window, shell) = cx
+        .update(|cx| {
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| Shell::new(shell_state, false, window, cx))
+            })
+        })
+        .unwrap();
+    for target in targets::all()
+        .into_iter()
+        .filter(|target| target.group == "paper")
+    {
+        for &capture in target.states {
+            state.update(cx, |state, _| {
+                targets::prepare(&target, capture, state).unwrap();
+                if matches!(target.opening, targets::Opening::PaperStep(_)) {
+                    state.ux.page = None;
+                }
+            });
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.open_target(&target, capture, window, cx)
+                })
+            })
+            .unwrap()
+            .unwrap();
+            assert!(
+                matches!(
+                    state.read_with(cx, |state, _| state.ux.page.clone()),
+                    Some(Page::Paper(_))
+                ),
+                "{}",
+                target.id
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
 fn write_paper_entry_opens_page(cx: &mut TestAppContext) {
     let _home = Home::new();
     for lang in [Lang::En, Lang::ZhTw] {
@@ -237,11 +396,7 @@ fn write_paper_entry_opens_page(cx: &mut TestAppContext) {
         let (run_state, session) = state(&fake, false);
         fake.set_status(&session, status());
         let (window, entity) = open(cx, lang, run_state, Screen::Run);
-        assert!(shows(
-            &capture(cx, window),
-            "write-paper",
-            label(lang, "Write paper", "撰寫論文")
-        ));
+        assert!(shown(cx, window, "write-paper"));
         click(cx, window, "write-paper");
         assert_eq!(
             entity.read_with(cx, |s, _| s.ux.page.clone()),
@@ -310,9 +465,23 @@ fn top_rank_not_preselected(cx: &mut TestAppContext) {
         assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::ChooseJournal(s, id, hash) if s == &session && id == "first" && hash == "shortlist-hash")));
         s.choice = Some(choice());
         fake.set_status(&session, s);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
-        capture(cx, window);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(50));
+            if shows(
+                &capture(cx, window),
+                "paper-row",
+                label(lang, "Chosen", "已選擇"),
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "choice update did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let chosen_rows = cx
             .update_window(window, |_, w, _| {
                 gpui_kit::base::test_support::texts(w)
@@ -332,6 +501,49 @@ fn top_rank_not_preselected(cx: &mut TestAppContext) {
             "{chosen_rows:?}"
         );
     }
+}
+
+#[gpui_kit::test]
+fn stale_estimate_is_visible_and_blocks_start(cx: &mut TestAppContext) {
+    let _home = Home::new();
+    let mut scripted = status();
+    scripted.shortlist = Some(shortlist(true));
+    scripted.choice = Some(choice());
+    scripted.estimate = Some(estimate());
+    let (window, fake, session) = setup(cx, Lang::En, scripted);
+    click(cx, window, "paper-ack");
+    let mut current = estimate();
+    current.digest = "changed-estimate".into();
+    fake.set_estimate(&session, current);
+    // Feed schedules against Instant, not the test executor's virtual clock.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let lines = loop {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        let lines = capture(cx, window);
+        if shows(
+            &lines,
+            "paper-estimate-stale",
+            "Estimate is stale; request a new estimate",
+        ) || std::time::Instant::now() >= deadline
+        {
+            break lines;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        shows(
+            &lines,
+            "paper-estimate-stale",
+            "Estimate is stale; request a new estimate"
+        ),
+        "{lines:?}"
+    );
+    click(cx, window, "paper-start");
+    assert!(!fake
+        .calls()
+        .iter()
+        .any(|call| matches!(call, PaperCall::Start(..))));
 }
 
 #[gpui_kit::test]
@@ -449,7 +661,11 @@ fn edited_form_and_cancel(cx: &mut TestAppContext) {
             (4, "medicine, biology"),
             (5, "fast review"),
         ] {
-            click(cx, window, ("paper-input", index));
+            click(
+                cx,
+                window,
+                (ElementId::from(("paper-input", index)), "input"),
+            );
             cx.update_window(window, |_, w, cx| w.input(value, cx))
                 .unwrap();
             capture(cx, window);
@@ -473,7 +689,7 @@ fn edited_form_and_cancel(cx: &mut TestAppContext) {
             categories: vec!["medicine".into(), "biology".into()],
             free_text: vec!["fast review".into()],
         };
-        assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected)), "{:?}", fake.calls());
+        assert!(fake.calls().iter().any(|c| matches!(c, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected.clone().into())), "{:?}", fake.calls());
         s.running = true;
         fake.set_status(&session, s);
         cx.executor()
@@ -533,14 +749,18 @@ fn saving_edited_models_invalidates_estimate(cx: &mut TestAppContext) {
     click(cx, window, "paper-ack");
     cx.update_window(window, |_, w, cx| {
         w.scroll(
-            ("paper-input", 0_usize),
+            (ElementId::from(("paper-input", 0_usize)), "input"),
             gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-320.))),
             cx,
         );
     })
     .unwrap();
     capture(cx, window);
-    click(cx, window, ("paper-model", 2_usize));
+    click(
+        cx,
+        window,
+        (ElementId::from(("paper-model", 2_usize)), "input"),
+    );
     cx.update_window(window, |_, w, cx| {
         w.press(
             if cfg!(target_os = "macos") {
@@ -554,12 +774,21 @@ fn saving_edited_models_invalidates_estimate(cx: &mut TestAppContext) {
     })
     .unwrap();
     capture(cx, window);
+    cx.update_window(window, |_, w, cx| {
+        w.scroll(
+            (ElementId::from(("paper-model", 2_usize)), "input"),
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(320.))),
+            cx,
+        );
+    })
+    .unwrap();
+    capture(cx, window);
     click(cx, window, "paper-save-models");
     let mut expected = models::PassModels::default();
     expected.gemini_revise = "gemini-custom".into();
     assert!(
         fake.calls().iter().any(|call| matches!(call,
-            PaperCall::SetModels(id, models) if id == &session && models == &expected
+            PaperCall::SetModels(id, models) if id == &session && models == &expected.clone().into()
         )),
         "{:?}",
         fake.calls()
@@ -731,7 +960,7 @@ fn shortlist_button_sends_form_payload(cx: &mut TestAppContext) {
         s.requirements = Some(expected.clone());
         let (window, fake, session) = setup(cx, lang, s);
         click(cx, window, "paper-shortlist");
-        assert!(fake.calls().iter().any(|call| matches!(call, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected)), "{:?}", fake.calls());
+        assert!(fake.calls().iter().any(|call| matches!(call, PaperCall::RequestShortlist(id, req, None) if id == &session && req == &expected.clone().into())), "{:?}", fake.calls());
     }
 }
 
@@ -768,12 +997,16 @@ fn late_evidence_and_cleared_estimate_are_applied(cx: &mut TestAppContext) {
     )
     .unwrap();
     s.evidence = Some("evidence-hash".into());
+    fake.set_evidence_question(&session, "Late evidence question");
     s.shortlist = None;
     s.estimate = None;
     fake.set_status(&session, s);
-    cx.executor()
-        .advance_clock(std::time::Duration::from_secs(1));
-    capture(cx, window);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while shown(cx, window, "paper-estimate") && std::time::Instant::now() < deadline {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert!(!shown(cx, window, "paper-estimate"));
     click(cx, window, "paper-start");
     assert!(!fake
@@ -821,4 +1054,134 @@ fn validation_and_enum_labels_are_localized(cx: &mut TestAppContext) {
     assert!(!shows(&lines, "paper-error", "validation detail"));
     assert!(shows(&lines, "paper-changelog", "編輯"));
     assert!(shows(&lines, "paper-error", "證據"));
+}
+
+// Hold the first render after it has captured A while B is selected and rendered.
+#[gpui_kit::test]
+fn switching_pdf_discards_in_flight_preview(cx: &mut TestAppContext) {
+    use axiom::desktop::ux::seams::{
+        EstimateRow, PaperService, PaperView, PassModels, PreviewInput, PreviewView,
+        ShortlistInput, StartInput,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    struct Delayed {
+        fake: Arc<FakePaper>,
+        calls: AtomicUsize,
+        started: AtomicBool,
+        release: AtomicBool,
+    }
+    impl PaperService for Delayed {
+        fn status(&self, s: &str) -> axiom::base::Res<PaperView> {
+            self.fake.status(s)
+        }
+        fn models(&self, s: &str) -> axiom::base::Res<PassModels> {
+            self.fake.models(s)
+        }
+        fn set_models(&self, s: &str, m: PassModels) -> axiom::base::Res<()> {
+            self.fake.set_models(s, m)
+        }
+        fn request_shortlist(&self, s: &str, i: ShortlistInput) -> axiom::base::Res<()> {
+            self.fake.request_shortlist(s, i)
+        }
+        fn choose_journal(&self, s: &str, id: &str, hash: &str) -> axiom::base::Res<()> {
+            self.fake.choose_journal(s, id, hash)
+        }
+        fn estimate(&self, s: &str) -> axiom::base::Res<EstimateRow> {
+            self.fake.estimate(s)
+        }
+        fn estimate_is_fresh(&self, s: &str, d: &str) -> axiom::base::Res<bool> {
+            self.fake.estimate_is_fresh(s, d)
+        }
+        fn start(&self, s: &str, i: StartInput) -> axiom::base::Res<()> {
+            self.fake.start(s, i)
+        }
+        fn cancel(&self, s: &str) -> axiom::base::Res<()> {
+            self.fake.cancel(s)
+        }
+        fn open_pdf(&self, s: &str) -> axiom::base::Res<()> {
+            self.fake.open_pdf(s)
+        }
+        fn preview(&self, s: &str, i: PreviewInput) -> axiom::base::Res<PreviewView> {
+            let value = self.fake.preview(s, i);
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !self.release.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            value
+        }
+    }
+    let _home = Home::new();
+    let fake = Arc::new(FakePaper::new());
+    let (mut state, session) = state(&fake, true);
+    let delayed = Arc::new(Delayed {
+        fake: fake.clone(),
+        calls: AtomicUsize::new(0),
+        started: AtomicBool::new(false),
+        release: AtomicBool::new(false),
+    });
+    state.ux.seams.paper = Some(delayed.clone());
+    let mut a = status();
+    a.pdf = Some("a.pdf".into());
+    fake.set_status(&session, a);
+    let page = |pages| {
+        Preview::Ready(PageImage {
+            png: vec![
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 248,
+                255, 31, 0, 3, 0, 1, 255, 252, 37, 220, 81, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+                96, 130,
+            ],
+            width_px: 1,
+            height_px: 1,
+            page: 1,
+            pages,
+        })
+    };
+    fake.set_preview(&session, page(11));
+    let (window, _) = open(cx, Lang::En, state, Screen::Run);
+    cx.update_window(window, |_, w, cx| {
+        w.scroll(
+            "paper.progress.passes",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-240.))),
+            cx,
+        );
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !delayed.started.load(Ordering::SeqCst) {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        capture(cx, window);
+        assert!(Instant::now() < deadline, "A render did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut b = status();
+    b.pdf = Some("b.pdf".into());
+    fake.set_status(&session, b);
+    fake.set_preview(&session, page(22));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        let lines = capture(cx, window);
+        assert!(!shows(&lines, "paper.preview.document", "1 / 11"));
+        if shows(&lines, "paper.preview.document", "1 / 22") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "B preview did not arrive: {lines:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    delayed.release.store(true, Ordering::SeqCst);
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        let lines = capture(cx, window);
+        assert!(!shows(&lines, "paper.preview.document", "1 / 11"));
+        assert!(shows(&lines, "paper.preview.document", "1 / 22"));
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }

@@ -1,13 +1,101 @@
 use super::*;
-use crate::{desktop::ornament::Celestial, paper::PassId};
+use crate::desktop::ornament::Celestial;
 use std::prelude::v1::test;
+#[test]
+fn status_poll_interval_respects_floor() {
+    assert!(Duration::from_secs(STATUS_POLL_SECONDS) >= Duration::from_millis(1500));
+    assert!(!include_str!("mod.rs").contains("Duration::from_millis(800)"));
+}
+
+#[test]
+fn gemini_pass_defaults_to_hydrogen() {
+    assert_eq!(
+        PassModels::default().gemini_revise,
+        "gemini-4-hydrogen-xhigh"
+    );
+}
+
+#[test]
+fn sources_repeat_first_value_if_feed_did_not_advance_cursor() {
+    let fake = Arc::new(crate::desktop::ux::seams::FakePaper::new());
+    fake.set_status("session", PaperView::default());
+    fake.set_preview(
+        "session",
+        PreviewView::Unavailable {
+            reason: "no renderer".into(),
+            pdf: "paper.pdf".into(),
+        },
+    );
+    let mut status = StatusSource {
+        service: fake.clone(),
+        session: "session".into(),
+        epoch: Arc::new(AtomicU64::new(0)),
+        models: None,
+        previous: None,
+    };
+    assert!(matches!(
+        status.poll(Cursor(0)).unwrap().0,
+        Delta::Replace(_)
+    ));
+    let (retry, cursor) = status.poll(Cursor(0)).unwrap();
+    assert!(matches!(retry, Delta::Replace(_)));
+    assert!(matches!(status.poll(cursor).unwrap().0, Delta::Unchanged));
+    let mut preview = PreviewSource {
+        service: fake,
+        session: "session".into(),
+        page: 1,
+        generation: 1,
+        loaded: false,
+    };
+    assert!(matches!(
+        preview.poll(Cursor(0)).unwrap().0,
+        Delta::Replace(_)
+    ));
+    let (retry, cursor) = preview.poll(Cursor(0)).unwrap();
+    assert!(matches!(retry, Delta::Replace(_)));
+    assert!(matches!(preview.poll(cursor).unwrap().0, Delta::Unchanged));
+}
+
+#[test]
+fn late_preview_from_old_pdf_cannot_replace_new_pdf() {
+    use std::sync::mpsc;
+    let (release, wait) = mpsc::channel::<()>();
+    let (done, receive) = mpsc::channel();
+    let old = std::thread::spawn(move || {
+        wait.recv().unwrap();
+        done.send(PreviewSnapshot {
+            generation: 1,
+            result: Ok(PreviewView::Unavailable {
+                reason: "document A".into(),
+                pdf: "a.pdf".into(),
+            }),
+        })
+        .unwrap();
+    });
+    let new = PreviewSnapshot {
+        generation: 2,
+        result: Ok(PreviewView::Unavailable {
+            reason: "document B".into(),
+            pdf: "b.pdf".into(),
+        }),
+    };
+    let mut visible = None;
+    let mut error = None;
+    apply_preview(2, &mut visible, &mut error, &new);
+    release.send(()).unwrap();
+    let late = receive.recv().unwrap();
+    apply_preview(2, &mut visible, &mut error, &late);
+    old.join().unwrap();
+    assert_eq!(visible, new.result.ok());
+    assert!(error.is_none());
+}
 #[test]
 fn pass_mapping() {
     for (p, n, g) in [
-        (PassId::AstraDraft, "Astra", Celestial::Star),
-        (PassId::FableRevise, "Fable", Celestial::Jupiter),
-        (PassId::GeminiRevise, "Gemini", Celestial::Gemini),
-        (PassId::FableStyle, "Fable", Celestial::Jupiter),
+        (1, "Astra", Celestial::Star),
+        (2, "Fable", Celestial::Jupiter),
+        (3, "Gemini", Celestial::Gemini),
+        (4, "Fable", Celestial::Jupiter),
     ] {
         let (name, glyph) = progress::glyph(p);
         assert_eq!(name, n);
@@ -22,15 +110,32 @@ fn gate_requires_choice_estimate_and_ack() {
     assert!(!can_start(true, true, true, true));
     assert!(can_start(true, true, true, false));
 }
+
+#[test]
+fn stale_display_estimate_blocks_start() {
+    let mut view = crate::desktop::ux::seams::PaperView::default();
+    view.estimate = Some(EstimateRow {
+        digest: "old".into(),
+        usd: None,
+        tokens: None,
+        stale: true,
+        line: String::new(),
+    });
+    assert!(!start_with_estimate(
+        true,
+        view.estimate.as_ref(),
+        true,
+        false
+    ));
+}
 #[test]
 fn no_preselection_and_stale_choice_are_rejected() {
-    use crate::paper::{Chooser, JournalChoice};
+    use crate::desktop::ux::seams::JournalRow;
     assert!(!is_chosen(None, "first", "current"));
-    let choice = JournalChoice {
-        journal_id: "second".into(),
-        shortlist_hash: "current".into(),
-        chosen_by: Chooser::Person,
-        at: String::new(),
+    let choice = JournalRow {
+        id: "second".into(),
+        hash: "current".into(),
+        ..Default::default()
     };
     assert!(!is_chosen(Some(&choice), "first", "current"));
     assert!(!is_chosen(Some(&choice), "second", "stale"));
@@ -39,7 +144,7 @@ fn no_preselection_and_stale_choice_are_rejected() {
 
 #[test]
 fn form_conversion_covers_requirements_and_jcr() {
-    use crate::paper::{AccessWanted, Money, Quartile, QuartileScheme};
+    use crate::desktop::ux::seams::{AccessWanted, Money, Quartile, QuartileScheme};
     let mut fields: Vec<String> = [
         "abstract",
         " alpha, , beta ",
@@ -111,38 +216,24 @@ fn form_conversion_covers_requirements_and_jcr() {
 }
 
 #[test]
-fn evidence_question_is_loaded_separately_from_status_hash() {
-    use crate::desktop::ux::real::paper::SessionPaper;
-    use crate::paper::{evidence, EvidenceBundle};
-    let home = tempfile::tempdir().unwrap();
-    let session = "paper-question";
-    let goal = crate::goal::open(
-        home.path(),
-        session,
-        "wish",
-        Some(home.path().to_str().unwrap()),
-    )
-    .unwrap();
-    let store = crate::orch::store_for_goal(home.path(), &goal).unwrap();
-    let bundle = EvidenceBundle {
-        version: 1,
-        program: "program".into(),
-        question: "Research question?".into(),
-        artifacts: vec![],
-        claims: vec![],
-        evidence: vec![],
-        quantities: vec![],
-        references: vec![],
-        hash: "evidence-hash".into(),
-    };
-    evidence::save(&store, &bundle).unwrap();
-    let service = SessionPaper::new(home.path());
-    assert_eq!(
-        service.status(session).unwrap().evidence.as_deref(),
-        Some("evidence-hash")
-    );
-    assert_eq!(
-        evidence_question(home.path(), session).unwrap().as_deref(),
-        Some("Research question?")
-    );
+fn views_do_not_import_paper_or_council_engines() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/desktop/paper");
+    let forbidden = [
+        concat!("crate::", "paper"),
+        concat!("crate::", "council"),
+        concat!("mesh::", "council"),
+    ];
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            let source = std::fs::read_to_string(&path).unwrap();
+            for pattern in forbidden {
+                assert!(
+                    !source.contains(pattern),
+                    "{} contains {pattern}",
+                    path.display()
+                );
+            }
+        }
+    }
 }

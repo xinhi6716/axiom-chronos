@@ -6,14 +6,14 @@ use crate::{
         server::{Bridge, Config},
     },
     council,
-    desktop::ux::seams::{PaperService, Preview},
+    desktop::ux::seams::{self as dto, EstimateRow, PaperService, Preview},
     paper::{
         self,
         cache::FetchMode,
         http::{CurlTransport, HttpRequest, HttpResponse, Transport},
-        models::{self, PassModels},
+        models::{self, PassModels as EngineModels},
         service::{PaperSession, PaperStatus},
-        state, Requirements, SpendEstimate, Step,
+        state, SpendEstimate, Step,
     },
     seams::{sha256_hex, SystemClock},
 };
@@ -26,6 +26,304 @@ use std::{
         Arc, Mutex, OnceLock,
     },
 };
+
+impl From<SpendEstimate> for EstimateRow {
+    fn from(estimate: SpendEstimate) -> Self {
+        Self {
+            digest: estimate.digest,
+            usd: estimate.priced_usd,
+            tokens: None,
+            stale: false,
+            line: estimate.line,
+        }
+    }
+}
+
+macro_rules! map_enum {
+    ($from:ty, $to:ty, $($variant:ident),+) => {
+        impl From<$from> for $to { fn from(value: $from) -> Self { match value { $(<$from>::$variant => <$to>::$variant),+ } } }
+        impl From<$to> for $from { fn from(value: $to) -> Self { match value { $(<$to>::$variant => <$from>::$variant),+ } } }
+    };
+}
+map_enum!(paper::Quartile, dto::Quartile, Q1, Q2, Q3, Q4);
+map_enum!(paper::QuartileScheme, dto::QuartileScheme, Sjr, Jcr);
+map_enum!(
+    paper::AccessWanted,
+    dto::AccessWanted,
+    OpenAccess,
+    Subscription,
+    Either
+);
+impl From<paper::Money> for dto::Money {
+    fn from(m: paper::Money) -> Self {
+        Self {
+            amount_minor: m.amount_minor,
+            currency: m.currency,
+        }
+    }
+}
+impl From<dto::Money> for paper::Money {
+    fn from(m: dto::Money) -> Self {
+        Self {
+            amount_minor: m.amount_minor,
+            currency: m.currency,
+        }
+    }
+}
+impl From<paper::Requirements> for dto::Requirements {
+    fn from(r: paper::Requirements) -> Self {
+        Self {
+            abstract_text: r.abstract_text,
+            keywords: r.keywords,
+            max_quartile: r.max_quartile.map(Into::into),
+            tier_scheme: r.tier_scheme.into(),
+            access: r.access.into(),
+            apc_limit: r.apc_limit.map(Into::into),
+            require_no_fee: r.require_no_fee,
+            categories: r.categories,
+            free_text: r.free_text,
+        }
+    }
+}
+impl From<dto::Requirements> for paper::Requirements {
+    fn from(r: dto::Requirements) -> Self {
+        Self {
+            abstract_text: r.abstract_text,
+            keywords: r.keywords,
+            max_quartile: r.max_quartile.map(Into::into),
+            tier_scheme: r.tier_scheme.into(),
+            access: r.access.into(),
+            apc_limit: r.apc_limit.map(Into::into),
+            require_no_fee: r.require_no_fee,
+            categories: r.categories,
+            free_text: r.free_text,
+        }
+    }
+}
+impl From<EngineModels> for dto::PassModels {
+    fn from(m: EngineModels) -> Self {
+        Self {
+            astra_draft: m.astra_draft,
+            fable_revise: m.fable_revise,
+            gemini_revise: m.gemini_revise,
+            fable_style: m.fable_style,
+        }
+    }
+}
+impl From<dto::PassModels> for EngineModels {
+    fn from(m: dto::PassModels) -> Self {
+        Self {
+            astra_draft: m.astra_draft,
+            fable_revise: m.fable_revise,
+            gemini_revise: m.gemini_revise,
+            fable_style: m.fable_style,
+        }
+    }
+}
+fn source_label(kind: paper::SourceKind) -> String {
+    match kind {
+        paper::SourceKind::Openalex => "OpenAlex",
+        paper::SourceKind::Sjr => "SJR",
+        paper::SourceKind::Doaj => "DOAJ",
+        paper::SourceKind::Crossref => "Crossref",
+        paper::SourceKind::JcrImport => "JCR",
+        paper::SourceKind::OfficialPage => "Official page",
+        paper::SourceKind::Program => "Program",
+        paper::SourceKind::Dataset => "Dataset",
+        paper::SourceKind::Person => "Person",
+    }
+    .into()
+}
+fn metric<T>(
+    label: &str,
+    value: paper::Known<T>,
+    format: impl FnOnce(T) -> String,
+) -> dto::MetricRow {
+    match value {
+        paper::Known::Known(s) => dto::MetricRow {
+            label: label.into(),
+            value: format(s.value),
+            source: source_label(s.source.kind),
+            date: s.source.fetched_at,
+        },
+        paper::Known::Unknown { reason } => dto::MetricRow {
+            label: label.into(),
+            value: format!("Unknown ({reason})"),
+            source: "Unknown".into(),
+            date: "Unknown".into(),
+        },
+    }
+}
+fn journal(j: paper::JournalRecord, hash: &str) -> dto::JournalRow {
+    let mut metrics = vec![
+        metric("Publisher", j.publisher, |v| v),
+        metric("Homepage", j.homepage, |v| v),
+        metric("SJR", j.sjr, |v| v.to_string()),
+        metric("Access", j.access, |v| {
+            match v {
+                paper::Access::OpenAccess => "Open access",
+                paper::Access::Hybrid => "Hybrid",
+                paper::Access::Subscription => "Subscription",
+            }
+            .into()
+        }),
+        metric("APC", j.apc, |v| match v {
+            paper::Apc::NoFee => "No fee".into(),
+            paper::Apc::Fee(m) => format!("{} {}", m.amount_minor, m.currency),
+        }),
+        metric("Review weeks", j.review_weeks, |v| v.to_string()),
+        metric("Works", j.works_count, |v| v.to_string()),
+    ];
+    if j.quartiles.is_empty() {
+        metrics.push(dto::MetricRow {
+            label: "Quartile".into(),
+            value: "Unknown".into(),
+            source: "Unknown".into(),
+            date: "Unknown".into(),
+        });
+    }
+    for q in j.quartiles {
+        metrics.push(dto::MetricRow {
+            label: "Quartile".into(),
+            value: q.value.label(),
+            source: source_label(q.source.kind),
+            date: q.source.fetched_at,
+        });
+    }
+    dto::JournalRow {
+        id: j.id,
+        title: j.title,
+        hash: hash.into(),
+        metrics,
+        ..Default::default()
+    }
+}
+impl From<paper::Shortlist> for dto::ShortlistView {
+    fn from(list: paper::Shortlist) -> Self {
+        let mut rows = Vec::new();
+        for r in list.ranked {
+            let mut row = journal(r.journal, &list.hash);
+            row.bucket = match r.bucket {
+                paper::Bucket::Passes => "Passes",
+                paper::Bucket::NeedsCheck => "Needs check",
+            }
+            .into();
+            row.filters = r
+                .filters
+                .into_iter()
+                .map(|f| dto::FilterRow {
+                    name: f.name,
+                    status: format!("{:?}", f.status),
+                    detail: f.detail,
+                })
+                .chain(r.free_text.into_iter().map(|f| dto::FilterRow {
+                    name: f.text,
+                    status: format!("{:?}", f.status),
+                    detail: f.detail,
+                }))
+                .collect();
+            rows.push(row);
+        }
+        for r in list.excluded {
+            let mut row = journal(r.journal, &list.hash);
+            row.excluded = true;
+            row.filters = r
+                .filters
+                .into_iter()
+                .map(|f| dto::FilterRow {
+                    name: f.name,
+                    status: format!("{:?}", f.status),
+                    detail: f.detail,
+                })
+                .collect();
+            rows.push(row);
+        }
+        Self { rows }
+    }
+}
+impl From<PaperStatus> for dto::PaperView {
+    fn from(s: PaperStatus) -> Self {
+        let shortlist = s
+            .shortlist
+            .map(|v| dto::ShortlistView::from(v).rows)
+            .unwrap_or_default();
+        let journal = s.choice.and_then(|c| {
+            shortlist
+                .iter()
+                .find(|j| !j.excluded && j.id == c.journal_id && j.hash == c.shortlist_hash)
+                .cloned()
+        });
+        let mut changes = Vec::new();
+        let passes = s
+            .passes
+            .into_iter()
+            .map(|p| {
+                let number = p.pass.number();
+                for c in p.change_log {
+                    changes.push(dto::ChangeRow {
+                        pass: number,
+                        member: p.member.clone(),
+                        location: c.location,
+                        kind: format!("{:?}", c.kind),
+                        reason: c.reason,
+                        validation: false,
+                    });
+                }
+                for v in p.validation {
+                    changes.push(dto::ChangeRow {
+                        pass: number,
+                        member: p.member.clone(),
+                        location: String::new(),
+                        kind: String::new(),
+                        reason: v,
+                        validation: true,
+                    });
+                }
+                dto::PassRow {
+                    number,
+                    status: format!("{:?}", p.status),
+                }
+            })
+            .collect();
+        let steps = s
+            .steps
+            .into_iter()
+            .map(|(step, ok, detail)| dto::GateRow {
+                label: format!("{:?}", step),
+                ok,
+                detail,
+            })
+            .collect();
+        let readiness = s
+            .ready
+            .map(|r| {
+                r.conditions
+                    .into_iter()
+                    .map(|(condition, ok, detail)| dto::GateRow {
+                        label: format!("{:?}", condition),
+                        ok,
+                        detail: Some(detail),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        dto::PaperView {
+            phase: if s.running { "running" } else { "idle" }.into(),
+            passes,
+            journal,
+            shortlist,
+            estimate: s.estimate.map(Into::into),
+            changelog: changes,
+            readiness,
+            requirements: s.requirements.map(Into::into),
+            evidence: s.evidence,
+            pdf: s.pdf,
+            running: s.running,
+            last_error: s.last_error,
+            steps,
+        }
+    }
+}
 
 pub struct SessionPaper {
     home: PathBuf,
@@ -188,17 +486,21 @@ impl SessionPaper {
     }
 }
 impl PaperService for SessionPaper {
-    fn models(&self, session: &str) -> Res<PassModels> {
-        models::load(&self.session(session)?.home)
+    fn evidence_question(&self, session: &str) -> Res<Option<String>> {
+        let store = super::session_store(&self.home, session)?;
+        Ok(paper::evidence::load(&store)?.map(|bundle| bundle.question))
     }
-    fn set_models(&self, session: &str, m: PassModels) -> Res<()> {
+    fn models(&self, session: &str) -> Res<dto::PassModels> {
+        models::load(&self.session(session)?.home).map(Into::into)
+    }
+    fn set_models(&self, session: &str, m: dto::PassModels) -> Res<()> {
         m.validate()?;
         let session = self.session(session)?;
         let map = lock_jobs()?;
         busy(&map, &session.store)?;
-        models::save(&session.home, &m)
+        models::save(&session.home, &m.into())
     }
-    fn status(&self, session: &str) -> Res<PaperStatus> {
+    fn status(&self, session: &str) -> Res<dto::PaperView> {
         let session = self.session(session)?;
         let mut status = session.status()?;
         let map = lock_jobs()?;
@@ -212,15 +514,19 @@ impl PaperService for SessionPaper {
         if map.contains_key(&session.store) {
             status.running = true;
         }
-        Ok(status)
+        Ok(status.into())
     }
-    fn request_shortlist(&self, session: &str, req: Requirements, jcr: Option<PathBuf>) -> Res<()> {
+    fn request_shortlist(&self, session: &str, input: dto::ShortlistInput) -> Res<()> {
         let session = self.session(session)?;
         self.spawn(
             session,
             move |s, _| {
-                s.shortlist(&req, jcr.as_deref(), FetchMode::Online)
-                    .map(|_| ())
+                s.shortlist(
+                    &input.requirements.into(),
+                    input.jcr.as_deref(),
+                    FetchMode::Online,
+                )
+                .map(|_| ())
             },
             true,
         )
@@ -231,13 +537,24 @@ impl PaperService for SessionPaper {
         busy(&map, &session.store)?;
         session.choose_journal(journal_id, hash).map(|_| ())
     }
-    fn estimate(&self, session: &str) -> Res<SpendEstimate> {
+    fn estimate(&self, session: &str) -> Res<EstimateRow> {
         let session = self.session(session)?;
         let map = lock_jobs()?;
         busy(&map, &session.store)?;
-        session.estimate()
+        session.estimate().map(Into::into)
     }
-    fn start(&self, session: &str, digest: &str) -> Res<()> {
+    fn estimate_is_fresh(&self, session: &str, digest: &str) -> Res<bool> {
+        let session = self.session(session)?;
+        Ok(paper::budget::estimate(
+            &session.home,
+            &models::estimate_models(),
+            &models::load(&session.home)?,
+        )?
+        .digest
+            == digest)
+    }
+    fn start(&self, session: &str, input: dto::StartInput) -> Res<()> {
+        let digest = &input.estimate_digest;
         let session = self.session(session)?;
         {
             let map = lock_jobs()?;
@@ -267,7 +584,9 @@ impl PaperService for SessionPaper {
         }
         Ok(())
     }
-    fn preview(&self, session: &str, page: u32, width: u32) -> Res<Preview> {
+    fn preview(&self, session: &str, input: dto::PreviewInput) -> Res<Preview> {
+        let page = input.page;
+        let width = input.width_px;
         let pdf = self.pdf(session)?;
         if page == 0 {
             return Err(Failure::new("bad_page", "page numbers start at 1"));

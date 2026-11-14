@@ -1,7 +1,9 @@
 use super::{paper::SessionPaper, wiring::production};
 use crate::{
     base::Failure,
-    desktop::ux::seams::{FakePaper, PaperCall, PaperService, Preview},
+    desktop::ux::seams::{
+        FakePaper, PaperCall, PaperService, Preview, PreviewInput, ShortlistInput, StartInput,
+    },
     paper::{
         self, journals::matching, service::PaperStatus, Chooser, JournalChoice, JournalRecord,
         Requirements, Shortlist, Step,
@@ -111,16 +113,35 @@ fn empty_status() -> PaperStatus {
 }
 
 #[test]
+fn fake_accepts_engine_and_display_status() {
+    let fake = FakePaper::new();
+    let view: crate::desktop::ux::seams::PaperView = empty_status().into();
+    fake.set_status("engine", empty_status());
+    fake.set_status("display", view.clone());
+    assert_eq!(fake.status("engine").unwrap(), view);
+    assert_eq!(fake.status("display").unwrap(), view);
+}
+
+#[test]
 fn fake_scripts_status_shortlist_failures_and_calls() {
     let fake = FakePaper::new();
     let list = shortlist();
-    let req = requirements();
+    let req: crate::desktop::ux::seams::Requirements = requirements().into();
     fake.set_status(SESSION, empty_status());
     fake.set_shortlist(SESSION, list.clone());
     assert!(!fake.status(SESSION).unwrap().running);
-    fake.request_shortlist(SESSION, req.clone(), Some("jcr.csv".into()))
-        .unwrap();
-    assert_eq!(fake.status(SESSION).unwrap().shortlist.unwrap(), list);
+    fake.request_shortlist(
+        SESSION,
+        ShortlistInput {
+            requirements: req.clone(),
+            jcr: Some("jcr.csv".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fake.status(SESSION).unwrap().shortlist,
+        crate::desktop::ux::seams::ShortlistView::from(list).rows
+    );
     fake.fail("cancel", Failure::new("scripted", "failure"));
     assert_eq!(fake.cancel(SESSION).unwrap_err().kind, "scripted");
     fake.clear_failure("cancel");
@@ -141,7 +162,7 @@ fn status_empty_and_unknown_session() {
     let r = Rig::new();
     let status = r.paper.status(SESSION).unwrap();
     assert!(!status.running);
-    assert!(status.shortlist.is_none());
+    assert!(status.shortlist.is_empty());
     assert_eq!(
         r.paper.status("missing-session").unwrap_err().kind,
         "not_found"
@@ -171,12 +192,28 @@ fn start_rechecks_choice_and_estimate() {
     let r = Rig::new();
     let list = r.seed();
     assert_eq!(
-        r.paper.start(SESSION, "wrong").unwrap_err().kind,
+        r.paper
+            .start(
+                SESSION,
+                StartInput {
+                    estimate_digest: "wrong".into()
+                }
+            )
+            .unwrap_err()
+            .kind,
         "no_journal"
     );
     r.choose(&list);
     assert_eq!(
-        r.paper.start(SESSION, "wrong").unwrap_err().kind,
+        r.paper
+            .start(
+                SESSION,
+                StartInput {
+                    estimate_digest: "wrong".into()
+                }
+            )
+            .unwrap_err()
+            .kind,
         "estimate_changed"
     );
 }
@@ -188,21 +225,34 @@ fn models_round_trip_and_changed_model_rejects_old_estimate() {
     r.choose(&list);
     let mut models = paper.models(SESSION).unwrap();
     let old = paper.estimate(SESSION).unwrap();
+    assert!(paper.estimate_is_fresh(SESSION, &old.digest).unwrap());
     models.gemini_revise = "gemini-custom".into();
     paper.set_models(SESSION, models.clone()).unwrap();
+    assert!(!paper.estimate_is_fresh(SESSION, &old.digest).unwrap());
     let status = paper.status(SESSION).unwrap();
-    assert_eq!(status.choice.unwrap().journal_id, list.ranked[0].journal.id);
+    assert_eq!(status.journal.unwrap().id, list.ranked[0].journal.id);
     assert_eq!(status.estimate.unwrap().digest, old.digest);
     assert_eq!(paper.models(SESSION).unwrap(), models);
     let saved: paper::models::PassModels = serde_json::from_slice(
         &fs::read(r.home.path().join("settings/paper-models.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(saved, models);
+    assert_eq!(
+        crate::desktop::ux::seams::PassModels::from(saved.clone()),
+        models
+    );
     let updated = paper.estimate(SESSION).unwrap();
     assert_ne!(old.digest, updated.digest);
     assert_eq!(
-        paper.start(SESSION, &old.digest).unwrap_err().kind,
+        paper
+            .start(
+                SESSION,
+                StartInput {
+                    estimate_digest: old.digest.clone()
+                }
+            )
+            .unwrap_err()
+            .kind,
         "estimate_changed"
     );
     models.gemini_revise = "invalid model".into();
@@ -210,7 +260,15 @@ fn models_round_trip_and_changed_model_rejects_old_estimate() {
         paper.set_models(SESSION, models).unwrap_err().kind,
         "invalid_model"
     );
-    assert_eq!(paper.models(SESSION).unwrap(), saved);
+    assert_eq!(paper.models(SESSION).unwrap(), saved.into());
+}
+
+#[test]
+fn gemini_pass_defaults_to_hydrogen() {
+    assert_eq!(
+        paper::models::PassModels::default().gemini_revise,
+        crate::usage::pools::HYDROGEN_XHIGH
+    );
 }
 #[test]
 fn second_write_is_busy() {
@@ -284,7 +342,13 @@ fn second_write_is_busy() {
     {
         std::env::set_var("AXIOM_CURL_CMD", serde_json::to_string(&argv).unwrap());
         r.paper
-            .request_shortlist(SESSION, requirements(), None)
+            .request_shortlist(
+                SESSION,
+                ShortlistInput {
+                    requirements: requirements().into(),
+                    jcr: None,
+                },
+            )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !ready.exists() && Instant::now() < deadline {
@@ -293,7 +357,13 @@ fn second_write_is_busy() {
         assert!(ready.exists(), "shortlist did not reach blocking transport");
         assert_eq!(
             r.paper
-                .request_shortlist(SESSION, requirements(), None)
+                .request_shortlist(
+                    SESSION,
+                    ShortlistInput {
+                        requirements: requirements().into(),
+                        jcr: None
+                    }
+                )
                 .unwrap_err()
                 .kind,
             "busy"
@@ -312,13 +382,34 @@ fn second_write_is_busy() {
 #[test]
 fn preview_missing_pdf() {
     let r = Rig::new();
-    assert_eq!(r.paper.preview(SESSION, 1, 600).unwrap_err().kind, "no_pdf");
+    assert_eq!(
+        r.paper
+            .preview(
+                SESSION,
+                PreviewInput {
+                    page: 1,
+                    width_px: 600
+                }
+            )
+            .unwrap_err()
+            .kind,
+        "no_pdf"
+    );
 }
 #[test]
 fn preview_sample_and_bad_page() {
     let r = Rig::new();
     let pdf = r.pdf("pdf/sample.pdf");
-    let result = r.paper.preview(SESSION, 1, 600).unwrap();
+    let result = r
+        .paper
+        .preview(
+            SESSION,
+            PreviewInput {
+                page: 1,
+                width_px: 600,
+            },
+        )
+        .unwrap();
     #[cfg(windows)]
     match result {
         Preview::Ready(image) => {
@@ -343,7 +434,16 @@ fn preview_sample_and_bad_page() {
     #[cfg(windows)]
     let _ = pdf;
     assert_eq!(
-        r.paper.preview(SESSION, 2, 600).unwrap_err().kind,
+        r.paper
+            .preview(
+                SESSION,
+                PreviewInput {
+                    page: 2,
+                    width_px: 600
+                }
+            )
+            .unwrap_err()
+            .kind,
         "bad_page"
     );
 }
@@ -351,7 +451,17 @@ fn preview_sample_and_bad_page() {
 fn preview_corrupt_pdf_is_unavailable() {
     let r = Rig::new();
     let pdf = r.pdf("render/garbage.pdf");
-    match r.paper.preview(SESSION, 1, 600).unwrap() {
+    match r
+        .paper
+        .preview(
+            SESSION,
+            PreviewInput {
+                page: 1,
+                width_px: 600,
+            },
+        )
+        .unwrap()
+    {
         Preview::Unavailable {
             reason,
             pdf: actual,
@@ -437,4 +547,57 @@ fn production_has_paper() {
 fn production_sources_do_not_construct_fake_paper() {
     assert!(!include_str!("wiring.rs").contains("FakePaper"));
     assert!(!include_str!("paper.rs").contains("FakePaper"));
+}
+
+#[test]
+fn estimate_display_mapping_preserves_amount_and_digest() {
+    let estimate = paper::SpendEstimate {
+        per_member: Default::default(),
+        priced_usd: Some(1.25),
+        samples: 1,
+        unpriced: vec![],
+        line: "estimate".into(),
+        digest: "digest".into(),
+    };
+    let row: crate::desktop::ux::seams::EstimateRow = estimate.into();
+    assert_eq!(row.digest, "digest");
+    assert_eq!(row.usd, Some(1.25));
+    assert_eq!(row.line, "estimate");
+    assert!(!row.stale);
+}
+
+#[test]
+fn evidence_question_is_loaded_separately_from_status_hash() {
+    use crate::paper::{evidence, EvidenceBundle};
+    let home = tempfile::tempdir().unwrap();
+    let session = "paper-question";
+    let goal = crate::goal::open(
+        home.path(),
+        session,
+        "wish",
+        Some(home.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let store = crate::orch::store_for_goal(home.path(), &goal).unwrap();
+    let bundle = EvidenceBundle {
+        version: 1,
+        program: "program".into(),
+        question: "Research question?".into(),
+        artifacts: vec![],
+        claims: vec![],
+        evidence: vec![],
+        quantities: vec![],
+        references: vec![],
+        hash: "evidence-hash".into(),
+    };
+    evidence::save(&store, &bundle).unwrap();
+    let service = SessionPaper::new(home.path());
+    assert_eq!(
+        service.status(session).unwrap().evidence.as_deref(),
+        Some("evidence-hash")
+    );
+    assert_eq!(
+        service.evidence_question(session).unwrap().as_deref(),
+        Some("Research question?")
+    );
 }
