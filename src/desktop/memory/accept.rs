@@ -7,10 +7,31 @@
 //! The named confirmation opening for every Delete path requires a GPUI window.
 use super::logic::*;
 use super::*;
+use crate::desktop::model::{MenuEffect, UndoStack};
 use std::prelude::v1::test;
 
 fn entry(id: i64, title: &str) -> MemoryEntry {
     MemoryEntry { id, title: title.into(), body: format!("body {id}").into(), project: "p".into(), wish: "".into(), confirmed: "".into(), corrected: false, stale: false, graph: None }
+}
+
+#[test]
+fn five_thousand_memories_have_a_bounded_visible_range() {
+    let entries: Vec<_> = (0..5000).map(|id| entry(id, "memory")).collect();
+    let rows = visible_memories(&entries, None, &[]);
+    let height = f32::from(theme::row_height(theme::Density::Comfortable) * 2.0);
+    let handle = VirtualListHandle::uniform(rows.len(), height);
+    for offset in [0.0, height * 2500.0, height * 4999.0] {
+        let range = handle.visible_range(offset, 1200.0, 1);
+        assert!(!range.is_empty() && range.len() <= 64, "{range:?}");
+    }
+}
+
+#[test]
+fn phase_six_unavailable_note_translates_in_both_languages() {
+    let note = "Phase 6 memory and Obsidian features are unavailable";
+    assert_eq!(translate(Lang::En, T, note), note);
+    assert_eq!(translate(Lang::ZhTw, T, note), "第 6 階段的記憶與 Obsidian 功能尚未提供");
+    assert!(include_str!("../memory.rs").contains("tr(cx, T, \"Phase 6 memory and Obsidian features are unavailable\")"));
 }
 fn prior(body: &str) -> MemoryPrior { MemoryPrior { body: body.into(), summary: "s".into(), corrected: None, confirmed: 0.0 } }
 fn undo(id: i64, prior: &MemoryPrior) -> Undoable { Undoable::Memory { id, prior: prior.clone() } }

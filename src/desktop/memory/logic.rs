@@ -1,8 +1,29 @@
 use super::{AppError, MemoryEntry, MemoryPrior, MenuAction, MenuTarget, PanelState, Undoable};
 use super::theme::{self, Density, Step};
 use gpui_kit::Pixels;
-use crate::desktop::settings::ViewMemory;
+use crate::desktop::model::facade::settings::ViewMemory;
 use std::collections::HashMap;
+
+use super::work::matches_terms;
+use std::cmp::Reverse;
+
+fn entry_matches(entry: &MemoryEntry, terms: &[String]) -> bool {
+    matches_terms(&[&entry.title, &entry.body, &entry.project, &entry.wish], terms)
+}
+
+/// Indices into `memory` of the rows to show, most recently recorded first.
+pub fn visible_memories(
+    memory: &[MemoryEntry],
+    project: Option<&str>,
+    terms: &[String],
+) -> Vec<usize> {
+    let mut rows: Vec<usize> = (0..memory.len())
+        .filter(|&i| project.is_none_or(|project| memory[i].project.as_ref() == project))
+        .filter(|&i| entry_matches(&memory[i], terms))
+        .collect();
+    rows.sort_by_key(|&i| Reverse(memory[i].id));
+    rows
+}
 
 /// The longest correction the memory store accepts, in lines.
 pub(super) const MAX_CORRECTION_LINES: usize = 12;

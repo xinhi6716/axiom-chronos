@@ -10,6 +10,39 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[gpui_kit::test]
+fn phase_six_note_is_visible_in_both_languages(cx: &mut gpui_kit::TestAppContext) {
+    use axiom::desktop::{i18n, model::Screen, theme, Shell, Store};
+    use gpui_kit::component::ThemeMode;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, WindowOptions};
+
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        theme::apply(ThemeMode::Dark, None, cx);
+        i18n::set(i18n::Lang::En, cx);
+        cx.set_global(Store::open(true));
+    });
+    let mut state = demo::state();
+    state.view = Screen::Memory;
+    let state = cx.new(|_| state);
+    let (window, _) = cx.update(|cx| gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+        cx.new(|cx| Shell::new(state, false, window, cx))
+    })).unwrap();
+    for (lang, expected) in [
+        (i18n::Lang::En, "Phase 6 memory and Obsidian features are unavailable"),
+        (i18n::Lang::ZhTw, "第 6 階段的記憶與 Obsidian 功能尚未提供"),
+    ] {
+        cx.update(|cx| i18n::set(lang, cx));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.refresh();
+            window.render_frame(cx);
+            assert!(gpui_kit::base::test_support::texts(window).iter().any(|text| text.visible() && text.text() == expected));
+        }).unwrap();
+    }
+}
+
 struct TempHome(PathBuf);
 impl TempHome {
     fn new() -> Self {
