@@ -3,6 +3,21 @@ use std::prelude::v1::test;
 use crate::desktop::{palette, demo, model::{MenuAction, MenuTarget}, ux::Page};
 
 #[test]
+fn context_menu_action() {
+    assert_eq!(gpui_kit::Action::name(&ContextMenu), "chronos_keys::ContextMenu");
+    let _binding = gpui_kit::KeyBinding::new("shift-f10", ContextMenu, Some("!Input"));
+}
+
+#[test]
+fn context_menu_action_is_not_palettes() {
+    let facade_name = gpui_kit::Action::name(&ContextMenu);
+    let palette_name = gpui_kit::Action::name(&palette::ContextMenu);
+    assert_eq!(palette_name, "chronos::ContextMenu");
+    // The overlays task must switch the palette to the facade action.
+    assert_ne!(facade_name, palette_name);
+}
+
+#[test]
 fn shortcut_table_matches_owner() {
     assert_eq!(SHORTCUTS.len(), palette::SHORTCUTS.len());
     for (a, b) in SHORTCUTS.iter().zip(palette::SHORTCUTS) {

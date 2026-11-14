@@ -11,6 +11,8 @@ use gpui_kit::component::{IconName, IndexPath};
 use gpui_kit::*;
 use std::rc::Rc;
 
+gpui_kit::actions!(chronos_keys, [ContextMenu]);
+
 /// Where a shortcut works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Area {
