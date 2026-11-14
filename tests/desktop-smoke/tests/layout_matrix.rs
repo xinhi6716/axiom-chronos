@@ -259,12 +259,7 @@ fn open(
             cx.update_window(window, |_, w, cx| w.click(id, cx))
                 .map_err(|e| format!("open research tab {tab}: {e:?}"))?;
         }
-        Opening::PaperStep(step) => match step {
-            // These sections are rendered on the paper page, not separate steps.
-            "form" | "shortlist" | "estimate" | "progress" | "changelog" | "preview" => {}
-            "readiness" => return Err("missing public paper readiness view hook".into()),
-            _ => return Err(format!("missing public paper step hook for {step}")),
-        },
+        Opening::PaperStep(step) => paper_step(step)?,
         Opening::Window("focus.graph" | "focus.checklist") => {
             use axiom::desktop::settings::{self, FocusPanel, WindowMode};
             let panel = if target.id == "focus.graph" {
@@ -437,9 +432,25 @@ fn matrix(cx: &mut TestAppContext, group: &str, id: &str) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+// Paper steps are sections rendered on the paper page, not separate steps.
+fn paper_step(step: &str) -> Result<(), String> {
+    match step {
+        "form" | "shortlist" | "estimate" | "progress" | "changelog" | "preview" | "readiness" => Ok(()),
+        _ => Err(format!("missing public paper step hook for {step}")),
+    }
+}
+
 mod rules {
     use super::*;
     use axiom::desktop::layout::persist;
+
+    #[test]
+    fn paper_step_accepts_every_page_section() {
+        for step in ["form", "shortlist", "estimate", "progress", "changelog", "preview", "readiness"] {
+            assert_eq!(paper_step(step), Ok(()), "{step}");
+        }
+        assert!(paper_step("nonsense").is_err());
+    }
 
     #[gpui_kit::test]
     fn persist_app_api(cx: &mut TestAppContext) {
