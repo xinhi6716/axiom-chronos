@@ -110,9 +110,25 @@ impl Actions {
         let generation = self.generation;
         let (reply, response) = std::sync::mpsc::channel();
         port.action(request, now, reply);
-        let task = cx.background_spawn(async move { response.recv() });
+        let deterministic = cx.background_executor().is_test();
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = if deterministic {
+                std::future::poll_fn(|cx| match response.try_recv() {
+                    Ok(value) => std::task::Poll::Ready(Ok(value)),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        std::task::Poll::Ready(Err(std::sync::mpsc::RecvError))
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await
+            } else {
+                cx.background_executor()
+                    .spawn(async move { response.recv() })
+                    .await
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;

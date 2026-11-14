@@ -309,15 +309,33 @@ impl Workbench {
         self.load = LoadState::Opening;
         self.port.remember(&mut self.prefs, r.clone());
         self.save();
+        let deterministic = cx.background_executor().is_test();
         cx.spawn(async move |this, cx| {
             let mut rx = rx;
             loop {
-                let task = cx.background_executor().spawn(async move {
-                    let result = rx.recv();
-                    (rx, result)
-                });
-                let (receiver, result) = task.await;
-                rx = receiver;
+                let result = if deterministic {
+                    std::future::poll_fn(|cx| match rx.try_recv() {
+                        Ok(event) => std::task::Poll::Ready(Ok(event)),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            std::task::Poll::Ready(Err(mpsc::RecvError))
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            // Like MapWaiter, yield to the deterministic scheduler:
+                            // an OS worker cannot wake it directly.
+                            cx.waker().wake_by_ref();
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await
+                } else {
+                    let task = cx.background_executor().spawn(async move {
+                        let result = rx.recv();
+                        (rx, result)
+                    });
+                    let (receiver, result) = task.await;
+                    rx = receiver;
+                    result
+                };
                 let Ok(event) = result else { break };
                 let terminal = matches!(event, OpenEvent::Ready { .. } | OpenEvent::Failed(..));
                 let active = this
