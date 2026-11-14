@@ -62,6 +62,9 @@ pub struct EventSummary {
     pub zh: String,
     pub raw: Option<String>,
 }
+pub fn summarize_text(text: &str) -> EventSummary {
+    crate::desktop::live::events::summarize_text(text)
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum NoticeKind {
     MaxTurns {
@@ -400,11 +403,20 @@ pub fn clock(local_secs: i64) -> String {
     format!("{:02}:{:02}:{:02}", day / 3600, day % 3600 / 60, day % 60)
 }
 
+pub fn local_clock_at(secs: i64) -> String {
+    clock(secs + i64::from(crate::session::local_offset_secs(secs)))
+}
+
 pub fn now_clock() -> SharedString {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
-    clock(secs + i64::from(crate::session::local_offset_secs(secs))).into()
+    local_clock_at(secs).into()
+}
+
+/// Call from a background task; spawning does not wait for the child process.
+pub fn spawn_editor(program: &str, args: &[String]) -> bool {
+    crate::base::proc::cmd(program).args(args).spawn().is_ok()
 }
 
 /// A question asked before something that cannot be taken back or would be a surprise.

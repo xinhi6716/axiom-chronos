@@ -2,6 +2,25 @@ use super::*;
 use std::prelude::v1::test;
 
 #[test]
+fn summarize_text_matches_engine() {
+    for text in [r#"{"type":"event","message":"hello"}"#, "plain text", ""] {
+        assert_eq!(summarize_text(text), crate::desktop::live::events::summarize_text(text));
+    }
+}
+
+#[test]
+fn local_clock_at_applies_offset() {
+    for secs in [0, 1_700_000_000, -1] {
+        assert_eq!(local_clock_at(secs), clock(secs + i64::from(crate::session::local_offset_secs(secs))));
+    }
+}
+
+#[test]
+fn spawn_editor_reports_missing_program() {
+    assert!(!spawn_editor("axiom-editor-program-that-cannot-exist-1794558470508", &[]));
+}
+
+#[test]
 fn facade_exposes_work_helpers() {
     let run = crate::desktop::demo::sample_run();
     assert_eq!(glyph_state(run.status, run.verified_end()), crate::desktop::wishes::glyph_state(run.status, run.verified_end()));
