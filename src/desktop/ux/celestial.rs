@@ -42,25 +42,8 @@ pub struct CouncilView {
     pub spent_usd: Option<f64>,
     pub cap_usd: Option<f64>,
 }
-#[derive(Clone, Debug, PartialEq)]
-pub enum DualCore {
-    Off,
-    Deciding {
-        topic: SharedString,
-    },
-    Agreed {
-        topic: SharedString,
-    },
-    Split {
-        topic: SharedString,
-    },
-    Adjudicated {
-        topic: SharedString,
-        by: SharedString,
-    },
-}
 
-pub use crate::desktop::ux::seams::dual_core::{DualCoreSource, FakeDualCore};
+pub use crate::desktop::ux::seams::dual_core::{DualCore, DualCoreSource, FakeDualCore};
 pub use crate::desktop::motion::Driver as CelestialDriver;
 
 const TABLE: Table = &[

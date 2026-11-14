@@ -2,7 +2,7 @@ use crate::{
     base::{self, Failure, Res},
     desktop::{
         i18n::Lang,
-        ux::seams::{OptimizerRunner, Proposal},
+        ux::seams::{OptimizerRunner, Proposal, ProposalLang},
     },
 };
 use std::{io::Write, process::Stdio, time::Duration};
@@ -119,9 +119,18 @@ pub(in crate::desktop) fn claude_args() -> &'static [&'static str] {
     ]
 }
 
+impl From<Lang> for ProposalLang {
+    fn from(lang: Lang) -> Self {
+        match lang {
+            Lang::ZhTw => Self::ZhTw,
+            Lang::En => Self::En,
+        }
+    }
+}
+
 pub(in crate::desktop) struct ClaudeOptimizer;
 impl OptimizerRunner for ClaudeOptimizer {
-    fn propose(&self, original: &str, lang: Lang) -> Res<Proposal> {
+    fn propose(&self, original: &str, lang: ProposalLang) -> Res<Proposal> {
         let mut command = base::proc::cmd("claude");
         #[cfg(unix)]
         {
@@ -135,7 +144,7 @@ impl OptimizerRunner for ClaudeOptimizer {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Failure::new("process", e.to_string()))?;
-        let language = if lang == Lang::ZhTw {
+        let language = if lang == ProposalLang::ZhTw {
             "Traditional Chinese"
         } else {
             "English"

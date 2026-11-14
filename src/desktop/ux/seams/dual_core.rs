@@ -1,5 +1,22 @@
-use super::super::celestial::DualCore;
+use gpui_kit::SharedString;
 use std::{collections::HashMap, sync::Mutex};
+#[derive(Clone, Debug, PartialEq)]
+pub enum DualCore {
+    Off,
+    Deciding {
+        topic: SharedString,
+    },
+    Agreed {
+        topic: SharedString,
+    },
+    Split {
+        topic: SharedString,
+    },
+    Adjudicated {
+        topic: SharedString,
+        by: SharedString,
+    },
+}
 pub trait DualCoreSource: Send + Sync + 'static {
     fn state(&self, session: &str) -> DualCore;
 }

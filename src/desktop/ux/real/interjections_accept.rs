@@ -261,9 +261,7 @@ fn draft(session: &str, id: &str, text: &str) -> Draft {
 }
 #[test]
 fn outbox_preserves_direct_receipt_and_rejected_receipt() {
-    use crate::desktop::{
-        data::outbox::TicketState, ux::seams::interjection::interjection_outbox_for,
-    };
+    use crate::desktop::data::{interjection_outbox_for, outbox::TicketState};
     struct Recording {
         inner: Arc<EngineInterjections>,
         result: Mutex<Option<crate::desktop::ux::seams::Receipt>>,

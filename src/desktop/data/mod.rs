@@ -4,6 +4,7 @@ pub mod faults;
 pub mod feed;
 pub mod io;
 pub mod outbox;
+pub mod outboxes;
 
 use crate::base::Res;
 use crate::desktop::components::panel::PanelState;
@@ -34,6 +35,7 @@ pub trait Source<T>: Send + 'static {
 }
 pub use feed::Feed;
 pub use outbox::{Outbox, Outcome, Ticket, TicketState};
+pub use outboxes::{approval_outbox_for, interjection_outbox_for, unit_action_outbox_for};
 
 /// Call once for each newly received orchestrator event, immediately before
 /// `Projection::apply` in `desktop/live/feed.rs::Feed::poll`.

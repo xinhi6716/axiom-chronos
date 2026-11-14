@@ -53,7 +53,7 @@ impl ApprovalService for FlakyApproval {
 
 #[test]
 fn outboxes_share_adapter_and_execute_duplicate_only_once() {
-    use crate::desktop::{data::outbox::TicketState, ux::seams::approvals::approval_outbox_for};
+    use crate::desktop::data::{approval_outbox_for, outbox::TicketState};
     let f = Fixture::new();
     let service = Arc::new(f.service());
     let card = service.pending().remove(0);
@@ -72,7 +72,7 @@ fn outboxes_share_adapter_and_execute_duplicate_only_once() {
 
 #[test]
 fn outbox_retries_refuses_and_retains_failed_tickets() {
-    use crate::desktop::{data::outbox::TicketState, ux::seams::approvals::approval_outbox_for};
+    use crate::desktop::data::{approval_outbox_for, outbox::TicketState};
     let f = Fixture::new();
     let service = Arc::new(FlakyApproval {
         inner: f.service(),

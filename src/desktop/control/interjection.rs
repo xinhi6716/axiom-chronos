@@ -156,7 +156,7 @@ impl InterjectionPanel {
         if let Some(service) = seam.clone() {
             state.update(cx, |state, _| {
                 if state.ux.seams.interjection_outbox.is_none() {
-                    state.ux.seams.interjection_outbox = Some(crate::desktop::ux::seams::interjection_outbox_for(service));
+                    state.ux.seams.interjection_outbox = Some(crate::desktop::data::interjection_outbox_for(service));
                 }
             });
         }

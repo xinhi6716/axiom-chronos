@@ -14,6 +14,7 @@ pub use activity::*;
 pub use celestial::*;
 pub use events::*;
 use crate::desktop::data::outbox::Outbox;
+use crate::desktop::data::{approval_outbox_for, interjection_outbox_for, unit_action_outbox_for};
 use gpui_kit::{Context, SharedString};
 use seams::*;
 use std::{

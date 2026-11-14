@@ -1,8 +1,7 @@
 use crate::base::{Failure, Res};
-use crate::desktop::data::outbox::{Outbox, Outcome};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalCard {
@@ -41,29 +40,6 @@ pub struct ApprovalReceipt {
 pub trait ApprovalService: Send + Sync + 'static {
     fn pending(&self) -> Vec<ApprovalCard>;
     fn decide(&self, d: &Decision) -> Res<ApprovalReceipt>;
-}
-pub(crate) fn outbox_failure(error: Failure) -> Outcome {
-    match error.kind.as_str() {
-        "transient"
-        | "offline"
-        | "unreachable"
-        | "unavailable"
-        | "service_unavailable"
-        | "timeout" => Outcome::Retry(error.to_string()),
-        _ => Outcome::Refused(error.to_string()),
-    }
-}
-
-pub fn approval_outbox_for(service: Arc<dyn ApprovalService>) -> Outbox<Decision> {
-    Outbox::new(move |decision: &Decision, key| {
-        if decision.key != key {
-            return Outcome::Refused("idempotency key does not match decision".into());
-        }
-        match service.decide(decision) {
-            Ok(_) => Outcome::Applied,
-            Err(error) => outbox_failure(error),
-        }
-    })
 }
 #[derive(Default)]
 pub struct Book {
