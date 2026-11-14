@@ -495,7 +495,7 @@ fn enter(gate: &'static Gate, me: &Holder, deadline: Instant) -> Res<GateGuard> 
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err(fail(format!(
+            return Err(locked_out(format!(
                 "store lock held by {other} in another thread of this process"
             )));
         }
@@ -594,7 +594,43 @@ fn clear_dead_lock(path: &Path, pid: &str, raw: &str, force: bool) -> bool {
     }
     cleared
 }
+/// The kind of the error a wait for the store lock ends with at its deadline.
+pub const LOCK_TIMEOUT: &str = "store_locked";
+fn locked_out(message: String) -> Failure {
+    Failure::new(LOCK_TIMEOUT, message)
+}
+thread_local! {
+    static PATIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Until dropped, a store lock this thread takes waits past the deadline instead of failing,
+/// reporting the holder each time. For writes that must not be lost, such as a unit's finish;
+/// a thread must hold no other lock while it waits this way.
+pub struct PatientScope {
+    previous: bool,
+}
+impl Drop for PatientScope {
+    fn drop(&mut self) {
+        PATIENT.with(|p| p.set(self.previous));
+    }
+}
+pub fn patient_scope() -> PatientScope {
+    PatientScope {
+        previous: PATIENT.with(|p| p.replace(true)),
+    }
+}
 fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
+    loop {
+        match acquire_once(store, force, note, wait) {
+            Err(e) if e.kind == LOCK_TIMEOUT && PATIENT.with(|p| p.get()) => {
+                eprintln!("{}; still waiting", e.message);
+            }
+            taken => return taken,
+        }
+    }
+}
+/// One wait with one deadline: the other threads of this process first, then the lock file
+/// with what is left of the time.
+fn acquire_once(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
     let deadline = Instant::now() + wait;
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
     let gate: &'static Gate = *LOCKS
@@ -644,8 +680,11 @@ fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<
             note.push_str(&format!("stealing store lock held by {holder}\n"));
             continue;
         }
-        if holder.pid == me.pid || Instant::now() >= deadline {
+        if holder.pid == me.pid {
             return Err(fail(format!("store lock held by {holder}")));
+        }
+        if Instant::now() >= deadline {
+            return Err(locked_out(format!("store lock held by {holder}")));
         }
         std::thread::sleep(Duration::from_millis(pause));
         pause = (pause * 2).min(50);
@@ -2533,6 +2572,40 @@ mod tests {
         );
         drop(held);
         drop(lock_store(t.path()).expect("released"));
+    }
+
+    #[test]
+    fn a_patient_thread_waits_past_the_deadline_and_others_still_fail() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().to_path_buf();
+        let wait = Duration::from_millis(150);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let lock = lock_store(&store).unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(700));
+                drop(lock);
+            }
+        });
+        held_rx.recv().unwrap();
+        let impatient = acquire(&store, false, &mut String::new(), wait)
+            .err()
+            .expect("an ordinary wait ends at its deadline");
+        assert_eq!(impatient.kind, LOCK_TIMEOUT, "{}", impatient.message);
+        let started = Instant::now();
+        let patient = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let _patient = patient_scope();
+                acquire(&store, false, &mut String::new(), wait).map(drop)
+            }
+        });
+        patient.join().unwrap().expect("a patient wait outlasts the holder");
+        assert!(started.elapsed() > wait, "{:?}", started.elapsed());
+        holder.join().unwrap();
+        assert!(!PATIENT.with(|p| p.get()));
     }
 
     fn live_process() -> std::process::Child {
