@@ -3,7 +3,7 @@ use std::prelude::v1::test;
 
 #[test]
 fn restored_view_text_localizes_and_omits_default_parts() {
-    use crate::research_workspace::index::Op;
+    use crate::desktop::ux::seams::research::{Filter, FilterOp as Op, TabView};
 
     let mut view = TabView::default();
     for lang in [Lang::En, Lang::ZhTw] {
@@ -158,69 +158,72 @@ fn background_index_opens_real_fixture_and_reports_bad_manifest() {
         data.push_str(&format!("M{i},{}\n", row.split_once(',').unwrap().1));
     }
     std::fs::write(path, data).unwrap();
-    let r = ResearchRef {
-        root: tmp.0.join("project"),
-        store: Some(tmp.0.join("store")),
-    };
+    use crate::desktop::ux::seams::research::{OpenEvent, ResearchPort};
+    let adapter = adapter::ResearchAdapter::new(ResearchSeams::default(), None);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        index_research(r, None, 0, SessionPrefs::default(), tx);
-    });
+    adapter.open_observed(tmp.0.join("project"), Some(tmp.0.join("store")), 0, tx);
     let events: Vec<_> = rx.iter().collect();
+    adapter.flush();
     let first_progress = events
         .iter()
-        .position(|e| matches!(e, WorkEvent::Progress(..)))
+        .position(|e| matches!(e, OpenEvent::Progress(..)))
         .unwrap();
     assert!(
         first_progress > 1,
         "a dataset preview must arrive between Located and indexing progress"
     );
-    let rows = match &events[1] {
-        WorkEvent::Preview(rows, false) => rows,
+    assert!(matches!(events[0], OpenEvent::Located(..)));
+    let preview = match &events[1] {
+        OpenEvent::Preview(preview) => preview,
         _ => panic!("expected preview after Located"),
     };
-    assert_eq!(rows.len(), 200);
-    let index = events
-        .iter()
-        .find_map(|e| match e {
-            WorkEvent::Ready(index, _) => Some(index),
-            _ => None,
-        })
-        .unwrap();
+    assert_eq!(preview.rows.len(), 200);
+    let located = locate(
+        &tmp.0.join("project"),
+        &LocateOptions {
+            store: Some(tmp.0.join("store")),
+            orch_home: None,
+        },
+    )
+    .unwrap();
+    let index = Index::build(Arc::new(located), Limits::default(), &|_, _| {}).unwrap();
     let page = dataset::load_page(
-        index,
+        &index,
         crate::research_workspace::dataset::DataLayer::Extracted,
         &[],
         0,
     )
     .unwrap()
     .0;
+    let display = adapter.dataset().unwrap();
     assert_eq!(page.rows.len(), 200);
-    assert_eq!(rows[0].fields["variable"], page.rows[0].variable);
-    assert!(events.iter().any(|e| matches!(e, WorkEvent::Progress(..))));
-    assert!(events
+    assert_eq!(display.rows.len(), 200);
+    assert_eq!(display.rows[0].cells[2], page.rows[0].variable);
+    let variable = preview
+        .columns
         .iter()
-        .any(|e| matches!(e, WorkEvent::Ready(_, map) if stages::blocker(map).is_some())));
+        .position(|column| column.key == "variable")
+        .unwrap();
+    assert_eq!(preview.rows[0].cells[variable], page.rows[0].variable);
+    assert!(events.iter().any(|e| matches!(e, OpenEvent::Progress(..))));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        OpenEvent::Ready {
+            blocker_en: Some(_),
+            ..
+        }
+    )));
     std::fs::write(tmp.0.join("project/research-manifest.json"), "{").unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    index_research(
-        ResearchRef {
-            root: tmp.0.join("project"),
-            store: None,
-        },
-        None,
-        0,
-        SessionPrefs::default(),
-        tx,
-    );
+    adapter.open_observed(tmp.0.join("project"), None, 0, tx);
     assert!(
-        matches!(rx.recv().unwrap(), WorkEvent::Failed(Failure { kind, .. }) if kind == "invalid_manifest")
+        matches!(rx.recv().unwrap(), OpenEvent::Failed(Failure { kind, .. }) if kind == "invalid_manifest")
     );
 }
 
 #[test]
 fn session_queue_restores_tab_filters_and_offset_after_reopen() {
-    use crate::research_workspace::index::{Filter, Op};
+    use crate::desktop::ux::seams::research::FilterOp as Op;
     let temp = Temp::new();
     let queue = session_queue(&temp.0);
     let filter = Filter {

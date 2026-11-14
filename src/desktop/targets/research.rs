@@ -26,14 +26,14 @@ pub(super) fn targets() -> Vec<Target> {
     ];
     for target in &mut targets {
         target.states = &[CaptureState::Live];
-        // Use actual GPUI IDs, including tab controls available before opening a research.
+        // Each ID is attached to a real element in the research page.
         let ids: (&'static [&'static str], &'static [&'static str]) = match target.id {
-            "research" => (&["research-page"], &["research-back", "research-open-button"]),
-            "research.map" => (&["research-map-panel"], &["research-tab-map"]),
-            "research.sources" => (&["research-sources-panel"], &["research-tab-sources"]),
-            "research.evidence" => (&["research-evidence-panel"], &["research-tab-evidence"]),
-            "research.dataset" => (&["research-dataset-panel"], &["research-tab-dataset"]),
-            "research.exports" => (&["research-exports-panel"], &["research-tab-exports"]),
+            "research" => (&["research.page"], &["action:research.back", "action:research.open"]),
+            "research.map" => (&["research.map.panel"], &["action:research.map.open"]),
+            "research.sources" => (&["research.sources.panel"], &["action:research.sources.open"]),
+            "research.evidence" => (&["research.evidence.panel"], &["action:research.evidence.open"]),
+            "research.dataset" => (&["research.dataset.panel"], &["action:research.dataset.open"]),
+            "research.exports" => (&["research.exports.panel"], &["action:research.exports.open"]),
             _ => unreachable!(),
         };
         (target.panels, target.actions) = ids;

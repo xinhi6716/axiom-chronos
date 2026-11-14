@@ -1,6 +1,6 @@
 //! UI-facing research data and non-blocking commands.
 use crate::base::Res;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -65,6 +65,62 @@ pub struct TabView {
     pub selection: Option<String>,
     pub node: Option<String>,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResearchRef {
+    pub root: PathBuf,
+    pub store: Option<PathBuf>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewState {
+    pub tab: String,
+    pub tabs: BTreeMap<String, TabView>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionPrefs {
+    pub last: Option<ResearchRef>,
+    pub recent: Vec<ResearchRef>,
+    pub views: BTreeMap<String, ViewState>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManifestSource {
+    File,
+    Adapter { name: String },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResearchInfo {
+    pub id: String,
+    pub title: String,
+    pub version: String,
+    pub source: ManifestSource,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpotVerdict {
+    Confirm,
+    Dispute { reason: String },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reverify {
+    Pending,
+    Passed,
+    Failed { reason: String },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorrectionReceipt {
+    pub stage: String,
+    pub detail: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorrectionStatus {
+    pub id: String,
+    pub who: String,
+    pub why: String,
+    pub research_version: String,
+    pub reverify: Reverify,
+    pub invalidates: Vec<String>,
+    pub receipt: Option<CorrectionReceipt>,
+    pub draft: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResearchNotice {
     pub kind: String,
@@ -233,9 +289,53 @@ pub struct Correction {
     pub why: String,
 }
 
+#[derive(Clone, Debug)]
+pub enum OpenEvent {
+    Located(ResearchInfo, usize),
+    Preview(DatasetDisplay),
+    Progress(usize, usize),
+    Ready {
+        blocker_en: Option<String>,
+        blocker_zh: Option<String>,
+        safe: bool,
+    },
+    Failed(crate::base::Failure),
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionSnapshot {
+    pub session: bool,
+    pub corrections: Vec<CorrectionStatus>,
+}
+#[derive(Clone, Debug)]
+pub enum ActionRequest {
+    Open,
+    Spot {
+        target: String,
+        node: Option<String>,
+        verdict: SpotVerdict,
+    },
+    Correct(Correction),
+    Retry(String),
+    Poll,
+}
+
 /// Implementations enqueue commands; disk, indexing and rendering never run in the caller.
 pub trait ResearchPort: Send + Sync {
     fn open(&self, root: PathBuf, store: Option<PathBuf>);
+    fn open_observed(
+        &self,
+        root: PathBuf,
+        store: Option<PathBuf>,
+        now_ms: i64,
+        events: std::sync::mpsc::Sender<OpenEvent>,
+    );
+    fn remember(&self, prefs: &mut SessionPrefs, reference: ResearchRef);
+    fn action(
+        &self,
+        request: ActionRequest,
+        now_ms: i64,
+        reply: std::sync::mpsc::Sender<Res<ActionSnapshot>>,
+    );
     fn refresh(&self);
     fn sample(&self, node: String, count: usize, seed: u64);
     fn correct(&self, correction: Correction);

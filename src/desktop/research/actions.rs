@@ -1,19 +1,15 @@
 use super::Workbench;
-use crate::{
-    base::Res,
-    desktop::{
-        components::TextField,
-        i18n::{translate, Lang, Table},
-        theme::Tokened as _,
-    },
-    research_workspace::annotations::{AnnotationStore, Correction, CorrectionDraft, Reverify, Verdict},
+use crate::desktop::{
+    components::TextField,
+    i18n::{translate, Lang, Table},
+    theme::Tokened as _,
+    ux::seams::research::{ActionRequest, Correction, CorrectionStatus, Reverify, SpotVerdict},
 };
 use gpui_kit::{
     base::{TestSupportExt as _, TestTextExt as _},
     component::input::InputState,
     *,
 };
-use std::sync::{Arc, Mutex};
 
 const T: Table = &[
     ("Confirm", "確認"),
@@ -46,17 +42,14 @@ pub(super) fn tr(lang: Lang, key: &'static str) -> &'static str {
     translate(lang, T, key)
 }
 
-pub use super::adapter::actions::resolve_session;
-use super::adapter::actions::{who, State};
-
-type Shared = Arc<Mutex<State>>;
+use super::adapter::actions::who;
 
 pub struct Actions {
     wb: Entity<Workbench>,
     key: Option<(std::path::PathBuf, String)>,
     generation: u64,
-    state: Option<Shared>,
-    corrections: Vec<Correction>,
+    state: bool,
+    corrections: Vec<CorrectionStatus>,
     session: bool,
     rows: Vec<(String, Option<String>)>,
     editing: Option<(String, String)>,
@@ -72,7 +65,7 @@ impl Actions {
             wb,
             key: None,
             generation: 0,
-            state: None,
+            state: false,
             corrections: vec![],
             session: false,
             rows: vec![],
@@ -91,42 +84,33 @@ impl Actions {
             .seams
             .research_home
             .clone()
-            .zip(wb.located.as_ref().map(|l| l.manifest.research_id.clone()));
+            .zip(wb.located.as_ref().map(|l| l.id.clone()));
         if key == self.key {
             return;
         }
         self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
         self.key = key.clone();
-        self.state = None;
+        self.state = false;
         self.corrections.clear();
         self.session = false;
         self.error = false;
         self.editing = None;
         self.rows.clear();
         self.polling = false;
-        let (Some((home, id)), Some(located)) = (key, wb.located.clone()) else {
+        if key.is_none() {
             cx.notify();
             return;
-        };
-        let goals = wb.seams.goals_home.clone();
-        let bridge = wb.interjections.clone();
-        let task = cx.background_spawn(async move {
-            let store = AnnotationStore::open(&home, &id)?;
-            let session = bridge
-                .as_ref()
-                .and_then(|_| resolve_session(&located, goals.as_deref()));
-            let corrections = store.corrections(None);
-            Ok::<_, crate::base::Failure>((
-                Arc::new(Mutex::new(State {
-                    store,
-                    session: session.clone(),
-                    bridge,
-                })),
-                corrections,
-                session.is_some(),
-            ))
-        });
+        }
+        self.request(cx, ActionRequest::Open);
+    }
+    fn request(&mut self, cx: &mut Context<Self>, request: ActionRequest) {
+        let wb = self.wb.read(cx);
+        let port = wb.port.clone();
+        let now = wb.clock.now_ms();
+        let generation = self.generation;
+        let (reply, response) = std::sync::mpsc::channel();
+        port.action(request, now, reply);
+        let task = cx.background_spawn(async move { response.recv() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -134,46 +118,24 @@ impl Actions {
                     return;
                 }
                 match result {
-                    Ok((state, corrections, session)) => {
-                        this.state = Some(state);
-                        this.corrections = corrections;
-                        this.session = session;
+                    Ok(Ok(snapshot)) => {
+                        this.state = true;
+                        this.error = false;
+                        this.session = snapshot.session;
+                        this.corrections = snapshot.corrections;
                         this.schedule(cx);
                     }
-                    Err(_) => this.error = true,
+                    _ => this.error = true,
                 }
                 cx.notify();
             });
         })
         .detach();
     }
-    fn run(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut State) -> Res<()> + Send + 'static,
-    ) {
-        let Some(state) = self.state.clone() else {
-            return;
-        };
-        let generation = self.generation;
-        let task = cx.background_spawn(async move {
-            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-            let result = f(&mut state);
-            (result, state.store.corrections(None))
-        });
-        cx.spawn(async move |this, cx| {
-            let (result, corrections) = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
-                this.error = result.is_err();
-                this.corrections = corrections;
-                this.schedule(cx);
-                cx.notify();
-            });
-        })
-        .detach();
+    fn run(&mut self, cx: &mut Context<Self>, request: ActionRequest) {
+        if self.state {
+            self.request(cx, request);
+        }
     }
     fn schedule(&mut self, cx: &mut Context<Self>) {
         if self.polling
@@ -188,7 +150,9 @@ impl Actions {
         self.polling = true;
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(super::adapter::receipt_poll_interval()).await;
+            cx.background_executor()
+                .timer(super::adapter::receipt_poll_interval())
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation {
                     this.polling = false;
@@ -202,19 +166,17 @@ impl Actions {
         &mut self,
         target: &str,
         node: Option<&str>,
-        v: Verdict,
+        v: SpotVerdict,
         cx: &mut Context<Self>,
     ) {
-        let wb = self.wb.read(cx);
-        let Some(ix) = wb.index.clone() else {
-            return;
-        };
-        let clock = wb.clock.clone();
-        let target = target.to_owned();
-        let node = node.map(str::to_owned);
-        self.run(cx, move |s| {
-            s.spot(&ix, &target, node.as_deref(), v, clock.as_ref())
-        });
+        self.run(
+            cx,
+            ActionRequest::Spot {
+                target: target.to_owned(),
+                node: node.map(str::to_owned),
+                verdict: v,
+            },
+        );
     }
     pub fn begin_correction(&mut self, target: &str, field: &str, cx: &mut Context<Self>) {
         self.editing = Some((target.into(), field.into()));
@@ -226,26 +188,20 @@ impl Actions {
         let Some((target, field)) = self.editing.clone() else {
             return;
         };
-        let wb = self.wb.read(cx);
-        let Some(ix) = wb.index.clone() else {
-            return;
-        };
-        let clock = wb.clock.clone();
-        let draft = CorrectionDraft {
+        let draft = Correction {
             target,
             field,
             after,
             why,
             who: who(),
         };
-        self.run(cx, move |s| s.correct(&ix, draft, clock.as_ref()));
+        self.run(cx, ActionRequest::Correct(draft));
     }
     pub fn retry_send(&mut self, correction_id: &str, cx: &mut Context<Self>) {
-        let id = correction_id.to_owned();
-        self.run(cx, move |s| s.retry(&id));
+        self.run(cx, ActionRequest::Retry(correction_id.to_owned()));
     }
     pub fn poll_receipts(&mut self, cx: &mut Context<Self>) {
-        self.run(cx, |s| s.poll());
+        self.run(cx, ActionRequest::Poll);
     }
     fn row(&mut self, target: &str, node: Option<&str>) -> usize {
         row_index(&mut self.rows, target, node)
@@ -293,9 +249,9 @@ pub fn spot_check_buttons(
                 .child(text.clone().test_text(text))
                 .on_click(move |_, _, cx| {
                     let v = if kind == "confirm" {
-                        Verdict::Confirm
+                        SpotVerdict::Confirm
                     } else {
-                        Verdict::Dispute {
+                        SpotVerdict::Dispute {
                             reason: "Disputed at spot-check".into(),
                         }
                     };
@@ -319,21 +275,37 @@ pub fn correction_form(actions: &Entity<Actions>, window: &mut Window, cx: &mut 
             .clone();
         (after, why, a.editing.is_some(), a.session)
     });
-    let mut form = div().flex().flex_col().id("research-correct-form").test_support();
+    let mut form = div()
+        .flex()
+        .flex_col()
+        .id("research-correct-form")
+        .test_support();
     if editing {
         form = form
             .child(tr(lang, "After"))
             .child({
                 let input = after.clone();
-                div().id("research-correct-after").test_support()
-                    .on_click(move |_, window, cx| input.read(cx).focus_handle(cx).focus(window, cx))
-                    .child(TextField::new("research-correct-after-field", &after, &colors))
+                div()
+                    .id("research-correct-after")
+                    .test_support()
+                    .on_click(move |_, window, cx| {
+                        input.read(cx).focus_handle(cx).focus(window, cx)
+                    })
+                    .child(TextField::new(
+                        "research-correct-after-field",
+                        &after,
+                        &colors,
+                    ))
             })
             .child(tr(lang, "Why"))
             .child({
                 let input = why.clone();
-                div().id("research-correct-why").test_support()
-                    .on_click(move |_, window, cx| input.read(cx).focus_handle(cx).focus(window, cx))
+                div()
+                    .id("research-correct-why")
+                    .test_support()
+                    .on_click(move |_, window, cx| {
+                        input.read(cx).focus_handle(cx).focus(window, cx)
+                    })
                     .child(TextField::new("research-correct-why-field", &why, &colors))
             });
         let a = actions.clone();
@@ -360,7 +332,11 @@ pub fn correction_form(actions: &Entity<Actions>, window: &mut Window, cx: &mut 
 pub fn receipts(actions: &Entity<Actions>, cx: &App) -> AnyElement {
     let lang = *cx.global::<Lang>();
     let state = actions.read(cx);
-    let mut list = div().flex().flex_col().id("research-receipts").test_support();
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .id("research-receipts")
+        .test_support();
     if state.error {
         let text = tr(lang, "Action failed").to_owned();
         list = list.child(text.clone().test_text(text));

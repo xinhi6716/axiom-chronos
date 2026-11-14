@@ -2,12 +2,11 @@ mod research_support;
 use axiom::{
     desktop::{
         i18n::Lang,
-        research::{LoadState, ResearchSeams, Workbench},
+        research::{LoadState, ResearchRef, ResearchSeams, Workbench},
     },
     research_workspace::{
         annotations::{AnnotationStore, Verdict},
         funnel::{self, Node},
-        session::ResearchRef,
     },
     seams::SystemClock,
 };
@@ -80,12 +79,21 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
     let copy = fixture_copy("rram");
     let before = tree_hash(&copy);
     let wb = opened_workbench(cx, &copy.join("project"), &copy.join("store"));
-    let (index, research_id) = wb.read_with(cx, |wb, _| {
-        (
-            wb.index.clone().unwrap(),
-            wb.located.as_ref().unwrap().manifest.research_id.clone(),
-        )
-    });
+    let research_id = wb.read_with(cx, |wb, _| wb.located.as_ref().unwrap().id.clone());
+    let located = axiom::research_workspace::manifest::locate(
+        &copy.join("project"),
+        &axiom::research_workspace::manifest::LocateOptions {
+            store: Some(copy.join("store")),
+            orch_home: None,
+        },
+    )
+    .unwrap();
+    let index = axiom::research_workspace::index::Index::build(
+        Arc::new(located),
+        axiom::research_workspace::read::Limits::default(),
+        &|_, _| {},
+    )
+    .unwrap();
     let f = funnel::funnel(&index).unwrap();
     assert_eq!(f.total, 40);
     for lang in [Lang::En, Lang::ZhTw] {

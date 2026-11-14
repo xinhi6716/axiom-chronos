@@ -2,7 +2,7 @@ mod research_support;
 use axiom::{
     desktop::{
         i18n::Lang,
-        research::{LoadState, ResearchSeams, Tab, Workbench},
+        research::{LoadState, ResearchRef as UiResearchRef, ResearchSeams, Tab, Workbench},
         ux::Page,
     },
     research_workspace::{
@@ -307,7 +307,7 @@ fn wait_workbench(cx: &mut TestAppContext, wb: &gpui_kit::Entity<Workbench>) {
 fn workbench_reopens_saved_tab_filters_and_offset(cx: &mut TestAppContext) {
     let copy = fixture_copy("rram");
     let home = temp_dir();
-    let reference = ResearchRef {
+    let reference = UiResearchRef {
         root: copy.join("project"),
         store: Some(copy.join("store")),
     };
@@ -318,9 +318,9 @@ fn workbench_reopens_saved_tab_filters_and_offset(cx: &mut TestAppContext) {
         LoadState::Opening | LoadState::Indexing { .. }
     )));
     wait_workbench(cx, &wb);
-    let filter = Filter {
+    let filter = axiom::desktop::ux::seams::research::Filter {
         column: "device".into(),
-        op: Op::Eq("RRAM".into()),
+        op: axiom::desktop::ux::seams::research::FilterOp::Eq("RRAM".into()),
     };
     wb.update(cx, |wb, cx| {
         wb.set_tab(Tab::Dataset, cx);

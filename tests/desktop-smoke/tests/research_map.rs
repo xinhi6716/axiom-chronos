@@ -212,6 +212,13 @@ fn registered_research_targets_open_their_actual_tab(cx: &mut TestAppContext) {
         })
         .unwrap();
     }
+    click(cx, window, "action:research.sources.open");
+    frame(cx, window);
+    cx.update_window(window, |_, window, _| {
+        assert!(window.try_find("research.sources.panel").is_some());
+        assert!(window.try_find("research.map.panel").is_none());
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

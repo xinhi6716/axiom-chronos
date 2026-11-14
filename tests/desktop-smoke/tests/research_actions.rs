@@ -6,18 +6,15 @@ use axiom::{
         i18n::{self, Lang},
         research::{
             actions::{self, Actions},
-            LoadState, ResearchSeams, Workbench,
+            LoadState, ResearchRef, ResearchSeams, Workbench,
         },
         theme,
         ux::seams::{
             Amendment, Draft, FakeInterjections, Interjections, Receipt, ReceiptStage, RunningWork,
         },
     },
-    research_workspace::{
-        annotations::{
-            register_snapshot, AnnotationStore, Correction, Reverify, SnapshotEntry, Verdict,
-        },
-        session::ResearchRef,
+    research_workspace::annotations::{
+        register_snapshot, AnnotationStore, Correction, Reverify, SnapshotEntry, Verdict,
     },
     seams::SystemClock,
 };

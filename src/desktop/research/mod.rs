@@ -1,20 +1,9 @@
-use crate::{
-    base::Failure,
-    desktop::{
-        components::{Button, TextField},
-        i18n::{translate, Lang, Table},
-        model::AppState,
-        theme::{self, Density, Step, Tokened as _},
-        ux::seams::Interjections,
-    },
-    research_workspace::{
-        index::{Filter, Index, IndexEvent, Indexer, Op},
-        manifest::{locate, Capability, LocateOptions, Located, ManifestSource, Role},
-        read::{self, Limits, Row},
-        session::{self, ResearchRef, SessionPrefs, TabView},
-        stages::{self, ResearchMap, StageState},
-    },
-    seams::Clock,
+use crate::desktop::{
+    components::{Button, TextField},
+    i18n::{translate, Lang, Table},
+    model::AppState,
+    theme::{self, Density, Step, Tokened as _},
+    ux::seams::Interjections,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -23,10 +12,19 @@ use gpui_kit::{
     *,
 };
 use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex, OnceLock},
+    path::PathBuf,
+    sync::{mpsc, Arc},
 };
+
+#[cfg(test)]
+use crate::base::Failure;
+#[cfg(test)]
+use crate::research_workspace::{
+    manifest::{locate, LocateOptions},
+    read::Limits,
+};
+#[cfg(test)]
+use std::{path::Path, sync::Mutex};
 
 pub mod adapter;
 
@@ -51,7 +49,9 @@ mod sources;
 #[cfg(test)]
 mod sources_accept;
 
-pub use crate::desktop::ux::seams::research::{LoadState, Tab};
+pub use crate::desktop::ux::seams::research::{
+    Filter, LoadState, ManifestSource, ResearchRef, SessionPrefs, Tab, TabView,
+};
 pub use adapter::ResearchSeams;
 
 #[cfg(test)]
@@ -110,126 +110,11 @@ mod production_seams_tests {
     }
 }
 
-enum WorkEvent {
-    Located(Arc<Located>),
-    Preview(Vec<Row>, bool),
-    Progress(usize, usize),
-    Ready(Arc<Index>, ResearchMap),
-    Failed(Failure),
-}
-// The worker owns the indexer: its blocking stop/join never runs on the UI thread.
-fn index_research(
-    r: ResearchRef,
-    orch_home: Option<PathBuf>,
-    now_ms: i64,
-    prefs: SessionPrefs,
-    out: mpsc::Sender<WorkEvent>,
-) {
-    let located = match locate(
-        &r.root,
-        &LocateOptions {
-            store: r.store,
-            orch_home,
-        },
-    ) {
-        Ok(l) => Arc::new(l),
-        Err(e) => {
-            let _ = out.send(WorkEvent::Failed(e));
-            return;
-        }
-    };
-    let _ = out.send(WorkEvent::Located(located.clone()));
-    let view = prefs
-        .views
-        .get(&located.manifest.research_id)
-        .and_then(|v| v.tabs.get(Tab::Dataset.key()));
-    let raw = view.and_then(|v| v.node.as_deref()) == Some("raw");
-    let role = if raw {
-        Role::RawMeasurements
-    } else {
-        Role::Measurements
-    };
-    let capability = if raw {
-        Capability::RawMeasurements
-    } else {
-        Capability::Dataset
-    };
-    let rows = located
-        .require(capability)
-        .ok()
-        .and_then(|_| {
-            located
-                .manifest
-                .artifacts
-                .iter()
-                .find(|a| a.role == role)
-                .and_then(|a| read::read_first_rows(&located, &a.id, 200, &Limits::default()).ok())
-                .map(|p| p.rows)
-        })
-        .unwrap_or_default();
-    let _ = out.send(WorkEvent::Preview(rows, raw));
-    let (tx, rx) = mpsc::channel();
-    let progress = out.clone();
-    let indexer = Indexer::start(
-        located,
-        Limits::default(),
-        Box::new(move |event| {
-            if let IndexEvent::Progress { done, total } = event {
-                let _ = progress.send(WorkEvent::Progress(done, total));
-            } else {
-                let _ = tx.send(event);
-            }
-        }),
-    );
-    match rx.recv() {
-        Ok(IndexEvent::Ready { .. }) => {
-            if let Some(index) = indexer.latest() {
-                let map = stages::research_map(&index, now_ms);
-                let _ = out.send(WorkEvent::Ready(index, map));
-            }
-        }
-        Ok(IndexEvent::Failed(e)) => {
-            let _ = out.send(WorkEvent::Failed(e));
-        }
-        _ => {
-            let _ = out.send(WorkEvent::Failed(Failure::new("index", "indexer stopped")));
-        }
-    }
-}
+use crate::desktop::ux::seams::research::OpenEvent;
+#[cfg(test)]
+use crate::research_workspace::index::Index;
+use adapter::{session_queue, Clock, SessionCommand};
 
-// All instances for one home share an ordered queue, including reopen/load.
-enum SessionCommand {
-    Load(mpsc::Sender<SessionPrefs>),
-    Save(SessionPrefs),
-}
-fn session_queue(home: &Path) -> mpsc::Sender<SessionCommand> {
-    static QUEUES: OnceLock<Mutex<HashMap<PathBuf, mpsc::Sender<SessionCommand>>>> =
-        OnceLock::new();
-    let mut queues = QUEUES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    queues
-        .entry(home.to_path_buf())
-        .or_insert_with(|| {
-            let (tx, rx) = mpsc::channel();
-            let home = home.to_path_buf();
-            std::thread::spawn(move || {
-                for command in rx {
-                    match command {
-                        SessionCommand::Load(reply) => {
-                            let _ = reply.send(session::load(&home));
-                        }
-                        SessionCommand::Save(prefs) => {
-                            let _ = session::save(&home, &prefs);
-                        }
-                    }
-                }
-            });
-            tx
-        })
-        .clone()
-}
 fn restore_tab(prefs: &SessionPrefs, id: &str) -> Tab {
     prefs
         .views
@@ -262,11 +147,9 @@ pub struct Workbench {
         crate::desktop::data::Feed<crate::desktop::ux::seams::research::ExportsDisplay>,
     pub seams: ResearchSeams,
     pub interjections: Option<Arc<dyn Interjections>>,
-    pub located: Option<Arc<Located>>,
-    pub index: Option<Arc<Index>>,
-    pub map: Option<ResearchMap>,
-    preview: Arc<Vec<Row>>,
-    preview_raw: bool,
+    pub located: Option<crate::desktop::ux::seams::research::ResearchInfo>,
+    blocker: Option<(Option<String>, Option<String>)>,
+    persistence_safe: bool,
     pub load: LoadState,
     pub tab: Tab,
     target_tab: Option<Tab>,
@@ -335,10 +218,8 @@ impl Workbench {
             seams,
             interjections,
             located: None,
-            index: None,
-            map: None,
-            preview: Arc::default(),
-            preview_raw: false,
+            blocker: None,
+            persistence_safe: false,
             load: LoadState::NoResearch,
             tab: Tab::Map,
             target_tab: None,
@@ -372,7 +253,9 @@ impl Workbench {
         let preview_ready = self
             .map_adapter
             .after_preview(cx.background_executor().is_test());
-        self.port.open(r.root.clone(), r.store.clone());
+        let (tx, rx) = mpsc::channel();
+        self.port
+            .open_observed(r.root.clone(), r.store.clone(), self.clock.now_ms(), tx);
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -417,19 +300,12 @@ impl Workbench {
         .detach();
         self.current = Some(r.clone());
         self.located = None;
-        self.index = None;
-        self.map = None;
-        self.preview = Arc::default();
-        self.preview_raw = false;
+        self.blocker = None;
+        self.persistence_safe = false;
         self.tab = Tab::Map;
         self.load = LoadState::Opening;
-        session::remember(&mut self.prefs, r.clone());
+        self.port.remember(&mut self.prefs, r.clone());
         self.save();
-        let (tx, rx) = mpsc::channel();
-        let orch = self.seams.orch_home.clone();
-        let now = self.clock.now_ms();
-        let prefs = self.prefs.clone();
-        std::thread::spawn(move || index_research(r, orch, now, prefs, tx));
         cx.spawn(async move |this, cx| {
             let mut rx = rx;
             loop {
@@ -440,34 +316,35 @@ impl Workbench {
                 let (receiver, result) = task.await;
                 rx = receiver;
                 let Ok(event) = result else { break };
-                let terminal = matches!(event, WorkEvent::Ready(..) | WorkEvent::Failed(..));
+                let terminal = matches!(event, OpenEvent::Ready { .. } | OpenEvent::Failed(..));
                 let active = this
                     .update(cx, |this, cx| {
                         if this.generation != generation {
                             return false;
                         }
                         match event {
-                            WorkEvent::Located(l) => {
-                                this.tab = this.target_tab.take().unwrap_or_else(|| {
-                                    restore_tab(&this.prefs, &l.manifest.research_id)
-                                });
-                                let total = l.manifest.artifacts.len();
+                            OpenEvent::Located(l, total) => {
+                                this.tab = this
+                                    .target_tab
+                                    .take()
+                                    .unwrap_or_else(|| restore_tab(&this.prefs, &l.id));
                                 this.located = Some(l);
                                 this.load = LoadState::Indexing { done: 0, total };
                             }
-                            WorkEvent::Progress(done, total) => {
+                            OpenEvent::Progress(done, total) => {
                                 this.load = LoadState::Indexing { done, total }
                             }
-                            WorkEvent::Preview(rows, raw) => {
-                                this.preview = Arc::new(rows);
-                                this.preview_raw = raw;
-                            }
-                            WorkEvent::Ready(index, map) => {
-                                this.index = Some(index);
-                                this.map = Some(map);
+                            OpenEvent::Preview(_) => {}
+                            OpenEvent::Ready {
+                                blocker_en,
+                                blocker_zh,
+                                safe,
+                            } => {
+                                this.blocker = Some((blocker_en, blocker_zh));
+                                this.persistence_safe = safe;
                                 this.load = LoadState::Ready;
                             }
-                            WorkEvent::Failed(e) => {
+                            OpenEvent::Failed(e) => {
                                 this.load = LoadState::Failed {
                                     kind: e.kind,
                                     message: e.message,
@@ -501,11 +378,7 @@ impl Workbench {
         self.target_tab = None;
         self.tab = t;
         if let Some(l) = &self.located {
-            self.prefs
-                .views
-                .entry(l.manifest.research_id.clone())
-                .or_default()
-                .tab = t.key().into();
+            self.prefs.views.entry(l.id.clone()).or_default().tab = t.key().into();
             self.save();
         }
         cx.notify();
@@ -513,13 +386,13 @@ impl Workbench {
     pub fn view(&self, t: Tab) -> TabView {
         self.located
             .as_ref()
-            .and_then(|l| self.prefs.views.get(&l.manifest.research_id))
+            .and_then(|l| self.prefs.views.get(&l.id))
             .and_then(|v| v.tabs.get(t.key()))
             .cloned()
             .unwrap_or_default()
     }
     pub(crate) fn tab_view(&self, t: Tab) -> crate::desktop::ux::seams::research::TabView {
-        adapter::display_view(&self.view(t))
+        self.view(t)
     }
     pub(crate) fn set_tab_view(
         &mut self,
@@ -529,13 +402,13 @@ impl Workbench {
     ) {
         let mut view = self.tab_view(t);
         f(&mut view);
-        self.set_view(t, |current| *current = adapter::engine_view(&view), cx);
+        self.set_view(t, |current| *current = view, cx);
     }
     pub fn set_view(&mut self, t: Tab, f: impl FnOnce(&mut TabView), cx: &mut Context<Self>) {
         if let Some(l) = &self.located {
-            update_view(&mut self.prefs, &l.manifest.research_id, t, f);
+            update_view(&mut self.prefs, &l.id, t, f);
             self.save();
-            self.port.set_view(t, adapter::display_view(&self.view(t)));
+            self.port.set_view(t, self.view(t));
             self.refresh_tab_feeds(cx);
             cx.notify();
         }
@@ -576,14 +449,13 @@ impl Workbench {
         self.set_tab(Tab::Evidence, cx);
     }
     pub(crate) fn layout_persistence_safe(&self) -> bool {
-        self.seams
-            .research_home
-            .as_ref()
-            .zip(self.index.as_ref())
-            .is_some_and(|(home, index)| adapter::safe_home(home, index))
+        self.persistence_safe
     }
     pub(crate) fn show_evidence_rows(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.show_rows(vec![adapter::evidence_filter(id)], cx);
+        self.show_rows(
+            vec![adapter::display_filter(&adapter::evidence_filter(id))],
+            cx,
+        );
     }
     pub fn show_dataset(&mut self, cx: &mut Context<Self>) {
         self.show_rows(Vec::new(), cx);
@@ -689,7 +561,11 @@ fn load_text(load: &LoadState, lang: Lang) -> String {
         }
     }
 }
-fn view_state_text(view: &TabView, lang: Lang) -> Option<String> {
+fn view_state_text(
+    view: &crate::desktop::ux::seams::research::TabView,
+    lang: Lang,
+) -> Option<String> {
+    use crate::desktop::ux::seams::research::FilterOp as Op;
     if view.filters.is_empty() && view.offset == 0 {
         return None;
     }
@@ -743,25 +619,6 @@ fn tab_label(t: Tab) -> &'static str {
         Tab::Exports => "Exports",
     }
 }
-fn blocker_text(map: &ResearchMap, lang: Lang) -> Option<String> {
-    let (id, state) = stages::blocker(map)?;
-    let label = map
-        .stages
-        .iter()
-        .find(|s| s.id == id)
-        .map(|s| s.label.as_str())
-        .unwrap_or(&id);
-    let detail = match state {
-        StageState::NotStarted => tr(lang, "Not started").to_string(),
-        StageState::Paused { reason } => format!("{}: {}", tr(lang, "Paused"), reason),
-        StageState::Blocked { reason } => format!("{}: {}", tr(lang, "Blocked"), reason),
-        StageState::Failed { reason } => format!("{}: {}", tr(lang, "Failed"), reason),
-        StageState::RateLimited { .. } => tr(lang, "Rate limited").to_string(),
-        StageState::Stalled { since } => format!("{}: {}", tr(lang, "Stalled"), since),
-        StageState::Running | StageState::Done => return None,
-    };
-    Some(format!("{label}: {detail}"))
-}
 fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
     div()
         .id(id)
@@ -794,8 +651,7 @@ pub struct ResearchPage {
 }
 impl ResearchPage {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (wb, map, sources, evidence, dataset, exports) =
-            adapter::compose(&state, window, cx);
+        let (wb, map, sources, evidence, dataset, exports) = adapter::compose(&state, window, cx);
         cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         let path = cx.new(|cx| InputState::new(window, cx));
         let store = cx.new(|cx| InputState::new(window, cx));
@@ -829,11 +685,14 @@ impl Render for ResearchPage {
         let colors = cx.tokens();
         let wb = self.wb.read(cx);
         let ready_map = if matches!(wb.load, LoadState::Ready) {
-            wb.map.as_ref()
+            wb.blocker.as_ref()
         } else {
             None
         };
-        let blocked = ready_map.and_then(|map| blocker_text(map, lang));
+        let blocked = ready_map.and_then(|(en, zh)| match lang {
+            Lang::En => en.clone(),
+            Lang::ZhTw => zh.clone(),
+        });
         let primary = primary_action(&wb.load, ready_map.is_some(), blocked.is_some());
         let blocker = if ready_map.is_some() {
             blocked.unwrap_or_else(|| tr(lang, "Nothing is blocking this research").into())
@@ -848,19 +707,19 @@ impl Render for ResearchPage {
         let title = wb
             .located
             .as_ref()
-            .map(|l| l.manifest.title.clone())
+            .map(|l| l.title.clone())
             .unwrap_or_else(|| tr(lang, "Research").into());
         let info = wb.located.as_ref().map(|l| {
             let source = match &l.source {
-                ManifestSource::File { .. } => tr(lang, "Manifest file").to_string(),
+                ManifestSource::File => tr(lang, "Manifest file").to_string(),
                 ManifestSource::Adapter { name } => format!("{}: {name}", tr(lang, "Adapter")),
             };
-            format!("{} · {}", l.manifest.research_version, source)
+            format!("{} · {}", l.version, source)
         });
         let load = load_text(&wb.load, lang);
         let current = wb.tab;
         let ready = matches!(wb.load, LoadState::Ready);
-        let view_state = view_state_text(&wb.view(current), lang);
+        let view_state = view_state_text(&wb.tab_view(current), lang);
         let recent = wb.prefs.recent.clone();
         let notice = wb.notice_text.clone();
         let panel: AnyElement = if matches!(wb.load, LoadState::Indexing { .. })
@@ -876,7 +735,11 @@ impl Render for ResearchPage {
                 Tab::Exports => self.exports.clone().into_any_element(),
             }
         };
-        let mut rail = div().flex().gap(theme::space(Density::default(), Step::Sm)).border_b_1().border_color(colors.orbit);
+        let mut rail = div()
+            .flex()
+            .gap(theme::space(Density::default(), Step::Sm))
+            .border_b_1()
+            .border_color(colors.orbit);
         for tab in [
             Tab::Map,
             Tab::Sources,
@@ -888,18 +751,28 @@ impl Render for ResearchPage {
             let handle = self.wb.clone();
             rail = rail.child(
                 div()
-                    .id(SharedString::from(id))
+                    .id(SharedString::from(format!(
+                        "action:research.{}.open",
+                        tab.key()
+                    )))
                     .test_support()
-                    .cursor_pointer()
-                    .p(theme::space(Density::default(), Step::Sm))
-                    .text_color(if current == tab {
-                        colors.gold
-                    } else {
-                        colors.text
-                    })
-                    .when(current == tab, |d| d.border_b_2().border_color(colors.gold))
-                    .child(tr(lang, tab_label(tab)).test_text(tr(lang, tab_label(tab))))
-                    .on_click(move |_, _, cx| handle.update(cx, |wb, cx| wb.set_tab(tab, cx))),
+                    .child(
+                        div()
+                            .id(SharedString::from(id))
+                            .test_support()
+                            .cursor_pointer()
+                            .p(theme::space(Density::default(), Step::Sm))
+                            .text_color(if current == tab {
+                                colors.gold
+                            } else {
+                                colors.text
+                            })
+                            .when(current == tab, |d| d.border_b_2().border_color(colors.gold))
+                            .child(tr(lang, tab_label(tab)).test_text(tr(lang, tab_label(tab))))
+                            .on_click(move |_, _, cx| {
+                                handle.update(cx, |wb, cx| wb.set_tab(tab, cx))
+                            }),
+                    ),
             );
         }
         let mut list = div().flex().flex_col();
@@ -915,7 +788,9 @@ impl Render for ResearchPage {
                     .on_click(move |_, _, cx| handle.update(cx, |wb, cx| wb.open(r.clone(), cx))),
             );
         }
-        div().flex().flex_col()
+        div()
+            .flex()
+            .flex_col()
             .id("research-page")
             .test_support()
             .size_full()
@@ -923,13 +798,12 @@ impl Render for ResearchPage {
             .p(theme::space(Density::default(), Step::Xl))
             .gap(theme::space(Density::default(), Step::Md))
             .text_color(colors.text)
-            .child(
-                Button::new("research-back", tr(lang, "Back"), &colors)
-                    .on_click({
-                        let state = self.state.clone();
-                        move |_, _, cx| state.update(cx, |s, cx| s.close_page(cx))
-                    }),
-            )
+            .child(div().id("action:research.back").test_support().child(
+                Button::new("research-back", tr(lang, "Back"), &colors).on_click({
+                    let state = self.state.clone();
+                    move |_, _, cx| state.update(cx, |s, cx| s.close_page(cx))
+                }),
+            ))
             .child(title)
             .children(info)
             .child(
@@ -940,8 +814,8 @@ impl Render for ResearchPage {
                     .child(marked("research-blocker", blocker)),
             )
             .child(
-                Button::new("research-primary", tr(lang, primary.label()), &colors)
-                    .on_click(cx.listener(move |this, _, window, cx| match primary {
+                Button::new("research-primary", tr(lang, primary.label()), &colors).on_click(
+                    cx.listener(move |this, _, window, cx| match primary {
                         PrimaryAction::Retry => this.wb.update(cx, |wb, cx| wb.refresh(cx)),
                         PrimaryAction::Blocker => {
                             this.wb.update(cx, |wb, cx| wb.set_tab(Tab::Map, cx))
@@ -952,7 +826,8 @@ impl Render for ResearchPage {
                         PrimaryAction::Open => {
                             this.path.read(cx).focus_handle(cx).focus(window, cx)
                         }
-                    })),
+                    }),
+                ),
             )
             .child(marked("research-load", load))
             .children(notice)
@@ -962,24 +837,49 @@ impl Render for ResearchPage {
             } else {
                 None
             })
-            .child(panel)
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "research.{}.panel",
+                        current.key()
+                    )))
+                    .test_support()
+                    .w_full()
+                    .child(panel),
+            )
             .child(tr(lang, "Research folder"))
             .child({
                 let path = self.path.clone();
-                div().id("research-open-path").test_support()
+                div()
+                    .id("research-open-path")
+                    .test_support()
                     .on_click(move |_, window, cx| path.read(cx).focus_handle(cx).focus(window, cx))
-                    .child(TextField::new("research-open-path-field", &self.path, &colors))
+                    .child(TextField::new(
+                        "research-open-path-field",
+                        &self.path,
+                        &colors,
+                    ))
             })
             .child(tr(lang, "Store folder (optional)"))
             .child({
                 let store = self.store.clone();
-                div().id("research-open-store").test_support()
-                    .on_click(move |_, window, cx| store.read(cx).focus_handle(cx).focus(window, cx))
-                    .child(TextField::new("research-open-store-field", &self.store, &colors))
+                div()
+                    .id("research-open-store")
+                    .test_support()
+                    .on_click(move |_, window, cx| {
+                        store.read(cx).focus_handle(cx).focus(window, cx)
+                    })
+                    .child(TextField::new(
+                        "research-open-store-field",
+                        &self.store,
+                        &colors,
+                    ))
             })
             .child(
-                Button::new("research-open-button", tr(lang, "Open"), &colors)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
+                div().id("action:research.open").test_support().child(
+                    Button::new("research-open-button", tr(lang, "Open"), &colors)
+                        .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
+                ),
             )
             .child(tr(lang, "Recent"))
             .child(list)

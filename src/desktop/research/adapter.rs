@@ -1,3 +1,11 @@
+pub trait Clock: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+impl<T: crate::seams::Clock> Clock for T {
+    fn now_ms(&self) -> i64 {
+        crate::seams::Clock::now_ms(self)
+    }
+}
 pub(crate) mod actions;
 pub(crate) mod dataset;
 pub(crate) mod exports;
@@ -249,7 +257,17 @@ impl std::future::Future for MapWaiter {
 enum Command {
     #[cfg(test)]
     Probe(Box<dyn FnOnce() + Send>),
-    Open(PathBuf, Option<PathBuf>, Vec<MapSignal>),
+    Open(
+        PathBuf,
+        Option<PathBuf>,
+        Vec<MapSignal>,
+        Option<(mpsc::Sender<dto::OpenEvent>, i64)>,
+    ),
+    Action(
+        dto::ActionRequest,
+        i64,
+        mpsc::Sender<Res<dto::ActionSnapshot>>,
+    ),
     MapReady(MapSignal),
     Refresh,
     Sample(String, usize, u64),
@@ -376,7 +394,7 @@ impl ResearchAdapter {
         let _ = self.sender.send(command);
     }
     #[cfg(test)]
-    fn flush(&self) {
+    pub(super) fn flush(&self) {
         let (tx, rx) = mpsc::channel();
         self.send(Command::Probe(Box::new(move || {
             let _ = tx.send(());
@@ -394,7 +412,34 @@ impl dto::ResearchPort for ResearchAdapter {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
-        self.send(Command::Open(root, store, signals));
+        self.send(Command::Open(root, store, signals, None));
+    }
+    fn open_observed(
+        &self,
+        root: PathBuf,
+        store: Option<PathBuf>,
+        now: i64,
+        events: mpsc::Sender<dto::OpenEvent>,
+    ) {
+        let signals = std::mem::take(
+            &mut *self
+                .outputs
+                .preview_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        self.send(Command::Open(root, store, signals, Some((events, now))));
+    }
+    fn remember(&self, prefs: &mut dto::SessionPrefs, reference: dto::ResearchRef) {
+        remember(prefs, reference);
+    }
+    fn action(
+        &self,
+        request: dto::ActionRequest,
+        now_ms: i64,
+        reply: mpsc::Sender<Res<dto::ActionSnapshot>>,
+    ) {
+        self.send(Command::Action(request, now_ms, reply));
     }
     fn refresh(&self) {
         self.send(Command::Refresh);
@@ -483,6 +528,7 @@ struct Worker {
     prefs: SessionPrefs,
     located_items: HashMap<String, dto::EvidenceItem>,
     selected_entity: Option<String>,
+    action_state: Option<actions::State>,
 }
 impl Worker {
     fn new(
@@ -499,6 +545,7 @@ impl Worker {
             prefs: SessionPrefs::default(),
             located_items: HashMap::new(),
             selected_entity: None,
+            action_state: None,
         }
     }
     fn run(mut self, rx: mpsc::Receiver<Command>) {
@@ -506,7 +553,7 @@ impl Worker {
             match command {
                 #[cfg(test)]
                 Command::Probe(probe) => probe(),
-                Command::Open(root, store, signals) => {
+                Command::Open(root, store, signals, observer) => {
                     self.located_items.clear();
                     self.selected_entity = None;
                     self.outputs.map.replace(Default::default());
@@ -515,10 +562,14 @@ impl Worker {
                     self.outputs.dataset.replace(Default::default());
                     self.outputs.exports.replace(Default::default());
                     self.current = Some(ResearchRef { root, store });
-                    self.open(signals);
+                    self.action_state = None;
+                    self.open(signals, observer);
                 }
                 Command::MapReady(signal) => signal.notify(),
-                Command::Refresh => self.open(Vec::new()),
+                Command::Action(request, now, reply) => {
+                    let _ = reply.send(self.action(request, now));
+                }
+                Command::Refresh => self.open(Vec::new(), None),
                 Command::View(tab, view) => {
                     let old = self.view(tab);
                     if tab == dto::Tab::Evidence
@@ -565,7 +616,7 @@ impl Worker {
         if let (Some(ix), Some(home)) = (&self.index, &self.seams.research_home) {
             if safe_home(home, ix) {
                 let (reply, response) = mpsc::channel();
-                let _ = super::session_queue(home).send(super::SessionCommand::Load(reply));
+                let _ = session_queue(home).send(SessionCommand::EngineLoad(reply));
                 self.prefs = response.recv().unwrap_or_default();
                 self.prefs
                     .views
@@ -573,8 +624,7 @@ impl Worker {
                     .or_default()
                     .tabs
                     .insert(tab.key().into(), engine_view(&view));
-                let _ = super::session_queue(home)
-                    .send(super::SessionCommand::Save(self.prefs.clone()));
+                let _ = session_queue(home).send(SessionCommand::EngineSave(self.prefs.clone()));
             }
         }
     }
@@ -583,7 +633,11 @@ impl Worker {
             signal.notify();
         }
     }
-    fn open(&mut self, mut preview_signals: Vec<MapSignal>) {
+    fn open(
+        &mut self,
+        mut preview_signals: Vec<MapSignal>,
+        observer: Option<(mpsc::Sender<dto::OpenEvent>, i64)>,
+    ) {
         let Some(reference) = self.current.clone() else {
             return;
         };
@@ -597,6 +651,23 @@ impl Worker {
                     orch_home: self.seams.orch_home.clone(),
                 },
             )?);
+            if let Some((events, _)) = &observer {
+                let source = match &located.source {
+                    engine::manifest::ManifestSource::File { .. } => dto::ManifestSource::File,
+                    engine::manifest::ManifestSource::Adapter { name } => {
+                        dto::ManifestSource::Adapter { name: name.clone() }
+                    }
+                };
+                let _ = events.send(dto::OpenEvent::Located(
+                    dto::ResearchInfo {
+                        id: located.manifest.research_id.clone(),
+                        title: located.manifest.title.clone(),
+                        version: located.manifest.research_version.clone(),
+                        source,
+                    },
+                    located.manifest.artifacts.len(),
+                ));
+            }
             if let Some(artifact) = located
                 .manifest
                 .artifacts
@@ -610,16 +681,27 @@ impl Worker {
                 }
             }
             Self::notify_preview(&mut preview_signals);
+            if let Some((events, _)) = &observer {
+                let preview = self.outputs.dataset.snapshot().unwrap_or_default();
+                let _ = events.send(dto::OpenEvent::Preview(preview));
+            }
             let progress = self.outputs.clone();
+            let events = observer.as_ref().map(|(events, _)| events.clone());
             let index = Index::build(located, Limits::default(), &move |done, total| {
                 *progress.load.lock().unwrap_or_else(|e| e.into_inner()) =
                     dto::LoadState::Indexing { done, total };
+                if let Some(events) = &events {
+                    let _ = events.send(dto::OpenEvent::Progress(done, total));
+                }
             })?;
             Ok(Arc::new(index))
         })();
         Self::notify_preview(&mut preview_signals);
         match result {
             Err(e) => {
+                if let Some((events, _)) = &observer {
+                    let _ = events.send(dto::OpenEvent::Failed(e.clone()));
+                }
                 *self.outputs.load.lock().unwrap_or_else(|p| p.into_inner()) =
                     dto::LoadState::Failed {
                         kind: e.kind.clone(),
@@ -640,12 +722,12 @@ impl Worker {
                 if let Some(home) = &self.seams.research_home {
                     if safe_home(home, &ix) {
                         let (reply, response) = mpsc::channel();
-                        let queue = super::session_queue(home);
-                        let _ = queue.send(super::SessionCommand::Load(reply));
+                        let queue = session_queue(home);
+                        let _ = queue.send(SessionCommand::EngineLoad(reply));
                         self.prefs = response.recv().unwrap_or_default();
                         engine::session::remember(&mut self.prefs, reference);
-                        let _ = super::session_queue(home)
-                            .send(super::SessionCommand::Save(self.prefs.clone()));
+                        let _ = session_queue(home)
+                            .send(SessionCommand::EngineSave(self.prefs.clone()));
                     }
                 }
                 let mut views = self.outputs.views.lock().unwrap_or_else(|e| e.into_inner());
@@ -658,6 +740,19 @@ impl Worker {
                     }
                 }
                 drop(views);
+                if let Some((events, now)) = &observer {
+                    let map = stages::research_map(&ix, *now);
+                    let safe = self
+                        .seams
+                        .research_home
+                        .as_ref()
+                        .is_some_and(|home| safe_home(home, &ix));
+                    let _ = events.send(dto::OpenEvent::Ready {
+                        blocker_en: blocker_text(&map, Lang::En),
+                        blocker_zh: blocker_text(&map, Lang::ZhTw),
+                        safe,
+                    });
+                }
                 self.index = Some(ix);
                 *self.outputs.load.lock().unwrap_or_else(|e| e.into_inner()) =
                     dto::LoadState::Ready;
@@ -672,6 +767,95 @@ impl Worker {
                 }
             }
         }
+    }
+    fn action(&mut self, request: dto::ActionRequest, now: i64) -> Res<dto::ActionSnapshot> {
+        let ix = self
+            .index
+            .as_ref()
+            .ok_or_else(|| Failure::new("index", "research is not ready"))?;
+        if self.action_state.is_none() {
+            let home = self
+                .seams
+                .research_home
+                .as_ref()
+                .ok_or_else(|| Failure::new("no_home", "research home unavailable"))?;
+            if !safe_home(home, ix) {
+                return Err(Failure::new(
+                    "invalid_argument",
+                    "research home overlaps source",
+                ));
+            }
+            let store = engine::annotations::AnnotationStore::open(
+                home,
+                &ix.located().manifest.research_id,
+            )?;
+            let session = self.interjections.as_ref().and_then(|_| {
+                actions::resolve_session(ix.located(), self.seams.goals_home.as_deref())
+            });
+            self.action_state = Some(actions::State {
+                store,
+                session,
+                bridge: self.interjections.clone(),
+            });
+        }
+        let state = self.action_state.as_mut().unwrap();
+        let clock = crate::seams::FakeClock::new(now);
+        match request {
+            dto::ActionRequest::Open => {}
+            dto::ActionRequest::Spot {
+                target,
+                node,
+                verdict,
+            } => {
+                let verdict = match verdict {
+                    dto::SpotVerdict::Confirm => engine::annotations::Verdict::Confirm,
+                    dto::SpotVerdict::Dispute { reason } => {
+                        engine::annotations::Verdict::Dispute { reason }
+                    }
+                };
+                state.spot(ix, &target, node.as_deref(), verdict, &clock)?;
+            }
+            dto::ActionRequest::Correct(c) => state.correct(
+                ix,
+                engine::annotations::CorrectionDraft {
+                    target: c.target,
+                    field: c.field,
+                    after: c.after,
+                    who: c.who,
+                    why: c.why,
+                },
+                &clock,
+            )?,
+            dto::ActionRequest::Retry(id) => state.retry(&id)?,
+            dto::ActionRequest::Poll => state.poll()?,
+        }
+        Ok(dto::ActionSnapshot {
+            session: state.session.is_some(),
+            corrections: state
+                .store
+                .corrections(None)
+                .into_iter()
+                .map(|c| dto::CorrectionStatus {
+                    id: c.id,
+                    who: c.who,
+                    why: c.why,
+                    research_version: c.research_version,
+                    reverify: match c.reverify {
+                        engine::annotations::Reverify::Pending => dto::Reverify::Pending,
+                        engine::annotations::Reverify::Passed => dto::Reverify::Passed,
+                        engine::annotations::Reverify::Failed { reason } => {
+                            dto::Reverify::Failed { reason }
+                        }
+                    },
+                    invalidates: c.invalidates,
+                    receipt: c.receipt.map(|r| dto::CorrectionReceipt {
+                        stage: r.stage,
+                        detail: r.detail,
+                    }),
+                    draft: c.draft,
+                })
+                .collect(),
+        })
     }
     fn update_tab(&mut self, tab: dto::Tab) {
         let Some(ix) = self.index.as_ref() else {
@@ -1108,6 +1292,14 @@ pub(crate) fn engine_view(view: &dto::TabView) -> engine::session::TabView {
             .collect(),
     }
 }
+pub(crate) fn display_filter(filter: &engine::index::Filter) -> dto::Filter {
+    display_view(&engine::session::TabView {
+        filters: vec![filter.clone()],
+        ..Default::default()
+    })
+    .filters
+    .remove(0)
+}
 pub(crate) fn display_view(view: &engine::session::TabView) -> dto::TabView {
     dto::TabView {
         offset: view.offset,
@@ -1540,7 +1732,12 @@ pub(super) fn compose(
     let seams = state.read(cx).ux.research.clone();
     let interjections = state.read(cx).ux.seams.interjections.clone();
     let wb = cx.new(|cx| {
-        super::Workbench::new(seams, interjections, Arc::new(crate::seams::SystemClock), cx)
+        super::Workbench::new(
+            seams,
+            interjections,
+            Arc::new(crate::seams::SystemClock),
+            cx,
+        )
     });
     register_workbench(&wb, cx);
     let map = cx.new(|cx| super::map::MapPanel::new(wb.clone(), window, cx));
@@ -1584,4 +1781,136 @@ pub(crate) fn evidence_filter(id: &str) -> engine::index::Filter {
 pub(super) fn receipt_poll_interval() -> Duration {
     const RECEIPT_POLL_SECONDS: u64 = 1;
     Duration::from_secs(RECEIPT_POLL_SECONDS)
+}
+
+use crate::research_workspace::stages::ResearchMap;
+use std::sync::OnceLock;
+
+// All instances for one home share an ordered queue, including reopen/load.
+pub(super) enum SessionCommand {
+    Load(mpsc::Sender<dto::SessionPrefs>),
+    Save(dto::SessionPrefs),
+    EngineLoad(mpsc::Sender<SessionPrefs>),
+    EngineSave(SessionPrefs),
+}
+pub(super) fn session_queue(home: &Path) -> mpsc::Sender<SessionCommand> {
+    static QUEUES: OnceLock<Mutex<HashMap<PathBuf, mpsc::Sender<SessionCommand>>>> =
+        OnceLock::new();
+    let mut queues = QUEUES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    queues
+        .entry(home.to_path_buf())
+        .or_insert_with(|| {
+            let (tx, rx) = mpsc::channel();
+            let home = home.to_path_buf();
+            std::thread::spawn(move || {
+                for command in rx {
+                    match command {
+                        SessionCommand::EngineLoad(reply) => {
+                            let _ = reply.send(engine::session::load(&home));
+                        }
+                        SessionCommand::EngineSave(prefs) => {
+                            let _ = engine::session::save(&home, &prefs);
+                        }
+                        SessionCommand::Load(reply) => {
+                            let _ = reply.send(display_prefs(&engine::session::load(&home)));
+                        }
+                        SessionCommand::Save(prefs) => {
+                            let _ = engine::session::save(&home, &engine_prefs(&prefs));
+                        }
+                    }
+                }
+            });
+            tx
+        })
+        .clone()
+}
+
+fn display_ref(r: &ResearchRef) -> dto::ResearchRef {
+    dto::ResearchRef {
+        root: r.root.clone(),
+        store: r.store.clone(),
+    }
+}
+fn engine_ref(r: &dto::ResearchRef) -> ResearchRef {
+    ResearchRef {
+        root: r.root.clone(),
+        store: r.store.clone(),
+    }
+}
+fn display_prefs(p: &SessionPrefs) -> dto::SessionPrefs {
+    dto::SessionPrefs {
+        last: p.last.as_ref().map(display_ref),
+        recent: p.recent.iter().map(display_ref).collect(),
+        views: p
+            .views
+            .iter()
+            .map(|(id, v)| {
+                (
+                    id.clone(),
+                    dto::ViewState {
+                        tab: v.tab.clone(),
+                        tabs: v
+                            .tabs
+                            .iter()
+                            .map(|(k, v)| (k.clone(), display_view(v)))
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+fn engine_prefs(p: &dto::SessionPrefs) -> SessionPrefs {
+    SessionPrefs {
+        last: p.last.as_ref().map(engine_ref),
+        recent: p.recent.iter().map(engine_ref).collect(),
+        views: p
+            .views
+            .iter()
+            .map(|(id, v)| {
+                (
+                    id.clone(),
+                    engine::session::ViewState {
+                        tab: v.tab.clone(),
+                        tabs: v
+                            .tabs
+                            .iter()
+                            .map(|(k, v)| (k.clone(), engine_view(v)))
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+pub(super) fn remember(p: &mut dto::SessionPrefs, r: dto::ResearchRef) {
+    let mut engine = engine_prefs(p);
+    engine::session::remember(&mut engine, engine_ref(&r));
+    *p = display_prefs(&engine);
+}
+
+use crate::desktop::i18n::Lang;
+use crate::research_workspace::stages::StageState;
+
+pub(super) fn blocker_text(map: &ResearchMap, lang: Lang) -> Option<String> {
+    let (id, state) = stages::blocker(map)?;
+    let label = map
+        .stages
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.label.as_str())
+        .unwrap_or(&id);
+    let detail = match state {
+        StageState::NotStarted => super::tr(lang, "Not started").to_string(),
+        StageState::Paused { reason } => format!("{}: {}", super::tr(lang, "Paused"), reason),
+        StageState::Blocked { reason } => format!("{}: {}", super::tr(lang, "Blocked"), reason),
+        StageState::Failed { reason } => format!("{}: {}", super::tr(lang, "Failed"), reason),
+        StageState::RateLimited { .. } => super::tr(lang, "Rate limited").to_string(),
+        StageState::Stalled { since } => format!("{}: {}", super::tr(lang, "Stalled"), since),
+        StageState::Running | StageState::Done => return None,
+    };
+    Some(format!("{label}: {detail}"))
 }

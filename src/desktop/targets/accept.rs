@@ -73,12 +73,12 @@ fn declared_panel_and_action_ids_are_unique_and_namespaced() {
    assert!(!t.actions.is_empty(), "{} has no actions", t.id);
   }
   for &id in t.panels {
-   if t.group != "research" { assert!(id.strip_prefix(t.id).is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1), "{id}"); }
+   assert!(id.strip_prefix(t.id).is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1), "{id}");
    assert!(ids.insert(id), "duplicate {id}");
   }
   for &id in t.actions {
    let prefix = format!("action:{}.", t.id);
-   if t.group != "research" { assert!(id.strip_prefix(&prefix).is_some_and(|suffix| !suffix.is_empty()), "{id}"); }
+   assert!(id.strip_prefix(&prefix).is_some_and(|suffix| !suffix.is_empty()), "{id}");
    assert!(ids.insert(id), "duplicate {id}");
   }
  }
@@ -87,7 +87,7 @@ fn declared_panel_and_action_ids_are_unique_and_namespaced() {
 #[test]
 fn declared_ids_include_existing_controls_and_routine_view_id() {
  for (target, action) in [("chat", "action:chat.send"), ("quick", "action:quick.start"),
-  ("plaza", "action:plaza.vote"), ("research.evidence", "research-tab-evidence"),
+  ("plaza", "action:plaza.vote"), ("research.evidence", "action:research.evidence.open"),
   ("paper.form", "action:paper.form.shortlist"), ("mini", "action:mini.pin"),
   ("dialog.composer", "action:dialog.composer.start")] {
   assert!(find(target).unwrap().actions.contains(&action), "{action}");
@@ -99,21 +99,16 @@ fn declared_ids_include_existing_controls_and_routine_view_id() {
 fn research_targets_reference_real_element_ids_and_prepare_the_page() {
  let page = include_str!("../research/mod.rs");
  let root = find("research").unwrap();
- assert_eq!(root.panels, &["research-page"]);
- assert!(page.contains(&format!(".id(\"{}\")", root.panels[0])));
- let panels = [
-  ("map", include_str!("../research/map.rs")),
-  ("sources", include_str!("../research/sources.rs")),
-  ("evidence", include_str!("../research/evidence.rs")),
-  ("dataset", include_str!("../research/dataset.rs")),
-  ("exports", include_str!("../research/exports.rs")),
- ];
+ assert_eq!(root.panels, &["research.page"]);
+ assert!(include_str!("../shell/pages.rs").contains(&format!("\"{}\"", root.panels[0])));
+ let panels = ["map", "sources", "evidence", "dataset", "exports"];
  let mut state = crate::desktop::demo::state();
- for (key, source) in panels {
+ for key in panels {
   let target = find(&format!("research.{key}")).unwrap();
-  assert_eq!(target.panels, &[format!("research-{key}-panel")]);
-  assert_eq!(target.actions, &[format!("research-tab-{key}")]);
-  assert!(source.contains(&format!(".id(\"{}\")", target.panels[0])));
+  assert_eq!(target.panels, &[format!("research.{key}.panel")]);
+  assert_eq!(target.actions, &[format!("action:research.{key}.open")]);
+  assert!(page.contains("research.{}.panel"));
+  assert!(page.contains("action:research.{}.open"));
   assert!(page.contains("research-tab-{}"));
   state.ux.page = None;
   assert_eq!(prepare(&target, CaptureState::Live, &mut state), Ok(()));

@@ -7,6 +7,7 @@ use crate::research_workspace::{
     index::{Filter, Index, Op},
     manifest::{locate, LocateOptions},
     read::Limits,
+    session::TabView,
 };
 use std::prelude::v1::test;
 
