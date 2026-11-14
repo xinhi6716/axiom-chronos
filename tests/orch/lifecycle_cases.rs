@@ -65,6 +65,23 @@ fn legacy_bare_verify_identity_is_read_but_not_reused() {
 }
 
 #[test]
+fn a_completed_unit_whose_evidence_never_verified_it_is_not_reused() {
+    let (store, repo) = setup();
+    let tree = snapshot(&repo, &["a.txt".into()]);
+    fs::write(
+        store.join("reports/a.evidence.tsv"),
+        format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-worker\t0\t\t1\nverify\ttest\t0\t{tree}\t2\n"),
+    )
+    .unwrap();
+    let units = fs::read_to_string(store.join("units.tsv")).unwrap();
+    fs::write(store.join("units.tsv"), units.replace("\tpending\t", "\tverified\t")).unwrap();
+    // Built on a VERIFY that matches, but no evidence ever verified it: units.tsv is the record.
+    assert_eq!(derive_state(&evidence(&store, "a").unwrap(), false), "built");
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn review_requires_repo() {
     let (store, _) = setup();
     let verdict = store.join("verdict.json");
@@ -160,6 +177,12 @@ fn lifecycle_reuse_scope_and_limit() {
     record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
     assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
     fs::write(repo.join("a.txt"), "changed").unwrap();
+    // tests/resume_201.rs: a changed tree alone never runs verified work again.
+    // VERIFY on the new files reopens it for reuse; a failed review, for a fix.
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
+    record_verify(&store, "a", &repo).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Reused));
+    record_review(&store, &["a".into()], "claude-review", false, &repo).unwrap();
     assert!(matches!(
         begin(&store, &repo),
         Begin::Run { attempt: 2, .. }
