@@ -638,7 +638,14 @@ impl Scan<'_> {
             if s.first() != Some(&"crate") {
                 continue;
             }
-            if self.layer == Layer::Seam && s.get(1) != Some(&"base") {
+            let resolved_file = (2..=p.len())
+                .rev()
+                .find_map(|n| self.idx.modules.get(&p[..n]));
+            // The seam layer is one layer: ux/seams/mod.rs re-exporting its children, or a
+            // seam naming a sibling seam, is not coupling. `p` is already expanded to its
+            // origin, so a seam re-export of anything else still lands outside the layer.
+            let seam_layer = resolved_file.is_some_and(|file| layer(file) == Some(Layer::Seam));
+            if self.layer == Layer::Seam && s.get(1) != Some(&"base") && !seam_layer {
                 self.add(span, "seam dependency");
             }
             let foundation = s.starts_with(&["crate", "desktop"])
@@ -664,9 +671,6 @@ impl Scan<'_> {
                 self.add(span, "foundation dependency");
             }
             if self.layer == Layer::View {
-                let resolved_file = (2..=p.len())
-                    .rev()
-                    .find_map(|n| self.idx.modules.get(&p[..n]));
                 let same_group = resolved_file.is_some_and(|file| group(file) == Some(self.group));
                 let permitted = same_group && s.starts_with(&["crate", "desktop"])
                     || foundation
@@ -1305,6 +1309,83 @@ mod rules {
             false,
             "seam dependency"
         ));
+    }
+    #[test]
+    fn seam_layer_names_its_own_files() {
+        let files = [
+            (
+                "ux/seams/mod.rs",
+                "pub mod approvals; pub mod optimizer; pub use approvals::*; pub use optimizer::*;",
+            ),
+            (
+                "ux/seams/approvals.rs",
+                "use crate::base::Res; pub struct Decision;",
+            ),
+            (
+                "ux/seams/optimizer.rs",
+                "use crate::desktop::ux::seams::approvals::Decision; use super::Decision as Flat;",
+            ),
+        ];
+        for file in ["ux/seams/mod.rs", "ux/seams/optimizer.rs"] {
+            assert!(
+                !has_rule(&scan_sources(&files, file), "seam dependency"),
+                "{file}"
+            );
+        }
+    }
+    #[test]
+    fn seam_layer_still_rejects_other_crate_paths() {
+        for source in [
+            "use crate::desktop::data::outbox::Outbox;",
+            "use crate::desktop::i18n::Lang;",
+            "use super::super::celestial::DualCore;",
+            "use crate::desktop::ux::Seams;",
+            "use crate::desktop::ux::seams::adapter::Bridge;",
+        ] {
+            let files = [
+                ("ux/seams/optimizer.rs", source),
+                ("ux/seams/mod.rs", "pub mod optimizer; pub mod adapter;"),
+                ("ux/seams/adapter.rs", "pub struct Bridge;"),
+                ("ux/celestial.rs", "pub struct DualCore;"),
+                ("ux/mod.rs", "pub mod seams; pub struct Seams;"),
+                ("data/outbox.rs", "pub struct Outbox;"),
+                ("i18n.rs", "pub enum Lang {}"),
+            ];
+            assert!(
+                has_rule(
+                    &scan_sources(&files, "ux/seams/optimizer.rs"),
+                    "seam dependency"
+                ),
+                "{source}"
+            );
+        }
+        // Expansion follows a child's non-base re-export to its origin, so the glob in
+        // mod.rs and a flat seam path naming it stay flagged.
+        let files = [
+            (
+                "ux/seams/mod.rs",
+                "pub mod approvals; pub mod optimizer; pub use approvals::*;",
+            ),
+            (
+                "ux/seams/approvals.rs",
+                "pub use crate::desktop::data::outbox::Outbox;",
+            ),
+            (
+                "ux/seams/optimizer.rs",
+                "use crate::desktop::ux::seams::Outbox;",
+            ),
+            ("data/outbox.rs", "pub struct Outbox;"),
+        ];
+        for file in [
+            "ux/seams/mod.rs",
+            "ux/seams/approvals.rs",
+            "ux/seams/optimizer.rs",
+        ] {
+            assert!(
+                has_rule(&scan_sources(&files, file), "seam dependency"),
+                "{file}"
+            );
+        }
     }
     #[test]
     fn cfg_test_exemption() {
