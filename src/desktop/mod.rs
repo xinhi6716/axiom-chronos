@@ -258,7 +258,7 @@ pub fn run(options: Options) -> i32 {
         let default_size = options.size.unwrap_or_else(|| size(px(layout::DEFAULT_WINDOW.0), px(layout::DEFAULT_WINDOW.1)));
         let min_size = size(px(layout::MIN_WINDOW.0), px(layout::MIN_WINDOW.1));
         let bounds = if options.offscreen {
-            WindowBounds::Windowed(Bounds { origin: point(px(-3000.), px(-3000.)), size: default_size })
+            WindowBounds::Windowed(Bounds { origin: targets::place::offscreen_origin(), size: default_size })
         } else if let Some(bounds) = targets::place::bounds(default_size, cx) {
             WindowBounds::Windowed(bounds)
         } else {

@@ -14,6 +14,10 @@ use std::{
 };
 
 const REASON: &str = "The service protocol does not support taking control or sending input.";
+/// While subscribed, the worker waits this long for an event before it checks its commands again.
+const EVENT_WAIT_MS: u64 = 100;
+/// After the connection is lost, the worker waits this long (or for a command) before it reconnects.
+const RECONNECT_WAIT_MS: u64 = 500;
 pub(super) struct Entry {
     session: WorkerSession,
     pub(super) frames: Vec<Frame>,
@@ -211,7 +215,7 @@ fn run(home: PathBuf, state: Arc<Mutex<State>>, commands: mpsc::Receiver<Command
                         Ok(Command::Reconnect) => break,
                         Err(mpsc::TryRecvError::Empty) => {}
                     }
-                    match subscription.recv_timeout(Duration::from_millis(100)) {
+                    match subscription.recv_timeout(Duration::from_millis(EVENT_WAIT_MS)) {
                         Ok(Some(event)) => {
                             let refresh = {
                                 let s = state.lock().unwrap();
@@ -238,7 +242,7 @@ fn run(home: PathBuf, state: Arc<Mutex<State>>, commands: mpsc::Receiver<Command
             }
         }
         state.lock().unwrap().connection = Some(Connection::Lost);
-        match commands.recv_timeout(Duration::from_millis(500)) {
+        match commands.recv_timeout(Duration::from_millis(RECONNECT_WAIT_MS)) {
             Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Ok(Command::Reconnect) | Err(mpsc::RecvTimeoutError::Timeout) => {}
         }

@@ -11,16 +11,22 @@ pub struct DisplayInfo { pub id: u32, pub bounds: Bounds<Pixels>, pub primary: b
 #[derive(Clone, Debug, PartialEq)]
 pub enum Chosen { Display { id: u32, origin: Point<Pixels> }, Offscreen }
 
+/// The top-left corner, in logical pixels on both axes, of an offscreen window: outside every display.
+pub(crate) const OFFSCREEN_ORIGIN: f32 = -3000.;
+/// How far inside a secondary display's top-left corner, on both axes, a placed window opens.
+const DISPLAY_INSET: f32 = 40.;
+pub(crate) fn offscreen_origin() -> Point<Pixels> { point(px(OFFSCREEN_ORIGIN), px(OFFSCREEN_ORIGIN)) }
+
 pub fn choose(place: Place, displays: &[DisplayInfo]) -> Chosen {
  if place == Place::Secondary {
   if let Some(display) = displays.iter().find(|display| !display.primary) {
-   return Chosen::Display { id: display.id, origin: display.bounds.origin + point(px(40.), px(40.)) };
+   return Chosen::Display { id: display.id, origin: display.bounds.origin + point(px(DISPLAY_INSET), px(DISPLAY_INSET)) };
   }
  }
  Chosen::Offscreen
 }
 pub fn window_bounds(chosen: &Chosen, size: Size<Pixels>) -> Bounds<Pixels> {
- let origin = match chosen { Chosen::Display { origin, .. } => *origin, Chosen::Offscreen => point(px(-3000.), px(-3000.)) };
+ let origin = match chosen { Chosen::Display { origin, .. } => *origin, Chosen::Offscreen => offscreen_origin() };
  Bounds { origin, size }
 }
 pub(crate) struct WindowInputs { pub bounds: Bounds<Pixels>, pub display_id: Option<u32>, pub show: bool, pub focus: bool }

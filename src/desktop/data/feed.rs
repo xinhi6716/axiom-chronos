@@ -15,6 +15,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Between polls the loop sleeps at most this long at a time, so a retry is picked up promptly.
+const WAIT_SLICE_MS: u64 = 50;
+/// The shortest gap between two polls, whatever period the feed was given.
+const MIN_PERIOD_MS: u64 = 1;
+
 struct Inner<T> {
     generation: u64,
     applied: u64,
@@ -219,7 +224,7 @@ impl<T: Clone + Send + Sync + 'static> Feed<T> {
                     cx.background_executor()
                         .timer(
                             next.saturating_duration_since(Instant::now())
-                                .min(Duration::from_millis(50)),
+                                .min(Duration::from_millis(WAIT_SLICE_MS)),
                         )
                         .await;
                     continue;
@@ -247,7 +252,7 @@ impl<T: Clone + Send + Sync + 'static> Feed<T> {
                         let _ = cx.update(|cx| watcher.update(cx, |_, cx| cx.notify()));
                     }
                 }
-                next = Instant::now() + every.max(Duration::from_millis(1));
+                next = Instant::now() + every.max(Duration::from_millis(MIN_PERIOD_MS));
             }
         })
         .detach();

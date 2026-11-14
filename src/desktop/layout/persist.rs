@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 
+/// How long the writer waits after the last size change before it writes the file once.
+const WRITE_DEBOUNCE_MS: u64 = 300;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PanelSizes {
     pub version: u32,
@@ -95,7 +98,7 @@ pub(super) fn worker(home: PathBuf) -> Sender<Message> {
         let mut pending: Option<PanelSizes> = None;
         loop {
             let msg = if pending.is_some() {
-                rx.recv_timeout(Duration::from_millis(300))
+                rx.recv_timeout(Duration::from_millis(WRITE_DEBOUNCE_MS))
             } else {
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };

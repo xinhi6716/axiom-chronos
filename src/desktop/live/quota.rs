@@ -3,6 +3,11 @@ use crate::{base::{self, Failure, Res}, codex::AppServer};
 use serde_json::Value;
 use std::{sync::{Arc, Mutex, mpsc::Receiver}, time::{Duration, Instant}};
 
+/// Rate limits are read again at least this often.
+const REFRESH_SECS: u64 = 180;
+/// While runs are active and have changed since the last read, they are read again this often.
+const ACTIVE_REFRESH_SECS: u64 = 60;
+
 pub(super) fn pool_snapshot(home: &std::path::Path, now_ms: i64) -> Vec<crate::usage::pools::PoolStatus> {
     crate::usage::pools::status(home, now_ms).unwrap_or_else(|_| super::super::quota::unknown_pools())
 }
@@ -69,11 +74,11 @@ impl RateSource for SharedCodex {
 /// `last` records the start, generation and runs revision of the previous read.
 pub(super) fn due(now: Instant, started: Instant, last: Option<(Instant, u64, u64)>, generation: u64, revision: u64, active: bool) -> bool {
     match last {
-        None => active || now.saturating_duration_since(started) >= Duration::from_secs(180),
+        None => active || now.saturating_duration_since(started) >= Duration::from_secs(REFRESH_SECS),
         Some((at, old_generation, old_revision)) => {
             let elapsed = now.saturating_duration_since(at);
-            generation != old_generation || elapsed >= Duration::from_secs(180)
-                || (active && revision != old_revision && elapsed >= Duration::from_secs(60))
+            generation != old_generation || elapsed >= Duration::from_secs(REFRESH_SECS)
+                || (active && revision != old_revision && elapsed >= Duration::from_secs(ACTIVE_REFRESH_SECS))
         }
     }
 }

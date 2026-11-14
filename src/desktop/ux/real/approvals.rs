@@ -13,6 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long a decision waits for another decider to finish executing the same card.
+const SETTLE_TIMEOUT_SECS: u64 = 60;
+/// How often that wait looks at the card's state again.
+const SETTLE_RECHECK_MS: u64 = 20;
+
 /// Where a card lives: its store, wish and the digest the request was bound to.
 #[derive(Clone, Debug)]
 pub(crate) struct Binding {
@@ -188,7 +193,7 @@ impl EngineApprovals {
 
     /// Wait for another decider (thread or process) to finish, then replay its result.
     fn settle(&self, b: &Binding, d: &Decision) -> Res<ApprovalReceipt> {
-        self.settle_until(b, d, Instant::now() + Duration::from_secs(60))
+        self.settle_until(b, d, Instant::now() + Duration::from_secs(SETTLE_TIMEOUT_SECS))
     }
 
     pub(super) fn settle_until(
@@ -219,7 +224,7 @@ impl EngineApprovals {
             if Instant::now() > deadline {
                 return Err(Failure::new("timeout", "Execution did not finish"));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(SETTLE_RECHECK_MS));
         }
     }
 }

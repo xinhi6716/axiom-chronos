@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+/// One full turn of a spinner.
+pub const SPIN_PERIOD: Duration = Duration::from_millis(800);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dur {
     Instant,
