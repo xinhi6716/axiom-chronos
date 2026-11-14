@@ -23,6 +23,8 @@ pub struct ModuleWait {
 pub struct Stuck {
     pub module: String,
     pub reason: String,
+    /// The orch command that claims the module again.
+    pub claim: String,
 }
 #[derive(Serialize, Debug, Clone)]
 pub struct ScheduleReply {
@@ -72,11 +74,18 @@ fn hold(store: &Path) -> Res<Option<String>> {
         .ok_or_else(|| Failure::new("invalid_argument", "invalid store path"))?;
     goal::accept_hold(home, project)
 }
+/// Each module's latest claim, release or verified event. A release made while the module was
+/// ready (its dispatcher stopped without `module_done`) stays `module_released`, listed in `stuck`
+/// until the core claims it, so a failing dispatcher is not restarted in a loop. Any other release
+/// (made while a dependency was unverified, or by an engine that did not record `ready`) leaves
+/// the module unclaimed, so `schedule next` claims it again once its DEPENDS are verified.
 fn states(store: &Path) -> Res<HashMap<String, String>> {
     let mut result = HashMap::new();
     for e in events::read_events(store, 0)? {
         if let Some(m) = e.module {
-            if [
+            if e.kind == events::MODULE_RELEASED && e.data["ready"] != true {
+                result.remove(&m);
+            } else if [
                 events::MODULE_CLAIMED,
                 events::MODULE_RELEASED,
                 events::MODULE_VERIFIED,
@@ -110,16 +119,9 @@ pub fn module_verified(store: &Path, module: &str) -> Res<bool> {
             return Ok(false);
         }
         let rows = orch::evidence(store, &u.id)?;
+        // derive_state orders ACCEPT and review: a review stands until a later VERIFY or ACCEPT
+        // saw different files, so re-running ACCEPT on reviewed, unchanged code keeps it.
         if orch::derive_state(&rows, orch::needs_accept(store, &u.id)?) != "verified" {
-            return Ok(false);
-        }
-        let review = rows.iter().rposition(|r| r.kind == "review");
-        let run = rows.iter().rposition(|r| r.kind == "run").unwrap_or(0);
-        if !review.is_some_and(|r| {
-            rows[run + 1..r]
-                .iter()
-                .any(|e| e.kind == "accept" && e.exit_code == 0)
-        }) {
             return Ok(false);
         }
     }
@@ -257,12 +259,18 @@ pub fn release(store: &Path, module: &str, reason: &str) -> Res<()> {
                 format!("{module} is not claimed"),
             ));
         }
+        let mut ready = true;
+        for m in map(store)?.modules.iter().filter(|m| m.id == module) {
+            for d in &m.depends {
+                ready &= module_verified(store, d)?;
+            }
+        }
         events::append_event(
             store,
             events::MODULE_RELEASED,
             Some(module),
             None,
-            json!({"reason":reason}),
+            json!({"reason":reason,"ready":ready}),
         )?;
         events::close_open_activities(store, Some(module), "cancelled")?;
         Ok(())
@@ -331,6 +339,7 @@ pub fn next(store: &Path, cursor: Option<u64>, timeout: Duration) -> Res<Schedul
                 stuck.push(Stuck {
                     module: module.id.clone(),
                     reason: "released".into(),
+                    claim: format!("schedule claim {}", module.id),
                 });
             } else if let Some(conflict) = conflicts::blocking(store, module, &active)? {
                 waiting.push(ModuleWait {
