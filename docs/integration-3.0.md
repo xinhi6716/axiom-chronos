@@ -29,10 +29,12 @@ P4 tip: `2587a38c`. `src/desktop/demo.rs` and `shell.rs` combine p4 UX hosts and
 
 ## Prompt sizes
 
-- engine/agents/dispatcher.md: 9762 bytes
-- engine/DISPATCH.md: 3571 bytes
-- engine/skills/wish/SKILL.md: 7457 bytes
-- total: 20790 bytes (cap 20813)
+- engine/agents/dispatcher.md: 9497 bytes
+- engine/DISPATCH.md: 3481 bytes
+- engine/skills/wish/SKILL.md: 7776 bytes
+- total: 20754 bytes (cap 20813)
+
+The tightest test limit is 20758 bytes (`paper_gates`, `phase11_gates`, `phase11_prompts`). The hand merge of r9/p11 left 20790 bytes, dropped phrases the phase 11 tests require and kept r10's legacy `TIER luna` text; the scheduler fix then grew the total to 21095 bytes. For 3.0.0-beta.1 the three files return to the r9/p11 wording, compressed, and keep the scheduler rules in short form: the `run_in_background` flag is a JSON boolean, ACCEPT precedes each unit's final review, and a repeated deny or an 1800 s MCP timeout starts a fresh core session from the store.
 
 Before phase 11: dispatcher.md 9538 bytes, DISPATCH.md 3463 bytes, SKILL.md 7757 bytes; total 20758 bytes.
 

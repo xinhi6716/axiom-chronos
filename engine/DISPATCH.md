@@ -20,7 +20,7 @@ Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) 
 
 Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.
 
-Between GOAL and CONTEXT, use `TIER terra|sol|astra` and `EFFORT low|medium|high|xhigh|max` together, or `RISK <class>`: trivial, standard, state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure, novel. The bridge reads these from the registered brief; never pass them to `codex_run`, and the worker never sees them. With no ROUTING line, RISK, TIER+EFFORT or explicit model, the unit is refused (`routing_missing`). Legacy `EFFORT low|medium|high` sets reasoning effort; `TIER luna` runs a terra unit on luna, legacy for terra units only, never maps.
+Between GOAL and CONTEXT, put `TIER terra|sol|astra` and `EFFORT low|medium|high|xhigh|max`. Both TIER and EFFORT are required together. Or use `RISK <class>`: trivial, standard, state_machine, concurrency, migration, parser, security, privacy, cross_module, prior_failure, novel. The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them. With no ROUTING line and no RISK, TIER+EFFORT or explicit model, a unit is refused (`routing_missing`).
 
 Worker-visible sections between GOAL and CONTEXT:
 
@@ -33,7 +33,7 @@ TEST_MATRIX
 
 Test files must be in SCOPE. Both sections are required in routed stores; any matrix is enforced. Write tests first: engine records RED before implementation, and VERIFY runs the matrix. RED must report a failing test matching each row's case, not a compile error, missing command or bare nonzero exit. Do not change matrix test files during implementation (`red_tampered`).
 
-Fix: `unit add --fixes <old>` climbs one routing step and writes TIER/EFFORT into its brief. A plan exception requires both `--routing <tier>/<effort> --reason <text>`; saturation without it gives `escalation_saturated`.
+Fix: `unit add --fixes <old>` climbs one routing step and writes TIER/EFFORT into its brief. A plan exception requires `--routing <tier>/<effort> --reason <text>` together; saturation without it gives `escalation_saturated`.
 
 In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste the upstream HANDOFF block or retrieved snippet, not a pointer.
 
@@ -49,10 +49,9 @@ In `CONTEXT`, include the graph packet. For dependencies outside SCOPE, paste th
 - No prohibitions, warnings or reminders: naming a behaviour puts it in the worker's context. SCOPE and the bridge (sandbox, lean mode) bound what the worker can do.
 - No persona, tone or background the unit does not use.
 
-
 ## HANDOFF
 
-Use a short HANDOFF block with exactly these five fields:
+Use a HANDOFF block with exactly these fields:
 
 ```
 HANDOFF
