@@ -36,7 +36,10 @@ mod research_tests {
             .map(str::trim)
             .filter(|line| line.starts_with("use ") || line.starts_with("pub use "))
             .all(|line| {
-                line.starts_with("use crate::base") || line.starts_with("pub use crate::base")
+                line.starts_with("use crate::base")
+                    || line.starts_with("pub use crate::base")
+                    || line.starts_with("use std::")
+                    || line.starts_with("pub use std::")
             })
     }
 
@@ -50,6 +53,10 @@ mod research_tests {
     #[test]
     fn base_only_rejects_other_imports() {
         assert!(!base_only("use crate::desktop::ux::Foo;\n"));
+        assert!(!base_only("use crate::orch::Thing;\n"));
         assert!(base_only("use crate::base::Res;\n"));
+        assert!(base_only(
+            "use std::sync::Arc;\npub use std::collections::HashMap;\nuse crate::base::Res;\n"
+        ));
     }
 }
