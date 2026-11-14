@@ -26,6 +26,15 @@ pub fn dispatcher_rules() -> String {
     contents.trim_start_matches('\n').to_owned()
 }
 
+fn is_field(line: &str, name: &str) -> bool {
+    line.strip_prefix(name)
+        .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+}
+
+/// The module's CONTRACT block followed by each of its column-0 AMENDMENT blocks, verbatim and
+/// in map order. A block is its field line and the indented or blank lines under it. The
+/// CONTRACT comes before any OUT OF SCOPE or FULL TEST line; AMENDMENT blocks are collected up
+/// to the next `## ` heading, since a map often appends them below those lines.
 pub fn contract_block(map_text: &str, module: &str) -> Option<String> {
     let normalized = map_text.replace("\r\n", "\n");
     let mut lines = normalized.split('\n');
@@ -33,32 +42,43 @@ pub fn contract_block(map_text: &str, module: &str) -> Option<String> {
         line.strip_prefix("## ")
             .is_some_and(|id| id.trim() == module)
     })?;
-    let mut block = Vec::new();
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut open = false;
+    let mut contract_allowed = true;
     for line in lines {
-        if line.starts_with("## ")
-            || line.starts_with("OUT OF SCOPE")
-            || line.starts_with("FULL TEST")
-        {
+        if line.starts_with("## ") {
             break;
         }
-        if block.is_empty() {
-            if line == "CONTRACT"
-                || line
-                    .strip_prefix("CONTRACT")
-                    .is_some_and(|tail| tail.starts_with(char::is_whitespace))
-            {
-                block.push(line);
+        if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
+            if open {
+                blocks.last_mut().unwrap().push(line);
             }
-        } else if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
-            block.push(line);
-        } else {
-            break;
+            continue;
+        }
+        open = false;
+        if line.starts_with("OUT OF SCOPE") || line.starts_with("FULL TEST") {
+            contract_allowed = false;
+        } else if is_field(line, "AMENDMENT") {
+            blocks.push(vec![line]);
+            open = true;
+        } else if contract_allowed && is_field(line, "CONTRACT") {
+            contract_allowed = false;
+            blocks.push(vec![line]);
+            open = true;
         }
     }
-    while block.last().is_some_and(|line| line.trim().is_empty()) {
-        block.pop();
+    for block in &mut blocks {
+        while block.last().is_some_and(|line| line.trim().is_empty()) {
+            block.pop();
+        }
     }
-    (!block.is_empty()).then(|| block.join("\n"))
+    (!blocks.is_empty()).then(|| {
+        blocks
+            .iter()
+            .map(|block| block.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 pub struct Anchor<'a> {
@@ -368,6 +388,8 @@ pub fn module_context(store: &Path, module: &str, repo: &Path) -> crate::base::R
         ));
     }
     let map_path = store.join("modules.md");
+    #[cfg(test)]
+    super::evidence::read_count::map();
     let text = std::fs::read_to_string(&map_path)
         .map_err(|e| Failure::new("io", format!("cannot read {}: {e}", map_path.display())))?;
     let map = crate::orch::parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
@@ -442,22 +464,18 @@ pub fn module_context(store: &Path, module: &str, repo: &Path) -> crate::base::R
             !tagged || names_id(d, &m.id) || names_path(d, &m.paths, false)
         })
         .collect();
+    // One scan serves every unit, so the store is read once instead of once per unit.
+    let scan = super::lifecycle::Scan::new(store)?;
     let mut units = Vec::new();
-    for u in crate::orch::read_units(store)?
-        .into_iter()
-        .filter(|u| u.track == module)
-    {
+    for u in scan.units().iter().filter(|u| u.track == module) {
         let state = if u.superseded_by().is_some() {
             u.state.clone()
         } else {
-            crate::orch::derive_state(
-                &crate::orch::evidence(store, &u.id)?,
-                crate::orch::needs_accept(store, &u.id)?,
-            )
+            scan.state(u)?
         };
         units.push(ContextUnit {
-            next: crate::orch::next_step_for(store, &u.id)?,
-            unit: u.id,
+            next: scan.next_step(&u.id)?,
+            unit: u.id.clone(),
             state,
         });
     }

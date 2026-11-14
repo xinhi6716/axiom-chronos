@@ -1,10 +1,16 @@
 pub mod scheduler;
+#[cfg(test)]
+mod read_cost_tests;
+#[cfg(test)]
+use super::evidence::read_count;
 use super::*;
 use crate::base::{self, Failure, Res};
 use serde_json::Value;
 use std::{
+    cell::{OnceCell, RefCell},
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -233,59 +239,272 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     }
     Ok(result)
 }
-fn known_track(store: &Path, u: &Unit) -> Res<bool> {
-    if !store.join("modules.md").exists() {
-        return Ok(true);
+/// A unit's evidence and the state derived from it.
+struct UnitState {
+    rows: Vec<Evidence>,
+    needs_accept: bool,
+    state: String,
+}
+/// One read of a store shared by the scheduling read paths of a single call.
+///
+/// Units, claims, the module map, each unit's evidence and brief, and each module's missing
+/// dependencies are read or derived at most once, so one call costs one pass over the store
+/// instead of one pass per unit and per dependency. Each part is read when a read path first
+/// needs it, so a call reads nothing it did not read before and fails on the same input.
+/// It never takes the store lock.
+pub(crate) struct Scan<'a> {
+    store: &'a Path,
+    units: Vec<Unit>,
+    claims: OnceCell<Vec<DiskClaim>>,
+    map: OnceCell<Option<Map>>,
+    states: RefCell<HashMap<String, Rc<UnitState>>>,
+    missing: RefCell<HashMap<String, Rc<Vec<String>>>>,
+    briefs: RefCell<HashMap<String, Rc<Res<Brief>>>>,
+    ready: OnceCell<Vec<String>>,
+    waiting: OnceCell<Vec<Waiting>>,
+}
+impl<'a> Scan<'a> {
+    pub(crate) fn new(store: &'a Path) -> Res<Self> {
+        Ok(Self::with_units(store, read_units(store)?))
     }
-    let text = std::fs::read_to_string(store.join("modules.md"))
-        .map_err(|e| Failure::new("io", e.to_string()))?;
-    let map = parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
-    Ok(map.modules.iter().any(|m| m.id == u.track))
+    fn with_units(store: &'a Path, units: Vec<Unit>) -> Self {
+        Self {
+            store,
+            units,
+            claims: OnceCell::new(),
+            map: OnceCell::new(),
+            states: RefCell::default(),
+            missing: RefCell::default(),
+            briefs: RefCell::default(),
+            ready: OnceCell::new(),
+            waiting: OnceCell::new(),
+        }
+    }
+    pub(crate) fn units(&self) -> &[Unit] {
+        &self.units
+    }
+    fn claims(&self) -> Res<&[DiskClaim]> {
+        if let Some(claims) = self.claims.get() {
+            return Ok(claims);
+        }
+        let claims = read_claims(self.store)?;
+        Ok(self.claims.get_or_init(|| claims))
+    }
+    /// The parsed modules.md, or `None` when the store has none.
+    fn map(&self) -> Res<Option<&Map>> {
+        if let Some(map) = self.map.get() {
+            return Ok(map.as_ref());
+        }
+        let path = self.store.join("modules.md");
+        let map = if path.exists() {
+            #[cfg(test)]
+            read_count::map();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| Failure::new("io", e.to_string()))?;
+            Some(parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?)
+        } else {
+            None
+        };
+        Ok(self.map.get_or_init(|| map).as_ref())
+    }
+    /// Whether the unit's track is a module; without a map every track is known.
+    fn known_track(&self, u: &Unit) -> Res<bool> {
+        Ok(self
+            .map()?
+            .is_none_or(|map| map.modules.iter().any(|m| m.id == u.track)))
+    }
+    /// The unit's evidence and derived state, as `derive_state(evidence, needs_accept)`. As in
+    /// `needs_accept`, the first row with the unit's id decides whether it needs an accept.
+    fn unit_state(&self, u: &Unit) -> Res<Rc<UnitState>> {
+        if let Some(state) = self.states.borrow().get(&u.id) {
+            return Ok(state.clone());
+        }
+        let rows = evidence(self.store, &u.id)?;
+        let track = self
+            .units
+            .iter()
+            .find(|x| x.id == u.id)
+            .map_or(&u.track, |x| &x.track);
+        let needs_accept = self
+            .map()?
+            .is_some_and(|map| map.modules.iter().any(|m| &m.id == track));
+        let state = Rc::new(UnitState {
+            state: derive_state(&rows, needs_accept),
+            rows,
+            needs_accept,
+        });
+        self.states.borrow_mut().insert(u.id.clone(), state.clone());
+        Ok(state)
+    }
+    pub(crate) fn state(&self, u: &Unit) -> Res<String> {
+        Ok(self.unit_state(u)?.state.clone())
+    }
+    fn brief(&self, unit: &str) -> Rc<Res<Brief>> {
+        if let Some(brief) = self.briefs.borrow().get(unit) {
+            return brief.clone();
+        }
+        let brief = Rc::new(unit_brief(self.store, unit));
+        self.briefs
+            .borrow_mut()
+            .insert(unit.to_owned(), brief.clone());
+        brief
+    }
+    /// The units of the modules `u`'s module depends on that are not verified. They depend
+    /// only on the module, so each module's list is derived once.
+    fn missing(&self, u: &Unit) -> Res<Rc<Vec<String>>> {
+        if let Some(missing) = self.missing.borrow().get(&u.track) {
+            return Ok(missing.clone());
+        }
+        let mut missing = Vec::new();
+        if let Some(map) = self.map()? {
+            let deps = map
+                .modules
+                .iter()
+                .find(|m| m.id == u.track)
+                .map(|m| m.depends.as_slice())
+                .unwrap_or(&[]);
+            for dep in deps {
+                let registered: Vec<_> = self.units.iter().filter(|x| &x.track == dep).collect();
+                if registered.is_empty() {
+                    missing.push(format!("{dep} (no units registered)"));
+                }
+                let mut seen = BTreeSet::new();
+                for other in registered {
+                    let Some(standing) = standing_unit(&self.units, other) else {
+                        missing.push(format!(
+                            "{} ({}; replacement chain is broken)",
+                            other.id, other.state
+                        ));
+                        continue;
+                    };
+                    if !seen.insert(&standing.id) {
+                        continue;
+                    }
+                    let s = self.unit_state(standing)?;
+                    if s.state != "verified" {
+                        missing.push(format!(
+                            "{} ({}; next {})",
+                            standing.id,
+                            s.state,
+                            next_step(&s.rows, &s.state, s.needs_accept)
+                        ));
+                    }
+                }
+            }
+        }
+        let missing = Rc::new(missing);
+        self.missing
+            .borrow_mut()
+            .insert(u.track.clone(), missing.clone());
+        Ok(missing)
+    }
+    fn runs(rows: &[Evidence]) -> usize {
+        rows.iter().filter(|r| r.kind == "run").count()
+    }
+    pub(crate) fn ready(&self) -> Res<&[String]> {
+        if let Some(ready) = self.ready.get() {
+            return Ok(ready);
+        }
+        let disk = self.claims()?;
+        let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
+        let mut result = vec![];
+        for u in self.units.iter().filter(|u| u.superseded_by().is_none()) {
+            let s = self.unit_state(u)?;
+            if !self.known_track(u)?
+                || !["pending", "failed"].contains(&s.state.as_str())
+                || Self::runs(&s.rows) >= 2
+                || !self.missing(u)?.is_empty()
+            {
+                continue;
+            }
+            let brief = self.brief(&u.id);
+            let brief = match &*brief {
+                Ok(b) => b,
+                Err(e) if e.kind == "no_brief" => continue,
+                Err(e) => return Err(e.clone()),
+            };
+            if disk.iter().any(|c| c.unit == u.id)
+                || selected.iter().any(|s| overlaps(s, &brief.scope))
+            {
+                continue;
+            }
+            selected.push(brief.scope.clone());
+            result.push(u.id.clone());
+        }
+        Ok(self.ready.get_or_init(|| result))
+    }
+    pub(crate) fn waiting(&self) -> Res<&[Waiting]> {
+        if let Some(waiting) = self.waiting.get() {
+            return Ok(waiting);
+        }
+        let ready = self.ready()?;
+        // Copy the attempts out so no file is read while the process-wide claims are locked.
+        let active: HashMap<String, String> = claims()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, c)| (k.clone(), c.attempt_id.clone()))
+            .collect();
+        let disk = self.claims()?;
+        let mut waiting = Vec::new();
+        for u in self.units.iter().filter(|u| u.superseded_by().is_none()) {
+            let s = self.unit_state(u)?;
+            let state = &s.state;
+            let known = self.known_track(u)?;
+            if (known && state == "verified" && !disk.iter().any(|c| c.unit == u.id))
+                || ready.contains(&u.id)
+            {
+                continue;
+            }
+            let next = if !known {
+                "unknown_track".into()
+            } else if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
+                if active
+                    .get(&key(self.store, &u.id))
+                    .is_some_and(|a| *a == c.attempt)
+                {
+                    "running".to_string()
+                } else {
+                    format!("unknown {}", c.attempt)
+                }
+            } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
+                next_step(&s.rows, state, s.needs_accept)
+            } else {
+                let missing = self.missing(u)?;
+                if !missing.is_empty() {
+                    format!("wait {}", missing.join(", "))
+                } else if Self::runs(&s.rows) >= 2 || self.brief(&u.id).is_err() {
+                    "blocked".into()
+                } else {
+                    "busy".into()
+                }
+            };
+            waiting.push(Waiting {
+                unit: u.id.clone(),
+                state: state.clone(),
+                next,
+            });
+        }
+        Ok(self.waiting.get_or_init(|| waiting))
+    }
+    /// What `unit` waits on: "ready", a waiting unit's next step, or "verified".
+    pub(crate) fn next_step(&self, unit: &str) -> Res<String> {
+        if self.ready()?.iter().any(|id| id == unit) {
+            return Ok("ready".into());
+        }
+        Ok(self
+            .waiting()?
+            .iter()
+            .find(|w| w.unit == unit)
+            .map(|w| w.next.clone())
+            .unwrap_or_else(|| "verified".into()))
+    }
+}
+fn known_track(store: &Path, u: &Unit) -> Res<bool> {
+    Scan::with_units(store, vec![]).known_track(u)
 }
 fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
-    if !store.join("modules.md").exists() {
-        return Ok(vec![]);
-    }
-    let text = std::fs::read_to_string(store.join("modules.md"))
-        .map_err(|e| Failure::new("io", e.to_string()))?;
-    let map = parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
-    let deps = map
-        .modules
-        .iter()
-        .find(|m| m.id == u.track)
-        .map(|m| m.depends.as_slice())
-        .unwrap_or(&[]);
-    let mut missing = Vec::new();
-    for dep in deps {
-        let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
-        if registered.is_empty() {
-            missing.push(format!("{dep} (no units registered)"));
-        }
-        let mut seen = BTreeSet::new();
-        for other in registered {
-            let Some(standing) = standing_unit(units, other) else {
-                missing.push(format!(
-                    "{} ({}; replacement chain is broken)",
-                    other.id, other.state
-                ));
-                continue;
-            };
-            if !seen.insert(&standing.id) {
-                continue;
-            }
-            let rows = evidence(store, &standing.id)?;
-            let needs = needs_accept(store, &standing.id)?;
-            let state = derive_state(&rows, needs);
-            if state != "verified" {
-                missing.push(format!(
-                    "{} ({state}; next {})",
-                    standing.id,
-                    next_step(&rows, &state, needs)
-                ));
-            }
-        }
-    }
-    Ok(missing)
+    Ok(Scan::with_units(store, units.to_vec()).missing(u)?.to_vec())
 }
 fn next_step(rows: &[Evidence], state: &str, needs_accept: bool) -> String {
     match state {
@@ -649,33 +868,7 @@ pub fn running() -> Vec<String> {
     v
 }
 pub fn ready_units(store: &Path) -> Res<Vec<String>> {
-    let units = read_units(store)?;
-    let disk = read_claims(store)?;
-    let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
-    let mut result = vec![];
-    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
-        let rows = evidence(store, &u.id)?;
-        let state = derive_state(&rows, needs_accept(store, &u.id)?);
-        if !known_track(store, u)?
-            || !["pending", "failed"].contains(&state.as_str())
-            || rows.iter().filter(|r| r.kind == "run").count() >= 2
-            || !dependencies(store, u, &units)?.is_empty()
-        {
-            continue;
-        }
-        let brief = match unit_brief(store, &u.id) {
-            Ok(b) => b,
-            Err(e) if e.kind == "no_brief" => continue,
-            Err(e) => return Err(e),
-        };
-        if disk.iter().any(|c| c.unit == u.id) || selected.iter().any(|s| overlaps(s, &brief.scope))
-        {
-            continue;
-        }
-        selected.push(brief.scope);
-        result.push(u.id.clone());
-    }
-    Ok(result)
+    Ok(Scan::new(store)?.ready()?.to_vec())
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Waiting {
@@ -685,63 +878,10 @@ pub struct Waiting {
 }
 
 pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
-    let ready = ready_units(store)?;
-    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
-    let units = read_units(store)?;
-    let disk = read_claims(store)?;
-    let mut waiting = Vec::new();
-    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
-        let rows = evidence(store, &u.id)?;
-        let needs = needs_accept(store, &u.id)?;
-        let state = derive_state(&rows, needs);
-        let known = known_track(store, u)?;
-        if (known && state == "verified" && !disk.iter().any(|c| c.unit == u.id))
-            || ready.contains(&u.id)
-        {
-            continue;
-        }
-        let next = if !known {
-            "unknown_track".into()
-        } else if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
-            if active
-                .get(&key(store, &u.id))
-                .is_some_and(|a| a.attempt_id == c.attempt)
-            {
-                "running".to_string()
-            } else {
-                format!("unknown {}", c.attempt)
-            }
-        } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
-            next_step(&rows, &state, needs)
-        } else {
-            let missing = dependencies(store, u, &units)?;
-            if !missing.is_empty() {
-                format!("wait {}", missing.join(", "))
-            } else if rows.iter().filter(|r| r.kind == "run").count() >= 2
-                || unit_brief(store, &u.id).is_err()
-            {
-                "blocked".into()
-            } else {
-                "busy".into()
-            }
-        };
-        waiting.push(Waiting {
-            unit: u.id.clone(),
-            state,
-            next,
-        });
-    }
-    Ok(waiting)
+    Ok(Scan::new(store)?.waiting()?.to_vec())
 }
 pub fn next_step_for(store: &Path, unit: &str) -> Res<String> {
-    if ready_units(store)?.iter().any(|id| id == unit) {
-        return Ok("ready".into());
-    }
-    Ok(waiting_units(store)?
-        .into_iter()
-        .find(|w| w.unit == unit)
-        .map(|w| w.next)
-        .unwrap_or_else(|| "verified".into()))
+    Scan::new(store)?.next_step(unit)
 }
 #[derive(Debug)]
 pub enum AutoAccept {
