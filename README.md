@@ -80,7 +80,7 @@ The summary board uses Codex luna, falling back to Claude Haiku, to describe eac
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="Workflow: Astra plans, the critic reviews the plan, the architect splits modules, Codex builds (terra builds, sol integrates), Claude reviews the code, then full tests, CI and memory close the loop. Review changes before accepting them." />
+  <img src="assets/chronos-process.svg" width="1200" alt="Workflow: Astra plans, the critic reviews the plan, the architect splits modules, Codex writes tests first and builds each unit at its routed tier (terra, sol or astra), the Astra reviewer checks the exact files by default with a Claude check on major findings, then full tests, CI and memory close the loop. Review changes before accepting them." />
 </picture></p>
 
 Every wish starts with Astra: Astra plans the change, `chronos:critic` reviews the plan, and the core rules on it before any unit is built.
