@@ -262,7 +262,8 @@ fn target_ids_are_rendered_from_constants() {
         .next()
         .unwrap();
     assert!(render.contains("Panel::new(PANEL_ID, &snapshot.state)"));
-    assert!(render.contains(".id(PANEL_ID)"));
+    assert!(render.contains(".id(\"session-content\")"));
+    assert!(!render.contains(".id(PANEL_ID)"));
     for id in [
         "BACK_ID",
         "SEND_ID",

@@ -503,7 +503,7 @@ impl Render for SessionPage {
             }))
             .content(move |_, _| {
                 div()
-                    .id(PANEL_ID)
+                    .id("session-content")
                     .test_support()
                     .size_full()
                     .child(
