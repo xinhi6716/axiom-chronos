@@ -61,6 +61,7 @@ pub enum DualCore {
 }
 
 pub use crate::desktop::ux::seams::dual_core::{DualCoreSource, FakeDualCore};
+pub use crate::desktop::motion::Driver as CelestialDriver;
 
 const TABLE: Table = &[
     ("Council · round {n} of {max} · {agreed} agreed · {disputed} disputed · ${spent} of ${cap}", "議會 · 第 {n} 輪（共 {max} 輪）· 同意 {agreed} · 爭議 {disputed} · 已用 ${spent}／${cap}"),
@@ -106,6 +107,7 @@ impl CouncilView {
                 Some(Seat::Waiting) => (viz::OrbitState::Waiting, None),
                 Some(Seat::Degraded { .. }) => (viz::OrbitState::Degraded, Some("Degraded")),
                 Some(Seat::Done) => (viz::OrbitState::Done, None),
+                None if self.speaker == Some(m) => (viz::OrbitState::Speaking, Some("Speaking")),
                 None => (viz::OrbitState::Idle, None),
             };
             let label = suffix.map_or_else(|| name.to_owned(), |s| format!("{name} · {}", i18n::translate(lang, TABLE, s)));
@@ -143,7 +145,7 @@ impl CouncilView {
             let line = self.line(lang);
             v_flex().id("council-orbit").test_support().items_center().gap(theme::space(d, theme::Step::Sm))
                 .child(h_flex().items_center().child(viz::orbit("council-orbit-viz", &members, driver, t, d))
-                    .when(self.lightning(extreme_flash), |e| e.child(div().id("council-lightning").text_color(t.review)
+                    .when(self.lightning(extreme_flash), |e| e.child(div().id("council-lightning").test_support().text_color(t.review)
                         .shadow(ornament::gold_glow(t, FLASH_GLOW)).child("⚡"))))
                 .child(seats).child(div().text_center().text_size(theme::font(d, theme::TypeSize::Body))
                     .text_color(t.muted).child(line.clone().test_text(line))).into_any_element()
@@ -213,10 +215,14 @@ mod tests {
         let mut v = CouncilView::default();
         assert!(v.orbit_members(Lang::En).is_empty());
         v.speaker = Some(Member::Argon);
-        let idle = v.orbit_members(Lang::En);
-        assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].state, viz::OrbitState::Idle);
-        assert_eq!(idle[0].id, "Argon");
+        let speaker = v.orbit_members(Lang::En);
+        assert_eq!(speaker.len(), 1);
+        assert_eq!(speaker[0].state, viz::OrbitState::Speaking);
+        assert_eq!(speaker[0].label, "Argon · Speaking");
+        assert_eq!(speaker[0].id, "Argon");
+        v.seats = vec![(Member::Argon, Seat::Done)];
+        assert_eq!(v.orbit_members(Lang::En)[0].state, viz::OrbitState::Done);
+        v.seats.clear();
         v.speaker = None;
         for (seat, expected) in [
             (Seat::Speaking, viz::OrbitState::Speaking),
@@ -282,5 +288,22 @@ mod tests {
         let mut reduced = motion::Driver::at(now, true);
         let _ = v.element(&mut reduced, Lang::En, &t, theme::Density::default(), false);
         assert!(!reduced.wants_frame());
+        let inactive = CouncilView { active: false, ..v };
+        for (visible, reduce_motion) in [(true, false), (false, false), (true, true)] {
+            let mut driver = motion::Driver::at(now, reduce_motion);
+            driver.view_visible(visible);
+            let _ = inactive.element(&mut driver, Lang::En, &t, theme::Density::default(), true);
+            assert!(!driver.wants_frame());
+        }
+        let core = DualCore::Deciding { topic: "x".into() };
+        let mut visible = motion::Driver::at(now, false);
+        assert!(core.element(&mut visible, Lang::En, &t, theme::Density::default()).is_some());
+        assert!(visible.wants_frame());
+        for (visible, reduce_motion) in [(false, false), (true, true)] {
+            let mut driver = motion::Driver::at(now, reduce_motion);
+            driver.view_visible(visible);
+            assert!(core.element(&mut driver, Lang::En, &t, theme::Density::default()).is_some());
+            assert!(!driver.wants_frame());
+        }
     }
 }

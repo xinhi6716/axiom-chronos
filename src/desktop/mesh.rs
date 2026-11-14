@@ -1,13 +1,6 @@
 //! The graph on the Run screen: Chronos on the left, then modules, then their units.
 //! `layout` is pure and decides every position; the rest of the file draws what it returns.
 
-// ux-celestial begin
-// p8: begin
-pub(crate) mod council;
-// p8: end
-
-// ux-celestial end
-
 use super::i18n::{self, tr, Lang, Table};
 use super::model::{AppState, Run, RunStatus, UnitState, PanelState, MenuTarget, MenuAction, Module, Unit, Selection, Screen, Phase, Stage, TextSource, UnitFiles, FeedKind, panel_state};
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
@@ -38,6 +31,22 @@ fn plain_title(cx: &App, title: &SharedString) -> PlainTitle {
 
 fn should_auto_refit(last: Option<(f32, f32)>, viewport: (f32, f32)) -> bool {
     last.is_some_and(|last| last != viewport)
+}
+
+fn panel_visible(width: f32, height: f32, window_visible: bool) -> bool {
+    width > 0.0 && height > 0.0 && window_visible
+}
+
+const FLASH_MILLIS: u64 = 600;
+const FLASH_WINDOW: Duration = Duration::from_millis(FLASH_MILLIS);
+
+fn extreme_flash_visible(reduce_motion: bool, flash_at: Option<Instant>, now: Instant) -> bool {
+    !reduce_motion && flash_at.is_some_and(|at| now.saturating_duration_since(at) < FLASH_WINDOW)
+}
+
+fn context_menu_shortcut(modifiers: &Modifiers, key: &str) -> bool {
+    !modifiers.control && !modifiers.platform && !modifiers.alt
+        && ((modifiers.shift && key == "f10") || (!modifiers.shift && key == "menu"))
 }
 
 fn scene_runs_needed(name: &str) -> usize {
@@ -2276,7 +2285,7 @@ impl Mesh {
         self.view = clamp_view(self.view, graph.content(), width, view_h);
         self.track_blends(&graph, &run.session, state.reduce_motion, motion::now(cx));
         let mut frames = Driver::new(state.reduce_motion, cx);
-        frames.view_visible(width > 0.0 && view_h > 0.0 && window.is_visible());
+        frames.view_visible(panel_visible(width, view_h, window.is_visible()));
         frames.keep(moving || self.ceremonies.playing(&run.session, state.reduce_motion, Instant::now()));
         frames.keep(!self.blends.is_empty() || !self.arrivals.is_empty());
         let view = self.view;
@@ -2397,7 +2406,7 @@ impl Mesh {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let m = &event.keystroke.modifiers;
                 if this.menu_key(event, window, cx) { return; }
-                if !m.control && !m.platform && !m.alt && ((m.shift && event.keystroke.key == "f10") || (!m.shift && event.keystroke.key == "menu")) {
+                if context_menu_shortcut(m, &event.keystroke.key) {
                     this.open_cursor_menu(window, cx);
                 } else { this.key(event, cx); }
             }))
@@ -2483,10 +2492,8 @@ impl Mesh {
         let has_council = state.ux.council.contains_key(&run.session);
         let council = state.ux.council.get(&run.session).cloned().unwrap_or_default();
         let mut frames = Driver::new(state.reduce_motion, cx);
-        frames.view_visible(self.view_w > 0.0 && self.view_h > 0.0 && window.is_visible());
-        const FLASH_MILLIS: u64 = 600;
-        const FLASH_WINDOW: Duration = Duration::from_millis(FLASH_MILLIS);
-        let flash = !state.reduce_motion && state.ux.extreme_flash.is_some_and(|at| frames.now().saturating_duration_since(at) < FLASH_WINDOW);
+        frames.view_visible(panel_visible(self.view_w, self.view_h, window.is_visible()));
+        let flash = extreme_flash_visible(state.reduce_motion, state.ux.extreme_flash, frames.now());
         let orbit = council.element(&mut frames, lang, &t, d, flash);
         let dual = state.ux.seams.dual_core.as_ref().and_then(|source| source.state(&run.session).element(&mut frames, lang, &t, d));
         frames.finish(window);
@@ -2517,32 +2524,32 @@ impl Mesh {
             .bg(t.surface.opacity(CONTROL_SURFACE_ALPHA))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                div().id("mesh-zoom-out-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Zoom out (Ctrl and the wheel)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
-                .child(IconButton::new("mesh-zoom-out", IconName::Minus, tr(cx, TABLE, "Zoom out (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
+                IconButton::new("mesh-zoom-out", IconName::Minus, tr(cx, TABLE, "Zoom out (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
+                    .tooltip(tr(cx, TABLE, "Zoom out (Ctrl and the wheel)"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(1.0 / ZOOM_STEP, cx);
-                    }))),
+                    })),
             )
             .child(
-                div().id("mesh-zoom-reset-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Back to true size").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
-                .child(Button::new("mesh-zoom-reset", zoom_label, t).variant(ButtonVariant::Ghost)
+                Button::new("mesh-zoom-reset", zoom_label, t).variant(ButtonVariant::Ghost)
+                    .tooltip(tr(cx, TABLE, "Back to true size"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(1.0 / this.view.zoom, cx);
-                    }))),
+                    })),
             )
             .child(
-                div().id("mesh-zoom-in-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Zoom in (Ctrl and the wheel)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
-                .child(IconButton::new("mesh-zoom-in", IconName::Plus, tr(cx, TABLE, "Zoom in (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
+                IconButton::new("mesh-zoom-in", IconName::Plus, tr(cx, TABLE, "Zoom in (Ctrl and the wheel)"), t).variant(ButtonVariant::Ghost)
+                    .tooltip(tr(cx, TABLE, "Zoom in (Ctrl and the wheel)"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.zoom_by(ZOOM_STEP, cx);
-                    }))),
+                    })),
             )
             .child(
-                div().id("mesh-fit-tip").tooltip({ let text: SharedString = tr(cx, TABLE, "Frame everything (F)").into(); move |_, cx| cx.new(|_| MeshTip(text.clone())).into() })
-                    .child(Button::new("mesh-fit", tr(cx, TABLE, "Fit"), t).variant(ButtonVariant::Ghost).on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.fit(); cx.notify(); }))),
+                Button::new("mesh-fit", tr(cx, TABLE, "Fit"), t).variant(ButtonVariant::Ghost)
+                    .tooltip(tr(cx, TABLE, "Frame everything (F)")).on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.fit(); cx.notify(); })),
             )
             .test_support()
     }

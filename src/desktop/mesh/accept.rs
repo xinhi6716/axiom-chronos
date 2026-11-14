@@ -199,20 +199,36 @@ fn mesh_has_no_foreign_view_dependencies() {
 }
 
 #[test]
-fn planning_hidden_driver_does_not_request_frames() {
-    let mut driver = Driver::at(Instant::now(), false);
-    driver.view_visible(false);
-    let council = crate::desktop::ux::CouncilView {
-        active: true,
-        seats: vec![(crate::desktop::ux::Member::Astra, crate::desktop::ux::Seat::Speaking)],
-        ..Default::default()
-    };
-    let mut visible = Driver::at(Instant::now(), false);
-    let _ = council.element(&mut visible, Lang::En, &theme::night(), theme::Density::default(), false);
-    assert!(visible.wants_frame());
-    let _ = council.element(&mut driver, Lang::En, &theme::night(), theme::Density::default(), false);
-    assert_eq!(driver.ask(true), motion::frame_ask(true, true, false));
-    assert!(!driver.wants_frame());
+fn panel_visibility_requires_nonzero_dimensions_and_visible_window() {
+    assert!(!panel_visible(0.0, 100.0, true));
+    assert!(!panel_visible(100.0, 0.0, true));
+    assert!(!panel_visible(100.0, 100.0, false));
+    assert!(panel_visible(100.0, 100.0, true));
+}
+
+#[test]
+fn extreme_flash_respects_window_and_reduce_motion() {
+    let at = Instant::now();
+    assert!(extreme_flash_visible(false, Some(at), at + FLASH_WINDOW - Duration::from_millis(1)));
+    assert!(!extreme_flash_visible(false, Some(at), at + FLASH_WINDOW));
+    assert!(!extreme_flash_visible(true, Some(at), at));
+    assert!(!extreme_flash_visible(false, None, at));
+}
+
+#[test]
+fn context_menu_shortcuts_respect_modifiers() {
+    let plain = Modifiers::default();
+    let shift = Modifiers { shift: true, ..plain };
+    let ctrl = Modifiers { control: true, ..plain };
+    let alt = Modifiers { alt: true, ..plain };
+    let platform = Modifiers { platform: true, ..plain };
+    assert!(context_menu_shortcut(&shift, "f10"));
+    assert!(context_menu_shortcut(&plain, "menu"));
+    assert!(!context_menu_shortcut(&ctrl, "menu"));
+    assert!(!context_menu_shortcut(&alt, "menu"));
+    assert!(!context_menu_shortcut(&platform, "menu"));
+    assert!(!context_menu_shortcut(&shift, "menu"));
+    assert!(!context_menu_shortcut(&plain, "f10"));
 }
 
 #[test]
