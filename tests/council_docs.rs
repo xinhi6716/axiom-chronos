@@ -2,14 +2,14 @@ use std::{fs, path::Path};
 #[test]
 fn release_and_council_documentation_match_the_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_eq!(env!("CARGO_PKG_VERSION"), "2.0.1");
+    assert_eq!(env!("CARGO_PKG_VERSION"), "3.0.0-beta.1");
     for path in [
         "engine/.claude-plugin/plugin.json",
         ".claude-plugin/marketplace.json",
     ] {
         assert!(fs::read_to_string(root.join(path))
             .unwrap()
-            .contains("2.0.1"));
+            .contains("3.0.0-beta.1"));
     }
     for path in [
         "README.md",

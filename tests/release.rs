@@ -41,10 +41,10 @@ fn rust_release_contract() {
     for name in ["README.md", "README.zh-TW.md"] {
         let readme = fs::read_to_string(root.join(name)).unwrap();
         let lower = readme.to_lowercase();
-        for forbidden in ["pipx", "bun", "axiom_python", "--model", "`60`", "beta", "測試版"] {
+        for forbidden in ["pipx", "bun", "axiom_python", "--model", "`60`", "測試版"] {
             assert!(!lower.contains(forbidden), "{name} contains {forbidden}");
         }
-        for required in ["2.0.0", "interjection"] {
+        for required in ["3.0.0-beta.1", "interjection"] {
             assert!(lower.contains(required), "{name} missing {required}");
         }
     }

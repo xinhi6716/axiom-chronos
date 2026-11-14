@@ -1,10 +1,10 @@
 # Modes
 
-`axiom modes` lists the six modes. The chat and plaza UI ships in phase 4; their engine APIs are available now. `axiom::modes::api::ModesApi` opens sessions and reads sessions, transcripts, bounded context, and runs.
+`axiom modes` lists the six modes. The Windows desktop app has Chat, Quick task, Plaza and Routine pages over the engine APIs below; chat and plaza have no CLI command. `axiom::modes::api::ModesApi` opens sessions and reads sessions, transcripts, bounded context, and runs.
 
 ## Chat
 
-`axiom::modes::chat::Chat` opens or resumes a session, accepts messages through a provider and read-only tools, and can launch a small action or promote the conversation. The UI is phase 4.
+`axiom::modes::chat::Chat` opens or resumes a session, accepts messages through a provider and read-only tools, and can launch a small action or promote the conversation. The desktop Chat page uses it.
 
 ## Quick task
 
@@ -12,7 +12,7 @@
 
 ## Plaza
 
-`axiom::modes::plaza` opens or resumes a read-only discussion room. Its router selects at most three distinct members and records whom it chose and why; routing never grants permissions. `plaza::access` enforces per-member call and optional cost budgets. `plaza::pins` records selected messages as pins and can promote a thread. The UI is phase 4.
+`axiom::modes::plaza` opens or resumes a read-only discussion room. Its router selects at most three distinct members and records whom it chose and why; routing never grants permissions. `plaza::access` enforces per-member call and optional cost budgets. `plaza::pins` records selected messages as pins and can promote a thread. The desktop Plaza page uses it.
 
 ## Wish
 

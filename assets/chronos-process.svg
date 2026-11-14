@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="594" viewBox="0 0 1200 594" role="img" aria-labelledby="title desc" xml:lang="en">
 <title id="title">Axiom Chronos: From a wish to verified work</title>
-<desc id="desc">Astra plans, the critic reviews the plan, the architect splits modules, Codex builds, Claude reviews the exact files, then full tests, CI and memory close the loop.</desc>
+<desc id="desc">Astra plans, the critic reviews the plan, the architect splits modules, Codex writes tests first and builds each unit at its routed tier, the Astra reviewer checks the exact files by default with a Claude check on major findings, then full tests, CI and memory close the loop.</desc>
 <rect width="1200" height="594" fill="#f4efe3"/>
 <path d="M24 1H1176M24 593H1176" stroke="#cabc9e"/>
 <text x="36" y="39" font-size="19" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="start">AXIOM / CHRONOS</text>
@@ -37,17 +37,17 @@
 <circle cx="74" cy="373" r="20" fill="#f4efe3" stroke="#8d6b2d"/>
 <text x="74" y="380" font-size="19" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">04</text>
 <text x="108" y="383" font-size="31" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Codex</text>
-<text x="60" y="430" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">terra builds each unit</text>
-<text x="60" y="464" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">sol integrates if needed</text>
+<text x="60" y="430" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Tests first, then build</text>
+<text x="60" y="464" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Tier: terra, sol or astra</text>
 </g>
 <path d="M400 414h16m-5-5 5 5-5 5" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
 <g data-step="5">
 <rect x="420" y="334" width="360" height="160" rx="6" fill="#fbf8f0" stroke="#cabc9e"/>
 <circle cx="458" cy="373" r="20" fill="#f4efe3" stroke="#8d6b2d"/>
 <text x="458" y="380" font-size="19" fill="#7e5c22" font-family="'Courier New', monospace" text-anchor="middle">05</text>
-<text x="492" y="383" font-size="31" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Claude review</text>
-<text x="444" y="430" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Review exact files</text>
-<text x="444" y="464" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Cross-family check</text>
+<text x="492" y="383" font-size="31" fill="#101a22" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Unit review</text>
+<text x="444" y="430" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Astra reviews exact files</text>
+<text x="444" y="464" font-size="24" fill="#5b5548" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Claude checks major findings</text>
 </g>
 <path d="M784 414h16m-5-5 5 5-5 5" fill="none" stroke="#8d6b2d" stroke-width="1.5"/>
 <g data-step="6">

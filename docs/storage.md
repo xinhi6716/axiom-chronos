@@ -24,6 +24,6 @@ The policy's default estimates are wish 2 GiB, batch 10 GiB, unpack 10 GiB, cach
 
 For tests, `AXIOM_FAKE_DISK` is the path to a JSON file such as `{"free_bytes": 10737418240}`; the probe uses that unsigned byte count and a single fake volume.
 
-## KNOWN LIMITATION
+## Usage and evolve
 
-Archived transcripts (`.gz`) are invisible to usage and evolve because `src/usage/mod.rs` has no owner yet; the integration phase will add one.
+`axiom usage` and `axiom evolve` read archived (`.gz`) transcripts, logs, goals and handoffs in place, without restoring or changing them. When a plain file and its archive both exist, the plain file is read and counted once. An unreadable archive is skipped and does not hide other sessions.

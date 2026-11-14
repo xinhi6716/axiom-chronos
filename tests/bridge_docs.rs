@@ -53,11 +53,11 @@ fn bridge_documentation_contract() {
         ]),
         ("README.md", &[
             "Every wish starts with Astra: Astra plans the change, `chronos:critic` reviews the plan, and the core rules on it before any unit is built.",
-            "Claude (`chronos:reviewer`, `chronos:critic`) reviews the Codex work; a Haiku narrator writes the final report from the engine digest and the core's rulings.",
+            "In routed wishes (the architect routes every map), unit reviews go to the Astra reviewer on Codex unless policy sets `reviewer` (`claude`, `astra-max` or `both`); blocker and major findings get one quick Claude check. `chronos:critic` (Claude) reviews the plan, and a Haiku narrator writes the final report from the engine digest and the core's rulings.",
         ]),
         ("README.zh-TW.md", &[
             "每次 wish 都先由 Astra 規劃，`chronos:critic` 審查計畫，核心裁決後才開始建置。",
-            "審查由 Claude（`chronos:reviewer`、`chronos:critic`）負責審 Codex 的成果；Haiku 敘述員依引擎摘要與核心裁決撰寫最終報告。",
+            "在有路由的願望中（architect 會為每份模組圖設定路由），單元審查預設交給 Codex 上的 Astra 審查員，除非政策設定了 `reviewer`（`claude`、`astra-max` 或 `both`）；blocker 與 major 發現會再由 Claude 快速核對一次。`chronos:critic`（Claude）審查計畫，Haiku 敘述員依引擎摘要與核心裁決撰寫最終報告。",
         ]),
     ];
     for (path, phrases) in cases {

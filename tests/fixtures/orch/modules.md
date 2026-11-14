@@ -2,7 +2,7 @@
 
 Global rules for every module:
 - One crate. Cargo package `axiom-chronos`, version `0.2.0-beta.1`, edition 2021, library crate name `axiom`, binary `axiom`. Only the dependencies the `base` module puts in Cargo.toml; add no crate.
-- Build and test offline: `cargo test --locked --offline` (CARGO_HOME is E:/codex/.toolchains/cargo; the dispatcher runs `cargo fetch` outside the sandbox first). CI uses `cargo test --locked`.
+- Build and test offline: `cargo test --locked --offline` (CARGO_HOME is a local toolchain folder; the dispatcher runs `cargo fetch` outside the sandbox first). CI uses `cargo test --locked`.
 - Each module lives in its own `src/<module>/` directory (`mod.rs` plus any files it wants) and its acceptance test `tests/<module>.rs`. `src/lib.rs` already declares every module; never edit another module's directory.
 - Public APIs take explicit directories and commands (a `home: &Path`, a store path, a resolved command `Vec<String>`). Only `bridge::Config::from_env`, `hook::main_stdin`, `session::Config::from_env` and `cli` read environment variables. Tests never touch the real ~/.axiom: they pass temp directories, or run the binary with AXIOM_HOME/AXIOM_DATA_HOME set to one.
 - Errors are `base::Failure { kind, message }` serialized as `{"kind","message"}`; user input never panics. JSON shapes keep the Python key names unless this map says otherwise. Every tool result has `status`; anything other than `completed` carries `error`.

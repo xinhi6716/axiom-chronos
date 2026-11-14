@@ -112,7 +112,7 @@ fn package_version_and_prompt_limit() {
         let (key, value) = line.split_once('=')?;
         (key.trim() == "version").then(|| value.trim())
     }).collect();
-    assert_eq!(versions, ["\"2.0.1\""]);
+    assert_eq!(versions, ["\"3.0.0-beta.1\""]);
 
     let prompts: Vec<_> = ["engine/agents/dispatcher.md", "engine/DISPATCH.md", "engine/skills/wish/SKILL.md"]
         .iter().map(|path| fs::read(root().join(path)).unwrap()).collect();

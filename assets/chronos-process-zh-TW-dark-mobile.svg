@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="360" height="992" viewBox="0 0 360 992" role="img" aria-labelledby="title desc" xml:lang="zh-TW">
 <title id="title">Axiom Chronos: 從願望到驗證完成</title>
-<desc id="desc">Astra 先規劃、critic 審查計畫、architect 切模組、Codex 施工、Claude 審查確切檔案，最後由完整測試、CI 與記憶收尾。</desc>
+<desc id="desc">Astra 先規劃、critic 審查計畫、architect 切模組、Codex 依路由等級先寫測試再實作、預設由 Astra 審查確切檔案並由 Claude 複核重大發現，最後由完整測試、CI 與記憶收尾。</desc>
 <rect width="360" height="992" fill="#101a22"/>
 <path d="M24 1H336M24 991H336" stroke="#586052"/>
 <text x="20" y="32" font-size="15" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="start">AXIOM / CHRONOS</text>
@@ -38,17 +38,17 @@
 <circle cx="47" cy="553" r="17" fill="#101a22" stroke="#b89a58"/>
 <text x="47" y="559" font-size="16" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">04</text>
 <text x="76" y="560" font-size="25" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Codex</text>
-<text x="36" y="594" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">terra 實作各單元</text>
-<text x="36" y="621" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">必要時由 sol 整合</text>
+<text x="36" y="594" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">先寫測試再實作</text>
+<text x="36" y="621" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">等級 terra、sol 或 astra</text>
 </g>
 <path d="M47 638v12m-4-4 4 4 4-4" fill="none" stroke="#b89a58" stroke-width="1.5"/>
 <g data-step="5">
 <rect x="20" y="654" width="320" height="116" rx="6" fill="#172530" stroke="#586052"/>
 <circle cx="47" cy="685" r="17" fill="#101a22" stroke="#b89a58"/>
 <text x="47" y="691" font-size="16" fill="#d7bd82" font-family="'Courier New', monospace" text-anchor="middle">05</text>
-<text x="76" y="692" font-size="25" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">Claude 審查</text>
-<text x="36" y="726" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">檢查確切檔案</text>
-<text x="36" y="753" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">跨模型家族複核</text>
+<text x="76" y="692" font-size="25" fill="#f4efe3" font-family="Georgia, 'Noto Serif CJK TC', 'Times New Roman', serif" text-anchor="start">單元審查</text>
+<text x="36" y="726" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">Astra 審查確切檔案</text>
+<text x="36" y="753" font-size="20" fill="#c9c4b6" font-family="Arial, 'Noto Sans CJK TC', 'Microsoft JhengHei', sans-serif" text-anchor="start">重大發現由 Claude 複核</text>
 </g>
 <path d="M47 770v12m-4-4 4 4 4-4" fill="none" stroke="#b89a58" stroke-width="1.5"/>
 <g data-step="6">
