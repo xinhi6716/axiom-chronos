@@ -181,5 +181,5 @@ fn modes_version_and_docs() {
     assert_eq!(f.command(&["modes", "extra"]).status.code(), Some(2));
     let version = f.command(&["--version"]);
     assert_eq!(version.status.code(), Some(0));
-    assert_eq!(text(&version.stdout).trim(), "axiom-chronos 2.0.1");
+    assert_eq!(text(&version.stdout).trim(), "axiom-chronos 3.0.0-beta.1");
 }

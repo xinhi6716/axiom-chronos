@@ -85,7 +85,7 @@ fn version_ok(cargo: &str) -> bool {
         let (key, value) = line.split_once('=')?;
         (key.trim() == "version").then_some(value.trim())
     }).collect();
-    versions == ["\"2.0.1\""]
+    versions == ["\"3.0.0-beta.1\""]
 }
 
 #[test]
@@ -132,8 +132,8 @@ fn always_loaded_prompts_within_20758() {
 }
 
 #[test]
-fn version_stays_2_0_1() {
+fn package_version_is_the_release_version() {
     let cargo = read(&root().join("Cargo.toml"));
-    assert!(version_ok(&cargo), "package version must be 2.0.1");
-    assert!(!version_ok("[package]\nversion = \"2.0.2\"\n[dependencies]\nversion = \"2.0.1\""));
+    assert!(version_ok(&cargo), "package version must be 3.0.0-beta.1");
+    assert!(!version_ok("[package]\nversion = \"2.0.1\"\n[dependencies]\nversion = \"3.0.0-beta.1\""));
 }
