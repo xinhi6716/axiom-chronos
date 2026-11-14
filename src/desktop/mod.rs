@@ -42,7 +42,7 @@ pub mod ux;
 mod usage;
 mod wishes;
 
-use gpui_kit::component::ThemeMode;
+use crate::desktop::theme::ThemeMode;
 use gpui_kit::*;
 use model::Screen;
 /// Exported so a headless test can install the same global `run` does, with `Store::open(true)`.
@@ -221,7 +221,7 @@ pub fn run(options: Options) -> i32 {
         else if let Some(place) = options.place { targets::place::install(place, cx); }
         gpui_kit::init(cx);
         if let Some(path) = options.perf_log.clone() { perf::install(path, started, cx); }
-        let mode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()) };
+        let mode: ThemeMode = if options.light { ThemeMode::Light } else { prefs.theme.resolve(cx.window_appearance()).into() };
         theme::apply(mode, None, cx);
         i18n::set(if options.english { i18n::Lang::En } else { prefs.language.resolve() }, cx);
         cx.set_global(store);
