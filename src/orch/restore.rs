@@ -26,6 +26,15 @@ pub fn dispatcher_rules() -> String {
     contents.trim_start_matches('\n').to_owned()
 }
 
+fn is_field(line: &str, name: &str) -> bool {
+    line.strip_prefix(name)
+        .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+}
+
+/// The module's CONTRACT block followed by each of its column-0 AMENDMENT blocks, verbatim and
+/// in map order. A block is its field line and the indented or blank lines under it. The
+/// CONTRACT comes before any OUT OF SCOPE or FULL TEST line; AMENDMENT blocks are collected up
+/// to the next `## ` heading, since a map often appends them below those lines.
 pub fn contract_block(map_text: &str, module: &str) -> Option<String> {
     let normalized = map_text.replace("\r\n", "\n");
     let mut lines = normalized.split('\n');
@@ -33,32 +42,43 @@ pub fn contract_block(map_text: &str, module: &str) -> Option<String> {
         line.strip_prefix("## ")
             .is_some_and(|id| id.trim() == module)
     })?;
-    let mut block = Vec::new();
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut open = false;
+    let mut contract_allowed = true;
     for line in lines {
-        if line.starts_with("## ")
-            || line.starts_with("OUT OF SCOPE")
-            || line.starts_with("FULL TEST")
-        {
+        if line.starts_with("## ") {
             break;
         }
-        if block.is_empty() {
-            if line == "CONTRACT"
-                || line
-                    .strip_prefix("CONTRACT")
-                    .is_some_and(|tail| tail.starts_with(char::is_whitespace))
-            {
-                block.push(line);
+        if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
+            if open {
+                blocks.last_mut().unwrap().push(line);
             }
-        } else if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
-            block.push(line);
-        } else {
-            break;
+            continue;
+        }
+        open = false;
+        if line.starts_with("OUT OF SCOPE") || line.starts_with("FULL TEST") {
+            contract_allowed = false;
+        } else if is_field(line, "AMENDMENT") {
+            blocks.push(vec![line]);
+            open = true;
+        } else if contract_allowed && is_field(line, "CONTRACT") {
+            contract_allowed = false;
+            blocks.push(vec![line]);
+            open = true;
         }
     }
-    while block.last().is_some_and(|line| line.trim().is_empty()) {
-        block.pop();
+    for block in &mut blocks {
+        while block.last().is_some_and(|line| line.trim().is_empty()) {
+            block.pop();
+        }
     }
-    (!block.is_empty()).then(|| block.join("\n"))
+    (!blocks.is_empty()).then(|| {
+        blocks
+            .iter()
+            .map(|block| block.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 pub struct Anchor<'a> {
