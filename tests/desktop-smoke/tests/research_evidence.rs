@@ -240,3 +240,132 @@ fn unopened_research_is_a_plain_state(cx: &mut TestAppContext) {
         "No research open or indexing"
     ));
 }
+
+#[gpui_kit::test]
+fn split_drag_persists_and_restores(cx: &mut TestAppContext) {
+    use axiom::desktop::layout::persist;
+    use gpui_kit::px;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    cx.update(|cx| persist::init(&home, cx));
+    let configuration = seams(&home, Arc::new(FakeRenderer::new()));
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        configuration.clone(),
+    );
+    click(cx, window, "research-tab-evidence");
+    wait_for(cx, window, "research-evidence-locator", "");
+    let original = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-evidence-split-frame").bounds()
+        })
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        let start = original.origin + gpui_kit::point(original.size.width / 2., px(10.));
+        window.drag(start, start + gpui_kit::point(px(4.), px(0.)), cx);
+    })
+    .unwrap();
+    frame(cx, window);
+    let moved = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-evidence-split-frame").bounds()
+        })
+        .unwrap();
+    assert!(moved.origin.x > original.origin.x);
+    let saved = cx
+        .update(|cx| {
+            persist::flush(cx);
+            persist::sizes("research.evidence", cx)
+        })
+        .unwrap();
+    assert_eq!(
+        persist::load(&home).panels.get("research.evidence"),
+        Some(&saved)
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    let (again, _) = open_shell(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        configuration,
+        true,
+    );
+    wait_load(cx, again);
+    click(cx, again, "research-tab-evidence");
+    wait_for(cx, again, "research-evidence-locator", "");
+    let restored = cx
+        .update_window(again, |_, window, _| {
+            window.find("research-evidence-split-frame").bounds()
+        })
+        .unwrap();
+    assert_eq!(restored.origin.x, moved.origin.x);
+    assert_eq!(tree_hash(&copy), before);
+}
+
+#[gpui_kit::test]
+fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
+    use axiom::desktop::data::faults::{self, Fault, FaultPlan};
+    use std::collections::HashMap;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    let configuration = seams(&home, Arc::new(FakeRenderer::new()));
+    cx.update(|cx| {
+        faults::install(
+            FaultPlan(HashMap::from([(
+                "research.evidence".into(),
+                Fault::Corrupt,
+            )])),
+            cx,
+        )
+    });
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        configuration,
+    );
+    click(cx, window, "research-tab-evidence");
+    wait_for(cx, window, "research-evidence-degraded", "");
+    click(cx, window, "research-tab-map");
+    wait_for(cx, window, "research-map-status", "");
+    cx.update(|cx| faults::install(FaultPlan::default(), cx));
+    assert_eq!(tree_hash(&copy), before);
+}
+
+#[gpui_kit::test]
+fn reopening_same_selection_locates_in_new_generation(cx: &mut TestAppContext) {
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    prefs(&home, "rram_fixture", false, "E1");
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        seams(&home, Arc::new(FakeRenderer::new())),
+    );
+    click(cx, window, "research-tab-evidence");
+    wait_for(cx, window, "research-evidence-locator", "Page 1");
+    click(cx, window, "research-tab-map");
+    click(cx, window, "research-open-button");
+    wait_load(cx, window);
+    click(cx, window, "research-tab-evidence");
+    wait_for(cx, window, "research-evidence-locator", "Page 1");
+    cx.update_window(window, |_, window, _| {
+        assert!(window.try_find("research-evidence-split-frame").is_some());
+    })
+    .unwrap();
+    assert_eq!(tree_hash(&copy), before);
+}

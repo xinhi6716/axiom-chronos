@@ -1,31 +1,16 @@
-use super::{ResearchSeams, Tab, Workbench};
-use crate::{
-    base::{Failure, Res},
-    desktop::{
-        i18n::{translate, Lang, Table},
-        theme::Tokened as _,
-    },
-    research_workspace::{
-        dataset::{self, DataLayer, DatasetQuery},
-        export::{self, Delivery, Exported, HandOff},
-        index::Index,
-        manifest::Located,
-        repro::{self, ReproStatus},
-        session::TabView,
-    },
-    seams::Clock,
+use super::{LoadState, Workbench};
+use crate::desktop::{
+    components::{panel::PanelState, Button, SplitHandle, TextField},
+    i18n::{translate, Lang, Table},
+    layout::persist,
+    theme::{self, Density, Step, Tokened as _},
 };
 use gpui_kit::{
     base::{TestSupportExt as _, TestTextExt as _},
-    component::{
-        button::Button,
-        h_flex,
-        input::{Input, InputState},
-        v_flex,
-    },
+    component::input::InputState,
     *,
 };
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::path::PathBuf;
 
 const T: Table = &[
     ("No research open", "尚未開啟研究"),
@@ -40,105 +25,12 @@ const T: Table = &[
     ),
     ("Research home is not configured", "尚未設定研究主目錄"),
     (
-        "Paper writing is not connected yet, so the snapshot stays here for you to share",
-        "論文寫作尚未連接，快照會留在此處供您分享",
-    ),
-    (
         "Vault and memory are not in this version",
         "此版本不包含知識庫與記憶功能",
     ),
-    ("Delivered", "已交付"),
-    ("Delivery failed", "交付失敗"),
-    ("Repro: Pass", "重現性：通過"),
-    ("Repro: Fail", "重現性：失敗"),
-    ("Repro: Not applicable", "重現性：不適用"),
 ];
 fn tr(lang: Lang, key: &'static str) -> &'static str {
     translate(lang, T, key)
-}
-pub(crate) fn delivery_text(d: &Delivery, seam: &str, lang: Lang) -> String {
-    match d {
-        Delivery::Delivered { to } => format!("{}: {to}", tr(lang, "Delivered")),
-        Delivery::Unwired => tr(
-            lang,
-            if seam == "paper" {
-                "Paper writing is not connected yet, so the snapshot stays here for you to share"
-            } else {
-                "Vault and memory are not in this version"
-            },
-        )
-        .into(),
-        Delivery::Failed { kind, message } => {
-            format!("{}: {kind}: {message}", tr(lang, "Delivery failed"))
-        }
-    }
-}
-pub(crate) fn layer_of(view: &TabView) -> DataLayer {
-    if view.node.as_deref() == Some("raw") {
-        DataLayer::Raw
-    } else {
-        DataLayer::Extracted
-    }
-}
-pub(crate) fn query(view: &TabView) -> DatasetQuery {
-    DatasetQuery {
-        layer: layer_of(view),
-        filters: view.filters.clone(),
-        sort: None,
-        offset: 0,
-        limit: 500,
-    }
-}
-pub(crate) fn collect_evidence_ids(ix: &Index, q: &DatasetQuery) -> Res<Vec<String>> {
-    let mut q = q.clone();
-    q.offset = 0;
-    q.limit = 500;
-    let mut ids = BTreeSet::new();
-    loop {
-        let page = dataset::page(ix, &q)?;
-        let count = page.rows.len();
-        for row in page.rows {
-            ids.extend(row.evidence.into_iter().filter(|id| !id.is_empty()));
-        }
-        q.offset += count;
-        if q.offset >= page.total {
-            break;
-        }
-        if count == 0 {
-            return Err(Failure::new(
-                "unavailable",
-                "dataset paging made no progress",
-            ));
-        }
-    }
-    Ok(ids.into_iter().collect())
-}
-fn repro_text(status: &ReproStatus, lang: Lang) -> String {
-    match status {
-        ReproStatus::Pass => tr(lang, "Repro: Pass").into(),
-        ReproStatus::Fail { overlap } => {
-            format!("{}: {}", tr(lang, "Repro: Fail"), overlap.join(", "))
-        }
-        ReproStatus::NotApplicable { reason } => {
-            let detail = if lang == Lang::ZhTw {
-                if reason == "groups not declared" {
-                    "未宣告群組".to_owned()
-                } else if reason == "inventory missing or corrupt" {
-                    "文獻清單遺失或損毀".to_owned()
-                } else if let Some(id) = reason
-                    .strip_prefix("artifact ")
-                    .and_then(|s| s.strip_suffix(" missing or corrupt"))
-                {
-                    format!("項目 {id} 遺失或損毀")
-                } else {
-                    reason.clone()
-                }
-            } else {
-                reason.clone()
-            };
-            format!("{}: {detail}", tr(lang, "Repro: Not applicable"))
-        }
-    }
 }
 fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
     div()
@@ -147,266 +39,211 @@ fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
         .child(text.clone().test_text(text))
 }
 #[derive(Clone, Copy)]
-pub(crate) enum Action {
+enum Action {
     Csv,
     Bundle,
     Snapshot,
 }
-pub(crate) enum Outcome {
-    Export(Exported),
-    Snapshot(Exported, HandOff),
-    Empty,
-    NoHome,
-}
-
-pub(crate) fn perform_action(
-    action: Action,
-    index: &Index,
-    located: &Located,
-    q: &DatasetQuery,
-    seams: &ResearchSeams,
-    clock: &dyn Clock,
-    dest: &Path,
-) -> Res<Outcome> {
-    let dest = export::check_dest(located, dest)?;
-    match action {
-        Action::Csv => {
-            let name = match q.layer {
-                DataLayer::Raw => "dataset-raw.csv",
-                DataLayer::Extracted => "dataset-extracted.csv",
-            };
-            Ok(Outcome::Export(export::export_csv(index, q, &dest, name)?))
-        }
-        Action::Bundle => {
-            let ids = collect_evidence_ids(index, q)?;
-            if ids.is_empty() {
-                Ok(Outcome::Empty)
-            } else {
-                Ok(Outcome::Export(export::export_evidence_bundle(
-                    index, &ids, &dest,
-                )?))
-            }
-        }
-        Action::Snapshot => {
-            let Some(home) = &seams.research_home else {
-                return Ok(Outcome::NoHome);
-            };
-            let (snapshot, dir) = export::snapshot(index, home, &dest, clock)?;
-            let sha256 = crate::research_workspace::read::hash_file(&dir.join("snapshot.json"))?;
-            let handoff = export::hand_off(
-                &snapshot,
-                &dir,
-                seams.snapshot_consumer.as_deref(),
-                seams.vault.as_deref(),
-            );
-            Ok(Outcome::Snapshot(
-                Exported {
-                    path: dir,
-                    rows: snapshot.files.len(),
-                    sha256,
-                },
-                handoff,
-            ))
-        }
-    }
-}
-
 pub struct ExportsPanel {
     wb: Entity<Workbench>,
     dest: Entity<InputState>,
-    index: Option<Arc<Index>>,
-    repro: Option<ReproStatus>,
-    results: Vec<Exported>,
-    handoff: Option<HandOff>,
     error: Option<String>,
-    busy: bool,
+    sizes: Option<Vec<f32>>,
 }
 impl ExportsPanel {
     pub fn new(wb: Entity<Workbench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dest = cx.new(|cx| InputState::new(window, cx));
-        cx.observe(&wb, |this, wb, cx| {
-            let index = wb.read(cx).index.clone();
-            if match (&this.index, &index) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            } {
-                return;
-            }
-            this.index = index.clone();
-            this.repro = None;
-            this.results.clear();
-            this.handoff = None;
-            this.error = None;
-            if let Some(index) = index {
-                let worker_index = index.clone();
-                let task = cx.background_spawn(async move { repro::guard(&worker_index).status });
-                cx.spawn(async move |this, cx| {
-                    let status = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this
-                            .index
-                            .as_ref()
-                            .is_some_and(|current| Arc::ptr_eq(current, &index))
-                        {
-                            this.repro = Some(status);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         Self {
             wb,
             dest,
-            index: None,
-            repro: None,
-            results: vec![],
-            handoff: None,
             error: None,
-            busy: false,
+            sizes: persist::sizes("research.exports", cx),
         }
     }
     fn run(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
         let dest = self.dest.read(cx).value().to_string();
         if dest.trim().is_empty() {
             self.error = Some(tr(*cx.global::<Lang>(), "Enter a destination").into());
             cx.notify();
             return;
         }
-        let wb = self.wb.read(cx);
-        let (Some(index), Some(located)) = (wb.index.clone(), wb.located.clone()) else {
-            return;
-        };
-        let q = query(&wb.view(Tab::Dataset));
-        let seams = wb.seams.clone();
-        let clock = wb.clock.clone();
-        let lang = *cx.global::<Lang>();
-        self.busy = true;
         self.error = None;
-        cx.notify();
-        let task = cx.background_spawn(async move {
-            perform_action(
-                action,
-                &index,
-                &located,
-                &q,
-                &seams,
-                clock.as_ref(),
-                Path::new(dest.trim()),
-            )
+        let dest = PathBuf::from(dest.trim());
+        self.wb.update(cx, |wb, cx| {
+            match action {
+                Action::Csv => wb.port.export_csv(dest),
+                Action::Bundle => wb.port.export_bundle(dest),
+                Action::Snapshot => wb.port.export_snapshot(dest),
+            }
+            wb.refresh_tab_feeds(cx);
         });
-        let active_index = self.index.clone();
-        cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.busy = false;
-                let same = match (&this.index, &active_index) {
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                    _ => false,
-                };
-                if same {
-                    match outcome {
-                        Ok(Outcome::Export(result)) => this.results.push(result),
-                        Ok(Outcome::Snapshot(result, handoff)) => {
-                            this.results.push(result);
-                            this.handoff = Some(handoff);
-                        }
-                        Ok(Outcome::Empty) => {
-                            this.error =
-                                Some(tr(lang, "No evidence in the current dataset filter").into())
-                        }
-                        Ok(Outcome::NoHome) => {
-                            this.error = Some(tr(lang, "Research home is not configured").into())
-                        }
-                        Err(e) => this.error = Some(format!("{}: {}", e.kind, e.message)),
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 }
 impl Render for ExportsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
         let colors = cx.tokens();
-        let mut panel = v_flex()
+        let gap = theme::space(Density::default(), Step::Sm);
+        let wb = self.wb.read(cx);
+        let snapshot = wb.exports_feed.snapshot();
+        let mut panel = div()
             .id("research-exports-panel")
             .test_support()
-            .gap(px(6.))
-            .text_color(colors.text);
-        if self.wb.read(cx).index.is_none() {
+            .flex()
+            .flex_col()
+            .gap(gap)
+            .text_color(colors.text)
+            .child(marked(
+                "research-exports-vault-status",
+                tr(lang, "Vault and memory are not in this version").into(),
+            ));
+        if !matches!(wb.load, LoadState::Ready) {
             return panel
                 .child(tr(lang, "No research open").test_text(tr(lang, "No research open")));
         }
-        panel = panel
+        let dest_input = self.dest.clone();
+        let left_content = div()
+            .flex()
+            .flex_col()
+            .gap(gap)
             .child(tr(lang, "Destination"))
-            .child(Input::new(&self.dest).id("research-exports-dest"))
             .child(
-                h_flex()
-                    .gap(px(6.))
+                div()
+                    .id("research-exports-dest")
+                    .test_support()
+                    .on_click(move |_, window, cx| {
+                        dest_input.read(cx).focus_handle(cx).focus(window, cx)
+                    })
+                    .child(TextField::new(
+                        "research-exports-dest-field",
+                        &self.dest,
+                        &colors,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(gap)
                     .child(
-                        Button::new("research-exports-csv")
-                            .label(tr(lang, "Export CSV"))
+                        Button::new("research-exports-csv", tr(lang, "Export CSV"), &colors)
                             .on_click(cx.listener(|this, _, _, cx| this.run(Action::Csv, cx))),
                     )
                     .child(
-                        Button::new("research-exports-bundle")
-                            .label(tr(lang, "Export evidence bundle"))
-                            .on_click(cx.listener(|this, _, _, cx| this.run(Action::Bundle, cx))),
+                        Button::new(
+                            "research-exports-bundle",
+                            tr(lang, "Export evidence bundle"),
+                            &colors,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run(Action::Bundle, cx))),
                     )
                     .child(
-                        Button::new("research-exports-snapshot")
-                            .label(tr(lang, "Freeze snapshot"))
-                            .on_click(cx.listener(|this, _, _, cx| this.run(Action::Snapshot, cx))),
+                        Button::new(
+                            "research-exports-snapshot",
+                            tr(lang, "Freeze snapshot"),
+                            &colors,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run(Action::Snapshot, cx))),
                     ),
             );
-        let vault_available = self.wb.read(cx).seams.vault.is_some();
-        if !vault_available {
-            panel = panel.child(marked(
-                "research-exports-vault-status",
-                delivery_text(&Delivery::Unwired, "vault", lang),
-            ));
+        let mut right = div().flex().flex_col().gap(gap);
+        if let PanelState::Failed { reason }
+        | PanelState::Corrupt { reason }
+        | PanelState::Offline { reason } = &snapshot.state
+        {
+            right = right.child(marked("research-exports-error", reason.clone()));
         }
-        if let Some(status) = &self.repro {
-            panel = panel.child(marked("research-exports-repro", repro_text(status, lang)));
+        if let Some(display) = snapshot.value {
+            let repro = if lang == Lang::ZhTw {
+                &display.repro_zh
+            } else {
+                &display.repro_en
+            };
+            if !repro.is_empty() {
+                right = right.child(marked("research-exports-repro", repro.clone()));
+            }
+            for notice in &display.notices {
+                if notice.kind == "unavailable" {
+                    continue;
+                }
+                let message = match notice.message.as_str() {
+                    "No evidence in the current dataset filter" => {
+                        tr(lang, "No evidence in the current dataset filter").to_owned()
+                    }
+                    "Research home is not configured" => {
+                        tr(lang, "Research home is not configured").to_owned()
+                    }
+                    _ => format!("{}: {}", notice.kind, notice.message),
+                };
+                right = right.child(marked("research-exports-error", message));
+            }
+            for (i, result) in display
+                .results
+                .iter()
+                .filter(|r| r.path.is_some())
+                .enumerate()
+            {
+                let hash = result.sha256.as_deref().unwrap_or("");
+                right = right.child(marked(
+                    SharedString::from(format!("research-exports-result-{i}")),
+                    format!(
+                        "{} · {} · {}",
+                        result.path.as_ref().unwrap().display(),
+                        result.rows,
+                        &hash[..hash.len().min(12)]
+                    ),
+                ));
+            }
+            let handoff = display.results.iter().rev().find_map(|result| {
+                if lang == Lang::ZhTw {
+                    result.handoff_zh.as_ref()
+                } else {
+                    result.handoff.as_ref()
+                }
+            });
+            if let Some(handoff) = handoff {
+                right = right.child(marked("research-exports-handoff", handoff.clone()));
+            }
         }
         if let Some(error) = &self.error {
-            panel = panel.child(marked("research-exports-error", error.clone()));
+            right = right.child(marked("research-exports-error", error.clone()));
         }
-        for (i, result) in self.results.iter().enumerate() {
-            panel = panel.child(marked(
-                SharedString::from(format!("research-exports-result-{i}")),
-                format!(
-                    "{} · {} · {}",
-                    result.path.display(),
-                    result.rows,
-                    &result.sha256[..result.sha256.len().min(12)]
-                ),
-            ));
-        }
-        if let Some(handoff) = &self.handoff {
-            panel = panel.child(marked(
-                "research-exports-handoff",
-                if vault_available {
-                    format!(
-                        "{} · {}",
-                        delivery_text(&handoff.consumer, "paper", lang),
-                        delivery_text(&handoff.vault, "vault", lang)
-                    )
-                } else {
-                    delivery_text(&handoff.consumer, "paper", lang)
-                },
-            ));
-        }
+        let available = window.viewport_size().width.as_f32();
+        let default = available / 2.;
+        let widths = self
+            .sizes
+            .clone()
+            .filter(|s| s.len() == 2)
+            .unwrap_or_else(|| vec![default, default]);
+        let left = widths[0].clamp(0., available);
+        let handle = cx.entity().clone();
+        let split =
+            SplitHandle::new("research-exports-split", &colors).on_resize(move |delta, _, cx| {
+                handle.update(cx, |this, cx| {
+                    let left = (widths[0] + delta.as_f32()).clamp(0., available);
+                    let next = vec![left, (available - left).max(0.)];
+                    this.sizes = Some(next.clone());
+                    if cx.try_global::<persist::LayoutState>().is_some()
+                        && this.wb.read(cx).layout_persistence_safe()
+                    {
+                        persist::remember("research.exports", next, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        panel = panel.child(
+            div()
+                .flex()
+                .w_full()
+                .child(div().w(px(left)).child(left_content))
+                .child(
+                    div()
+                        .id("research-exports-split-frame")
+                        .test_support()
+                        .child(split),
+                )
+                .child(div().flex_1().child(right)),
+        );
         panel
     }
 }

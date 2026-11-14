@@ -11,7 +11,7 @@ use axiom::{
     },
     seams::SystemClock,
 };
-use gpui_kit::{component::ThemeMode, AppContext as _, TestAppContext};
+use gpui_kit::{component::ThemeMode, test::TestWindowExt as _, AppContext as _, TestAppContext};
 use research_support::*;
 use std::{
     path::Path,
@@ -321,4 +321,102 @@ fn sources_funnel_is_visible(cx: &mut TestAppContext) {
         captures_before,
         "research_sources must not write captures/research"
     );
+}
+
+#[gpui_kit::test]
+fn split_drag_persists_and_restores(cx: &mut TestAppContext) {
+    use axiom::desktop::layout::persist;
+    use gpui_kit::px;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    cx.update(|cx| persist::init(&home, cx));
+    let configuration = seams(&home);
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        configuration.clone(),
+    );
+    click(cx, window, "research-tab-sources");
+    wait_for(cx, window, "research-sources-node-total", "");
+    let original = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-sources-split-frame").bounds()
+        })
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        let start = original.origin + gpui_kit::point(original.size.width / 2., px(10.));
+        window.drag(start, start + gpui_kit::point(px(4.), px(0.)), cx);
+    })
+    .unwrap();
+    frame(cx, window);
+    let moved = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-sources-split-frame").bounds()
+        })
+        .unwrap();
+    assert!(moved.origin.x > original.origin.x);
+    let saved = cx
+        .update(|cx| {
+            persist::flush(cx);
+            persist::sizes("research.sources", cx)
+        })
+        .unwrap();
+    assert_eq!(
+        persist::load(&home).panels.get("research.sources"),
+        Some(&saved)
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    let (again, _) = open_shell(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        configuration,
+        true,
+    );
+    wait_load(cx, again);
+    click(cx, again, "research-tab-sources");
+    wait_for(cx, again, "research-sources-node-total", "");
+    let restored = cx
+        .update_window(again, |_, window, _| {
+            window.find("research-sources-split-frame").bounds()
+        })
+        .unwrap();
+    assert_eq!(restored.origin.x, moved.origin.x);
+    assert_eq!(tree_hash(&copy), before);
+}
+
+#[gpui_kit::test]
+fn feed_failure_is_local_to_tab(cx: &mut TestAppContext) {
+    use axiom::desktop::data::faults::{self, Fault, FaultPlan};
+    use std::collections::HashMap;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    let configuration = seams(&home);
+    cx.update(|cx| {
+        faults::install(
+            FaultPlan(HashMap::from([("research.sources".into(), Fault::Corrupt)])),
+            cx,
+        )
+    });
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        configuration,
+    );
+    click(cx, window, "research-tab-sources");
+    wait_for(cx, window, "research-sources-error", "");
+    click(cx, window, "research-tab-map");
+    wait_for(cx, window, "research-map-status", "");
+    cx.update(|cx| faults::install(FaultPlan::default(), cx));
+    assert_eq!(tree_hash(&copy), before);
 }

@@ -36,6 +36,29 @@ fn worker_executes_engine_on_another_thread() {
 }
 
 #[test]
+fn preview_notifications_are_bound_to_their_open_command() {
+    use crate::desktop::ux::seams::research::ResearchPort;
+    let temp = tempfile::tempdir().unwrap();
+    let adapter = ResearchAdapter::new(ResearchSeams::default(), None);
+    let first = adapter.after_preview(false);
+    adapter.open(temp.path().join("missing-first"), None);
+    let (arrived, waiting) = mpsc::channel();
+    let (resume, release) = mpsc::channel();
+    adapter.send(Command::Probe(Box::new(move || {
+        arrived.send(()).unwrap();
+        release.recv().unwrap();
+    })));
+    let second = adapter.after_preview(false);
+    adapter.open(temp.path().join("missing-second"), None);
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(first.0.lock().unwrap().ready);
+    assert!(!second.0.lock().unwrap().ready);
+    resume.send(()).unwrap();
+    adapter.flush();
+    assert!(second.0.lock().unwrap().ready);
+}
+
+#[test]
 fn failed_feed_does_not_affect_another_feed() {
     let a = SharedRows::<String>::default();
     let b = SharedRows::<String>::default();
@@ -147,20 +170,13 @@ fn fixture_actions_leave_source_tree_unchanged() {
         .any(|item| item.id == "RE1"));
     adapter.render_page("RE1".into());
     check();
-    assert_eq!(
-        adapter
-            .evidence()
-            .unwrap()
-            .items
-            .iter()
-            .find(|i| i.id == "RE1")
-            .unwrap()
-            .notice
-            .as_ref()
-            .unwrap()
-            .kind,
-        "renderer_missing"
-    );
+    let raw = adapter.evidence().unwrap();
+    let raw = raw.items.iter().find(|i| i.id == "RE1").unwrap();
+    assert!(raw.notice.is_none());
+    assert!(matches!(
+        raw.target,
+        Some(dto::EvidenceLocator::RawField { .. })
+    ));
     adapter.locate_page("missing-id".into());
     check();
     assert!(adapter
@@ -191,7 +207,19 @@ fn fixture_actions_leave_source_tree_unchanged() {
     assert_eq!(adapter.exports().unwrap().results.len(), 2);
     adapter.export_snapshot(temp.path().join("out"));
     check();
-    assert_eq!(adapter.exports().unwrap().results.len(), 3);
+    let exports = adapter.exports().unwrap();
+    assert_eq!(exports.results.len(), 3);
+    assert!(exports.repro_en.starts_with("Repro:"));
+    assert!(exports.repro_zh.starts_with("重現性"));
+    assert_eq!(
+        exports.results[2].handoff.as_deref(),
+        Some("Paper writing is not connected yet, so the snapshot stays here for you to share")
+    );
+    assert!(exports.results[2]
+        .handoff_zh
+        .as_deref()
+        .unwrap()
+        .contains("尚未連接"));
     adapter.refresh();
     check();
 }
@@ -570,4 +598,65 @@ fn feeds_report_independent_tab_results() {
     assert_eq!(states[2], PanelState::Ready);
     assert_eq!(states[3], PanelState::Ready);
     assert_eq!(states[4], PanelState::Ready);
+}
+
+#[test]
+fn map_ready_notifies_without_blocking_the_executor() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll, Wake, Waker},
+    };
+    struct WakeFlag(AtomicBool);
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let state = Arc::new(Mutex::new(MapWaitState::default()));
+    let mut waiter = MapWaiter(state.clone());
+    let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = Waker::from(flag.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(Pin::new(&mut waiter).poll(&mut cx), Poll::Pending));
+    assert!(!flag.0.load(Ordering::SeqCst));
+    MapSignal(state).notify();
+    assert!(flag.0.load(Ordering::SeqCst));
+    assert!(matches!(
+        Pin::new(&mut waiter).poll(&mut cx),
+        Poll::Ready(())
+    ));
+}
+
+#[test]
+fn deterministic_map_waiter_never_wakes_from_the_worker() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll, Wake, Waker},
+    };
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let state = Arc::new(Mutex::new(MapWaitState {
+        deterministic: true,
+        ..Default::default()
+    }));
+    let mut waiter = MapWaiter(state.clone());
+    let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = Waker::from(count.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(Pin::new(&mut waiter).poll(&mut cx), Poll::Pending));
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    MapSignal(state).notify();
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        Pin::new(&mut waiter).poll(&mut cx),
+        Poll::Ready(())
+    ));
 }

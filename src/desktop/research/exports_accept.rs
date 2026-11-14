@@ -1,5 +1,5 @@
-use super::exports::Action as ExportAction;
-use super::exports::*;
+use super::adapter::exports::Action as ExportAction;
+use super::adapter::exports::*;
 use super::*;
 use crate::research_workspace::{
     dataset::{DataLayer, DatasetQuery},

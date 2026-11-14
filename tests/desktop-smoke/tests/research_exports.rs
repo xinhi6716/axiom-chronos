@@ -123,6 +123,15 @@ fn run(
     .research_id;
     let (window, _) = open_research(cx, lang, mode, size, &root, seams);
     click(cx, window, "research-tab-exports");
+    assert!(shows(
+        &capture(cx, window),
+        "research-exports-vault-status",
+        if lang == Lang::En {
+            "Vault and memory are not in this version"
+        } else {
+            "此版本不包含知識庫與記憶功能"
+        }
+    ));
     if !wired {
         let lines = capture(cx, window);
         assert!(shows(
@@ -397,6 +406,11 @@ fn no_research_has_no_export_actions(cx: &mut TestAppContext) {
     click(cx, window, "research-tab-exports");
     assert!(shows(
         &capture(cx, window),
+        "research-exports-vault-status",
+        "Vault and memory are not in this version"
+    ));
+    assert!(shows(
+        &capture(cx, window),
         "research-exports-panel",
         "No research open"
     ));
@@ -493,4 +507,68 @@ fn snapshot_reports_failed_vault_handoff(cx: &mut TestAppContext) {
     ));
     assert_eq!(consumer.calls().len(), 1);
     assert_eq!(vault.calls().len(), 1);
+}
+
+#[gpui_kit::test]
+fn split_drag_persists_and_restores(cx: &mut TestAppContext) {
+    use axiom::desktop::layout::persist;
+    use gpui_kit::px;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    cx.update(|cx| persist::init(&home, cx));
+    let seams = ResearchSeams {
+        research_home: Some(home.clone()),
+        ..Default::default()
+    };
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        seams.clone(),
+    );
+    click(cx, window, "research-tab-exports");
+    wait_for(cx, window, "research-exports-repro", "Repro:");
+    let original = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-exports-split-frame").bounds()
+        })
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        let start = original.origin + gpui_kit::point(original.size.width / 2., px(10.));
+        window.drag(start, start + gpui_kit::point(px(4.), px(0.)), cx);
+    })
+    .unwrap();
+    frame(cx, window);
+    let moved = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-exports-split-frame").bounds()
+        })
+        .unwrap();
+    assert!(moved.origin.x > original.origin.x);
+    let saved = cx
+        .update(|cx| {
+            persist::flush(cx);
+            persist::sizes("research.exports", cx)
+        })
+        .unwrap();
+    assert_eq!(
+        persist::load(&home).panels.get("research.exports"),
+        Some(&saved)
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    let (again, _) = open_shell(cx, Lang::En, ThemeMode::Dark, (1920., 1200.), seams, true);
+    wait_load(cx, again);
+    click(cx, again, "research-tab-exports");
+    wait_for(cx, again, "research-exports-repro", "Repro:");
+    let restored = cx
+        .update_window(again, |_, window, _| {
+            window.find("research-exports-split-frame").bounds()
+        })
+        .unwrap();
+    assert_eq!(restored.origin.x, moved.origin.x);
+    assert_eq!(tree_hash(&copy), before);
 }

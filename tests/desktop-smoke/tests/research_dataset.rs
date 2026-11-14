@@ -243,3 +243,67 @@ fn tree_hash_negative_control() {
         .unwrap();
     assert_ne!(tree_hash(&root), before);
 }
+
+#[gpui_kit::test]
+fn split_drag_persists_and_restores(cx: &mut TestAppContext) {
+    use axiom::desktop::layout::persist;
+    use gpui_kit::px;
+    let copy = fixture_copy("rram");
+    let before = tree_hash(&copy);
+    let home = temp_dir();
+    cx.update(|cx| persist::init(&home, cx));
+    let seams = ResearchSeams {
+        research_home: Some(home.clone()),
+        ..Default::default()
+    };
+    let (window, _) = open_research(
+        cx,
+        Lang::En,
+        ThemeMode::Dark,
+        (1920., 1200.),
+        &copy.join("project"),
+        seams.clone(),
+    );
+    click(cx, window, "research-tab-dataset");
+    wait_for(cx, window, "research-dataset-row-0", "voltage");
+    let original = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-dataset-split-frame").bounds()
+        })
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        let start = original.origin + gpui_kit::point(original.size.width / 2., px(10.));
+        window.drag(start, start + gpui_kit::point(px(4.), px(0.)), cx);
+    })
+    .unwrap();
+    frame(cx, window);
+    let moved = cx
+        .update_window(window, |_, window, _| {
+            window.find("research-dataset-split-frame").bounds()
+        })
+        .unwrap();
+    assert!(moved.origin.x > original.origin.x);
+    let saved = cx
+        .update(|cx| {
+            persist::flush(cx);
+            persist::sizes("research.dataset", cx)
+        })
+        .unwrap();
+    assert_eq!(
+        persist::load(&home).panels.get("research.dataset"),
+        Some(&saved)
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    let (again, _) = open_shell(cx, Lang::En, ThemeMode::Dark, (1920., 1200.), seams, true);
+    wait_load(cx, again);
+    click(cx, again, "research-tab-dataset");
+    wait_for(cx, again, "research-dataset-row-0", "voltage");
+    let restored = cx
+        .update_window(again, |_, window, _| {
+            window.find("research-dataset-split-frame").bounds()
+        })
+        .unwrap();
+    assert_eq!(restored.origin.x, moved.origin.x);
+    assert_eq!(tree_hash(&copy), before);
+}

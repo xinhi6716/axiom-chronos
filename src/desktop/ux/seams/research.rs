@@ -84,6 +84,11 @@ pub struct MapStage {
     pub gate: String,
     pub progress: Option<String>,
     pub stale: Vec<String>,
+    pub text_en: String,
+    pub text_zh: String,
+    pub tone: String,
+    pub current: bool,
+    pub output: Option<Tab>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MapDisplay {
@@ -92,6 +97,13 @@ pub struct MapDisplay {
     pub stages: Vec<MapStage>,
     pub funnel: Vec<FunnelNode>,
     pub notices: Vec<ResearchNotice>,
+    pub status_zh: String,
+    pub engineering_en: Option<String>,
+    pub engineering_zh: Option<String>,
+    pub repro_en: Option<String>,
+    pub repro_zh: Option<String>,
+    pub stale_en: Vec<String>,
+    pub stale_zh: Vec<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceRow {
@@ -114,6 +126,35 @@ pub struct SourcesDisplay {
     pub sample: Vec<String>,
     pub notices: Vec<ResearchNotice>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvidenceLocator {
+    PdfPage {
+        physical_page: u32,
+        printed_page: Option<String>,
+        highlight: bool,
+    },
+    RawField {
+        file: String,
+        row: u64,
+        column: String,
+    },
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EvidenceRow {
+    pub text: String,
+    pub evidence: Vec<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EvidenceCondition {
+    pub id: String,
+    pub rows: Vec<EvidenceRow>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EvidenceContradiction {
+    pub text: String,
+    pub a: String,
+    pub b: String,
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EvidenceItem {
     pub id: String,
@@ -121,6 +162,7 @@ pub struct EvidenceItem {
     pub layer: String,
     pub quote: String,
     pub locator: String,
+    pub target: Option<EvidenceLocator>,
     pub image: Option<PathBuf>,
     pub notice: Option<ResearchNotice>,
 }
@@ -128,6 +170,9 @@ pub struct EvidenceItem {
 pub struct EvidenceDisplay {
     pub layers: Vec<String>,
     pub entities: Vec<String>,
+    pub conditions: Vec<EvidenceCondition>,
+    pub contradictions: Vec<EvidenceContradiction>,
+    pub pdf_available: bool,
     pub items: Vec<EvidenceItem>,
     pub total: usize,
     pub offset: usize,
@@ -141,12 +186,18 @@ pub struct DatasetColumn {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DatasetRow {
     pub id: String,
+    pub layer: String,
+    pub text_en: String,
+    pub text_zh: String,
     pub cells: Vec<String>,
     pub evidence: Vec<String>,
     pub flags: Vec<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DatasetDisplay {
+    pub validation_en: String,
+    pub validation_zh: String,
+    pub missing: Vec<String>,
     pub columns: Vec<DatasetColumn>,
     pub rows: Vec<DatasetRow>,
     pub total: usize,
@@ -163,10 +214,13 @@ pub struct ExportStatus {
     pub sha256: Option<String>,
     pub busy: bool,
     pub handoff: Option<String>,
+    pub handoff_zh: Option<String>,
     pub notice: Option<ResearchNotice>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExportsDisplay {
+    pub repro_en: String,
+    pub repro_zh: String,
     pub results: Vec<ExportStatus>,
     pub notices: Vec<ResearchNotice>,
 }
@@ -188,6 +242,7 @@ pub trait ResearchPort: Send + Sync {
     fn export_csv(&self, destination: PathBuf);
     fn export_bundle(&self, destination: PathBuf);
     fn export_snapshot(&self, destination: PathBuf);
+    fn select_entity(&self, entity: String);
     fn locate_page(&self, evidence_id: String);
     fn render_page(&self, evidence_id: String);
     fn set_view(&self, tab: Tab, view: TabView);

@@ -1,4 +1,4 @@
-use super::map::{engineering_text, map_lines, repro_text, status_text, Tone};
+use super::adapter::map_format::{engineering_text, map_lines, repro_text, status_text, Tone};
 use crate::{
     desktop::i18n::Lang,
     research_workspace::{
@@ -9,6 +9,44 @@ use crate::{
         },
     },
 };
+
+#[test]
+fn map_funnel_uses_actual_viz_id_and_display_counts() {
+    use crate::desktop::{
+        theme,
+        ux::seams::research::{FunnelNode, MapDisplay},
+    };
+    use gpui_kit::{Element as _, IntoElement as _};
+    let map = MapDisplay {
+        funnel: vec![
+            FunnelNode {
+                label: "Total".into(),
+                count: 42,
+                ..Default::default()
+            },
+            FunnelNode {
+                label: "Included".into(),
+                count: 7,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let stages = super::map::funnel_stages(&map);
+    assert_eq!(
+        stages
+            .iter()
+            .map(|s| (s.label.as_str(), s.count))
+            .collect::<Vec<_>>(),
+        vec![("Total", 42), ("Included", 7)]
+    );
+    assert_eq!(
+        super::map::map_funnel(&map, &theme::night())
+            .into_element()
+            .id(),
+        Some("research-map-funnel".into())
+    );
+}
 
 fn map(state: StageState, gate: GateResult) -> ResearchMap {
     ResearchMap {

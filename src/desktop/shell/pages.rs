@@ -89,6 +89,7 @@ impl Shell {
   use crate::desktop::targets::{CaptureState, Opening, unavailable};
   if s != CaptureState::Live && !(matches!(t.opening, Opening::Screen(crate::desktop::model::Screen::Run | crate::desktop::model::Screen::Wishes | crate::desktop::model::Screen::Memory | crate::desktop::model::Screen::Usage)) && matches!(s, CaptureState::Empty | CaptureState::Error)) { return Err(unavailable(t,s)); }
   match t.opening {
+   Opening::Page("research") => crate::desktop::targets::open(t, s, &self.state, window, cx),
    Opening::Screen(_) | Opening::Page(_) => Ok(()),
    Opening::Window("mini") => {
     // The shell's normal Mini transition always opens on-screen.

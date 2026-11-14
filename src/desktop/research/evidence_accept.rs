@@ -1,15 +1,34 @@
 use super::evidence::{degraded_text, locator_text};
-use crate::desktop::i18n::Lang;
+use crate::desktop::{
+    i18n::Lang,
+    ux::seams::research::{EvidenceLocator, TabView},
+};
 use crate::research_workspace::{
-    evidence::{self, Layer, Target},
     index::Index,
     manifest::{locate, LocateOptions},
     read::Limits,
 };
 use std::{path::Path, prelude::v1::test, sync::Arc};
 
-fn fixture() -> Index {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/research/rram");
+fn fixture() -> (tempfile::TempDir, Index) {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), dest).unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("rram");
+    copy(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/research/rram"),
+        &root,
+    );
     let located = locate(
         &root.join("project"),
         &LocateOptions {
@@ -18,34 +37,33 @@ fn fixture() -> Index {
         },
     )
     .unwrap();
-    Index::build(Arc::new(located), Limits::default(), &|_, _| {}).unwrap()
+    let index = Index::build(Arc::new(located), Limits::default(), &|_, _| {}).unwrap();
+    (temp, index)
 }
 #[test]
 fn locators_and_degraded_states_are_localized() {
-    let ix = fixture();
-    let mut r = evidence::resolve(&ix, "E1", &Limits::default()).unwrap();
+    let mut r = EvidenceLocator::PdfPage {
+        physical_page: 1,
+        printed_page: Some("11".into()),
+        highlight: true,
+    };
     assert!(locator_text(&r, Lang::En).contains("Page 1 (printed 11)"));
     assert!(locator_text(&r, Lang::En)
         .contains("Region recorded; precise highlighting comes in a later version"));
     assert!(locator_text(&r, Lang::ZhTw).contains("第 1 頁（印刷頁碼 11）"));
     assert!(locator_text(&r, Lang::ZhTw).contains("已記錄區域；精確標示將於未來版本提供"));
-    if let Target::PdfPage {
-        printed_page,
-        highlight,
-        ..
-    } = &mut r.target
-    {
-        *printed_page = None;
-        *highlight = None;
-    }
+    r = EvidenceLocator::PdfPage {
+        physical_page: 1,
+        printed_page: None,
+        highlight: false,
+    };
     assert!(locator_text(&r, Lang::En).contains("Page 1"));
     assert!(locator_text(&r, Lang::En).contains("No region recorded; showing the whole page"));
     assert!(locator_text(&r, Lang::ZhTw).contains("第 1 頁 · 未記錄區域；顯示整頁"));
-    r.target = Target::RawField {
+    r = EvidenceLocator::RawField {
         file: "raw.csv".into(),
         row: 3,
         column: "value".into(),
-        value: "1".into(),
     };
     assert_eq!(locator_text(&r, Lang::En), "raw.csv, row 3, column value");
     assert_eq!(locator_text(&r, Lang::ZhTw), "raw.csv，第 3 列，欄位 value");
@@ -85,16 +103,19 @@ fn locators_and_degraded_states_are_localized() {
 }
 #[test]
 fn fixture_group_preserves_conditions_and_contradictions() {
-    let ix = fixture();
-    let group = evidence::group(&ix, "HfO2", Layer::Literature).unwrap();
-    assert!(group.conditions.iter().any(|c| c.condition_id == "C1"));
-    assert!(group.conditions.iter().any(|c| c.condition_id == "C2"));
-    assert!(group
-        .conditions
-        .iter()
-        .all(|c| c.rows.iter().all(|r| r.condition_id == c.condition_id)));
+    let (_copy, ix) = fixture();
+    let group = super::adapter::evidence_display(&ix, &TabView::default(), Some("HfO2")).unwrap();
+    assert!(group.conditions.iter().any(|c| c.id == "C1"));
+    assert!(group.conditions.iter().any(|c| c.id == "C2"));
+    assert!(group.conditions.iter().all(|c| !c.rows.is_empty()));
     assert!(group
         .contradictions
         .iter()
-        .any(|c| c.a.value_original != c.b.value_original && c.a.condition_id == c.b.condition_id));
+        .any(|c| c.a != c.b && c.text.contains("C1")));
+    assert!(group
+        .conditions
+        .iter()
+        .flat_map(|c| &c.rows)
+        .flat_map(|r| &r.evidence)
+        .any(|id| group.items.iter().any(|item| &item.id == id)));
 }

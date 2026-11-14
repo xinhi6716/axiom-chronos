@@ -62,6 +62,16 @@ fn tab_keys_round_trip() {
 }
 
 #[test]
+fn public_tab_and_load_state_are_the_seam_types() {
+    use crate::desktop::ux::seams::research;
+
+    let tab: research::Tab = Tab::Sources;
+    let state: research::LoadState = LoadState::Indexing { done: 1, total: 2 };
+    assert_eq!(tab.key(), "sources");
+    assert_eq!(state, research::LoadState::Indexing { done: 1, total: 2 });
+}
+
+#[test]
 fn production_seams_use_research_paths() {
     let home = std::path::Path::new("test-home");
     let seams = ResearchSeams::production(home);

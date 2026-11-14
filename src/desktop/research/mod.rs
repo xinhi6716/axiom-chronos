@@ -1,9 +1,10 @@
 use crate::{
     base::Failure,
     desktop::{
+        components::{Button, TextField},
         i18n::{translate, Lang, Table},
         model::AppState,
-        theme::Tokened as _,
+        theme::{self, Density, Step, Tokened as _},
         ux::seams::Interjections,
     },
     research_workspace::{
@@ -13,17 +14,12 @@ use crate::{
         session::{self, ResearchRef, SessionPrefs, TabView},
         stages::{self, ResearchMap, StageState},
     },
-    seams::{Clock, SystemClock},
+    seams::Clock,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     base::{TestSupportExt as _, TestTextExt as _},
-    component::{
-        button::Button,
-        h_flex,
-        input::{Input, InputState},
-        v_flex,
-    },
+    component::input::InputState,
     *,
 };
 use std::{
@@ -55,6 +51,7 @@ mod sources;
 #[cfg(test)]
 mod sources_accept;
 
+pub use crate::desktop::ux::seams::research::{LoadState, Tab};
 pub use adapter::ResearchSeams;
 
 #[cfg(test)]
@@ -111,44 +108,6 @@ mod production_seams_tests {
         assert!(seams.snapshot_consumer.is_none());
         assert!(seams.vault.is_none());
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tab {
-    Map,
-    Sources,
-    Evidence,
-    Dataset,
-    Exports,
-}
-impl Tab {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Map => "map",
-            Self::Sources => "sources",
-            Self::Evidence => "evidence",
-            Self::Dataset => "dataset",
-            Self::Exports => "exports",
-        }
-    }
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "map" => Some(Self::Map),
-            "sources" => Some(Self::Sources),
-            "evidence" => Some(Self::Evidence),
-            "dataset" => Some(Self::Dataset),
-            "exports" => Some(Self::Exports),
-            _ => None,
-        }
-    }
-}
-#[derive(Debug)]
-pub enum LoadState {
-    NoResearch,
-    Opening,
-    Indexing { done: usize, total: usize },
-    Ready,
-    Failed { kind: String, message: String },
 }
 
 enum WorkEvent {
@@ -289,6 +248,18 @@ fn update_view(prefs: &mut SessionPrefs, id: &str, tab: Tab, f: impl FnOnce(&mut
 }
 
 pub struct Workbench {
+    pub port: Arc<dyn crate::desktop::ux::seams::research::ResearchPort>,
+    map_adapter: adapter::ResearchAdapter,
+    map_pending: bool,
+    pub map_feed: crate::desktop::data::Feed<crate::desktop::ux::seams::research::MapDisplay>,
+    pub sources_feed:
+        crate::desktop::data::Feed<crate::desktop::ux::seams::research::SourcesDisplay>,
+    pub evidence_feed:
+        crate::desktop::data::Feed<crate::desktop::ux::seams::research::EvidenceDisplay>,
+    pub dataset_feed:
+        crate::desktop::data::Feed<crate::desktop::ux::seams::research::DatasetDisplay>,
+    pub exports_feed:
+        crate::desktop::data::Feed<crate::desktop::ux::seams::research::ExportsDisplay>,
     pub seams: ResearchSeams,
     pub interjections: Option<Arc<dyn Interjections>>,
     pub located: Option<Arc<Located>>,
@@ -298,6 +269,7 @@ pub struct Workbench {
     preview_raw: bool,
     pub load: LoadState,
     pub tab: Tab,
+    target_tab: Option<Tab>,
     pub prefs: SessionPrefs,
     pub clock: Arc<dyn Clock>,
     current: Option<ResearchRef>,
@@ -314,6 +286,22 @@ impl Workbench {
         clock: Arc<dyn Clock>,
         cx: &mut Context<Self>,
     ) -> Self {
+        if cx
+            .try_global::<crate::desktop::layout::persist::LayoutState>()
+            .is_none()
+        {
+            if let Some(home) = seams.research_home.as_deref() {
+                crate::desktop::layout::persist::init(home, cx);
+            }
+        }
+        let adapter = adapter::ResearchAdapter::new(seams.clone(), interjections.clone());
+        let feeds = adapter.feeds(cx);
+        feeds.sources.observe(cx);
+        feeds.evidence.observe(cx);
+        feeds.dataset.observe(cx);
+        feeds.exports.observe(cx);
+        let port: Arc<dyn crate::desktop::ux::seams::research::ResearchPort> =
+            Arc::new(adapter.clone());
         let loading_prefs = seams.research_home.is_some();
         let saves = seams.research_home.as_deref().map(session_queue);
         if let Some(queue) = &saves {
@@ -336,6 +324,14 @@ impl Workbench {
             .detach();
         }
         Self {
+            port,
+            map_adapter: adapter,
+            map_pending: false,
+            map_feed: feeds.map,
+            sources_feed: feeds.sources,
+            evidence_feed: feeds.evidence,
+            dataset_feed: feeds.dataset,
+            exports_feed: feeds.exports,
             seams,
             interjections,
             located: None,
@@ -345,6 +341,7 @@ impl Workbench {
             preview_raw: false,
             load: LoadState::NoResearch,
             tab: Tab::Map,
+            target_tab: None,
             prefs: SessionPrefs::default(),
             clock,
             current: None,
@@ -360,16 +357,64 @@ impl Workbench {
             let _ = tx.send(SessionCommand::Save(self.prefs.clone()));
         }
     }
+    pub fn open_paths(&mut self, root: PathBuf, store: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.open(ResearchRef { root, store }, cx);
+    }
     pub fn open(&mut self, r: ResearchRef, cx: &mut Context<Self>) {
         self.notice_text = None;
+        self.map_pending = true;
         if self.loading_prefs {
             self.pending = Some(r);
             self.load = LoadState::Opening;
             cx.notify();
             return;
         }
+        let preview_ready = self
+            .map_adapter
+            .after_preview(cx.background_executor().is_test());
+        self.port.open(r.root.clone(), r.store.clone());
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            preview_ready.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    let dataset = this.map_adapter.dataset_feed(cx);
+                    dataset.observe(cx);
+                    this.dataset_feed = dataset;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        let ready = self
+            .map_adapter
+            .after_map(cx.background_executor().is_test());
+        cx.spawn(async move |this, cx| {
+            ready.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    let feed = this.map_adapter.map_feed(cx);
+                    feed.observe(cx);
+                    this.map_feed = feed;
+                    let sources = this.map_adapter.sources_feed(cx);
+                    let evidence = this.map_adapter.evidence_feed(cx);
+                    sources.observe(cx);
+                    evidence.observe(cx);
+                    this.sources_feed = sources;
+                    this.evidence_feed = evidence;
+                    let dataset = this.map_adapter.dataset_feed(cx);
+                    let exports = this.map_adapter.exports_feed(cx);
+                    dataset.observe(cx);
+                    exports.observe(cx);
+                    this.dataset_feed = dataset;
+                    this.exports_feed = exports;
+                    this.map_pending = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.current = Some(r.clone());
         self.located = None;
         self.index = None;
@@ -403,7 +448,9 @@ impl Workbench {
                         }
                         match event {
                             WorkEvent::Located(l) => {
-                                this.tab = restore_tab(&this.prefs, &l.manifest.research_id);
+                                this.tab = this.target_tab.take().unwrap_or_else(|| {
+                                    restore_tab(&this.prefs, &l.manifest.research_id)
+                                });
                                 let total = l.manifest.artifacts.len();
                                 this.located = Some(l);
                                 this.load = LoadState::Indexing { done: 0, total };
@@ -444,7 +491,14 @@ impl Workbench {
             self.open(r, cx);
         }
     }
+    pub(crate) fn select_target_tab(&mut self, t: Tab, cx: &mut Context<Self>) {
+        self.set_tab(t, cx);
+        if !matches!(self.load, LoadState::Ready) {
+            self.target_tab = Some(t);
+        }
+    }
     pub fn set_tab(&mut self, t: Tab, cx: &mut Context<Self>) {
+        self.target_tab = None;
         self.tab = t;
         if let Some(l) = &self.located {
             self.prefs
@@ -464,12 +518,54 @@ impl Workbench {
             .cloned()
             .unwrap_or_default()
     }
+    pub(crate) fn tab_view(&self, t: Tab) -> crate::desktop::ux::seams::research::TabView {
+        adapter::display_view(&self.view(t))
+    }
+    pub(crate) fn set_tab_view(
+        &mut self,
+        t: Tab,
+        f: impl FnOnce(&mut crate::desktop::ux::seams::research::TabView),
+        cx: &mut Context<Self>,
+    ) {
+        let mut view = self.tab_view(t);
+        f(&mut view);
+        self.set_view(t, |current| *current = adapter::engine_view(&view), cx);
+    }
     pub fn set_view(&mut self, t: Tab, f: impl FnOnce(&mut TabView), cx: &mut Context<Self>) {
         if let Some(l) = &self.located {
             update_view(&mut self.prefs, &l.manifest.research_id, t, f);
             self.save();
+            self.port.set_view(t, adapter::display_view(&self.view(t)));
+            self.refresh_tab_feeds(cx);
             cx.notify();
         }
+    }
+    pub(crate) fn refresh_tab_feeds(&mut self, cx: &mut Context<Self>) {
+        let generation = self.generation;
+        let ready = self
+            .map_adapter
+            .after_map(cx.background_executor().is_test());
+        cx.spawn(async move |this, cx| {
+            ready.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    let sources = this.map_adapter.sources_feed(cx);
+                    let evidence = this.map_adapter.evidence_feed(cx);
+                    sources.observe(cx);
+                    evidence.observe(cx);
+                    this.sources_feed = sources;
+                    this.evidence_feed = evidence;
+                    let dataset = this.map_adapter.dataset_feed(cx);
+                    let exports = this.map_adapter.exports_feed(cx);
+                    dataset.observe(cx);
+                    exports.observe(cx);
+                    this.dataset_feed = dataset;
+                    this.exports_feed = exports;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
     pub fn open_evidence(&mut self, evidence_id: &str, cx: &mut Context<Self>) {
         self.set_view(
@@ -478,6 +574,19 @@ impl Workbench {
             cx,
         );
         self.set_tab(Tab::Evidence, cx);
+    }
+    pub(crate) fn layout_persistence_safe(&self) -> bool {
+        self.seams
+            .research_home
+            .as_ref()
+            .zip(self.index.as_ref())
+            .is_some_and(|(home, index)| adapter::safe_home(home, index))
+    }
+    pub(crate) fn show_evidence_rows(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.show_rows(vec![adapter::evidence_filter(id)], cx);
+    }
+    pub fn show_dataset(&mut self, cx: &mut Context<Self>) {
+        self.show_rows(Vec::new(), cx);
     }
     pub fn show_rows(&mut self, filters: Vec<Filter>, cx: &mut Context<Self>) {
         self.set_view(
@@ -685,17 +794,11 @@ pub struct ResearchPage {
 }
 impl ResearchPage {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let seams = state.read(cx).ux.research.clone();
-        let interjections = state.read(cx).ux.seams.interjections.clone();
-        let wb = cx.new(|cx| Workbench::new(seams, interjections, Arc::new(SystemClock), cx));
+        let (wb, map, sources, evidence, dataset, exports) =
+            adapter::compose(&state, window, cx);
         cx.observe(&wb, |_, _, cx| cx.notify()).detach();
         let path = cx.new(|cx| InputState::new(window, cx));
         let store = cx.new(|cx| InputState::new(window, cx));
-        let map = cx.new(|cx| map::MapPanel::new(wb.clone(), window, cx));
-        let sources = cx.new(|cx| sources::SourcesPanel::new(wb.clone(), window, cx));
-        let evidence = cx.new(|cx| evidence::EvidencePanel::new(wb.clone(), window, cx));
-        let dataset = cx.new(|cx| dataset::DatasetPanel::new(wb.clone(), window, cx));
-        let exports = cx.new(|cx| exports::ExportsPanel::new(wb.clone(), window, cx));
         Self {
             state,
             wb,
@@ -773,7 +876,7 @@ impl Render for ResearchPage {
                 Tab::Exports => self.exports.clone().into_any_element(),
             }
         };
-        let mut rail = h_flex().gap(px(8.)).border_b_1().border_color(colors.orbit);
+        let mut rail = div().flex().gap(theme::space(Density::default(), Step::Sm)).border_b_1().border_color(colors.orbit);
         for tab in [
             Tab::Map,
             Tab::Sources,
@@ -788,7 +891,7 @@ impl Render for ResearchPage {
                     .id(SharedString::from(id))
                     .test_support()
                     .cursor_pointer()
-                    .p(px(8.))
+                    .p(theme::space(Density::default(), Step::Sm))
                     .text_color(if current == tab {
                         colors.gold
                     } else {
@@ -799,7 +902,7 @@ impl Render for ResearchPage {
                     .on_click(move |_, _, cx| handle.update(cx, |wb, cx| wb.set_tab(tab, cx))),
             );
         }
-        let mut list = v_flex();
+        let mut list = div().flex().flex_col();
         for (i, r) in recent.into_iter().enumerate() {
             let title = r.root.display().to_string();
             let handle = self.wb.clone();
@@ -812,17 +915,16 @@ impl Render for ResearchPage {
                     .on_click(move |_, _, cx| handle.update(cx, |wb, cx| wb.open(r.clone(), cx))),
             );
         }
-        v_flex()
+        div().flex().flex_col()
             .id("research-page")
             .test_support()
             .size_full()
             .overflow_y_scroll()
-            .p(px(20.))
-            .gap(px(10.))
+            .p(theme::space(Density::default(), Step::Xl))
+            .gap(theme::space(Density::default(), Step::Md))
             .text_color(colors.text)
             .child(
-                Button::new("research-back")
-                    .label(tr(lang, "Back"))
+                Button::new("research-back", tr(lang, "Back"), &colors)
                     .on_click({
                         let state = self.state.clone();
                         move |_, _, cx| state.update(cx, |s, cx| s.close_page(cx))
@@ -838,8 +940,7 @@ impl Render for ResearchPage {
                     .child(marked("research-blocker", blocker)),
             )
             .child(
-                Button::new("research-primary")
-                    .label(tr(lang, primary.label()))
+                Button::new("research-primary", tr(lang, primary.label()), &colors)
                     .on_click(cx.listener(move |this, _, window, cx| match primary {
                         PrimaryAction::Retry => this.wb.update(cx, |wb, cx| wb.refresh(cx)),
                         PrimaryAction::Blocker => {
@@ -863,12 +964,21 @@ impl Render for ResearchPage {
             })
             .child(panel)
             .child(tr(lang, "Research folder"))
-            .child(Input::new(&self.path).id("research-open-path"))
+            .child({
+                let path = self.path.clone();
+                div().id("research-open-path").test_support()
+                    .on_click(move |_, window, cx| path.read(cx).focus_handle(cx).focus(window, cx))
+                    .child(TextField::new("research-open-path-field", &self.path, &colors))
+            })
             .child(tr(lang, "Store folder (optional)"))
-            .child(Input::new(&self.store).id("research-open-store"))
+            .child({
+                let store = self.store.clone();
+                div().id("research-open-store").test_support()
+                    .on_click(move |_, window, cx| store.read(cx).focus_handle(cx).focus(window, cx))
+                    .child(TextField::new("research-open-store-field", &self.store, &colors))
+            })
             .child(
-                Button::new("research-open-button")
-                    .label(tr(lang, "Open"))
+                Button::new("research-open-button", tr(lang, "Open"), &colors)
                     .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
             )
             .child(tr(lang, "Recent"))

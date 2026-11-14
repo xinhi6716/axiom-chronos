@@ -1,3 +1,7 @@
+pub(crate) mod actions;
+pub(crate) mod dataset;
+pub(crate) mod exports;
+pub(crate) mod map_format;
 use crate::research_workspace::{
     pdf::PdfiumProcess,
     seams::{PageRenderer, SnapshotConsumer, VaultActions},
@@ -185,6 +189,7 @@ struct Outputs {
     exports: Slot<dto::ExportsDisplay>,
     load: Mutex<dto::LoadState>,
     views: Mutex<HashMap<dto::Tab, dto::TabView>>,
+    preview_waiters: Mutex<Vec<MapSignal>>,
 }
 
 pub struct ResearchFeeds {
@@ -201,15 +206,57 @@ pub struct ResearchAdapter {
     sender: mpsc::Sender<Command>,
     outputs: Arc<Outputs>,
 }
+#[derive(Default)]
+struct MapWaitState {
+    ready: bool,
+    deterministic: bool,
+    waker: Option<std::task::Waker>,
+}
+struct MapSignal(Arc<Mutex<MapWaitState>>);
+impl MapSignal {
+    fn notify(self) {
+        let waker = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.ready = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+pub(crate) struct MapWaiter(Arc<Mutex<MapWaitState>>);
+impl std::future::Future for MapWaiter {
+    type Output = ();
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ready {
+            std::task::Poll::Ready(())
+        } else {
+            if state.deterministic {
+                // The deterministic GPUI scheduler cannot be awakened from an OS worker.
+                cx.waker().wake_by_ref();
+            } else {
+                state.waker = Some(cx.waker().clone());
+            }
+            std::task::Poll::Pending
+        }
+    }
+}
 enum Command {
     #[cfg(test)]
     Probe(Box<dyn FnOnce() + Send>),
-    Open(PathBuf, Option<PathBuf>),
+    Open(PathBuf, Option<PathBuf>, Vec<MapSignal>),
+    MapReady(MapSignal),
     Refresh,
     Sample(String, usize, u64),
     Correct(dto::Correction),
-    Export(super::exports::Action, PathBuf),
+    Export(exports::Action, PathBuf),
     Locate(String, bool),
+    Entity(String),
     View(dto::Tab, dto::TabView),
     Filters(dto::Tab, Vec<dto::Filter>),
 }
@@ -225,26 +272,12 @@ impl ResearchAdapter {
         Self { sender, outputs }
     }
     pub fn feeds(&self, cx: &mut gpui_kit::App) -> ResearchFeeds {
-        let period = Duration::from_millis(100);
+        const FEED_PERIOD_MS: u64 = 100;
+        let period = Duration::from_millis(FEED_PERIOD_MS);
         ResearchFeeds {
-            map: crate::desktop::data::Feed::spawn(
-                "research.map",
-                self.outputs.map.source(),
-                period,
-                cx,
-            ),
-            sources: crate::desktop::data::Feed::spawn(
-                "research.sources",
-                self.outputs.sources.source(),
-                period,
-                cx,
-            ),
-            evidence: crate::desktop::data::Feed::spawn(
-                "research.evidence",
-                self.outputs.evidence.source(),
-                period,
-                cx,
-            ),
+            map: self.map_feed(cx),
+            sources: self.sources_feed(cx),
+            evidence: self.evidence_feed(cx),
             dataset: crate::desktop::data::Feed::spawn(
                 "research.dataset",
                 self.outputs.dataset.source(),
@@ -258,6 +291,86 @@ impl ResearchAdapter {
                 cx,
             ),
         }
+    }
+    pub(crate) fn dataset_feed(
+        &self,
+        cx: &mut gpui_kit::App,
+    ) -> crate::desktop::data::Feed<dto::DatasetDisplay> {
+        const FEED_PERIOD_MS: u64 = 100;
+        crate::desktop::data::Feed::spawn(
+            "research.dataset",
+            self.outputs.dataset.source(),
+            Duration::from_millis(FEED_PERIOD_MS),
+            cx,
+        )
+    }
+    pub(crate) fn exports_feed(
+        &self,
+        cx: &mut gpui_kit::App,
+    ) -> crate::desktop::data::Feed<dto::ExportsDisplay> {
+        const FEED_PERIOD_MS: u64 = 100;
+        crate::desktop::data::Feed::spawn(
+            "research.exports",
+            self.outputs.exports.source(),
+            Duration::from_millis(FEED_PERIOD_MS),
+            cx,
+        )
+    }
+    pub(crate) fn sources_feed(
+        &self,
+        cx: &mut gpui_kit::App,
+    ) -> crate::desktop::data::Feed<dto::SourcesDisplay> {
+        const FEED_PERIOD_MS: u64 = 100;
+        crate::desktop::data::Feed::spawn(
+            "research.sources",
+            self.outputs.sources.source(),
+            Duration::from_millis(FEED_PERIOD_MS),
+            cx,
+        )
+    }
+    pub(crate) fn evidence_feed(
+        &self,
+        cx: &mut gpui_kit::App,
+    ) -> crate::desktop::data::Feed<dto::EvidenceDisplay> {
+        const FEED_PERIOD_MS: u64 = 100;
+        crate::desktop::data::Feed::spawn(
+            "research.evidence",
+            self.outputs.evidence.source(),
+            Duration::from_millis(FEED_PERIOD_MS),
+            cx,
+        )
+    }
+    pub(crate) fn map_feed(
+        &self,
+        cx: &mut gpui_kit::App,
+    ) -> crate::desktop::data::Feed<dto::MapDisplay> {
+        const FEED_PERIOD_MS: u64 = 100;
+        crate::desktop::data::Feed::spawn(
+            "research.map",
+            self.outputs.map.source(),
+            Duration::from_millis(FEED_PERIOD_MS),
+            cx,
+        )
+    }
+    pub(crate) fn after_preview(&self, deterministic: bool) -> MapWaiter {
+        let state = Arc::new(Mutex::new(MapWaitState {
+            deterministic,
+            ..Default::default()
+        }));
+        self.outputs
+            .preview_waiters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(MapSignal(state.clone()));
+        MapWaiter(state)
+    }
+    pub(crate) fn after_map(&self, deterministic: bool) -> MapWaiter {
+        let state = Arc::new(Mutex::new(MapWaitState {
+            deterministic,
+            ..Default::default()
+        }));
+        self.send(Command::MapReady(MapSignal(state.clone())));
+        MapWaiter(state)
     }
     fn send(&self, command: Command) {
         let _ = self.sender.send(command);
@@ -274,7 +387,14 @@ impl ResearchAdapter {
 }
 impl dto::ResearchPort for ResearchAdapter {
     fn open(&self, root: PathBuf, store: Option<PathBuf>) {
-        self.send(Command::Open(root, store));
+        let signals = std::mem::take(
+            &mut *self
+                .outputs
+                .preview_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        self.send(Command::Open(root, store, signals));
     }
     fn refresh(&self) {
         self.send(Command::Refresh);
@@ -286,13 +406,16 @@ impl dto::ResearchPort for ResearchAdapter {
         self.send(Command::Correct(c));
     }
     fn export_csv(&self, dest: PathBuf) {
-        self.send(Command::Export(super::exports::Action::Csv, dest));
+        self.send(Command::Export(exports::Action::Csv, dest));
     }
     fn export_bundle(&self, dest: PathBuf) {
-        self.send(Command::Export(super::exports::Action::Bundle, dest));
+        self.send(Command::Export(exports::Action::Bundle, dest));
     }
     fn export_snapshot(&self, dest: PathBuf) {
-        self.send(Command::Export(super::exports::Action::Snapshot, dest));
+        self.send(Command::Export(exports::Action::Snapshot, dest));
+    }
+    fn select_entity(&self, entity: String) {
+        self.send(Command::Entity(entity));
     }
     fn locate_page(&self, id: String) {
         self.send(Command::Locate(id, false));
@@ -359,6 +482,7 @@ struct Worker {
     index: Option<Arc<Index>>,
     prefs: SessionPrefs,
     located_items: HashMap<String, dto::EvidenceItem>,
+    selected_entity: Option<String>,
 }
 impl Worker {
     fn new(
@@ -374,6 +498,7 @@ impl Worker {
             index: None,
             prefs: SessionPrefs::default(),
             located_items: HashMap::new(),
+            selected_entity: None,
         }
     }
     fn run(mut self, rx: mpsc::Receiver<Command>) {
@@ -381,16 +506,26 @@ impl Worker {
             match command {
                 #[cfg(test)]
                 Command::Probe(probe) => probe(),
-                Command::Open(root, store) => {
+                Command::Open(root, store, signals) => {
                     self.located_items.clear();
+                    self.selected_entity = None;
+                    self.outputs.map.replace(Default::default());
                     self.outputs.sources.replace(Default::default());
                     self.outputs.evidence.replace(Default::default());
+                    self.outputs.dataset.replace(Default::default());
                     self.outputs.exports.replace(Default::default());
                     self.current = Some(ResearchRef { root, store });
-                    self.open();
+                    self.open(signals);
                 }
-                Command::Refresh => self.open(),
+                Command::MapReady(signal) => signal.notify(),
+                Command::Refresh => self.open(Vec::new()),
                 Command::View(tab, view) => {
+                    let old = self.view(tab);
+                    if tab == dto::Tab::Evidence
+                        && (old.node != view.node || old.offset != view.offset)
+                    {
+                        self.selected_entity = None;
+                    }
                     self.set_view(tab, view);
                     self.update_tab(tab);
                 }
@@ -405,6 +540,10 @@ impl Worker {
                 Command::Correct(c) => self.correct(c),
                 Command::Export(action, dest) => self.export(action, dest),
                 Command::Locate(id, render) => self.locate(id, render),
+                Command::Entity(entity) => {
+                    self.selected_entity = Some(entity);
+                    self.update_tab(dto::Tab::Evidence);
+                }
             }
         }
     }
@@ -425,6 +564,9 @@ impl Worker {
             .insert(tab, view.clone());
         if let (Some(ix), Some(home)) = (&self.index, &self.seams.research_home) {
             if safe_home(home, ix) {
+                let (reply, response) = mpsc::channel();
+                let _ = super::session_queue(home).send(super::SessionCommand::Load(reply));
+                self.prefs = response.recv().unwrap_or_default();
                 self.prefs
                     .views
                     .entry(ix.located().manifest.research_id.clone())
@@ -436,7 +578,12 @@ impl Worker {
             }
         }
     }
-    fn open(&mut self) {
+    fn notify_preview(signals: &mut Vec<MapSignal>) {
+        for signal in std::mem::take(signals) {
+            signal.notify();
+        }
+    }
+    fn open(&mut self, mut preview_signals: Vec<MapSignal>) {
         let Some(reference) = self.current.clone() else {
             return;
         };
@@ -462,6 +609,7 @@ impl Worker {
                     self.outputs.dataset.replace(preview_display(page.rows));
                 }
             }
+            Self::notify_preview(&mut preview_signals);
             let progress = self.outputs.clone();
             let index = Index::build(located, Limits::default(), &move |done, total| {
                 *progress.load.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -469,6 +617,7 @@ impl Worker {
             })?;
             Ok(Arc::new(index))
         })();
+        Self::notify_preview(&mut preview_signals);
         match result {
             Err(e) => {
                 *self.outputs.load.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -537,7 +686,9 @@ impl Worker {
                     .sources
                     .set(sources_display(ix, &view).map(|mut display| {
                         if let Some(previous) = previous {
-                            display.sample = previous.sample;
+                            if display.sample.is_empty() {
+                                display.sample = previous.sample;
+                            }
                             for row in &mut display.rows {
                                 if let Some(old) = previous.rows.iter().find(|old| old.id == row.id)
                                 {
@@ -550,22 +701,31 @@ impl Worker {
                     }));
             }
             dto::Tab::Evidence => {
-                self.outputs
-                    .evidence
-                    .set(evidence_display(ix, &view).map(|mut display| {
-                        for item in &mut display.items {
-                            if let Some(old) = self.located_items.get(&item.id) {
-                                item.locator = old.locator.clone();
-                                item.image = old.image.clone();
-                                item.notice = old.notice.clone();
+                self.outputs.evidence.set(
+                    evidence_display(ix, &view, self.selected_entity.as_deref()).map(
+                        |mut display| {
+                            for item in &mut display.items {
+                                if let Some(old) = self.located_items.get(&item.id) {
+                                    item.locator = old.locator.clone();
+                                    item.target = old.target.clone();
+                                    item.image = old.image.clone();
+                                    item.notice = old.notice.clone();
+                                }
                             }
-                        }
-                        display
-                    }));
+                            display
+                        },
+                    ),
+                );
             }
-            dto::Tab::Dataset => self.outputs.dataset.set(dataset_display(ix, &view)),
+            dto::Tab::Dataset => self.outputs.dataset.set(
+                dataset_display(ix, &view)
+                    .map_err(|e| Failure::new(&e.kind, format!("{}: {}", e.kind, e.message))),
+            ),
             dto::Tab::Exports => {
                 let mut display = unavailable_exports();
+                let status = engine::repro::guard(ix).status;
+                display.repro_en = exports::repro_text(&status, crate::desktop::i18n::Lang::En);
+                display.repro_zh = exports::repro_text(&status, crate::desktop::i18n::Lang::ZhTw);
                 if let Ok(previous) = self.outputs.exports.snapshot() {
                     display.results = previous.results;
                 }
@@ -607,9 +767,9 @@ impl Worker {
                 &ix.located().manifest.research_id,
             )?;
             let session = self.interjections.as_ref().and_then(|_| {
-                super::actions::resolve_session(ix.located(), self.seams.goals_home.as_deref())
+                actions::resolve_session(ix.located(), self.seams.goals_home.as_deref())
             });
-            let mut state = super::actions::State {
+            let mut state = actions::State {
                 store,
                 session,
                 bridge: self.interjections.clone(),
@@ -635,11 +795,11 @@ impl Worker {
             }
         }
     }
-    fn export(&mut self, action: super::exports::Action, dest: PathBuf) {
+    fn export(&mut self, action: exports::Action, dest: PathBuf) {
         let Some(ix) = &self.index else { return };
         let view = engine_view(&self.view(dto::Tab::Dataset));
-        let q = super::exports::query(&view);
-        if matches!(action, super::exports::Action::Snapshot)
+        let q = exports::query(&view);
+        if matches!(action, exports::Action::Snapshot)
             && self
                 .seams
                 .research_home
@@ -652,9 +812,9 @@ impl Worker {
             return;
         }
         let action_name = match action {
-            super::exports::Action::Csv => "csv",
-            super::exports::Action::Bundle => "bundle",
-            super::exports::Action::Snapshot => "snapshot",
+            exports::Action::Csv => "csv",
+            exports::Action::Bundle => "bundle",
+            exports::Action::Snapshot => "snapshot",
         };
         let mut display = self.outputs.exports.snapshot().unwrap_or_default();
         display.results.push(dto::ExportStatus {
@@ -663,7 +823,7 @@ impl Worker {
             ..Default::default()
         });
         self.outputs.exports.replace(display);
-        let result = super::exports::perform_action(
+        let result = exports::perform_action(
             action,
             ix,
             ix.located(),
@@ -673,43 +833,94 @@ impl Worker {
             &dest,
         );
         let status = match result {
-            Ok(super::exports::Outcome::Export(item)) => dto::ExportStatus {
+            Ok(exports::Outcome::Export(item)) => dto::ExportStatus {
                 action: action_name.into(),
                 path: Some(item.path),
                 rows: item.rows,
                 sha256: Some(item.sha256),
                 ..Default::default()
             },
-            Ok(super::exports::Outcome::Snapshot(item, handoff)) => dto::ExportStatus {
+            Ok(exports::Outcome::Snapshot(item, handoff)) => dto::ExportStatus {
                 action: "snapshot".into(),
                 path: Some(item.path),
                 rows: item.rows,
                 sha256: Some(item.sha256),
-                handoff: Some(format!("{:?}", handoff.consumer)),
+                handoff: Some({
+                    let paper = exports::delivery_text(
+                        &handoff.consumer,
+                        "paper",
+                        crate::desktop::i18n::Lang::En,
+                    );
+                    if self.seams.vault.is_some() {
+                        format!(
+                            "{} · {}",
+                            paper,
+                            exports::delivery_text(
+                                &handoff.vault,
+                                "vault",
+                                crate::desktop::i18n::Lang::En
+                            )
+                        )
+                    } else {
+                        paper
+                    }
+                }),
+                handoff_zh: Some({
+                    let paper = exports::delivery_text(
+                        &handoff.consumer,
+                        "paper",
+                        crate::desktop::i18n::Lang::ZhTw,
+                    );
+                    if self.seams.vault.is_some() {
+                        format!(
+                            "{} · {}",
+                            paper,
+                            exports::delivery_text(
+                                &handoff.vault,
+                                "vault",
+                                crate::desktop::i18n::Lang::ZhTw
+                            )
+                        )
+                    } else {
+                        paper
+                    }
+                }),
                 ..Default::default()
             },
-            Ok(super::exports::Outcome::Empty) => dto::ExportStatus {
+            Ok(exports::Outcome::Empty) => dto::ExportStatus {
                 notice: Some(dto::ResearchNotice {
                     kind: "empty".into(),
                     message: "No evidence in the current dataset filter".into(),
                 }),
                 ..Default::default()
             },
-            Ok(super::exports::Outcome::NoHome) => dto::ExportStatus {
+            Ok(exports::Outcome::NoHome) => dto::ExportStatus {
                 notice: Some(dto::ResearchNotice {
                     kind: "no_home".into(),
                     message: "Research home is not configured".into(),
                 }),
                 ..Default::default()
             },
-            Err(e) => {
-                self.outputs.exports.set(Err(e));
-                return;
-            }
+            Err(e) => dto::ExportStatus {
+                notice: Some(dto::ResearchNotice {
+                    kind: e.kind,
+                    message: e.message,
+                }),
+                ..Default::default()
+            },
         };
         let mut display = self.outputs.exports.snapshot().unwrap_or_default();
-        if let Some(last) = display.results.last_mut() {
+        if status.notice.is_some() {
+            display.results.pop();
+            display
+                .notices
+                .retain(|notice| notice.kind == "unavailable");
+            display.notices.push(status.notice.unwrap());
+        } else if let Some(last) = display.results.last_mut() {
             *last = status;
+            display
+                .notices
+                .retain(|notice| notice.kind == "unavailable");
         }
         self.outputs.exports.replace(display);
     }
@@ -717,7 +928,7 @@ impl Worker {
         let Some(ix) = &self.index else { return };
         let result = (|| -> Res<dto::EvidenceDisplay> {
             let resolved = evidence::resolve(ix, &id, &Limits::default())?;
-            let image = if render {
+            let image = if render && matches!(resolved.target, evidence::Target::PdfPage { .. }) {
                 let renderer = self
                     .seams
                     .renderer
@@ -770,6 +981,25 @@ impl Worker {
                 layer: format!("{:?}", resolved.item.layer),
                 quote: resolved.item.quote,
                 locator: format!("{:?}", resolved.target),
+                target: Some(match &resolved.target {
+                    evidence::Target::PdfPage {
+                        physical_page,
+                        printed_page,
+                        highlight,
+                        ..
+                    } => dto::EvidenceLocator::PdfPage {
+                        physical_page: *physical_page,
+                        printed_page: printed_page.clone(),
+                        highlight: highlight.is_some(),
+                    },
+                    evidence::Target::RawField {
+                        file, row, column, ..
+                    } => dto::EvidenceLocator::RawField {
+                        file: file.clone(),
+                        row: *row,
+                        column: column.clone(),
+                    },
+                }),
                 image: image.or_else(|| {
                     display
                         .items
@@ -829,10 +1059,11 @@ fn unavailable_exports() -> dto::ExportsDisplay {
             kind: "unavailable".into(),
             message: "Vault and memory are not in this version".into(),
         }],
+        ..Default::default()
     }
 }
 
-fn safe_home(home: &Path, ix: &Index) -> bool {
+pub(crate) fn safe_home(home: &Path, ix: &Index) -> bool {
     if !home.is_absolute()
         || home
             .components()
@@ -856,7 +1087,7 @@ fn safe_home(home: &Path, ix: &Index) -> bool {
             .is_ok_and(|r| target.starts_with(&r) || r.starts_with(&target))
     })
 }
-fn engine_view(view: &dto::TabView) -> engine::session::TabView {
+pub(crate) fn engine_view(view: &dto::TabView) -> engine::session::TabView {
     engine::session::TabView {
         offset: view.offset,
         selection: view.selection.clone(),
@@ -877,7 +1108,7 @@ fn engine_view(view: &dto::TabView) -> engine::session::TabView {
             .collect(),
     }
 }
-fn display_view(view: &engine::session::TabView) -> dto::TabView {
+pub(crate) fn display_view(view: &engine::session::TabView) -> dto::TabView {
     dto::TabView {
         offset: view.offset,
         selection: view.selection.clone(),
@@ -960,19 +1191,87 @@ fn map_display(ix: &Index) -> Res<dto::MapDisplay> {
             });
         }
     }
+    use crate::desktop::i18n::Lang;
+    let en = map_format::map_lines(&map, Lang::En);
+    let zh = map_format::map_lines(&map, Lang::ZhTw);
+    let current = map
+        .stages
+        .iter()
+        .position(|s| !matches!(s.state, stages::StageState::Done));
+    let render = |line: &map_format::MapLine| {
+        let mut text = format!("{} — {}", line.label, line.state_text);
+        if let Some(progress) = &line.progress_text {
+            text.push_str(&format!(" · {progress}"));
+        }
+        text.push_str(&format!(" · {}", line.gate_text));
+        for stale in &line.stale_text {
+            text.push_str(&format!(" · {stale}"));
+        }
+        text
+    };
     Ok(dto::MapDisplay {
         title: ix.located().manifest.title.clone(),
-        status: format!("{:?}", map.status),
+        status: map_format::status_text(&map.status, Lang::En),
+        status_zh: map_format::status_text(&map.status, Lang::ZhTw),
+        engineering_en: map
+            .engineering
+            .as_ref()
+            .map(|e| map_format::engineering_text(e, Lang::En)),
+        engineering_zh: map
+            .engineering
+            .as_ref()
+            .map(|e| map_format::engineering_text(e, Lang::ZhTw)),
+        repro_en: map
+            .repro
+            .as_ref()
+            .map(|r| map_format::repro_text(r, Lang::En)),
+        repro_zh: map
+            .repro
+            .as_ref()
+            .map(|r| map_format::repro_text(r, Lang::ZhTw)),
+        stale_en: map
+            .stale
+            .iter()
+            .map(|s| map_format::stale_text(s, Lang::En))
+            .collect(),
+        stale_zh: map
+            .stale
+            .iter()
+            .map(|s| map_format::stale_text(s, Lang::ZhTw))
+            .collect(),
         stages: map
             .stages
-            .into_iter()
-            .map(|s| dto::MapStage {
-                id: s.id,
-                label: s.label,
-                state: format!("{:?}", s.state),
-                gate: format!("{:?}", s.gate),
-                progress: s.progress.map(|p| format!("{}/{}", p.done, p.total)),
-                stale: s.stale.into_iter().map(|s| format!("{:?}", s)).collect(),
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let output = ix
+                    .located()
+                    .manifest
+                    .stages
+                    .iter()
+                    .find(|stage| stage.id == s.id)
+                    .and_then(|stage| stage.outputs.first())
+                    .map(|id| match ix.located().artifact(id).map(|a| &a.role) {
+                        Some(
+                            engine::manifest::Role::Measurements
+                            | engine::manifest::Role::RawMeasurements,
+                        ) => dto::Tab::Dataset,
+                        Some(engine::manifest::Role::Evidence) => dto::Tab::Evidence,
+                        _ => dto::Tab::Sources,
+                    });
+                dto::MapStage {
+                    id: s.id.clone(),
+                    label: s.label.clone(),
+                    state: format!("{:?}", s.state),
+                    gate: format!("{:?}", s.gate),
+                    progress: en[i].progress_text.clone(),
+                    stale: en[i].stale_text.clone(),
+                    text_en: render(&en[i]),
+                    text_zh: render(&zh[i]),
+                    tone: format!("{:?}", en[i].tone),
+                    current: current == Some(i),
+                    output,
+                }
             })
             .collect(),
         funnel,
@@ -998,18 +1297,37 @@ fn sources_display(ix: &Index, view: &dto::TabView) -> Res<dto::SourcesDisplay> 
                 title: r.title,
                 doi: r.doi,
                 group: r.duplicate_group,
-                decision: format!("{:?}", r.decision),
+                decision: match r.decision {
+                    funnel::Decision::Included => "Included".into(),
+                    funnel::Decision::Excluded { reason } => format!("Excluded: {reason}"),
+                    funnel::Decision::Pending { reason } => format!("Pending: {reason}"),
+                    funnel::Decision::Failed { reason } => format!("Failed: {reason}"),
+                    funnel::Decision::Duplicate { of_group } => format!("Duplicate: {of_group}"),
+                    funnel::Decision::Unprocessed => "Unprocessed".into(),
+                },
                 page: None,
                 locate_state: "not selected".into(),
             })
             .collect(),
         total,
         offset: view.offset,
-        sample: vec![],
+        sample: match view
+            .selection
+            .as_deref()
+            .and_then(|s| s.strip_prefix("sample:"))
+            .and_then(|s| s.parse().ok())
+        {
+            Some(seed) => funnel::sample(ix, &node, 5, seed)?,
+            None => vec![],
+        },
         notices: vec![],
     })
 }
-fn evidence_display(ix: &Index, view: &dto::TabView) -> Res<dto::EvidenceDisplay> {
+pub(crate) fn evidence_display(
+    ix: &Index,
+    view: &dto::TabView,
+    selected_entity: Option<&str>,
+) -> Res<dto::EvidenceDisplay> {
     let layer = if view.node.as_deref() == Some("raw") {
         evidence::Layer::Raw
     } else {
@@ -1018,13 +1336,42 @@ fn evidence_display(ix: &Index, view: &dto::TabView) -> Res<dto::EvidenceDisplay
     let (entities, total) = evidence::entities(ix, layer.clone(), view.offset, 20)?;
     let mut items = Vec::new();
     let mut notices = Vec::new();
-    if let Some(entity) = view
-        .selection
+    let mut conditions = Vec::new();
+    let mut contradictions = Vec::new();
+    if let Some(entity) = selected_entity
+        .filter(|selected| entities.iter().any(|name| name == selected))
+        .map(str::to_owned)
+        .or_else(|| entities.first().cloned())
         .as_ref()
-        .filter(|selected| entities.contains(selected))
-        .or_else(|| entities.first())
     {
         let group = evidence::group(ix, entity, layer)?;
+        conditions = group
+            .conditions
+            .iter()
+            .map(|condition| dto::EvidenceCondition {
+                id: condition.condition_id.clone(),
+                rows: condition
+                    .rows
+                    .iter()
+                    .map(|row| dto::EvidenceRow {
+                        text: format!(
+                            "{}: {} {}",
+                            row.variable, row.value_original, row.unit_original
+                        ),
+                        evidence: row.evidence.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        contradictions = group
+            .contradictions
+            .iter()
+            .map(|c| dto::EvidenceContradiction {
+                text: format!("{} · {}", c.condition_id, c.variable),
+                a: format!("{} {}", c.a.value_original, c.a.unit_original),
+                b: format!("{} {}", c.b.value_original, c.b.unit_original),
+            })
+            .collect();
         let ids: std::collections::BTreeSet<_> = group
             .conditions
             .into_iter()
@@ -1039,6 +1386,7 @@ fn evidence_display(ix: &Index, view: &dto::TabView) -> Res<dto::EvidenceDisplay
                     layer: format!("{:?}", item.layer),
                     quote: item.quote,
                     locator: format!("{:?}", item.locator),
+                    target: None,
                     image: None,
                     notice: None,
                 }),
@@ -1052,21 +1400,24 @@ fn evidence_display(ix: &Index, view: &dto::TabView) -> Res<dto::EvidenceDisplay
     Ok(dto::EvidenceDisplay {
         layers: vec!["literature".into(), "raw".into()],
         entities,
+        conditions,
+        contradictions,
+        pdf_available: ix.located().has(engine::manifest::Capability::PdfPages),
         items,
         total,
         offset: view.offset,
         notices,
     })
 }
-fn dataset_display(ix: &Index, view: &dto::TabView) -> Res<dto::DatasetDisplay> {
+pub(crate) fn dataset_display(ix: &Index, view: &dto::TabView) -> Res<dto::DatasetDisplay> {
     let layer = if view.node.as_deref() == Some("raw") {
         DataLayer::Raw
     } else {
         DataLayer::Extracted
     };
     let engine_view = engine_view(view);
-    let (page, validation, _) =
-        super::dataset::load_page(ix, layer, &engine_view.filters, view.offset)?;
+    let (page, validation, missing) =
+        dataset::load_page(ix, layer, &engine_view.filters, view.offset)?;
     let names = [
         "paper_or_source",
         "condition_id",
@@ -1083,6 +1434,14 @@ fn dataset_display(ix: &Index, view: &dto::TabView) -> Res<dto::DatasetDisplay> 
         .rows
         .into_iter()
         .map(|r| dto::DatasetRow {
+            text_en: dataset::row_text(&r, crate::desktop::i18n::Lang::En),
+            text_zh: dataset::row_text(&r, crate::desktop::i18n::Lang::ZhTw),
+            layer: if r.layer == DataLayer::Raw {
+                "raw"
+            } else {
+                "extracted"
+            }
+            .into(),
             id: r.record_id,
             cells: vec![
                 r.paper_or_source,
@@ -1101,6 +1460,12 @@ fn dataset_display(ix: &Index, view: &dto::TabView) -> Res<dto::DatasetDisplay> 
         })
         .collect();
     Ok(dto::DatasetDisplay {
+        validation_en: dataset::validation_text(&validation, crate::desktop::i18n::Lang::En),
+        validation_zh: dataset::validation_text(&validation, crate::desktop::i18n::Lang::ZhTw),
+        missing: missing
+            .iter()
+            .map(|m| format!("{} {}/{}", m.column, m.missing, m.total))
+            .collect(),
         columns: names
             .iter()
             .map(|n| dto::DatasetColumn {
@@ -1150,4 +1515,73 @@ fn preview_display(rows: Vec<engine::read::Row>) -> dto::DatasetDisplay {
             .collect(),
         ..Default::default()
     }
+}
+
+#[derive(Default)]
+struct ResearchTarget {
+    pending: Option<dto::Tab>,
+    active: Option<gpui_kit::WeakEntity<super::Workbench>>,
+}
+impl gpui_kit::Global for ResearchTarget {}
+
+pub(super) fn compose(
+    state: &gpui_kit::Entity<crate::desktop::model::AppState>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::Context<super::ResearchPage>,
+) -> (
+    gpui_kit::Entity<super::Workbench>,
+    gpui_kit::Entity<super::map::MapPanel>,
+    gpui_kit::Entity<super::sources::SourcesPanel>,
+    gpui_kit::Entity<super::evidence::EvidencePanel>,
+    gpui_kit::Entity<super::dataset::DatasetPanel>,
+    gpui_kit::Entity<super::exports::ExportsPanel>,
+) {
+    use gpui_kit::AppContext as _;
+    let seams = state.read(cx).ux.research.clone();
+    let interjections = state.read(cx).ux.seams.interjections.clone();
+    let wb = cx.new(|cx| {
+        super::Workbench::new(seams, interjections, Arc::new(crate::seams::SystemClock), cx)
+    });
+    register_workbench(&wb, cx);
+    let map = cx.new(|cx| super::map::MapPanel::new(wb.clone(), window, cx));
+    let sources = cx.new(|cx| super::sources::SourcesPanel::new(wb.clone(), window, cx));
+    let evidence = cx.new(|cx| super::evidence::EvidencePanel::new(wb.clone(), window, cx));
+    let dataset = cx.new(|cx| super::dataset::DatasetPanel::new(wb.clone(), window, cx));
+    let exports = cx.new(|cx| super::exports::ExportsPanel::new(wb.clone(), window, cx));
+    (wb, map, sources, evidence, dataset, exports)
+}
+
+pub(crate) fn register_workbench(wb: &gpui_kit::Entity<super::Workbench>, cx: &mut gpui_kit::App) {
+    if cx.try_global::<ResearchTarget>().is_none() {
+        cx.set_global(ResearchTarget::default());
+    }
+    let target = cx.global_mut::<ResearchTarget>();
+    target.active = Some(wb.downgrade());
+    if let Some(tab) = target.pending.take() {
+        wb.update(cx, |wb, cx| wb.select_target_tab(tab, cx));
+    }
+}
+
+pub(crate) fn open_target(tab: Option<dto::Tab>, already_open: bool, cx: &mut gpui_kit::App) {
+    if cx.try_global::<ResearchTarget>().is_none() {
+        cx.set_global(ResearchTarget::default());
+    }
+    let target = cx.global_mut::<ResearchTarget>();
+    let active = already_open
+        .then(|| target.active.as_ref().and_then(|wb| wb.upgrade()))
+        .flatten();
+    target.pending = if active.is_some() { None } else { tab };
+    if let (Some(wb), Some(tab)) = (active, tab) {
+        wb.update(cx, |wb, cx| wb.select_target_tab(tab, cx));
+    }
+}
+
+pub(crate) fn evidence_filter(id: &str) -> engine::index::Filter {
+    engine::dataset::evidence_filter(id)
+}
+
+/// Interval for polling asynchronous correction receipts, not an animation duration.
+pub(super) fn receipt_poll_interval() -> Duration {
+    const RECEIPT_POLL_SECONDS: u64 = 1;
+    Duration::from_secs(RECEIPT_POLL_SECONDS)
 }

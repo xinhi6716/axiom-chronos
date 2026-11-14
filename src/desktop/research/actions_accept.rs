@@ -3,7 +3,7 @@ use std::prelude::v1::test;
 
 #[test]
 fn resolve_manifest_goal_and_missing_session() {
-    use super::actions::resolve_session;
+    use super::adapter::actions::resolve_session;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let home = std::env::temp_dir().join(format!(
@@ -91,8 +91,8 @@ fn state(
     id: &str,
     bridge: Option<Arc<dyn Interjections>>,
     session: Option<&str>,
-) -> actions::State {
-    actions::State {
+) -> adapter::actions::State {
+    adapter::actions::State {
         store: crate::research_workspace::annotations::AnnotationStore::open(home, id).unwrap(),
         bridge,
         session: session.map(str::to_owned),
@@ -278,7 +278,7 @@ fn spot_check_persists_without_touching_sources() {
     )
     .unwrap();
     let spot = s.store.spot_checks(None).remove(0);
-    assert_eq!(spot.who, actions::who());
+    assert_eq!(spot.who, adapter::actions::who());
     assert_eq!(
         spot.research_version,
         ix.located().manifest.research_version

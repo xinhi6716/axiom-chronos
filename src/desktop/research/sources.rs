@@ -2,22 +2,17 @@ use super::{
     actions::{self, Actions},
     LoadState, Tab, Workbench,
 };
-use crate::{
-    desktop::{
-        i18n::{translate, Lang, Table},
-        theme::Tokened as _,
-    },
-    research_workspace::{
-        funnel::{self, Decision, Funnel, FunnelRow, Node},
-        index::Index,
-    },
+use crate::desktop::{
+    components::{panel::PanelState, SplitHandle},
+    i18n::{translate, Lang, Table},
+    layout::persist,
+    theme::{self, Density, Step, Tokened as _},
+    ux::seams::research::{FunnelNode, SourceRow},
 };
 use gpui_kit::{
     base::{TestSupportExt as _, TestTextExt as _},
-    component::{h_flex, v_flex, v_virtual_list, VirtualListScrollHandle},
     *,
 };
-use std::{rc::Rc, sync::Arc};
 
 const PAGE: usize = 200;
 const SAMPLE: usize = 5;
@@ -52,69 +47,44 @@ fn tr(lang: Lang, key: &'static str) -> &'static str {
     translate(lang, T, key)
 }
 
-pub(crate) fn funnel_nodes(f: &Funnel, lang: Lang) -> Vec<(Node, String)> {
-    let mut v = Vec::new();
-    let mut add =
-        |node, label: &'static str, count| v.push((node, format!("{}: {count}", tr(lang, label))));
-    add(Node::Total, "Total", f.total);
-    add(Node::Deduplicated, "Deduplicated", f.deduplicated);
-    add(Node::Duplicates, "Duplicates", f.duplicates);
-    add(Node::ScreenedIn, "Screened in", f.screened_in);
-    add(
-        Node::ScreenedOut { reason: None },
-        "Screened out",
-        f.screened_out,
-    );
-    for (reason, count) in &f.out_reasons {
-        v.push((
-            Node::ScreenedOut {
-                reason: Some(if reason == "(none)" {
-                    String::new()
-                } else {
-                    reason.clone()
-                }),
-            },
-            format!("  {reason}: {count}"),
-        ));
-    }
-    v.push((
-        Node::Pending,
-        format!("{}: {}", tr(lang, "Pending"), f.pending),
-    ));
-    v.push((
-        Node::Unprocessed,
-        format!("{}: {}", tr(lang, "Unprocessed"), f.unprocessed),
-    ));
-    v.push((Node::Read, format!("{}: {}", tr(lang, "Read"), f.read)));
-    v.push((
-        Node::ReadFailed { reason: None },
-        format!("{}: {}", tr(lang, "Read failed"), f.read_failed),
-    ));
-    for (reason, count) in &f.fail_reasons {
-        v.push((
-            Node::ReadFailed {
-                reason: Some(if reason == "(none)" {
-                    String::new()
-                } else {
-                    reason.clone()
-                }),
-            },
-            format!("  {reason}: {count}"),
-        ));
-    }
-    v
+pub(crate) fn funnel_nodes(nodes: &[FunnelNode], lang: Lang) -> Vec<(String, String)> {
+    nodes
+        .iter()
+        .map(|node| {
+            let label = match node.label.as_str() {
+                "Total" => tr(lang, "Total"),
+                "Deduplicated" => tr(lang, "Deduplicated"),
+                "Duplicates" => tr(lang, "Duplicates"),
+                "Screened in" => tr(lang, "Screened in"),
+                "Screened out" => tr(lang, "Screened out"),
+                "Pending" => tr(lang, "Pending"),
+                "Unprocessed" => tr(lang, "Unprocessed"),
+                "Read" => tr(lang, "Read"),
+                "Read failed" => tr(lang, "Read failed"),
+                _ => &node.label,
+            };
+            (node.key.clone(), format!("{label}: {}", node.count))
+        })
+        .collect()
 }
-fn row_text(row: &FunnelRow, lang: Lang) -> String {
-    let decision = match &row.decision {
-        Decision::Included => tr(lang, "Included").to_owned(),
-        Decision::Excluded { reason } => format!("{}: {reason}", tr(lang, "Excluded")),
-        Decision::Pending { reason } => format!("{}: {reason}", tr(lang, "Pending")),
-        Decision::Failed { reason } => format!("{}: {reason}", tr(lang, "Failed")),
-        Decision::Duplicate { of_group } => format!("{}: {of_group}", tr(lang, "Duplicate")),
-        Decision::Unprocessed => tr(lang, "Unprocessed").to_owned(),
+pub(super) fn row_text(row: &SourceRow, lang: Lang) -> String {
+    let (kind, reason) = row.decision.split_once(": ").unwrap_or((&row.decision, ""));
+    let label = match kind {
+        "Included" => tr(lang, "Included"),
+        "Excluded" => tr(lang, "Excluded"),
+        "Pending" => tr(lang, "Pending"),
+        "Failed" => tr(lang, "Failed"),
+        "Duplicate" => tr(lang, "Duplicate"),
+        "Unprocessed" => tr(lang, "Unprocessed"),
+        _ => kind,
+    };
+    let decision = if reason.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}: {reason}")
     };
     let hash: String = row.sha256.chars().take(12).collect();
-    format!(
+    let mut text = format!(
         "{hash} · {} · {}: {} · {decision}",
         if row.doi.is_empty() {
             &row.title
@@ -122,8 +92,18 @@ fn row_text(row: &FunnelRow, lang: Lang) -> String {
             &row.doi
         },
         tr(lang, "Group"),
-        row.duplicate_group
-    )
+        row.group
+    );
+    if let Some(page) = row.page {
+        let (page_label, state) = match (lang, row.locate_state.as_str()) {
+            (Lang::ZhTw, "rendered") => ("頁", "已呈現"),
+            (Lang::ZhTw, _) => ("頁", "已定位"),
+            (Lang::En, "rendered") => ("Page", "rendered"),
+            (Lang::En, _) => ("Page", "located"),
+        };
+        text.push_str(&format!(" · {page_label} {page} · {state}"));
+    }
+    text
 }
 fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
     div()
@@ -131,182 +111,95 @@ fn marked(id: impl Into<ElementId>, text: String) -> impl IntoElement {
         .test_support()
         .child(text.clone().test_text(text))
 }
-
 pub struct SourcesPanel {
     wb: Entity<Workbench>,
     actions: Entity<Actions>,
-    index: Option<Arc<Index>>,
-    key: Option<(String, usize, Option<u64>)>,
-    generation: u64,
-    funnel: Option<Funnel>,
-    rows: Vec<FunnelRow>,
-    total: usize,
-    sample: Vec<String>,
-    error: Option<(String, String)>,
-    loading: bool,
-    scroll: VirtualListScrollHandle,
+    sizes: Option<Vec<f32>>,
 }
 impl SourcesPanel {
     pub fn new(wb: Entity<Workbench>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let actions = cx.new(|cx| Actions::new(wb.clone(), cx));
         cx.observe(&actions, |_, _, cx| cx.notify()).detach();
-        cx.observe(&wb, |this, _, cx| this.sync(cx)).detach();
-        let mut panel = Self {
+        cx.observe(&wb, |_, _, cx| cx.notify()).detach();
+        Self {
             wb,
             actions,
-            index: None,
-            key: None,
-            generation: 0,
-            funnel: None,
-            rows: vec![],
-            total: 0,
-            sample: vec![],
-            error: None,
-            loading: false,
-            scroll: VirtualListScrollHandle::new(),
-        };
-        panel.sync(cx);
-        panel
-    }
-    fn sync(&mut self, cx: &mut Context<Self>) {
-        let wb = self.wb.read(cx);
-        let index = wb.index.clone();
-        let view = wb.view(Tab::Sources);
-        let node = view
-            .node
-            .as_deref()
-            .and_then(Node::from_key)
-            .unwrap_or(Node::Total);
-        let seed = view
-            .selection
-            .as_deref()
-            .and_then(|s| s.strip_prefix("sample:"))
-            .and_then(|s| s.parse::<u64>().ok());
-        let key = (node.key(), view.offset, seed);
-        let same = match (&self.index, &index) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if same && self.key.as_ref() == Some(&key) {
-            cx.notify();
-            return;
+            sizes: persist::sizes("research.sources", cx),
         }
-        if self
-            .key
-            .as_ref()
-            .is_none_or(|old| old.0 != key.0 || old.1 != key.1)
-        {
-            self.scroll = VirtualListScrollHandle::new();
-        }
-        self.index = index.clone();
-        self.key = Some(key.clone());
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.funnel = None;
-        self.rows.clear();
-        self.sample.clear();
-        self.total = 0;
-        self.error = None;
-        self.loading = index.is_some();
-        if let Some(index) = index {
-            let task = cx.background_spawn(async move {
-                let result = (|| {
-                    let f = funnel::funnel(&index)?;
-                    let (rows, total) = funnel::rows(&index, &node, key.1, PAGE)?;
-                    let sample = match seed {
-                        Some(seed) => funnel::sample(&index, &node, SAMPLE, seed)?,
-                        None => vec![],
-                    };
-                    Ok::<_, crate::base::Failure>((f, rows, total, sample))
-                })();
-                result
-            });
-            cx.spawn(async move |this, cx| {
-                let result = task.await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
-                    }
-                    this.loading = false;
-                    match result {
-                        Ok((f, rows, total, sample)) => {
-                            this.funnel = Some(f);
-                            this.rows = rows;
-                            this.total = total;
-                            this.sample = sample;
-                        }
-                        Err(e) => this.error = Some((e.kind, e.message)),
-                    }
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-        cx.notify();
-    }
-    fn set_page(&self, offset: usize, cx: &mut Context<Self>) {
-        self.wb.update(cx, |wb, cx| {
-            wb.set_view(Tab::Sources, |v| v.offset = offset, cx)
-        });
     }
 }
 impl Render for SourcesPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = *cx.global::<Lang>();
-        let mut panel = v_flex()
+        let colors = cx.tokens();
+        let gap = theme::space(Density::default(), Step::Sm);
+        let wb = self.wb.read(cx);
+        let view = wb.tab_view(Tab::Sources);
+        let snapshot = wb.sources_feed.snapshot();
+        let mut panel = div()
             .id("research-sources-panel")
             .test_support()
+            .flex()
+            .flex_col()
             .w_full()
-            .gap(px(4.));
-        if self.loading {
+            .gap(gap);
+        if wb.map_pending {
             return panel.child(marked(
                 "research-sources-loading",
                 tr(lang, "Loading sources…").into(),
             ));
         }
-        if let Some((kind, message)) = &self.error {
-            let text = if kind == "not_capable" {
-                tr(lang, "This research does not have literature sources.").to_owned()
-            } else {
-                format!("{}: {message}", tr(lang, "Sources could not be loaded"))
-            };
-            return panel.child(marked("research-sources-error", text));
+        match &snapshot.state {
+            PanelState::Failed { reason }
+            | PanelState::Corrupt { reason }
+            | PanelState::Offline { reason } => {
+                let msg = if reason.starts_with("capability ") {
+                    tr(lang, "This research does not have literature sources.").to_string()
+                } else {
+                    format!("{}: {reason}", tr(lang, "Sources could not be loaded"))
+                };
+                return panel.child(marked("research-sources-error", msg));
+            }
+            PanelState::Stale { .. } => {
+                panel = panel.child(marked(
+                    "research-sources-stale",
+                    "Sources data is stale".into(),
+                ))
+            }
+            _ => {}
         }
-        let Some(funnel) = &self.funnel else {
-            let text = match &self.wb.read(cx).load {
+        let Some(display) = snapshot.value else {
+            return panel.child(marked(
+                "research-sources-loading",
+                tr(lang, "Loading sources…").into(),
+            ));
+        };
+        if display.nodes.is_empty() {
+            let text = match &wb.load {
                 LoadState::Failed { message, .. } => {
                     format!("{}: {message}", tr(lang, "Sources could not be loaded"))
                 }
-                LoadState::Opening | LoadState::Indexing { .. } => {
+                LoadState::Opening | LoadState::Indexing { .. } | LoadState::Ready => {
                     tr(lang, "Loading sources…").into()
                 }
                 _ => tr(lang, "No research open").into(),
             };
             return panel.child(marked("research-sources-status", text));
-        };
-        let colors = cx.tokens();
-        let mut nodes = v_flex().gap(px(4.));
-        let mut stage = h_flex().flex_wrap().gap(px(8.));
-        for (node, text) in funnel_nodes(funnel, lang) {
-            if matches!(node, Node::ScreenedIn | Node::Read) {
-                nodes = nodes.child(stage).child("↓");
-                stage = h_flex().flex_wrap().gap(px(8.));
-            }
-            let key = node.key();
-            let selected = self.key.as_ref().is_some_and(|k| k.0 == key);
+        }
+        let mut nodes = div().flex().flex_wrap().gap(gap);
+        for (key, text) in funnel_nodes(&display.nodes, lang) {
+            let selected = view.node.as_deref().unwrap_or("total") == key;
             let wb = self.wb.clone();
-            let id = format!("research-sources-node-{key}");
-            stage = stage.child(
+            nodes = nodes.child(
                 div()
-                    .id(SharedString::from(id))
+                    .id(SharedString::from(format!("research-sources-node-{key}")))
                     .test_support()
                     .cursor_pointer()
                     .text_color(if selected { colors.gold } else { colors.text })
                     .child(text.clone().test_text(text))
                     .on_click(move |_, _, cx| {
                         wb.update(cx, |wb, cx| {
-                            wb.set_view(
+                            wb.set_tab_view(
                                 Tab::Sources,
                                 |v| {
                                     v.node = Some(key.clone());
@@ -319,68 +212,111 @@ impl Render for SourcesPanel {
                     }),
             );
         }
-        panel = panel.child(nodes.child(stage));
-        let offset = self.key.as_ref().map_or(0, |k| k.1);
-        let sizes = Rc::new(self.rows.iter().map(|_| size(px(0.), px(30.))).collect());
+        let list_display = display.clone();
+        let rows = uniform_list(
+            "research-sources-list",
+            display.rows.len(),
+            move |range, _, _| {
+                range
+                    .map(|i| {
+                        let text = row_text(&list_display.rows[i], lang);
+                        div()
+                            .id(SharedString::from(format!(
+                                "research-sources-row-{}",
+                                list_display.offset + i
+                            )))
+                            .test_support()
+                            .h(theme::row_height(Density::default()))
+                            .child(text.clone().test_text(text))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .h(theme::row_height(Density::default()) * 5.);
+        let available = window.viewport_size().width.as_f32();
+        let default = available / 2.;
+        let widths = self
+            .sizes
+            .clone()
+            .filter(|sizes| sizes.len() == 2)
+            .unwrap_or_else(|| vec![default, default]);
+        let handle = cx.entity().clone();
+        let split =
+            SplitHandle::new("research-sources-split", &colors).on_resize(move |delta, _, cx| {
+                handle.update(cx, |this, cx| {
+                    let left = (widths[0] + delta.as_f32()).clamp(0., available);
+                    let next = vec![left, (available - left).max(0.)];
+                    this.sizes = Some(next.clone());
+                    if cx.try_global::<persist::LayoutState>().is_some()
+                        && this.wb.read(cx).layout_persistence_safe()
+                    {
+                        persist::remember("research.sources", next, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        let left = self
+            .sizes
+            .as_ref()
+            .and_then(|s| s.first())
+            .copied()
+            .unwrap_or(default)
+            .clamp(0., available);
         panel = panel.child(
-            div().h(px(180.)).w_full().child(
-                v_virtual_list(
-                    cx.entity(),
-                    "research-sources-list",
-                    sizes,
-                    move |this, range, _, cx| {
-                        let lang = *cx.global::<Lang>();
-                        range
-                            .map(|i| {
-                                let text = row_text(&this.rows[i], lang);
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "research-sources-row-{}",
-                                        offset + i
-                                    )))
-                                    .test_support()
-                                    .h(px(30.))
-                                    .child(text.clone().test_text(text))
-                            })
-                            .collect::<Vec<_>>()
-                    },
+            div()
+                .flex()
+                .w_full()
+                .child(div().w(px(left)).child(nodes))
+                .child(
+                    div()
+                        .id("research-sources-split-frame")
+                        .test_support()
+                        .child(split),
                 )
-                .track_scroll(&self.scroll),
-            ),
+                .child(div().flex_1().child(rows)),
         );
-        let mut paging = h_flex().gap(px(12.)).child(marked(
+        let offset = display.offset;
+        let mut paging = div().flex().gap(gap).child(marked(
             "research-sources-page",
             format!(
                 "{}–{} / {}",
-                if self.total == 0 { 0 } else { offset + 1 },
-                (offset + self.rows.len()).min(self.total),
-                self.total
+                if display.total == 0 { 0 } else { offset + 1 },
+                (offset + display.rows.len()).min(display.total),
+                display.total
             ),
         ));
-        if offset > 0 {
-            paging = paging.child(
-                div()
-                    .id("research-sources-previous")
-                    .test_support()
-                    .cursor_pointer()
-                    .child(tr(lang, "Previous").test_text(tr(lang, "Previous")))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_page(offset.saturating_sub(PAGE), cx)
-                    })),
-            );
-        }
-        if offset.saturating_add(PAGE) < self.total {
-            paging = paging.child(
-                div()
-                    .id("research-sources-next")
-                    .test_support()
-                    .cursor_pointer()
-                    .child(tr(lang, "Next").test_text(tr(lang, "Next")))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_page(offset + PAGE, cx))),
-            );
+        for (id, label, target, enabled) in [
+            (
+                "previous",
+                "Previous",
+                offset.saturating_sub(PAGE),
+                offset > 0,
+            ),
+            (
+                "next",
+                "Next",
+                offset.saturating_add(PAGE),
+                offset.saturating_add(PAGE) < display.total,
+            ),
+        ] {
+            if enabled {
+                let wb = self.wb.clone();
+                paging = paging.child(
+                    div()
+                        .id(SharedString::from(format!("research-sources-{id}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .child(tr(lang, label).test_text(tr(lang, label)))
+                        .on_click(move |_, _, cx| {
+                            wb.update(cx, |wb, cx| {
+                                wb.set_tab_view(Tab::Sources, |v| v.offset = target, cx)
+                            })
+                        }),
+                );
+            }
         }
         panel = panel.child(paging);
-        if self.total > 0 {
+        if display.total > 0 {
             let wb = self.wb.clone();
             panel = panel.child(
                 div()
@@ -394,24 +330,35 @@ impl Render for SourcesPanel {
                     .on_click(move |_, _, cx| {
                         wb.update(cx, |wb, cx| {
                             let seed = wb.clock.now_ms() as u64;
-                            wb.set_view(
+                            let node = wb
+                                .tab_view(Tab::Sources)
+                                .node
+                                .unwrap_or_else(|| "total".into());
+                            wb.set_tab_view(
                                 Tab::Sources,
                                 |v| v.selection = Some(format!("sample:{seed}")),
                                 cx,
                             );
+                            wb.port.sample(node, SAMPLE, seed);
+                            wb.refresh_tab_feeds(cx);
                         })
                     }),
             );
         }
-        if let Some((node, _, Some(seed))) = &self.key {
+        if let Some(seed) = view
+            .selection
+            .as_deref()
+            .and_then(|s| s.strip_prefix("sample:"))
+        {
             panel = panel.child(marked(
                 "research-sources-seed",
                 format!("{}: {seed}", tr(lang, "Seed")),
             ));
-            for (i, target) in self.sample.iter().enumerate() {
+            for (i, target) in display.sample.iter().enumerate() {
                 panel = panel.child(
-                    h_flex()
-                        .gap(px(8.))
+                    div()
+                        .flex()
+                        .gap(gap)
                         .child(marked(
                             SharedString::from(format!("research-sources-sampled-{i}")),
                             target.clone(),
@@ -419,7 +366,7 @@ impl Render for SourcesPanel {
                         .child(actions::spot_check_buttons(
                             &self.actions,
                             target,
-                            Some(node),
+                            view.node.as_deref(),
                             cx,
                         )),
                 );

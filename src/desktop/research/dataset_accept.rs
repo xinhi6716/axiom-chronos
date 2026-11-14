@@ -1,4 +1,6 @@
-use super::dataset::*;
+use super::adapter::dataset::{cell_text, load_page, row_text, validation_text};
+use super::dataset::filter_value;
+use crate::desktop::ux::seams::research::{Filter as DisplayFilter, FilterOp, TabView};
 use crate::{
     desktop::i18n::Lang,
     research_workspace::{
@@ -6,7 +8,6 @@ use crate::{
         index::{Filter, Index, Op},
         manifest::{locate, LocateOptions},
         read::Limits,
-        session::TabView,
     },
 };
 use std::prelude::v1::test;
@@ -96,6 +97,16 @@ fn layers_filter_and_conversion() {
     let (page, _, missing) = load_page(&ix, DataLayer::Extracted, &[], 0).unwrap();
     assert!(!page.rows.is_empty());
     assert!(!missing.is_empty());
+    let display = super::adapter::dataset_display(&ix, &TabView::default()).unwrap();
+    assert_eq!(display.total, page.total);
+    assert!(display
+        .columns
+        .iter()
+        .any(|column| column.key == "variable"));
+    assert_eq!(display.rows[0].id, page.rows[0].record_id);
+    assert!(display.rows[0].text_en.contains("Original"));
+    assert!(!display.validation_en.is_empty());
+    assert!(!display.missing.is_empty());
     let f = Filter {
         column: "condition_id".into(),
         op: Op::Contains("C2".into()),
@@ -163,18 +174,18 @@ fn paging_after_two_hundred() {
 fn view_layer_mapping_preserves_filters_and_offset() {
     let mut v = TabView {
         node: Some("raw".into()),
-        filters: vec![Filter {
+        filters: vec![DisplayFilter {
             column: "variable".into(),
-            op: Op::Contains("voltage".into()),
+            op: FilterOp::Contains("voltage".into()),
         }],
         offset: 234,
         ..Default::default()
     };
-    assert_eq!(layer_of(&v), DataLayer::Raw);
+    assert_eq!(v.node.as_deref(), Some("raw"));
     assert_eq!(filter_value(&v, "variable"), "voltage");
     let old = v.clone();
     v.node = None;
-    assert_eq!(layer_of(&v), DataLayer::Extracted);
+    assert_eq!(v.node, None);
     v.node = Some("raw".into());
     assert_eq!(v, old);
 }
