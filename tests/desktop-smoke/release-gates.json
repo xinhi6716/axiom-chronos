@@ -497,7 +497,9 @@
       "actions": [
         "action:research.map.open"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": false,
       "gates": [
@@ -518,11 +520,11 @@
         "research.sources.panel"
       ],
       "actions": [
-        "action:research.sources.previous",
-        "action:research.sources.next",
-        "action:research.sources.sample"
+        "action:research.sources.open"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": false,
       "gates": [
@@ -543,14 +545,11 @@
         "research.evidence.panel"
       ],
       "actions": [
-        "action:research.evidence.select-layer",
-        "action:research.evidence.select-entity",
-        "action:research.evidence.previous",
-        "action:research.evidence.next",
-        "action:research.evidence.open-dataset",
-        "action:research.evidence.correct"
+        "action:research.evidence.open"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": false,
       "gates": [
@@ -571,9 +570,11 @@
         "research.dataset.panel"
       ],
       "actions": [
-        "action:research.dataset.correct"
+        "action:research.dataset.open"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": false,
       "gates": [
@@ -594,11 +595,11 @@
         "research.exports.panel"
       ],
       "actions": [
-        "action:research.exports.csv",
-        "action:research.exports.bundle",
-        "action:research.exports.snapshot"
+        "action:research.exports.open"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
@@ -647,7 +648,9 @@
         "action:paper.form.shortlist",
         "action:paper.form.save-models"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
@@ -669,7 +672,9 @@
       "actions": [
         "action:paper.shortlist.choose"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
@@ -692,7 +697,9 @@
         "action:paper.estimate.request",
         "action:paper.estimate.acknowledge"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
@@ -712,7 +719,9 @@
         "paper.progress.passes"
       ],
       "actions": [],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": true,
       "gates": [
@@ -734,7 +743,9 @@
         "paper.changelog.log"
       ],
       "actions": [],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": true,
       "live": false,
       "gates": [
@@ -759,7 +770,9 @@
         "action:paper.preview.next",
         "action:paper.preview.open-pdf"
       ],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
@@ -779,7 +792,9 @@
         "paper.readiness.status"
       ],
       "actions": [],
-      "states": [],
+      "states": [
+        "live"
+      ],
       "animated": false,
       "live": false,
       "gates": [
