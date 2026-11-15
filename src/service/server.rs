@@ -250,6 +250,9 @@ impl Server {
                             .is_none_or(|h| h.is_finished())
                         && (s.count() == 0 || s.quit_deadline.is_some_and(|d| Instant::now() >= d))
                     {
+                        // A wish can send Exited and finish after the pump above; record it
+                        // before leaving, or its saved session never reaches "ended".
+                        s.pump();
                         for item in &mut s.items {
                             if let Some(wish) = item.wish.take() {
                                 thread::spawn(move || drop(wish));
