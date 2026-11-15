@@ -1,0 +1,17 @@
+{
+  "id": "js-028",
+  "language": "js",
+  "feature": "method",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 4,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.js#method:Worker.render"
+      }
+    }
+  ]
+}

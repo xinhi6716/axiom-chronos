@@ -9,6 +9,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tests/r11_merge.rs checks recorded merges against history
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -16,13 +18,21 @@ jobs:
       - run: python -m unittest discover -s tests -p test_readme_workflow_assets.py
       - run: python -m unittest discover -s tests -p test_package_release.py
       - uses: dtolnay/rust-toolchain@stable
+      - name: Keep the cargo registry out of the user profile on Windows
+        # tests/release.rs scans built binaries for user-profile paths; dependency sources
+        # in the runner's profile cargo home would be embedded otherwise.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'CARGO_HOME=D:/cargo-home' >> "$GITHUB_ENV"
       - run: cargo build --locked
-      - run: cargo test --locked
+      - run: python tools/laya/fetch.py --runtime
+      - run: cargo test --locked --no-fail-fast
       - run: cargo run --locked -- --version
   desktop-smoke:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked
+      - run: python tools/laya/fetch.py --runtime
+      - run: cargo test --locked --no-fail-fast
         working-directory: tests/desktop-smoke

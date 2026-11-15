@@ -17,6 +17,43 @@ const MAX_COVERAGE: usize = 6_000;
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
 }
+fn report_evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
+    let path = store.join("reports").join(format!("{unit}.evidence.tsv"));
+    let text = match crate::storage::archive::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(io(e)),
+    };
+    let mut lines = text.lines();
+    if lines.next() != Some("kind\tcommand\texit_code\tcommit\tts") {
+        return Err(Failure::new("invalid_argument", "invalid evidence header"));
+    }
+    lines
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let c: Vec<_> = line.split('\t').collect();
+            if c.len() != 5 {
+                return Err(Failure::new("invalid_argument", "malformed evidence row"));
+            }
+            Ok(Evidence {
+                kind: c[0].into(),
+                command: c[1].into(),
+                exit_code: c[2]
+                    .parse()
+                    .map_err(|_| Failure::new("invalid_argument", "invalid evidence exit code"))?,
+                commit: c[3].into(),
+                ts: c[4].into(),
+            })
+        })
+        .collect()
+}
+fn evidence(store: &Path, unit: &str) -> Res<Vec<Evidence>> {
+    base::require_slug("unit", unit)?;
+    report_evidence(store, unit)
+}
+fn full_evidence(store: &Path) -> Res<Vec<Evidence>> {
+    report_evidence(store, "_full")
+}
 fn cut(text: &str, max: usize) -> (String, bool) {
     let mut chars = text.chars();
     let head: String = chars.by_ref().take(max).collect();
@@ -266,6 +303,27 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         head.push_str(&format!("\n## Module contract\n\n{}\n", module.contract));
     }
     head.push_str(&format!("\n## Brief\n\n{}\n", brief.text.trim_end()));
+    if !brief.contract.is_empty() {
+        head.push_str(&format!("\n## CONTRACT\n\n{}\n", brief.contract.join("\n")));
+    }
+    if !brief.test_matrix.is_empty() {
+        head.push_str("\n## TEST_MATRIX\n\n");
+        for row in &brief.test_matrix {
+            head.push_str(&format!("{} | {} | {}::{} | {} | {}\n", row.id, row.kind, row.file, row.case, row.assertion, row.command));
+        }
+    }
+    {
+        head.push_str("\n## Test matrix results\n\n");
+        for result in rows
+            .iter()
+            .filter(|r| r.kind == "red" || r.kind == "matrix")
+        {
+            head.push_str(&format!(
+                "{} | {} | exit {} | {}\n",
+                result.kind, result.command, result.exit_code, result.commit
+            ));
+        }
+    }
     if earlier.is_some() {
         head.push_str("\n## Earlier findings\n\n");
         pack_findings(store, unit, &rows, &mut head)?;
@@ -326,7 +384,7 @@ pub fn review_pack(store: &Path, unit: &str, repo: &Path) -> Res<PackInfo> {
         }
     };
     let report = store.join("reports").join(format!("{unit}.json"));
-    let reported: BTreeSet<String> = match std::fs::read_to_string(&report) {
+    let reported: BTreeSet<String> = match crate::storage::archive::read_to_string(&report) {
         Ok(text) => serde_json::from_str::<Value>(&text)
             .map(|v| report_paths(&v, repo).into_iter().collect())
             .unwrap_or_default(),
@@ -375,14 +433,15 @@ fn unit_paths(
     repo: &Path,
     notes: &mut Vec<String>,
 ) -> Res<BTreeSet<String>> {
-    let mut paths: BTreeSet<String> =
-        match std::fs::read_to_string(store.join("reports").join(format!("{unit}.json"))) {
-            Ok(text) => serde_json::from_str::<Value>(&text)
-                .map(|v| report_paths(&v, repo).into_iter().collect())
-                .unwrap_or_default(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(e) => return Err(io(e)),
-        };
+    let mut paths: BTreeSet<String> = match crate::storage::archive::read_to_string(
+        &store.join("reports").join(format!("{unit}.json")),
+    ) {
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .map(|v| report_paths(&v, repo).into_iter().collect())
+            .unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => return Err(io(e)),
+    };
     let rows = evidence(store, unit)?;
     let tree = |r: &&Evidence| r.commit.starts_with("tree:");
     let base = rows.iter().filter(|r| r.kind == "run").find(tree);
@@ -653,6 +712,26 @@ pub fn digest(store: &Path, repo: &Path, module: Option<&str>) -> Res<String> {
         }
         if let Some(note) = crate::council::stage_note_at(&store.join("astra")) {
             out.push_str(&format!("council: {note}\n"));
+        }
+    }
+    let cap = crate::codex::slots::from_env().unwrap_or(48);
+    if let Ok(path) = super::receipts::write_receipts(store, cap) {
+        if let Ok(data) = std::fs::read(&path) {
+            if let Ok(r) = serde_json::from_slice::<super::receipts::Receipts>(&data) {
+                let per_unit = r
+                    .per_unit_ms
+                    .map_or_else(|| "n/a".to_string(), |ms| format!("{:.1}s", ms / 1000.0));
+                out.push_str(&format!(
+                    "receipts: T={:.1}s N={} T/N={} mean={:.2} peak={} cap={}\nreceipts file: {}\n",
+                    r.total_ms as f64 / 1000.0,
+                    r.verified_units,
+                    per_unit,
+                    r.concurrency.mean,
+                    r.concurrency.peak,
+                    r.concurrency.cap,
+                    path.display()
+                ));
+            }
         }
     }
     Ok(out)

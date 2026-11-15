@@ -18,10 +18,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tests/r11_merge.rs checks recorded merges against history
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
+      - name: Keep the cargo registry out of the user profile on Windows
+        # tests/release.rs scans built binaries for user-profile paths; dependency sources
+        # in the runner's profile cargo home would be embedded otherwise.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'CARGO_HOME=D:/cargo-home' >> "$GITHUB_ENV"
       - run: cargo test --locked
       - run: cargo build --release --locked
       - run: cp ${{ matrix.bin }} ${{ matrix.asset }}
@@ -72,4 +80,5 @@ jobs:
         run: |
           notes="docs/releases/${TAG#v}.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
-          gh release create "$TAG" dist/* --verify-tag --title "Axiom Chronos ${TAG#v}" --notes-file "$notes"
+          pre=""; case "$TAG" in *-*) pre="--prerelease";; esac
+          gh release create "$TAG" dist/* --verify-tag --title "Axiom Chronos ${TAG#v}" --notes-file "$notes" $pre

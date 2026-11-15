@@ -8,10 +8,16 @@ fn missing_phrase<'a>(text: &str, phrase: &'a str) -> Option<&'a str> {
 fn required_phrases_are_present() {
     let cases = [
         ("skills/wish/BATCH.md", "A batch that calls Codex sizes its worker pool from `AXIOM_CODEX_MAX_PARALLEL`, minus the slots the wish itself still needs, and never hard-codes a smaller pool."),
+        ("skills/wish/SKILL.md", r#""schedule", "next""#),
+        ("skills/wish/SKILL.md", "after each start and each completion notice"),
+        ("skills/wish/SKILL.md", r#""setup", "start""#),
+        ("skills/wish/SKILL.md", "Core stage models"),
+        ("agents/dispatcher.md", r#""activity""#),
+        ("agents/dispatcher.md", r#""schedule", "release""#),
         ("agents/dispatcher.md", "Call `codex_run` yourself"),
         ("agents/dispatcher.md", "Never forward Codex work through another agent"),
         ("agents/dispatcher.md", "Never wait with `sleep`; a `codex_run` call returns when its turn ends"),
-        ("agents/dispatcher.md", "`cargo fetch --locked`"),
+        ("agents/dispatcher.md", "Setup fetches Rust dependencies"),
         ("agents/dispatcher.md", "`cargo test --locked --offline`"),
         ("skills/wish/SKILL.md", "Hand work back to `chronos:dispatcher` only when `orch` `[\"ready\"]` lists a ready unit or a unit whose next step is `accept` or `review`"),
         ("skills/wish/SKILL.md", "or the report shows `handoff pending`"),
@@ -23,6 +29,9 @@ fn required_phrases_are_present() {
         ("skills/wish/SKILL.md", "evidence strength, then direct user value, then reuse of what exists"),
         ("skills/wish/SKILL.md", "exactly one smallest increment"),
         ("skills/wish/SKILL.md", "each as a heading `### <id> <title>`"),
+        ("agents/architect.md", "NEW_PATHS  optional paths the module creates"),
+        ("agents/architect.md", "SHARED_OWNER optional one module id that may share PATHS"),
+        ("agents/architect.md", r#"`orch` `["map", "--repo", <dir>]`"#),
         ("agents/architect.md", "SERVES     plan item ids"),
         ("agents/architect.md", "OUT OF SCOPE <id> <reason>"),
         ("skills/wish/SKILL.md", "In creative mode `[no-architect]` is ignored"),
@@ -37,7 +46,6 @@ fn required_phrases_are_present() {
         ("research/COUNCIL.md", "Also read the council digest at that path; treat its open claims as claims about this plan."),
         ("agents/dispatcher.md", "including fix and sol units"),
         ("agents/dispatcher.md", "`orch` `[\"map\"]`"),
-        ("agents/dispatcher.md", "`orch` `[\"ready\"]`"),
         ("agents/dispatcher.md", "`orch` `[\"accept\", <module>"),
         ("agents/dispatcher.md", "`orch` `[\"fulltest\", \"--repo\""),
         ("agents/dispatcher.md", "A CI run that fails after pushing is a failed full test"),
@@ -47,7 +55,6 @@ fn required_phrases_are_present() {
         ("agents/dispatcher.md", "`done` stays refused until a later `fulltest` passes"),
         ("agents/dispatcher.md", "`orch` `[\"review\", <unit>"),
         ("agents/dispatcher.md", "parallel `codex_run` calls with `project` the slug, `unit` the id, `role: \"terra\"`, and `cwd` the project directory"),
-        ("agents/dispatcher.md", "Give the files and contract to `chronos:reviewer`"),
         ("skills/wish/SKILL.md", "Declare the task mode (`review`, `answer` or `change`) with the bridge `goal` tool."),
         ("skills/wish/SKILL.md", "Give the `chronos:critic` agent the review schema, the plan path"),
         ("skills/wish/SKILL.md", "An old `[astra]` marker at the start of the wish is removed as plain text and changes nothing."),
@@ -77,6 +84,28 @@ fn required_phrases_are_present() {
     assert!(!wish.contains("`$!` in Git Bash is not a Windows pid"));
     let dispatch = fs::read_to_string(root.join("DISPATCH.md")).unwrap();
     assert!(!dispatch.contains("After the worker returns"));
+}
+
+fn has_forbidden_wish_phrase(text: &str) -> bool {
+    [
+        "run independent ready modules as parallel calls in one message",
+        "Keep every dispatcher in the foreground",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
+#[test]
+fn wish_forbids_obsolete_dispatch_rules() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md");
+    let wish = fs::read_to_string(path).unwrap();
+    assert!(!has_forbidden_wish_phrase(&wish));
+    for phrase in [
+        "run independent ready modules as parallel calls in one message",
+        "Keep every dispatcher in the foreground",
+    ] {
+        assert!(has_forbidden_wish_phrase(&format!("{wish}\n{phrase}")));
+    }
 }
 
 #[test]
@@ -119,6 +148,35 @@ fn deleted_rules_have_enforcing_tests() {
         let declaration = format!("fn {function}(");
         assert!(source.contains(&declaration), "missing {test}");
     }
+}
+
+#[test]
+fn council_precedes_astra_in_step_2a() {
+    let wish = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/skills/wish/SKILL.md"),
+    )
+    .unwrap();
+    let step = wish
+        .split_once("2a. ")
+        .unwrap()
+        .1
+        .split_once("\n3. ")
+        .unwrap()
+        .0;
+    let council = step.find("   - Council bullet:").unwrap();
+    let astra = step.find("   - Give the `chronos:astra` agent").unwrap();
+    assert!(council < astra);
+}
+
+#[test]
+fn council_starts_with_program_redirect() {
+    let council = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("engine/research/COUNCIL.md"),
+    )
+    .unwrap();
+    assert!(council.starts_with(
+        "When the bridge `council` tool offers action `program`, read `${CLAUDE_PLUGIN_ROOT}/research/PROGRAM.md` and follow it in place of the rest of step 2a."
+    ));
 }
 
 #[test]

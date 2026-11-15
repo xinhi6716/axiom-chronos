@@ -1,23 +1,41 @@
 //! The window frame: title bar, navigation rail and the active screen. It also owns what applies
 //! across screens: the window-wide shortcuts (Ctrl+N, Ctrl+K and ?), the command palette's jumps,
-//! Needs you notifications and the question asked before closing.
+//! Needs you notifications and service quit confirmation.
 mod logic;
+// ux: begin modules
+mod background;
+mod modes;
+mod pages;
+// ux: end
 use super::control::{ask, Ask};
+use super::components::panel::{Panel, PanelState as SurfaceState};
+use super::data::faults::{self, Fault};
 use super::i18n::{fill, tr, Lang, Table};
 use super::launch::{self, Launch, Square};
 use super::model::*;
 use super::motion::{self, mix, Curve, Driver, Pace, Tween};
 use super::ornament::Emblem;
-use super::palette::{self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target};
+use super::palette::{
+    self, Command, NewWish, OpenPalette, Overlay, Palette, PaletteEvent, ShowShortcuts, Target,
+};
 use super::settings::{FocusPanel, LanguageChoice, SettingPrior, ThemeChoice, WindowMode};
-use super::{mini, ornament, quota, settings};
 use super::theme::{self, Step, Tokened as _, Tokens, TypeSize};
-use super::{composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView, usage::UsageView, wishes::WishesView};
+use super::{
+    composer::Composer, doctor::DoctorView, memory::MemoryView, run_view::RunView,
+    usage::UsageView, wishes::WishesView,
+};
+use super::{mini, ornament, quota, settings};
+#[cfg(test)]
+pub(crate) use background::ClosePlan;
+use gpui_kit::base::{TestSupportExt as _, TestTextExt as _};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Placement, Selectable as _, StyledExt as _, TitleBar, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Placement, Selectable as _, StyledExt as _,
+    TitleBar, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -28,8 +46,14 @@ use std::time::{Duration, Instant};
 const T: Table = &[
     ("What the current wish is doing", "目前的願望進行到哪裡"),
     ("Every wish, newest first", "所有願望，最新的在前"),
-    ("Every wish, newest first. {} need you.", "所有願望，最新的在前。其中 {} 個需要你。"),
-    ("What Chronos remembers between wishes", "Chronos 在願望之間記住的事"),
+    (
+        "Every wish, newest first. {} need you.",
+        "所有願望，最新的在前。其中 {} 個需要你。",
+    ),
+    (
+        "What Chronos remembers between wishes",
+        "Chronos 在願望之間記住的事",
+    ),
     ("Cost and context by wish", "每個願望的花費與內容量"),
     ("Environment checks and preferences", "環境檢查與偏好設定"),
     ("{} not ready", "{} 尚未就緒"),
@@ -50,9 +74,15 @@ const T: Table = &[
         "{} wishes are still running. Closing the window stops them; you can resume them later.",
         "有 {} 個願望還在進行。關閉視窗會停止它們，之後可以接續。",
     ),
+    ("Quit Chronos?", "要結束 Chronos 嗎？"),
+    (
+        "Running wishes will stop. You can resume them later.",
+        "進行中的願望會停止，之後可以接續。",
+    ),
     ("Keep working", "繼續工作"),
     ("Stop and close", "停止並關閉"),
     ("Stopping…", "正在停止…"),
+    ("Stop and quit", "停止並結束"),
     ("The wish could not start", "願望無法開始"),
     ("Your message was not delivered", "你的訊息沒有送達"),
     ("The wish was not stopped", "願望沒有停止"),
@@ -64,41 +94,104 @@ const T: Table = &[
     ("A wish stopped with an error", "有個願望因錯誤而停止"),
     ("Some saved data could not be read", "有些儲存的資料讀不到"),
     ("The connection to the engine stopped", "與引擎的連線已中斷"),
-    ("Nothing was changed. Check Settings, then try again.", "沒有任何變更。請到設定檢查後再試一次。"),
-    ("The run did not receive it. Check that it is still going, then send it again.", "這次執行沒有收到。請確認它還在進行，再送一次。"),
-    ("It may still be working. Try again, or stop it where it was started.", "它可能還在工作。請再試一次，或到啟動它的地方停止。"),
-    ("It is still stopped. Read the details, then try again.", "它仍然是停止的。請看詳細內容後再試一次。"),
+    (
+        "Nothing was changed. Check Settings, then try again.",
+        "沒有任何變更。請到設定檢查後再試一次。",
+    ),
+    (
+        "The run did not receive it. Check that it is still going, then send it again.",
+        "這次執行沒有收到。請確認它還在進行，再送一次。",
+    ),
+    (
+        "It may still be working. Try again, or stop it where it was started.",
+        "它可能還在工作。請再試一次，或到啟動它的地方停止。",
+    ),
+    (
+        "It is still stopped. Read the details, then try again.",
+        "它仍然是停止的。請看詳細內容後再試一次。",
+    ),
     ("It is still stored. Try again.", "它還在，請再試一次。"),
-    ("The old text is still in use. Try again.", "仍在使用舊的內容，請再試一次。"),
-    ("What you see may be out of date.", "畫面上的內容可能不是最新的。"),
-    ("The results shown may be out of date.", "顯示的結果可能不是最新的。"),
-    ("Open it to see how far it got. It can be resumed.", "打開來看看進行到哪裡，之後可以接續。"),
-    ("The rest of the app keeps working; the affected panel may be incomplete.", "其他功能不受影響，相關面板可能不完整。"),
-    ("Nothing will update any more. Restart Chronos.", "畫面不會再更新，請重新啟動 Chronos。"),
+    (
+        "The old text is still in use. Try again.",
+        "仍在使用舊的內容，請再試一次。",
+    ),
+    (
+        "What you see may be out of date.",
+        "畫面上的內容可能不是最新的。",
+    ),
+    (
+        "The results shown may be out of date.",
+        "顯示的結果可能不是最新的。",
+    ),
+    (
+        "Open it to see how far it got. It can be resumed.",
+        "打開來看看進行到哪裡，之後可以接續。",
+    ),
+    (
+        "The rest of the app keeps working; the affected panel may be incomplete.",
+        "其他功能不受影響，相關面板可能不完整。",
+    ),
+    (
+        "Nothing will update any more. Restart Chronos.",
+        "畫面不會再更新，請重新啟動 Chronos。",
+    ),
     ("Copy details", "複製詳細內容"),
     ("Search", "搜尋"),
-    ("Search wishes, goals, modules, units and memory, or run a command", "搜尋願望、目標、模組、單元與記憶，或執行指令"),
+    (
+        "Search wishes, goals, modules, units and memory, or run a command",
+        "搜尋願望、目標、模組、單元與記憶，或執行指令",
+    ),
     ("Stop this wish?", "要停止這個願望嗎？"),
     ("It can be resumed later.", "之後可以接續。"),
     ("Keep running", "繼續執行"),
-    ("Not connected to the engine, so nothing was sent.", "沒有連上引擎，所以沒有送出任何指令。"),
+    (
+        "Not connected to the engine, so nothing was sent.",
+        "沒有連上引擎，所以沒有送出任何指令。",
+    ),
     ("The mini window could not open", "無法開啟迷你視窗"),
 ];
 
-pub(super) fn start_mini_only(ephemeral: bool, mode: WindowMode) -> bool {
-    logic::startup_windows(ephemeral, mode) == logic::Startup::MiniOnly
+pub(super) fn start_mini_only(ephemeral: bool, mode: WindowMode, confirm_quit: bool) -> bool {
+    !confirm_quit && logic::startup_windows(ephemeral, mode) == logic::Startup::MiniOnly
 }
 
-pub(super) fn record_change(state: &Entity<AppState>, prior: SettingPrior, now: SettingPrior, cx: &mut App) {
+pub(super) fn record_change(
+    state: &Entity<AppState>,
+    prior: SettingPrior,
+    now: SettingPrior,
+    cx: &mut App,
+) {
     if logic::should_record(&prior, &now) {
         state.update(cx, |state, _| state.record_undo(Undoable::Setting(prior)));
     }
 }
 
-/// How long "Stop and close" waits for the runs to report that they stopped before closing anyway.
-const STOP_DEADLINE: Duration = Duration::from_secs(10);
-/// How long closing the window waits for the engine to drop its wishes before giving up.
-const ENGINE_DEADLINE: Duration = Duration::from_secs(5);
+const ENGINE_DEADLINE_SECS: u64 = 5;
+const STOP_DEADLINE_SECS: u64 = 10;
+const MODE_APPLY_DELAY_MS: u64 = 50;
+const SCENE_DELAY_MS: u64 = 400;
+const SCENE_FREEZE_DELAY_MS: u64 = 300;
+const BADGE_TOP: f32 = -6.0;
+const BADGE_RIGHT: f32 = -9.0;
+const BADGE_HEIGHT: f32 = 15.0;
+const BADGE_PADDING: f32 = 3.0;
+const ALERT_ICON_SIZE: f32 = 20.0;
+const RAIL_ITEM_WIDTH: f32 = 64.0;
+const RAIL_ITEM_HEIGHT: f32 = 52.0;
+const ADD_ICON_SIZE: f32 = 18.0;
+const NEW_WISH_WIDTH: f32 = 68.0;
+const SEARCH_HEIGHT: f32 = 26.0;
+const SEARCH_ICON_SIZE: f32 = 13.0;
+const STRIP_DIVIDER_HEIGHT: f32 = 12.0;
+const STRIP_DOT_SIZE: f32 = 6.0;
+const RAIL_WIDTH: f32 = 80.0;
+const RAIL_DIVIDER_WIDTH: f32 = 60.0;
+const VISIBLE: f32 = 1.0;
+
+/// How long closing the window waits for the desktop to detach.
+const ENGINE_DEADLINE: Duration = Duration::from_secs(ENGINE_DEADLINE_SECS);
+/// How long a local stop waits for the runs to report that they stopped.
+const STOP_DEADLINE: Duration = Duration::from_secs(STOP_DEADLINE_SECS);
 const TOAST_MESSAGE_CHARS: usize = 120;
 /// How far a new screen drifts up into place as it crossfades in.
 const SCREEN_DRIFT: f32 = 10.0;
@@ -113,11 +206,22 @@ pub(super) struct Chrome {
 
 pub(super) fn chrome(mode: WindowMode) -> Chrome {
     let focus = matches!(mode, WindowMode::Focus(_));
-    Chrome { rail: !focus, title_extras: !focus, strip: true, force_run: focus }
+    Chrome {
+        rail: !focus,
+        title_extras: !focus,
+        strip: true,
+        force_run: focus,
+    }
 }
 
 /// The rail's screens, in order.
-const SCREENS: [Screen; 5] = [Screen::Run, Screen::Wishes, Screen::Memory, Screen::Usage, Screen::Doctor];
+const SCREENS: [Screen; 5] = [
+    Screen::Run,
+    Screen::Wishes,
+    Screen::Memory,
+    Screen::Usage,
+    Screen::Doctor,
+];
 
 fn slot(screen: Screen) -> usize {
     SCREENS.iter().position(|s| *s == screen).unwrap_or(0)
@@ -157,7 +261,10 @@ pub fn run_alerts(seen: &mut HashMap<SharedString, RunStatus>, runs: &[Run]) -> 
             RunStatus::Waiting => AlertKind::Waiting,
             RunStatus::Done => AlertKind::Finished,
         };
-        alerts.push(RunAlert { session: run.session.clone(), kind });
+        alerts.push(RunAlert {
+            session: run.session.clone(),
+            kind,
+        });
     }
     alerts
 }
@@ -169,12 +276,60 @@ pub fn needs_user(run: &Run) -> bool {
 
 /// The first required check that failed. Optional tools report a warning and never block.
 pub fn blocking_check(checks: &[Check]) -> Option<&Check> {
-    checks.iter().find(|check| check.status == CheckStatus::Fail)
+    checks
+        .iter()
+        .find(|check| check.status == CheckStatus::Fail)
 }
 
-/// Wishes this app started that are still working: the ones closing the window would stop.
+/// Hosted wishes that are still working.
 pub fn running_here(runs: &[Run]) -> Vec<&Run> {
-    runs.iter().filter(|run| run.hosted && matches!(run.status, RunStatus::Active | RunStatus::LimitWait)).collect()
+    runs.iter()
+        .filter(|run| run.hosted && matches!(run.status, RunStatus::Active | RunStatus::LimitWait))
+        .collect()
+}
+
+pub(crate) enum StopStep {
+    CloseNow,
+    StopThenWait { sessions: Vec<SharedString> },
+}
+
+pub(crate) fn stop_step(state: &AppState) -> StopStep {
+    let sessions: Vec<_> = running_here(&state.runs)
+        .iter()
+        .map(|run| run.session.clone())
+        .collect();
+    if sessions.is_empty() || state.backend.is_none() {
+        StopStep::CloseNow
+    } else {
+        StopStep::StopThenWait { sessions }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn stop_complete(state: &AppState, targets: &[SharedString], waited: Duration) -> bool {
+    waited >= STOP_DEADLINE
+        || running_here(&state.runs)
+            .iter()
+            .all(|run| !targets.contains(&run.session))
+}
+
+pub(crate) fn service_backed(state: &AppState) -> bool {
+    state.backend.is_some()
+        && state
+            .service_background
+            .as_ref()
+            .and_then(|marker| marker.upgrade())
+            .zip(state.ux.seams.background.as_ref())
+            .is_some_and(|(installed, current)| std::sync::Arc::ptr_eq(&installed, current))
+}
+
+pub(crate) fn close_plan_for(state: &AppState, sessions: &[String]) -> background::ClosePlan {
+    let plan = background::close_plan(sessions, state.ux.seams.background.as_deref());
+    if service_backed(state) && matches!(plan, background::ClosePlan::Continue { .. }) {
+        background::ClosePlan::CloseNow
+    } else {
+        plan
+    }
 }
 
 fn clipped(text: &str, max_chars: usize) -> String {
@@ -188,11 +343,11 @@ fn clipped(text: &str, max_chars: usize) -> String {
 fn count_badge(count: usize, t: &Tokens, d: theme::Density) -> impl IntoElement {
     h_flex()
         .absolute()
-        .top(px(-6.))
-        .right(px(-9.))
-        .h(px(15.))
-        .min_w(px(15.))
-        .px(px(3.))
+        .top(px(BADGE_TOP))
+        .right(px(BADGE_RIGHT))
+        .h(px(BADGE_HEIGHT))
+        .min_w(px(BADGE_HEIGHT))
+        .px(px(BADGE_PADDING))
         .justify_center()
         .rounded_full()
         .bg(t.fail)
@@ -201,11 +356,20 @@ fn count_badge(count: usize, t: &Tokens, d: theme::Density) -> impl IntoElement 
         .text_size(theme::font(d, TypeSize::Caption))
         .font_semibold()
         .text_color(t.canvas)
-        .child(if count > 9 { "9+".to_string() } else { count.to_string() })
+        .child(if count > 9 {
+            "9+".to_string()
+        } else {
+            count.to_string()
+        })
 }
 
 /// Sends a stop or resume for the run on screen; without an engine, says that nothing was sent.
-fn command_or_report(state: &mut AppState, action: super::model::Action, offline: &'static str, cx: &mut Context<AppState>) {
+fn command_or_report(
+    state: &mut AppState,
+    action: super::model::Action,
+    offline: &'static str,
+    cx: &mut Context<AppState>,
+) {
     let session = state.run().map(|run| run.session.clone());
     if state.backend.is_none() {
         state.report(action, session, offline);
@@ -220,10 +384,42 @@ fn command_or_report(state: &mut AppState, action: super::model::Action, offline
 
 fn open_session(state: &Entity<AppState>, session: &str, cx: &mut App) {
     state.update(cx, |state, cx| {
-        if let Some(index) = state.runs.iter().position(|run| run.session.as_ref() == session) {
+        if let Some(index) = state
+            .runs
+            .iter()
+            .position(|run| run.session.as_ref() == session)
+        {
             state.open_run(index, cx);
         }
     });
+}
+
+fn detach(state: &AppState) {
+    if let Some(backend) = state.backend.as_deref() {
+        backend.shutdown(ENGINE_DEADLINE);
+    }
+}
+
+fn request_service_quit(state: &mut AppState) -> bool {
+    let result = state
+        .backend
+        .as_ref()
+        .map(|backend| backend.quit_service(true));
+    match result {
+        Some(Ok(())) => true,
+        Some(Err(error)) => {
+            state.report(super::model::Action::Engine, None, error.message);
+            false
+        }
+        None => {
+            state.report(
+                super::model::Action::Engine,
+                None,
+                "Not connected to the engine.",
+            );
+            false
+        }
+    }
 }
 
 struct NeedsYouToast;
@@ -232,6 +428,9 @@ struct ErrorToast;
 
 pub struct Shell {
     state: Entity<AppState>,
+    // ux: begin page host
+    page_view: Option<(super::ux::Page, AnyView)>,
+    // ux: end
     run: Entity<RunView>,
     wishes: Entity<WishesView>,
     memory: Entity<MemoryView>,
@@ -257,6 +456,12 @@ pub struct Shell {
     rail_portrait: Rc<Cell<Option<Square>>>,
     /// The screen last drawn, the one a switch is leaving, and how far the switch has come.
     shown: Screen,
+    // Keep a fault result visible after injection ends until its retry is clicked.
+    panel_panics: HashSet<&'static str>,
+    panel_faults: HashMap<&'static str, SurfaceState>,
+    // The generation prevents an obsolete slow-fault timer from completing a newer one.
+    panel_slow: HashMap<&'static str, (u64, u64, bool)>,
+    panel_slow_generation: u64,
     leaving: Option<Screen>,
     switch: Tween,
     /// Selection and hover share one glow per rail slot.
@@ -280,6 +485,7 @@ impl Shell {
 
     /// Any key or click during the launch ends it at once. Returns whether it was playing.
     fn skip_launch(&mut self, cx: &mut Context<Self>) -> bool {
+        crate::desktop::perf::interactive(cx);
         // A held demo frame is a still picture: stray input must not end it.
         if !self.launch.playing(motion::now(cx)) || motion::is_frozen(cx) {
             return false;
@@ -289,22 +495,86 @@ impl Shell {
         true
     }
 
-    fn screen(&self, screen: Screen) -> AnyElement {
-        match screen {
-            Screen::Run => self.run.clone().into_any_element(),
-            Screen::Wishes => self.wishes.clone().into_any_element(),
-            Screen::Memory => self.memory.clone().into_any_element(),
-            Screen::Usage => self.usage.clone().into_any_element(),
-            Screen::Doctor => self.doctor.clone().into_any_element(),
+    fn screen(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (id, kind, content) = match screen {
+            Screen::Run => ("run.overview", FeedKind::Runs, div().id("run.overview").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.run.clone()).into_any_element()),
+            Screen::Wishes => return self.wishes.clone().into_any_element(),
+            Screen::Memory => ("memory.list", FeedKind::Memory, div().id("memory.list").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.memory.clone()).into_any_element()),
+            Screen::Usage => ("usage.summary", FeedKind::Usage, div().id("usage.summary").test_support().size_full().min_w_0().min_h_0().overflow_hidden().child(self.usage.clone()).into_any_element()),
+            Screen::Doctor => return self.doctor.clone().into_any_element(),
+        };
+        let fault = faults::active(id, cx);
+        let slow_elapsed = if let Some(Fault::Slow { ms }) = fault.as_ref() {
+            if !self.panel_slow.get(id).is_some_and(|(delay, _, _)| delay == ms) {
+                self.panel_slow_generation = self.panel_slow_generation.wrapping_add(1);
+                let generation = self.panel_slow_generation;
+                self.panel_slow.insert(id, (*ms, generation, *ms == 0));
+                if *ms > 0 {
+                    let delay = Duration::from_millis(*ms);
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(delay).await;
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if let Some((_, current, elapsed)) = this.panel_slow.get_mut(id) {
+                                if *current == generation { *elapsed = true; cx.notify(); }
+                            }
+                        });
+                    }).detach();
+                }
+            }
+            self.panel_slow.get(id).is_some_and(|(_, _, elapsed)| *elapsed)
+        } else {
+            self.panel_slow.remove(id);
+            false
+        };
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
+        let mut state = logic::panel_state(self.state.read(cx).feeds.get(kind), fault.as_ref(), slow_elapsed, now_ms);
+        let panic_active = fault == Some(Fault::Panic);
+        match fault {
+            Some(Fault::Panic) => { self.panel_faults.remove(id); }
+            Some(Fault::Slow { .. }) if slow_elapsed => { self.panel_faults.remove(id); }
+            Some(_) => { self.panel_faults.insert(id, state.clone()); }
+            None => if let Some(pending) = self.panel_faults.get(id) { state = pending.clone(); },
         }
+        if panic_active && state == SurfaceState::Ready { self.panel_panics.insert(id); }
+        if self.panel_panics.contains(id) && !panic_active {
+            state = SurfaceState::Failed { reason: "panel rendering failed".into() };
+        }
+        Panel::new(id, &state)
+            .retry(cx.listener(move |this, _, _, cx| {
+                this.panel_panics.remove(id);
+                this.panel_faults.remove(id);
+                this.panel_slow.remove(id);
+                this.state.update(cx, |state, cx| state.retry(kind, cx));
+                cx.notify();
+            }))
+            .content(move |_, _| content)
+            .into_any_element()
     }
 
-    pub fn new(state: Entity<AppState>, may_flash: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        may_flash: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // ux: begin startup
+        state.update(cx, |state, cx| {
+            super::doctor::extreme::install_policy(state, cx)
+        });
+        if let Some(bg) = state.read(cx).ux.seams.background.clone() {
+            let _ = bg.reattach();
+        }
+        // ux: end
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &state.read(cx).runs);
         let subscriptions = vec![
-            cx.observe_in(&state, window, |this, _, window, cx| this.state_changed(window, cx)),
-            cx.observe_global_in::<settings::Store>(window, |this, window, cx| this.apply_wanted(window, cx)),
+            cx.observe_in(&state, window, |this, _, window, cx| {
+                this.state_changed(window, cx)
+            }),
+            cx.observe_global_in::<settings::Store>(window, |this, window, cx| {
+                this.apply_wanted(window, cx)
+            }),
             cx.observe_window_bounds(window, |_, window, cx| {
                 settings::remember_window(window.window_bounds(), cx);
             }),
@@ -314,6 +584,7 @@ impl Shell {
         ];
         // The window-wide keys come from the shortcut table, so the overlay can never disagree with them.
         cx.bind_keys(palette::global_bindings());
+        cx.bind_keys([pages::page_escape_binding()]);
         Self::on_global::<NewWish>(window, cx, Self::new_wish);
         Self::on_global::<OpenPalette>(window, cx, Self::toggle_palette);
         Self::on_global::<ShowShortcuts>(window, cx, Self::toggle_shortcuts);
@@ -323,17 +594,29 @@ impl Shell {
         Self::on_global::<palette::ToggleDensity>(window, cx, Self::toggle_density);
         let palette = cx.new(|cx| Palette::new(state.clone(), window, cx));
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
         let mut subscriptions = subscriptions;
         subscriptions.extend(motion::watch_window(window, cx));
-        subscriptions.push(cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
-            let PaletteEvent::Chose(target) = event;
-            this.go_to(target.clone(), window, cx);
-        }));
+        subscriptions.push(cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, event: &PaletteEvent, window, cx| {
+                let PaletteEvent::Chose(target) = event;
+                this.go_to(target.clone(), window, cx);
+            },
+        ));
         let shell = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            shell.update(cx, |shell, cx| shell.should_close(window, cx)).unwrap_or(true)
+            shell
+                .update(cx, |shell, cx| shell.should_close(window, cx))
+                .unwrap_or(true)
         });
+        // Also consume a request already present before the first observation.
+        if state.read(cx).feeds.quit_requested {
+            cx.spawn_in(window, async move |this, cx| {
+                let _ = this.update_in(cx, |this, window, cx| this.show_requested_quit(window, cx));
+            })
+            .detach();
+        }
         let scene = state.read(cx).scene.clone();
         let shown = state.read(cx).view;
         let mut glows = motion::Glows::new(Pace::Glow);
@@ -343,18 +626,23 @@ impl Shell {
         let initial_on_top = prefs.mini_on_top;
         if initial_mode != WindowMode::Full {
             cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(50)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(MODE_APPLY_DELAY_MS))
+                    .await;
                 let _ = this.update_in(cx, |this, window, cx| this.apply_wanted(window, cx));
-            }).detach();
+            })
+            .detach();
         }
         if let Some(scene) = scene {
             cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(400)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(SCENE_DELAY_MS))
+                    .await;
                 let _ = this.update_in(cx, |this, window, cx| this.play_scene(&scene, window, cx));
             })
             .detach();
         }
-        Self {
+        let shell = Self {
             run: cx.new(|cx| RunView::new(state.clone(), window, cx)),
             wishes: cx.new(|cx| WishesView::new(state.clone(), window, cx)),
             memory: cx.new(|cx| MemoryView::new(state.clone(), window, cx)),
@@ -362,6 +650,9 @@ impl Shell {
             doctor: cx.new(|cx| DoctorView::new(state.clone(), window, cx)),
             composer: cx.new(|cx| Composer::new(state.clone(), window, cx)),
             palette,
+            // ux: begin page host
+            page_view: None,
+            // ux: end
             state,
             may_flash,
             seen,
@@ -375,6 +666,10 @@ impl Shell {
             launch: Launch::none(),
             rail_portrait: Rc::new(Cell::new(None)),
             shown,
+            panel_panics: HashSet::new(),
+            panel_faults: HashMap::new(),
+            panel_slow: HashMap::new(),
+            panel_slow_generation: 0,
             leaving: None,
             switch: Tween::rest(1.0, Pace::Screen, Curve::EaseOut),
             glows,
@@ -384,16 +679,35 @@ impl Shell {
             applied_mode: WindowMode::Full,
             applied_on_top: initial_on_top,
             mini: None,
-            last_panel: match initial_mode { WindowMode::Focus(panel) => panel, _ => FocusPanel::Graph },
+            last_panel: match initial_mode {
+                WindowMode::Focus(panel) => panel,
+                _ => FocusPanel::Graph,
+            },
             _subscriptions: subscriptions,
-        }
+        };
+        shell.focus.focus(window, cx);
+        shell
     }
 
     fn apply_wanted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep the confirmation visible until it is dismissed, then apply the saved mode.
+        if self.asking_close || self.state.read(cx).feeds.quit_requested {
+            return;
+        }
         let prefs = settings::Store::current(cx).clone();
-        let plan = logic::plan(self.applied_mode, prefs.mode, self.applied_on_top, prefs.mini_on_top, self.mini.is_some());
-        if theme::density(cx) != prefs.density { theme::set_density(prefs.density, cx); }
-        if let WindowMode::Focus(panel) = prefs.mode { self.last_panel = panel; }
+        let plan = logic::plan(
+            self.applied_mode,
+            prefs.mode,
+            self.applied_on_top,
+            prefs.mini_on_top,
+            self.mini.is_some(),
+        );
+        if theme::density(cx) != prefs.density {
+            theme::set_density(prefs.density, cx);
+        }
+        if let WindowMode::Focus(panel) = prefs.mode {
+            self.last_panel = panel;
+        }
         if plan.close_mini || plan.reopen_mini {
             if let Some(handle) = self.mini.take() {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -408,19 +722,28 @@ impl Shell {
                     // gpui's Windows activate() restores minimized windows with SW_RESTORE.
                     window.activate_window();
                     self.state.update(cx, |state, cx| {
-                        state.report(super::model::Action::ReadData, None, format!("mini window: {error}"));
+                        state.report(
+                            super::model::Action::ReadData,
+                            None,
+                            format!("mini window: {error}"),
+                        );
                         cx.notify();
                     });
                     return;
                 }
             }
         }
-        if plan.minimize_main { window.minimize_window(); }
+        if plan.minimize_main {
+            window.minimize_window();
+        }
         if plan.restore_main {
             // gpui's Windows activate() restores minimized windows with SW_RESTORE.
             window.activate_window();
         }
-        if plan.force_run { self.state.update(cx, |state, cx| state.set_view(Screen::Run, cx)); }
+        if plan.force_run {
+            self.state
+                .update(cx, |state, cx| state.set_view(Screen::Run, cx));
+        }
         self.applied_mode = prefs.mode;
         self.applied_on_top = prefs.mini_on_top;
         cx.notify();
@@ -428,32 +751,49 @@ impl Shell {
 
     fn set_mode(&mut self, mode: WindowMode, cx: &mut Context<Self>) {
         let prior = settings::set_mode(mode, cx);
-        if let SettingPrior::Mode(WindowMode::Focus(panel)) = prior { self.last_panel = panel; }
-        if let WindowMode::Focus(panel) = mode { self.last_panel = panel; }
+        if let SettingPrior::Mode(WindowMode::Focus(panel)) = prior {
+            self.last_panel = panel;
+        }
+        if let WindowMode::Focus(panel) = mode {
+            self.last_panel = panel;
+        }
         record_change(&self.state, prior, SettingPrior::Mode(mode), cx);
     }
 
     fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open(window, cx) { return; }
+        if self.dialog_open(window, cx) {
+            return;
+        }
         let mode = logic::after_key_focus(settings::Store::current(cx).mode, self.last_panel);
         self.set_mode(mode, cx);
     }
     fn toggle_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open(window, cx) { return; }
+        if self.dialog_open(window, cx) {
+            return;
+        }
         let mode = logic::after_key_mini(settings::Store::current(cx).mode);
         self.set_mode(mode, cx);
     }
     fn toggle_density(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open(window, cx) { return; }
-        let density = match theme::density(cx) { theme::Density::Comfortable => theme::Density::Dense, theme::Density::Dense => theme::Density::Comfortable };
+        if self.dialog_open(window, cx) {
+            return;
+        }
+        let density = match theme::density(cx) {
+            theme::Density::Comfortable => theme::Density::Dense,
+            theme::Density::Dense => theme::Density::Comfortable,
+        };
         let prior = settings::set_density(density, cx);
         record_change(&self.state, prior, SettingPrior::Density(density), cx);
     }
     fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_open(window, cx) || self.palette.read(cx).overlay() != Overlay::Closed { return; }
+        if self.dialog_open(window, cx) || self.palette.read(cx).overlay() != Overlay::Closed {
+            return;
+        }
         let undo = self.state.update(cx, |state, _| state.take_undo());
         match logic::undo_step(undo) {
-            logic::UndoStep::Memory { id, prior } => self.state.update(cx, |state, cx| state.undo_memory(id, prior, cx)),
+            logic::UndoStep::Memory { id, prior } => self
+                .state
+                .update(cx, |state, cx| state.undo_memory(id, prior, cx)),
             logic::UndoStep::Setting(prior) => settings::restore(prior, &self.state, window, cx),
             logic::UndoStep::Nothing => (),
         }
@@ -469,19 +809,30 @@ impl Shell {
             .filter_map(|run| run.cwd.clone())
             .collect();
         let alerts = run_alerts(&mut self.seen, &state.runs);
-        let viewing = (screen == Screen::Run).then(|| state.run().map(|run| run.session.clone())).flatten();
+        let viewing = (screen == Screen::Run)
+            .then(|| state.run().map(|run| run.session.clone()))
+            .flatten();
         let newly_viewed = viewing.clone().filter(|_| viewing != self.viewing);
         let stale: Vec<SharedString> = self
             .toasts
             .iter()
             .filter(|session| {
                 newly_viewed.as_ref() == Some(*session)
-                    || state.runs.iter().any(|run| run.session == **session && run.status == RunStatus::Active)
+                    || state
+                        .runs
+                        .iter()
+                        .any(|run| run.session == **session && run.status == RunStatus::Active)
             })
             .cloned()
             .collect();
+        let quit_requested = state.feeds.quit_requested;
         let all_stopped = running_here(&state.runs).is_empty();
-        let errors: Vec<AppError> = state.errors.iter().filter(|error| error.id > self.errors_shown).cloned().collect();
+        let errors: Vec<AppError> = state
+            .errors
+            .iter()
+            .filter(|error| error.id > self.errors_shown)
+            .cloned()
+            .collect();
 
         self.viewing = viewing;
         settings::remember_screen(screen, cx);
@@ -494,6 +845,9 @@ impl Shell {
         }
         self.show_alerts(alerts, window, cx);
         self.show_errors(errors, window, cx);
+        if quit_requested {
+            self.show_requested_quit(window, cx);
+        }
         if self.stopping && all_stopped {
             self.finish_close(window, cx);
         }
@@ -525,13 +879,26 @@ impl Shell {
                 Notification::new()
                     .id1::<ErrorToast>(error.id as usize)
                     .with_type(NotificationType::Error)
-                    .title(tr(cx, T, if error.message.starts_with("mini window: ") { "The mini window could not open" } else { error.action.headline() }))
-                    .message(clipped(&format!("{advice} {}", error.message), TOAST_MESSAGE_CHARS))
+                    .title(tr(
+                        cx,
+                        T,
+                        if error.message.starts_with("mini window: ") {
+                            "The mini window could not open"
+                        } else {
+                            error.action.headline()
+                        },
+                    ))
+                    .message(clipped(
+                        &format!("{advice} {}", error.message),
+                        TOAST_MESSAGE_CHARS,
+                    ))
                     .action(move |_, _, cx| {
                         let raw = raw.clone();
-                        Button::new("copy-error").label(copy).on_click(cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(raw.to_string()));
-                        }))
+                        Button::new("copy-error").label(copy).on_click(cx.listener(
+                            move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(raw.to_string()));
+                            },
+                        ))
                     }),
                 cx,
             );
@@ -539,11 +906,32 @@ impl Shell {
     }
 
     fn toast_for(&self, alert: &RunAlert, cx: &App) -> Option<Notification> {
-        let run = self.state.read(cx).runs.iter().find(|run| run.session == alert.session)?;
-        let need = || run.needs.first().map(|need| if need.title.is_empty() { need.note.clone() } else { need.title.clone() });
+        let run = self
+            .state
+            .read(cx)
+            .runs
+            .iter()
+            .find(|run| run.session == alert.session)?;
+        let need = || {
+            run.needs.first().map(|need| {
+                if need.title.is_empty() {
+                    need.note.clone()
+                } else {
+                    need.title.clone()
+                }
+            })
+        };
         let (kind, title, message) = match alert.kind {
-            AlertKind::Blocked => (NotificationType::Warning, tr(cx, T, "Needs you: {}"), need().unwrap_or_else(|| run.wish.clone())),
-            AlertKind::Waiting => (NotificationType::Info, tr(cx, T, "Waiting on batch: {}"), need().unwrap_or_else(|| run.wish.clone())),
+            AlertKind::Blocked => (
+                NotificationType::Warning,
+                tr(cx, T, "Needs you: {}"),
+                need().unwrap_or_else(|| run.wish.clone()),
+            ),
+            AlertKind::Waiting => (
+                NotificationType::Info,
+                tr(cx, T, "Waiting on batch: {}"),
+                need().unwrap_or_else(|| run.wish.clone()),
+            ),
             AlertKind::Finished => {
                 let verified = run.count(UnitState::Verified).to_string();
                 let total = run.units.len().to_string();
@@ -552,7 +940,11 @@ impl Shell {
                 } else {
                     fill(tr(cx, T, "{} of {} units verified"), &[&verified, &total]).into()
                 };
-                let kind = if run.verified_end() { NotificationType::Success } else { NotificationType::Warning };
+                let kind = if run.verified_end() {
+                    NotificationType::Success
+                } else {
+                    NotificationType::Warning
+                };
                 (kind, tr(cx, T, "Finished: {}"), summary)
             }
         };
@@ -564,19 +956,32 @@ impl Shell {
                 .id1::<NeedsYouToast>(id)
                 .with_type(kind)
                 .title(fill(title, &[run.project.as_ref()]))
-                .content(move |_, _, _| div().w_full().text_size(theme::font(d, TypeSize::Body)).truncate().child(message.clone()).into_any_element())
+                .content(move |_, _, _| {
+                    div()
+                        .w_full()
+                        .text_size(theme::font(d, TypeSize::Body))
+                        .truncate()
+                        .child(message.clone())
+                        .into_any_element()
+                })
                 .action(move |_, _, cx| {
                     let (state, session) = (state.clone(), session.clone());
-                    Button::new("open-run").label(open).on_click(cx.listener(move |note, _, window, cx| {
-                        open_session(&state, &session, cx);
-                        note.dismiss(window, cx);
-                    }))
+                    Button::new("open-run").label(open).on_click(cx.listener(
+                        move |note, _, window, cx| {
+                            open_session(&state, &session, cx);
+                            note.dismiss(window, cx);
+                        },
+                    ))
                 }),
         )
     }
 
     /// Runs `act` when the window-wide action `A` fires.
-    fn on_global<A: gpui_kit::Action>(window: &mut Window, cx: &mut Context<Self>, act: fn(&mut Self, &mut Window, &mut Context<Self>)) {
+    fn on_global<A: gpui_kit::Action>(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        act: fn(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
         let (shell, handle) = (cx.weak_entity(), window.window_handle());
         App::on_action(cx, move |_: &A, cx: &mut App| {
             // A key press runs inside the window's own update, which cannot be re-entered.
@@ -598,27 +1003,36 @@ impl Shell {
         if self.dialog_open(window, cx) {
             return;
         }
-        self.palette.update(cx, |palette, cx| match palette.overlay() {
-            Overlay::Search => palette.close(window, cx),
-            _ => palette.open(window, cx),
-        });
+        self.palette
+            .update(cx, |palette, cx| match palette.overlay() {
+                Overlay::Search => palette.close(window, cx),
+                _ => palette.open(window, cx),
+            });
     }
 
     fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open(window, cx) {
             return;
         }
-        self.palette.update(cx, |palette, cx| match palette.overlay() {
-            Overlay::Shortcuts => palette.close(window, cx),
-            _ => palette.show_shortcuts(window, cx),
-        });
+        self.palette
+            .update(cx, |palette, cx| match palette.overlay() {
+                Overlay::Shortcuts => palette.close(window, cx),
+                _ => palette.show_shortcuts(window, cx),
+            });
     }
 
     /// Opens a run and selects something in it, found by id so a refresh in between does not
     /// change what is selected.
-    fn open_at(&mut self, session: &SharedString, select: impl FnOnce(&Run) -> Selection, cx: &mut Context<Self>) {
+    fn open_at(
+        &mut self,
+        session: &SharedString,
+        select: impl FnOnce(&Run) -> Selection,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |state, cx| {
-            let Some(index) = state.runs.iter().position(|run| run.session == *session) else { return };
+            let Some(index) = state.runs.iter().position(|run| run.session == *session) else {
+                return;
+            };
             let selection = select(&state.runs[index]);
             state.open_run(index, cx);
             state.select(selection, cx);
@@ -633,24 +1047,40 @@ impl Shell {
             Target::Goal(session, id) => self.open_at(
                 &session,
                 |run| {
-                    let lead = run.goals.iter().find(|goal| goal.id == id).and_then(|goal| palette::goal_lead(run, goal));
+                    let lead = run
+                        .goals
+                        .iter()
+                        .find(|goal| goal.id == id)
+                        .and_then(|goal| palette::goal_lead(run, goal));
                     lead.map_or(Selection::None, Selection::Module)
                 },
                 cx,
             ),
             Target::Module(session, id) => self.open_at(
                 &session,
-                |run| run.modules.iter().position(|m| m.id == id).map_or(Selection::None, Selection::Module),
+                |run| {
+                    run.modules
+                        .iter()
+                        .position(|m| m.id == id)
+                        .map_or(Selection::None, Selection::Module)
+                },
                 cx,
             ),
             Target::Unit(session, id) => self.open_at(
                 &session,
-                |run| run.units.iter().position(|u| u.id == id).map_or(Selection::None, Selection::Unit),
+                |run| {
+                    run.units
+                        .iter()
+                        .position(|u| u.id == id)
+                        .map_or(Selection::None, Selection::Unit)
+                },
                 cx,
             ),
             Target::Memory(id) => {
-                self.state.update(cx, |state, cx| state.set_view(Screen::Memory, cx));
-                self.memory.update(cx, |memory, cx| memory.reveal(id, window, cx));
+                self.state
+                    .update(cx, |state, cx| state.set_view(Screen::Memory, cx));
+                self.memory
+                    .update(cx, |memory, cx| memory.reveal(id, window, cx));
             }
         }
     }
@@ -658,13 +1088,24 @@ impl Shell {
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             Command::NewWish => self.new_wish(window, cx),
-            Command::Open(screen) => self.state.update(cx, |state, cx| state.set_view(screen, cx)),
+            Command::Open(screen) => self.state.update(cx, |state, cx| {
+                state.close_page(cx);
+                state.set_view(screen, cx)
+            }),
             Command::ToggleTheme => {
-                let choice = if cx.theme().is_dark() { ThemeChoice::Light } else { ThemeChoice::Dark };
+                let choice = if cx.theme().is_dark() {
+                    ThemeChoice::Light
+                } else {
+                    ThemeChoice::Dark
+                };
                 settings::set_theme(choice, window, cx);
             }
             Command::ToggleLanguage => {
-                let choice = if *cx.global::<Lang>() == Lang::En { LanguageChoice::ZhTw } else { LanguageChoice::English };
+                let choice = if *cx.global::<Lang>() == Lang::En {
+                    LanguageChoice::ZhTw
+                } else {
+                    LanguageChoice::English
+                };
                 settings::set_language(choice, window, cx);
             }
             Command::Stop => {
@@ -681,16 +1122,28 @@ impl Shell {
                     },
                     window,
                     cx,
-                    move |_, cx| state.update(cx, |state, cx| command_or_report(state, super::model::Action::Stop, offline, cx)),
+                    move |_, cx| {
+                        state.update(cx, |state, cx| {
+                            command_or_report(state, super::model::Action::Stop, offline, cx)
+                        })
+                    },
                 );
             }
             Command::Resume => {
                 let offline = tr(cx, T, "Not connected to the engine, so nothing was sent.");
-                self.state.update(cx, |state, cx| command_or_report(state, super::model::Action::Resume, offline, cx));
+                self.state.update(cx, |state, cx| {
+                    command_or_report(state, super::model::Action::Resume, offline, cx)
+                });
             }
-            Command::Shortcuts => self.palette.update(cx, |palette, cx| palette.show_shortcuts(window, cx)),
+            Command::Shortcuts => self
+                .palette
+                .update(cx, |palette, cx| palette.show_shortcuts(window, cx)),
             Command::Focus(_) | Command::FullWindow | Command::Mini => {
-                if let Some(mode) = logic::mode_after(&command, settings::Store::current(cx).mode, self.last_panel) { self.set_mode(mode, cx); }
+                if let Some(mode) =
+                    logic::mode_after(&command, settings::Store::current(cx).mode, self.last_panel)
+                {
+                    self.set_mode(mode, cx);
+                }
             }
             Command::ToggleDensity => self.toggle_density(window, cx),
             Command::ToggleOnTop => {
@@ -699,17 +1152,66 @@ impl Shell {
                 record_change(&self.state, prior, SettingPrior::MiniOnTop(on), cx);
             }
             Command::Undo => self.undo(window, cx),
+            // ux: begin commands
+            // --- research workspace (phase 9) ---
+            Command::Research => self
+                .state
+                .update(cx, |s, cx| s.open_page(super::ux::Page::Research, cx)),
+            // --- end research workspace (phase 9) ---
+            Command::Storage => self
+                .state
+                .update(cx, |s, cx| s.open_page(super::ux::Page::Storage, cx)),
+            Command::Chat | Command::QuickTask | Command::Plaza => {
+                use super::ux::seams::ModeKind;
+                let mode = match command {
+                    Command::Chat => ModeKind::Chat,
+                    Command::QuickTask => ModeKind::QuickTask,
+                    _ => ModeKind::Plaza,
+                };
+                self.state.update(cx, |s, cx| {
+                    s.ux.composer_prefill = None;
+                    s.open_mode(mode, None, cx);
+                });
+            }
+            Command::UsageForWish => self.state.update(cx, |s, cx| {
+                let wish = s
+                    .run()
+                    .map(|r| s.ux.wish_ids.get(&r.session).unwrap_or(&r.session).clone());
+                s.close_page(cx);
+                s.show_usage_for(wish, cx);
+            }),
+            Command::CompareUsage => self.state.update(cx, |s, cx| {
+                let mut ids = s.ux.usage_sessions.iter().map(|u| u.wish.clone());
+                if let Some(first) = ids.next() {
+                    if let Some(second) = ids.find(|id| id != &first) {
+                        settings::Store::edit(cx, |prefs| {
+                            prefs.ux.usage_wish = Some(first.to_string());
+                            prefs.ux.usage_compare = Some(second.to_string());
+                        });
+                    }
+                }
+                s.close_page(cx);
+                s.set_view(Screen::Usage, cx);
+            }),
+            Command::MarkAllRead => self.state.update(cx, |s, cx| s.mark_all_read(cx)),
+            Command::ExtremeOn | Command::ExtremeOff => self
+                .state
+                .update(cx, |s, cx| s.set_extreme(command == Command::ExtremeOn, cx)),
+            // ux: end
         }
     }
 
     fn new_wish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette.update(cx, |palette, cx| palette.close(window, cx));
+        self.palette
+            .update(cx, |palette, cx| palette.close(window, cx));
         if self.dialog_open(window, cx) {
             return;
         }
-        let blocked = blocking_check(&self.state.read(cx).checks).map(|check| (check.name.clone(), check.detail.clone()));
+        let blocked = blocking_check(&self.state.read(cx).checks)
+            .map(|check| (check.name.clone(), check.detail.clone()));
         let Some((name, detail)) = blocked else {
-            self.state.update(cx, |state, cx| state.set_composing(true, cx));
+            self.state
+                .update(cx, |state, cx| state.set_composing(true, cx));
             return;
         };
         let (state, open_settings) = (self.state.clone(), tr(cx, T, "Open Settings"));
@@ -718,13 +1220,18 @@ impl Shell {
                 .id::<SetupToast>()
                 .with_type(NotificationType::Warning)
                 .title(tr(cx, T, "You can't make a wish yet"))
-                .message(clipped(&fill(tr(cx, T, "{}: {}"), &[&name, &detail]), TOAST_MESSAGE_CHARS))
+                .message(clipped(
+                    &fill(tr(cx, T, "{}: {}"), &[&name, &detail]),
+                    TOAST_MESSAGE_CHARS,
+                ))
                 .action(move |_, _, cx| {
                     let state = state.clone();
-                    Button::new("open-settings").label(open_settings).on_click(cx.listener(move |note, _, window, cx| {
-                        state.update(cx, |state, cx| state.set_view(Screen::Doctor, cx));
-                        note.dismiss(window, cx);
-                    }))
+                    Button::new("open-settings")
+                        .label(open_settings)
+                        .on_click(cx.listener(move |note, _, window, cx| {
+                            state.update(cx, |state, cx| state.set_view(Screen::Doctor, cx));
+                            note.dismiss(window, cx);
+                        }))
                 }),
             cx,
         );
@@ -734,18 +1241,129 @@ impl Shell {
         if self.stopping {
             return false;
         }
-        if running_here(&self.state.read(cx).runs).is_empty() {
-            self.end_engine(cx);
-            settings::remember_window(window.window_bounds(), cx);
-            return true;
+        // ux: begin background close
+        let state = self.state.read(cx);
+        let running = running_here(&state.runs);
+        let sessions: Vec<String> = running.iter().map(|r| r.session.to_string()).collect();
+        let wishes: Vec<String> = running.iter().map(|r| r.wish.to_string()).collect();
+        let plan = close_plan_for(state, &sessions);
+        match plan {
+            background::ClosePlan::CloseNow => {
+                self.end_engine(cx);
+                settings::remember_window(window.window_bounds(), cx);
+                return true;
+            }
+            background::ClosePlan::AskStop { .. } => self.ask_window_close(window, cx),
+            background::ClosePlan::Continue { .. } => {
+                self.ask_background_close(plan, wishes, window, cx)
+            }
         }
-        self.ask_before_close(window, cx);
+        // ux: end
         false
     }
 
-    fn ask_before_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_requested_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let requested = self.state.update(cx, |state, _| {
+            std::mem::take(&mut state.feeds.quit_requested)
+        });
+        if requested {
+            self.ask_before_close(window, cx);
+        }
+    }
+
+    // ux: begin background close
+    fn ask_background_close(
+        &mut self,
+        plan: background::ClosePlan,
+        wishes: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.asking_close && window.has_active_dialog(cx) {
             return;
+        }
+        let background::ClosePlan::Continue { ref sessions } = plan else {
+            return;
+        };
+        let sessions = sessions.clone();
+        let Some(bg) = self.state.read(cx).ux.seams.background.clone() else {
+            self.ask_window_close(window, cx);
+            return;
+        };
+        let copy = background::close_copy(&plan, &wishes, *cx.global::<Lang>()).unwrap();
+        self.asking_close = true;
+        let shell = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let t = cx.tokens();
+            let closed = shell.clone();
+            let confirm = shell.clone();
+            let cancel = shell.clone();
+            let bg = bg.clone();
+            let sessions = sessions.clone();
+            let description = copy.description.clone();
+            alert
+                .entrance(motion::DIALOG_ENTRANCE)
+                .title(copy.title.clone())
+                .description(
+                    div()
+                        .id("close-keeps-working")
+                        .test_support()
+                        .child(description.clone().test_text(description)),
+                )
+                .centered()
+                .on_close(move |_, _, cx| {
+                    let _ = closed.update(cx, |s, _| s.asking_close = false);
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("keep-open")
+                                .label(copy.cancel.clone())
+                                .on_click(move |_, window, cx| {
+                                    let _ = cancel.update(cx, |s, _| s.asking_close = false);
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            theme::gold_leaf(Button::new("close-window"), &t)
+                                .label(copy.confirm.clone())
+                                .on_click(move |_, window, cx| {
+                                    if bg.detach(&sessions).is_ok() {
+                                        settings::remember_window(window.window_bounds(), cx);
+                                        window.remove_window();
+                                    } else {
+                                        window.close_dialog(cx);
+                                        let _ = confirm.update(cx, |s, cx| {
+                                            s.asking_close = false;
+                                            s.ask_window_close(window, cx);
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+        });
+    }
+    // ux: end
+
+    fn ask_before_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_close_dialog(true, window, cx);
+    }
+
+    fn ask_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_close_dialog(false, window, cx);
+    }
+
+    fn show_close_dialog(
+        &mut self,
+        service_quit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.asking_close && window.has_active_dialog(cx) {
+            return;
+        }
+        if self.applied_mode == WindowMode::Mini {
+            window.activate_window();
         }
         self.asking_close = true;
         let shell = cx.weak_entity();
@@ -756,7 +1374,9 @@ impl Shell {
             let stopping = this.stopping;
             let state = this.state.read(cx);
             let running = running_here(&state.runs);
-            let description = match running.as_slice() {
+            let description = if service_quit {
+                tr(cx, T, "Running wishes will stop. You can resume them later.").to_owned()
+            } else { match running.as_slice() {
                 [run] => fill(
                     tr(cx, T, "\"{}\" is still running. Closing the window stops it; you can resume it later."),
                     &[&clipped(&run.wish, 60)],
@@ -765,70 +1385,105 @@ impl Shell {
                     tr(cx, T, "{} wishes are still running. Closing the window stops them; you can resume them later."),
                     &[&runs.len().to_string()],
                 ),
-            };
-            let stop_label = if stopping { tr(cx, T, "Stopping…") } else { tr(cx, T, "Stop and close") };
+            }};
+            let title = if service_quit { tr(cx, T, "Quit Chronos?") } else { tr(cx, T, "A wish is still running") };
+            let stop_label = if stopping { tr(cx, T, "Stopping…") } else if service_quit { tr(cx, T, "Stop and quit") } else { tr(cx, T, "Stop and close") };
+            let keep_label = tr(cx, T, "Keep working");
             let (keep, stop, closed) = (shell.clone(), shell.clone(), shell.clone());
             alert
                 .entrance(motion::DIALOG_ENTRANCE)
-                .icon(Icon::new(IconName::TriangleAlert).size(px(20.)).text_color(t.review))
-                .title(tr(cx, T, "A wish is still running"))
-                .description(description)
+                .icon(Icon::new(IconName::TriangleAlert).size(px(ALERT_ICON_SIZE)).text_color(t.review))
+                .title(title.test_text(title))
+                .description(div().id("dialog.close.prompt").test_support().child(description))
                 .centered()
                 .on_ok(move |_, _, _| !stopping)
                 .on_cancel(move |_, _, _| !stopping)
-                .on_close(move |_, _, cx| {
-                    let _ = closed.update(cx, |shell, _| shell.asking_close = false);
+                .on_close(move |_, window, cx| {
+                    let _ = closed.update(cx, |shell, cx| shell.dismiss_quit(window, cx));
                 })
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new("stop-and-close")
+                            div().id("action:dialog.close.confirm").test_support().child(Button::new(if service_quit { "stop-and-quit" } else { "stop-and-close" })
                                 .danger()
                                 .outline()
-                                .label(stop_label)
+                                .accessibility_label(stop_label)
+                                .child(stop_label.test_text(stop_label))
                                 .loading(stopping)
                                 .on_click(move |_, window, cx| {
-                                    let _ = stop.update(cx, |shell, cx| shell.stop_and_close(window, cx));
-                                }),
+                                    let _ = stop.update(cx, |shell, cx| shell.stop_and_close(service_quit, window, cx));
+                                })),
                         )
                         .child(
-                            theme::gold_leaf(Button::new("keep-working"), &t)
-                                .label(tr(cx, T, "Keep working"))
+                            div().id("action:dialog.close.cancel").test_support().child(theme::gold_leaf(Button::new("keep-working"), &t)
+                                .accessibility_label(keep_label)
+                                .child(keep_label.test_text(keep_label))
                                 .disabled(stopping)
                                 .on_click(move |_, window, cx| {
-                                    let _ = keep.update(cx, |shell, _| shell.asking_close = false);
                                     window.close_dialog(cx);
-                                }),
+                                    let _ = keep.update(cx, |shell, cx| shell.dismiss_quit(window, cx));
+                                })),
                         ),
                 )
         });
     }
 
-    fn stop_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let running: Vec<SharedString> = running_here(&state.runs).iter().map(|run| run.session.clone()).collect();
-        if running.is_empty() || state.backend.is_none() {
-            self.finish_close(window, cx);
-            return;
+    fn dismiss_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.asking_close = false;
+        let was_mini = self.applied_mode == WindowMode::Mini;
+        self.apply_wanted(window, cx);
+        if was_mini && self.applied_mode == WindowMode::Mini {
+            window.minimize_window();
         }
-        self.state.update(cx, |state, _| running.iter().for_each(|session| state.stop(session)));
-        self.stopping = true;
-        self.stop_deadline = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(STOP_DEADLINE).await;
-            let _ = this.update_in(cx, |this, window, cx| this.finish_close(window, cx));
-        }));
-        window.refresh();
     }
 
-    /// The engine owns every wish started here; ending it is what stops their `claude` processes.
-    fn end_engine(&self, cx: &mut Context<Self>) {
-        if let Some(backend) = self.state.read(cx).backend.as_deref() {
-            backend.shutdown(ENGINE_DEADLINE);
+    fn stop_and_close(&mut self, service_quit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
         }
+        if !service_quit {
+            let sessions = match stop_step(self.state.read(cx)) {
+                StopStep::CloseNow => {
+                    self.finish_close(window, cx);
+                    return;
+                }
+                StopStep::StopThenWait { sessions } => sessions,
+            };
+            self.state.update(cx, |state, _| {
+                sessions.iter().for_each(|session| state.stop(session))
+            });
+            self.stopping = true;
+            self.stop_deadline = Some(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(STOP_DEADLINE).await;
+                let _ = this.update_in(cx, |this, window, cx| this.finish_close(window, cx));
+            }));
+            window.refresh();
+            return;
+        }
+        self.stopping = true;
+        let success = self.state.update(cx, |state, cx| {
+            let success = request_service_quit(state);
+            if !success {
+                cx.notify();
+            }
+            success
+        });
+        if success {
+            self.finish_close(window, cx);
+        } else {
+            self.stopping = false;
+        }
+    }
+
+    fn end_engine(&self, cx: &mut Context<Self>) {
+        detach(self.state.read(cx));
     }
 
     fn finish_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_engine(cx);
+        if let Some(handle) = self.mini.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
         settings::remember_window(window.window_bounds(), cx);
         window.remove_window();
     }
@@ -836,11 +1491,19 @@ impl Shell {
     /// Demo only: starts a transition on a frozen clock, then holds it `ms` in, so a capture shows
     /// the frame mid-way. The hold waits a moment of real time first, so every view has drawn the
     /// transition's first frame and taken its start from the frozen clock.
-    fn hold_transition(&mut self, what: &str, ms: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn hold_transition(
+        &mut self,
+        what: &str,
+        ms: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let start = Instant::now();
         motion::freeze(start, cx);
         match what {
-            "switch" => self.state.update(cx, |state, cx| state.set_view(Screen::Wishes, cx)),
+            "switch" => self
+                .state
+                .update(cx, |state, cx| state.set_view(Screen::Wishes, cx)),
             "palette" => self.palette.update(cx, |palette, cx| {
                 palette.open(window, cx);
                 palette.type_query("read", window, cx);
@@ -852,7 +1515,8 @@ impl Shell {
                 });
                 // Opened long enough ago to be settled, closing now.
                 motion::freeze(start + Pace::Open.duration() * 2, cx);
-                self.palette.update(cx, |palette, cx| palette.close(window, cx));
+                self.palette
+                    .update(cx, |palette, cx| palette.close(window, cx));
             }
             "progress" => self.state.update(cx, |state, cx| {
                 if let Some(run) = state.current.and_then(|i| state.runs.get_mut(i)) {
@@ -864,7 +1528,9 @@ impl Shell {
         }
         let held = motion::now(cx) + Duration::from_millis(ms);
         cx.spawn_in(window, async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(300)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(SCENE_FREEZE_DELAY_MS))
+                .await;
             let _ = cx.update(|_, cx| motion::freeze(held, cx));
         })
         .detach();
@@ -877,8 +1543,7 @@ impl Shell {
             return;
         }
         match scene {
-            "close-confirm" => self.ask_before_close(window, cx),
-            "close-stop" => self.stop_and_close(window, cx),
+            "close-confirm" | "close-stop" => self.finish_close(window, cx),
             "rail-focus" => window.focus_next(cx),
             "needs-you" => self.state.update(cx, |state, cx| {
                 state.runs[0].status = RunStatus::Blocked;
@@ -907,7 +1572,9 @@ impl Shell {
                 palette.open(window, cx);
                 palette.type_query("read", window, cx);
             }),
-            "palette-empty" => self.palette.update(cx, |palette, cx| palette.open(window, cx)),
+            "palette-empty" => self
+                .palette
+                .update(cx, |palette, cx| palette.open(window, cx)),
             "palette-none" => self.palette.update(cx, |palette, cx| {
                 palette.open(window, cx);
                 palette.type_query("qqzz", window, cx);
@@ -916,7 +1583,11 @@ impl Shell {
             // Types a query and presses Enter, to show where a result leads.
             jump if jump.starts_with("palette-go-") => {
                 let query = jump["palette-go-".len()..].replace('_', " ");
-                let query = if query == "d10 scorer" { "d10_scorer".to_owned() } else { query };
+                let query = if query == "d10 scorer" {
+                    "d10_scorer".to_owned()
+                } else {
+                    query
+                };
                 self.palette.update(cx, |palette, cx| {
                     palette.open(window, cx);
                     palette.type_query(&query, window, cx);
@@ -924,7 +1595,11 @@ impl Shell {
                 });
             }
             "version-mismatch" => self.state.update(cx, |state, cx| {
-                state.checks.push(Check { name: "plugin".into(), status: CheckStatus::Ok, detail: "0.9.4".into() });
+                state.checks.push(Check {
+                    name: "plugin".into(),
+                    status: CheckStatus::Ok,
+                    detail: "0.9.4".into(),
+                });
                 cx.notify();
             }),
             _ => {}
@@ -950,13 +1625,19 @@ impl Shell {
         let ring = focus.is_focused(window) && window.last_input_was_keyboard();
         let state = self.state.clone();
         // Glow and underline follow selection (lit); hover only tints the face.
-        let face = mix(t.raised.opacity(0.0), t.raised, lit.max(hover));
-        let colors = ButtonCustomVariant::new(cx).color(face).foreground(t.rail_ink(lit)).hover(face).active(face);
+        let face = mix(t.raised.opacity(theme::ornament_tokens::TRANSPARENT), t.raised, lit.max(hover));
+        let colors = ButtonCustomVariant::new(cx)
+            .color(face)
+            .foreground(t.rail_ink(lit))
+            .hover(face)
+            .active(face);
         div()
             .id(("nav-glow", slot(view)))
             .relative()
             .rounded(theme::RADIUS)
-            .when(lit > 0.01 && !ring, |this| this.shadow(ornament::gold_glow(&t, lit)))
+            .when(lit > 0.01 && !ring, |this| {
+                this.shadow(ornament::gold_glow(&t, lit))
+            })
             .when(ring, |this| this.shadow(theme::focus_ring(&t)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
@@ -971,13 +1652,18 @@ impl Shell {
                     .track_focus(&focus.clone().tab_stop(true))
                     .custom(colors)
                     .selected(active)
-                    .w(px(64.))
-                    .h(px(52.))
+                    .w(px(RAIL_ITEM_WIDTH))
+                    .h(px(RAIL_ITEM_HEIGHT))
                     .rounded(theme::RADIUS)
                     .accessibility_label(tr(cx, &[], label))
                     .tooltip(hint)
                     .tooltip_placement(Placement::Right)
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_view(view, cx)))
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| {
+                            s.close_page(cx);
+                            s.set_view(view, cx)
+                        })
+                    })
                     .child(
                         v_flex()
                             .items_center()
@@ -993,17 +1679,27 @@ impl Shell {
                             .child(tr(cx, &[], label)),
                     ),
             )
-            .when(shows_underline(lit), |this| this.child(div().absolute().left_0().bottom_0().w_full().child(ornament::orbit_underline(t.gold, lit))))
+            .when(shows_underline(lit), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .bottom_0()
+                        .w_full()
+                        .child(ornament::orbit_underline(t.gold, lit)),
+                )
+            })
     }
 
     fn new_wish_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.tokens();
         let d = theme::density(cx);
-        let blocked = blocking_check(&self.state.read(cx).checks).map(|check| (check.name.clone(), check.detail.clone()));
+        let blocked = blocking_check(&self.state.read(cx).checks)
+            .map(|check| (check.name.clone(), check.detail.clone()));
         let label = tr(cx, &[], "New wish");
         let button = theme::gold_leaf(Button::new("new-wish"), &t)
-            .w(px(64.))
-            .h(px(52.))
+            .w(px(RAIL_ITEM_WIDTH))
+            .h(px(RAIL_ITEM_HEIGHT))
             .rounded(theme::RADIUS)
             .disabled(blocked.is_some())
             .accessibility_label(label)
@@ -1015,7 +1711,7 @@ impl Shell {
                     .gap(theme::space(d, Step::Xs))
                     .text_size(theme::font(d, TypeSize::Label))
                     .font_medium()
-                    .child(Icon::new(IconName::Plus).size(px(18.)))
+                    .child(Icon::new(IconName::Plus).size(px(ADD_ICON_SIZE)))
                     .child(label),
             );
         let Some((name, detail)) = blocked else {
@@ -1030,11 +1726,13 @@ impl Shell {
             .child(
                 Button::new("setup-reason")
                     .text()
-                    .w(px(68.))
+                    .w(px(NEW_WISH_WIDTH))
                     .h_auto()
                     .tooltip(reason)
                     .tooltip_placement(Placement::Right)
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_view(Screen::Doctor, cx)))
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| s.set_view(Screen::Doctor, cx))
+                    })
                     .child(
                         div()
                             .w_full()
@@ -1056,7 +1754,7 @@ impl Shell {
         h_flex()
             .id("title-search")
             .flex_none()
-            .h(px(26.))
+            .h(px(SEARCH_HEIGHT))
             .px(theme::space(d, Step::Sm))
             .gap(theme::space(d, Step::Sm))
             .rounded(theme::RADIUS)
@@ -1067,10 +1765,15 @@ impl Shell {
             .cursor_pointer()
             .hover(|this| this.bg(t.raised))
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tr(cx, T, "Search wishes, goals, modules, units and memory, or run a command")).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(tr(
+                    cx,
+                    T,
+                    "Search wishes, goals, modules, units and memory, or run a command",
+                ))
+                .build(window, cx)
             })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)))
-            .child(Icon::new(IconName::Search).size(px(13.)))
+            .child(Icon::new(IconName::Search).size(px(SEARCH_ICON_SIZE)))
             .child(label)
             .child(palette::key_cap(palette::keys_of(palette::Global::Palette)))
     }
@@ -1086,15 +1789,21 @@ impl Shell {
             h_flex()
                 .gap(theme::space(d, Step::Sm))
                 .min_w_0()
-                .child(div().w(px(1.)).h(px(12.)).bg(t.border))
-                .child(div().text_size(theme::font(d, TypeSize::Body)).text_color(t.muted).truncate().child(project))
+                .child(div().w(theme::ornament_tokens::DIVIDER_LINE_HEIGHT).h(px(STRIP_DIVIDER_HEIGHT)).bg(t.border))
+                .child(
+                    div()
+                        .text_size(theme::font(d, TypeSize::Body))
+                        .text_color(t.muted)
+                        .truncate()
+                        .child(project),
+                )
                 .child(
                     h_flex()
                         .gap(theme::space(d, Step::Xs))
                         .flex_shrink_0()
                         .text_size(theme::font(d, TypeSize::Caption))
                         .text_color(color)
-                        .child(div().size(px(6.)).rounded_full().bg(color))
+                        .child(div().size(px(STRIP_DOT_SIZE)).rounded_full().bg(color))
                         .child(label),
                 ),
         )
@@ -1113,13 +1822,26 @@ impl Render for Shell {
         let ticking = quota::repaint_after(&self.state.read(cx).quota).is_some();
         self.ticker.sync(ticking, cx);
         let state = self.state.read(cx);
-        let strip = quota::strip(state, cx);
         let reduce = state.reduce_motion;
-        let view = if chrome.force_run { Screen::Run } else { state.view };
+        let view = if chrome.force_run {
+            Screen::Run
+        } else {
+            state.view
+        };
         let composing = state.composing;
         let waiting = state.runs.iter().filter(|run| needs_user(run)).count();
         let mut motion = Driver::new(reduce, cx);
         let now = motion.now();
+        // ux: begin extreme strip
+        let flash_started = state.ux.extreme_flash;
+        let flash = super::doctor::extreme::flash_level(flash_started, now, reduce);
+        motion.keep(flash > 0.0);
+        if flash_started.is_some() && flash == 0.0 {
+            self.state.update(cx, |s, _| s.ux.extreme_flash = None);
+        }
+        // quota::strip(...) is replaced here so the strip can receive interaction and flash.
+        let strip = quota::strip_with(&self.state, flash, cx);
+        // ux: end
         motion.track(&self.launch);
         let launching = self.launch.seconds(now).filter(|_| !reduce);
 
@@ -1140,43 +1862,117 @@ impl Render for Shell {
         if switch >= 1.0 {
             self.leaving = None;
         }
-        if !chrome.rail { self.hovered = None; }
+        if !chrome.rail {
+            self.hovered = None;
+        }
         let mut glows = [(0.0, 0.0); 5];
         for (i, screen) in SCREENS.into_iter().enumerate() {
-            let target = if screen == view { 1.0 } else if self.hovered == Some(screen) && chrome.rail { 0.5 } else { 0.0 };
+            let target = if screen == view {
+                1.0
+            } else if self.hovered == Some(screen) && chrome.rail {
+                0.5
+            } else {
+                0.0
+            };
             self.glows.set(&i, target, now, reduce);
             let value = self.glows.value(&i, &mut motion);
             glows[i] = ((value * 2.0 - 1.0).max(0.0), (value * 2.0).min(1.0));
         }
-        let content = self.screen(view);
+        // ux: begin page host
+        let page = self.page(window, cx);
+        let page_open = page.is_some();
+        let content = page.unwrap_or_else(|| self.screen(view, window, cx));
+        // ux: end
         // The screen being left stays underneath while the new one fades in over it.
-        let leaving = self.leaving.map(|screen| self.screen(screen));
+        let leaving = if page_open {
+            None
+        } else {
+            self.leaving.map(|screen| self.screen(screen, window, cx))
+        };
         let wishes_hint: SharedString = if waiting == 0 {
             tr(cx, T, "Every wish, newest first").into()
         } else {
-            fill(tr(cx, T, "Every wish, newest first. {} need you."), &[&waiting.to_string()]).into()
+            fill(
+                tr(cx, T, "Every wish, newest first. {} need you."),
+                &[&waiting.to_string()],
+            )
+            .into()
         };
         let status = self.title_status(cx);
         let search = self.search_button(cx);
         let new_wish = self.new_wish_button(cx);
         let g = |screen: Screen| glows[slot(screen)];
-        let run_item = self.nav_item("nav-run", Emblem::Hourglass, "Run", tr(cx, T, "What the current wish is doing").into(), Screen::Run, 0, g(Screen::Run), window, cx);
-        let wishes_item = self.nav_item("nav-wishes", Emblem::Scroll, "Wishes", wishes_hint, Screen::Wishes, waiting, g(Screen::Wishes), window, cx);
-        let memory_item = self.nav_item("nav-memory", Emblem::StarBook, "Memory", tr(cx, T, "What Chronos remembers between wishes").into(), Screen::Memory, 0, g(Screen::Memory), window, cx);
-        let usage_item = self.nav_item("nav-usage", Emblem::Astrolabe, "Usage", tr(cx, T, "Cost and context by wish").into(), Screen::Usage, 0, g(Screen::Usage), window, cx);
-        let settings_item = self.nav_item("nav-doctor", Emblem::Armillary, "Settings", tr(cx, T, "Environment checks and preferences").into(), Screen::Doctor, 0, g(Screen::Doctor), window, cx);
+        let run_item = self.nav_item(
+            "nav-run",
+            Emblem::Hourglass,
+            "Run",
+            tr(cx, T, "What the current wish is doing").into(),
+            Screen::Run,
+            0,
+            g(Screen::Run),
+            window,
+            cx,
+        );
+        let wishes_item = self.nav_item(
+            "nav-wishes",
+            Emblem::Scroll,
+            "Wishes",
+            wishes_hint,
+            Screen::Wishes,
+            waiting,
+            g(Screen::Wishes),
+            window,
+            cx,
+        );
+        let memory_item = self.nav_item(
+            "nav-memory",
+            Emblem::StarBook,
+            "Memory",
+            tr(cx, T, "What Chronos remembers between wishes").into(),
+            Screen::Memory,
+            0,
+            g(Screen::Memory),
+            window,
+            cx,
+        );
+        let usage_item = self.nav_item(
+            "nav-usage",
+            Emblem::Astrolabe,
+            "Usage",
+            tr(cx, T, "Cost and context by wish").into(),
+            Screen::Usage,
+            0,
+            g(Screen::Usage),
+            window,
+            cx,
+        );
+        let settings_item = self.nav_item(
+            "nav-doctor",
+            Emblem::Armillary,
+            "Settings",
+            tr(cx, T, "Environment checks and preferences").into(),
+            Screen::Doctor,
+            0,
+            g(Screen::Doctor),
+            window,
+            cx,
+        );
         let rail_cell = self.rail_portrait.clone();
         // Hidden while the launch's keeper is on its way to this spot.
         let rail_portrait = div()
             .relative()
             .mt(theme::space(d, Step::Xs))
             .mb(theme::space(d, Step::Sm))
-            .child(ornament::portrait(44.).opacity(if launching.is_some() { 0.0 } else { 1.0 }))
+            .child(ornament::portrait(44.).opacity(if launching.is_some() { theme::ornament_tokens::TRANSPARENT } else { VISIBLE }))
             .child(
                 canvas(
                     move |bounds, _, _| {
                         let (x, y) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-                        rail_cell.set(Some(Square { x, y, side: f32::from(bounds.size.width) }));
+                        rail_cell.set(Some(Square {
+                            x,
+                            y,
+                            side: f32::from(bounds.size.width),
+                        }));
                     },
                     |_, _, _, _| (),
                 )
@@ -1190,10 +1986,6 @@ impl Render for Shell {
             let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
             launch::overlay(s, w, h, self.rail_portrait.get(), super::theme::night())
                 .id("launch")
-                .occlude()
-                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
-                    this.skip_launch(cx);
-                }))
         });
         motion.finish(window);
         div()
@@ -1201,80 +1993,99 @@ impl Render for Shell {
             .relative()
             .key_context("ChronosShell")
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::escape_page))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.skip_launch(cx);
+            }))
             .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
-                if this.skip_launch(cx) {
-                    cx.stop_propagation();
-                }
+                this.skip_launch(cx);
             }))
             .bg(tokens.canvas)
             .text_color(tokens.text)
             .child(
-                v_flex().size_full()
-                .child(
-                    TitleBar::new()
-                        .on_close_window(cx.listener(|this, _, window, cx| {
-                            if this.should_close(window, cx) {
-                                window.remove_window();
-                            }
-                        }))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .pr(theme::space(d, Step::Sm))
-                                .gap(theme::space(d, Step::Sm))
-                                .child(div().flex_shrink_0().text_size(theme::font(d, TypeSize::Body)).font_medium().text_color(tokens.gold).child("Axiom Chronos"))
-                                .when(chrome.title_extras, |this| this.children(status))
-                                .child(div().flex_1())
-                                .when(chrome.title_extras, |this| this.child(search)),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .items_start()
-                        .when(chrome.rail, |this| this.child(
-                            v_flex()
-                                .id("rail")
-                                .h_full()
-                                .w(px(80.))
-                                .flex_shrink_0()
-                                .p(theme::space(d, Step::Sm))
-                                .gap(theme::space(d, Step::Xs))
-                                .items_center()
-                                .bg(tokens.surface)
-                                .border_r_1()
-                                .border_color(tokens.border)
-                                .child(rail_portrait)
-                                .child(new_wish)
-                                .child(div().w(px(60.)).my(theme::space(d, Step::Xs)).child(ornament::divider(&tokens, 0.0)))
-                                .child(run_item)
-                                .child(wishes_item)
-                                .child(memory_item)
-                                .child(usage_item)
-                                .child(div().flex_1())
-                                .child(settings_item),
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .relative()
-                                .child(ornament::backdrop(&tokens, cx.theme().is_dark()))
-                                .children(leaving.map(|screen| div().absolute().top_0().left_0().size_full().child(screen)))
-                                .child(
-                                    div()
-                                        .relative()
-                                        .size_full()
-                                        .top(px(SCREEN_DRIFT * (1.0 - switch)))
-                                        .when(switch < 1.0, |this| this.opacity(switch))
-                                        .child(content),
-                                ),
-                        ),
-                )
-                .when(chrome.strip, |this| this.child(strip))
+                v_flex()
+                    .size_full()
+                    .child(
+                        TitleBar::new()
+                            .on_close_window(cx.listener(|this, _, window, cx| {
+                                if this.should_close(window, cx) {
+                                    window.remove_window();
+                                }
+                            }))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .pr(theme::space(d, Step::Sm))
+                                    .gap(theme::space(d, Step::Sm))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(theme::font(d, TypeSize::Body))
+                                            .font_medium()
+                                            .text_color(tokens.gold)
+                                            .child("Axiom Chronos"),
+                                    )
+                                    .when(chrome.title_extras, |this| this.children(status))
+                                    .child(div().flex_1())
+                                    .when(chrome.title_extras, |this| this.child(search)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .items_start()
+                            .when(chrome.rail, |this| {
+                                this.child(
+                                    v_flex()
+                                        .id("rail")
+                                        .h_full()
+                                        .w(px(RAIL_WIDTH))
+                                        .flex_shrink_0()
+                                        .p(theme::space(d, Step::Sm))
+                                        .gap(theme::space(d, Step::Xs))
+                                        .items_center()
+                                        .bg(tokens.surface)
+                                        .border_r_1()
+                                        .border_color(tokens.border)
+                                        .child(rail_portrait)
+                                        .child(new_wish)
+                                        .child(
+                                            div()
+                                                .w(px(RAIL_DIVIDER_WIDTH))
+                                                .my(theme::space(d, Step::Xs))
+                                                .child(ornament::divider(&tokens, 0.0)),
+                                        )
+                                        .child(run_item)
+                                        .child(wishes_item)
+                                        .child(memory_item)
+                                        .child(usage_item)
+                                        .child(div().flex_1())
+                                        .child(settings_item),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .child(ornament::backdrop(&tokens, cx.theme().is_dark()))
+                                    .children(leaving.map(|screen| {
+                                        div().absolute().top_0().left_0().size_full().child(screen)
+                                    }))
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .size_full()
+                                            .top(px(SCREEN_DRIFT * (VISIBLE - switch)))
+                                            .when(switch < 1.0, |this| this.opacity(switch))
+                                            .child(content),
+                                    ),
+                            ),
+                    )
+                    .when(chrome.strip, |this| this.child(strip)),
             )
             .when(composing, |this| this.child(self.composer.clone()))
             .child(self.palette.clone())
@@ -1282,6 +2093,10 @@ impl Render for Shell {
     }
 }
 
+// ux: begin tests
+#[cfg(test)]
+mod ux_accept;
+// ux: end
 #[cfg(test)]
 mod accept;
 
@@ -1289,16 +2104,29 @@ mod accept;
 mod tests {
     use super::*;
     // Named, because the glob above also brings in gpui's own `test` macro.
-    use std::prelude::v1::test;
     use crate::desktop::demo::sample_run;
+    use std::prelude::v1::test;
+
+    fn production_source() -> &'static str {
+        // Test-only imports may precede production code; exclude only this test module.
+        include_str!("shell.rs")
+            .rsplit_once("\nmod tests {")
+            .expect("shell test module")
+            .0
+    }
 
     #[test]
     fn backdrop_stays_behind_the_crossfade() {
-        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
-        let render = source.split("impl Render for Shell {").nth(1).expect("shell render");
+        let source = production_source();
+        let render = source
+            .split("impl Render for Shell {")
+            .nth(1)
+            .expect("shell render");
         assert_eq!(render.matches("ornament::backdrop(").count(), 1);
         let backdrop = render.find("ornament::backdrop(").expect("backdrop");
-        let content_end = backdrop + render[backdrop..].find(".child(content)").expect("content") + ".child(content)".len();
+        let content_end = backdrop
+            + render[backdrop..].find(".child(content)").expect("content")
+            + ".child(content)".len();
         let content_area = &render[backdrop..content_end];
         let backdrop = content_area.find("ornament::backdrop(").unwrap();
         assert!(backdrop < content_area.find("leaving.map(").expect("leaving screen"));
@@ -1307,7 +2135,13 @@ mod tests {
         assert!(!content_area.contains(".bg("));
 
         let ornament = include_str!("ornament.rs");
-        let backdrop_fn = ornament.split("pub fn backdrop(").nth(1).expect("backdrop function").split("\npub ").next().unwrap();
+        let backdrop_fn = ornament
+            .split("pub fn backdrop(")
+            .nth(1)
+            .expect("backdrop function")
+            .split("\npub ")
+            .next()
+            .unwrap();
         assert!(backdrop_fn.contains(".absolute().top_0().left_0().size_full()"));
     }
 
@@ -1321,17 +2155,29 @@ mod tests {
 
     #[test]
     fn orbit_underline_uses_visibility_rule() {
-        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
-        let rail_item = source.split("    fn nav_item(").nth(1).expect("rail item").split("    fn new_wish_button(").next().unwrap();
-        let underline = rail_item.lines().find(|line| line.contains("ornament::orbit_underline(")).expect("orbit underline");
-        assert!(underline.contains(".when(shows_underline(lit)"));
+        let source = production_source();
+        let rail_item = source
+            .split("    fn nav_item(")
+            .nth(1)
+            .expect("rail item")
+            .split("    fn new_wish_button(")
+            .next()
+            .unwrap();
+        let underline = regex::Regex::new(
+            r"\.when\(shows_underline\(lit\),\s*\|this\|\s*\{?[^{}]*ornament::orbit_underline\(",
+        )
+        .unwrap();
+        assert!(underline.is_match(rail_item));
         assert!(!rail_item.contains(".when(lit > 0.01, |this| this.child(div().absolute()"));
     }
 
     #[test]
     fn wish_and_keep_working_buttons_use_gold_leaf() {
-        let source = include_str!("shell.rs").split("#[cfg(test)]").next().unwrap();
-        for (id, end) in [("new-wish", "let Some((name, detail))"), ("keep-working", "fn stop_and_close(")] {
+        let source = production_source();
+        for (id, end) in [
+            ("new-wish", "let Some((name, detail))"),
+            ("keep-working", "fn stop_and_close("),
+        ] {
             let marker = format!("Button::new(\"{id}\")");
             assert_eq!(source.matches(&marker).count(), 1);
             let position = source.find(&marker).unwrap();
@@ -1349,18 +2195,93 @@ mod tests {
         run
     }
 
+    #[test]
+    fn hosted_running_sessions_are_the_stop_targets() {
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Stops(Rc<RefCell<Vec<String>>>);
+        impl Backend for Stops {
+            fn start_wish(&self, _: WishRequest) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn interject(&self, _: &str, _: &str) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn stop(&self, session: &str) -> crate::base::Res<()> {
+                self.0.borrow_mut().push(session.into());
+                Ok(())
+            }
+            fn resume(&self, _: &str, _: Option<&str>) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn delete_memory(&self, _: i64) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn correct_memory(&self, _: i64, _: &str) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn refresh(&self) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn recheck(&self) -> crate::base::Res<()> {
+                Ok(())
+            }
+            fn follow(&self, _: &str) -> crate::base::Res<()> {
+                Ok(())
+            }
+        }
+
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut state = crate::desktop::demo::state();
+        state.backend = Some(Box::new(Stops(calls.clone())));
+        state.runs = vec![
+            run_with("first", RunStatus::Active),
+            run_with("second", RunStatus::Active),
+            run_with("external", RunStatus::Active),
+            run_with("finished", RunStatus::Done),
+        ];
+        for run in &mut state.runs {
+            run.hosted = true;
+        }
+        state.runs[2].hosted = false;
+        let targets: Vec<_> = running_here(&state.runs)
+            .iter()
+            .map(|run| run.session.clone())
+            .collect();
+        for session in &targets {
+            state.stop(session);
+        }
+        assert_eq!(*calls.borrow(), ["first", "second"]);
+        state.runs[0].status = RunStatus::Done;
+        assert_eq!(running_here(&state.runs).len(), 1);
+        state.runs[1].status = RunStatus::Done;
+        assert!(running_here(&state.runs).is_empty());
+        assert_eq!(STOP_DEADLINE, Duration::from_secs(10));
+    }
+
     fn check(name: &'static str, status: CheckStatus) -> Check {
-        Check { name: name.into(), status, detail: "detail".into() }
+        Check {
+            name: name.into(),
+            status,
+            detail: "detail".into(),
+        }
     }
 
     fn alert(session: &'static str, kind: AlertKind) -> RunAlert {
-        RunAlert { session: session.into(), kind }
+        RunAlert {
+            session: session.into(),
+            kind,
+        }
     }
 
     #[test]
     fn nothing_is_announced_for_runs_already_in_their_state_at_launch() {
         let mut seen = HashMap::new();
-        let runs = [run_with("a", RunStatus::Blocked), run_with("b", RunStatus::Done), run_with("c", RunStatus::Waiting)];
+        let runs = [
+            run_with("a", RunStatus::Blocked),
+            run_with("b", RunStatus::Done),
+            run_with("c", RunStatus::Waiting),
+        ];
         assert_eq!(run_alerts(&mut seen, &runs), vec![]);
     }
 
@@ -1374,7 +2295,10 @@ mod tests {
         for (status, kind) in cases {
             let mut seen = HashMap::new();
             run_alerts(&mut seen, &[run_with("a", RunStatus::Active)]);
-            assert_eq!(run_alerts(&mut seen, &[run_with("a", status)]), vec![alert("a", kind)]);
+            assert_eq!(
+                run_alerts(&mut seen, &[run_with("a", status)]),
+                vec![alert("a", kind)]
+            );
         }
     }
 
@@ -1382,9 +2306,15 @@ mod tests {
     fn the_same_state_is_never_announced_twice() {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &[run_with("a", RunStatus::Active)]);
-        assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]).len(), 1);
+        assert_eq!(
+            run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]).len(),
+            1
+        );
         for _ in 0..3 {
-            assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]), vec![]);
+            assert_eq!(
+                run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]),
+                vec![]
+            );
         }
     }
 
@@ -1392,23 +2322,38 @@ mod tests {
     fn returning_to_work_is_silent_and_blocking_again_is_news() {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]);
-        assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Active)]), vec![]);
-        assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]), vec![alert("a", AlertKind::Blocked)]);
+        assert_eq!(
+            run_alerts(&mut seen, &[run_with("a", RunStatus::Active)]),
+            vec![]
+        );
+        assert_eq!(
+            run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]),
+            vec![alert("a", AlertKind::Blocked)]
+        );
     }
 
     #[test]
     fn moving_between_states_that_matter_is_announced_for_the_new_one() {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &[run_with("a", RunStatus::Waiting)]);
-        assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Done)]), vec![alert("a", AlertKind::Finished)]);
+        assert_eq!(
+            run_alerts(&mut seen, &[run_with("a", RunStatus::Done)]),
+            vec![alert("a", AlertKind::Finished)]
+        );
     }
 
     #[test]
     fn a_new_run_is_a_baseline_while_others_still_change() {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &[run_with("a", RunStatus::Active)]);
-        let runs = [run_with("a", RunStatus::Done), run_with("b", RunStatus::Blocked)];
-        assert_eq!(run_alerts(&mut seen, &runs), vec![alert("a", AlertKind::Finished)]);
+        let runs = [
+            run_with("a", RunStatus::Done),
+            run_with("b", RunStatus::Blocked),
+        ];
+        assert_eq!(
+            run_alerts(&mut seen, &runs),
+            vec![alert("a", AlertKind::Finished)]
+        );
     }
 
     #[test]
@@ -1416,7 +2361,10 @@ mod tests {
         let mut seen = HashMap::new();
         run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]);
         run_alerts(&mut seen, &[]);
-        assert_eq!(run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]), vec![]);
+        assert_eq!(
+            run_alerts(&mut seen, &[run_with("a", RunStatus::Blocked)]),
+            vec![]
+        );
     }
 
     #[test]
@@ -1426,7 +2374,11 @@ mod tests {
         assert!(!needs_user(&run_with("a", RunStatus::Active)));
         assert!(!needs_user(&run_with("a", RunStatus::Done)));
         let mut asking = run_with("a", RunStatus::Active);
-        asking.needs = vec![Need { kind: NeedKind::Interjection, title: "?".into(), note: "?".into() }];
+        asking.needs = vec![Need {
+            kind: NeedKind::Interjection,
+            title: "?".into(),
+            note: "?".into(),
+        }];
         assert!(needs_user(&asking));
         let mut finished = asking;
         finished.status = RunStatus::Done;
@@ -1436,9 +2388,20 @@ mod tests {
     #[test]
     fn only_a_failed_check_blocks_new_wishes() {
         assert!(blocking_check(&[]).is_none());
-        assert!(blocking_check(&[check("codegraph", CheckStatus::Warn), check("claude", CheckStatus::Ok)]).is_none());
-        let checks = [check("claude", CheckStatus::Ok), check("codex", CheckStatus::Fail), check("state", CheckStatus::Fail)];
-        assert_eq!(blocking_check(&checks).map(|c| c.name.as_ref()), Some("codex"));
+        assert!(blocking_check(&[
+            check("codegraph", CheckStatus::Warn),
+            check("claude", CheckStatus::Ok)
+        ])
+        .is_none());
+        let checks = [
+            check("claude", CheckStatus::Ok),
+            check("codex", CheckStatus::Fail),
+            check("state", CheckStatus::Fail),
+        ];
+        assert_eq!(
+            blocking_check(&checks).map(|c| c.name.as_ref()),
+            Some("codex")
+        );
     }
 
     #[test]
@@ -1452,7 +2415,10 @@ mod tests {
         let mut waiting = run_with("waiting", RunStatus::Waiting);
         waiting.hosted = true;
         let runs = [terminal, paused, waiting, here];
-        let running: Vec<_> = running_here(&runs).iter().map(|run| run.session.to_string()).collect();
+        let running: Vec<_> = running_here(&runs)
+            .iter()
+            .map(|run| run.session.to_string())
+            .collect();
         assert_eq!(running, vec!["here"]);
         assert!(running_here(&runs[..3]).is_empty());
     }
@@ -1466,7 +2432,10 @@ mod tests {
         }
         assert!(!run.verified_end(), "the full test has not passed yet");
         assert_eq!(run.status_label(), "Ended, needs attention");
-        run.stages.iter_mut().filter(|stage| stage.name == "Full test").for_each(|stage| stage.phase = Phase::Done);
+        run.stages
+            .iter_mut()
+            .filter(|stage| stage.name == "Full test")
+            .for_each(|stage| stage.phase = Phase::Done);
         assert!(run.verified_end());
         assert_eq!(run.status_label(), "Done");
         run.units.clear();
@@ -1476,7 +2445,10 @@ mod tests {
     #[test]
     fn a_held_scene_names_its_transition_and_moment() {
         assert_eq!(held_scene("switch-at-120"), Some(("switch", 120)));
-        assert_eq!(held_scene("palette-close-at-60"), Some(("palette-close", 60)));
+        assert_eq!(
+            held_scene("palette-close-at-60"),
+            Some(("palette-close", 60))
+        );
         assert_eq!(held_scene("launch-at-0"), Some(("launch", 0)));
         assert_eq!(held_scene("switch-at-"), None);
         assert_eq!(held_scene("palette"), None);
@@ -1501,19 +2473,28 @@ mod tests {
         let used = regex::Regex::new(r#"tr\(cx, T, "((?:[^"\\]|\\.)*)"\)"#).unwrap();
         for capture in used.captures_iter(source) {
             let key = capture[1].replace("\\\"", "\"");
-            assert!(T.iter().any(|(en, _)| *en == key), "missing translation: {key}");
+            assert!(
+                T.iter().any(|(en, _)| *en == key),
+                "missing translation: {key}"
+            );
         }
         let labels = regex::Regex::new(r#"Emblem::\w+, "(\w+)""#).unwrap();
         for capture in labels.captures_iter(source) {
             let key = &capture[1];
-            assert!(super::super::i18n::COMMON.iter().any(|(en, _)| *en == key), "missing translation: {key}");
+            assert!(
+                super::super::i18n::COMMON.iter().any(|(en, _)| *en == key),
+                "missing translation: {key}"
+            );
         }
     }
 
     #[test]
     fn every_nav_call_site_has_an_emblem() {
-        let source = include_str!("shell.rs");
-        let labels = regex::Regex::new(r#"self\.nav_item\("nav-[\w-]+", Emblem::\w+, "(\w+)""#).unwrap();
+        let source = production_source();
+        let labels = regex::Regex::new(
+            r#"self\.nav_item\(\s*"nav-[\w-]+",\s*Emblem::\w+,\s*"(\w+)""#,
+        )
+        .unwrap();
         assert_eq!(labels.captures_iter(source).count(), 5);
     }
 }

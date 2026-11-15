@@ -1,0 +1,17 @@
+{
+  "id": "python-001",
+  "language": "python",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 6,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.py#function:run.compute"
+      }
+    }
+  ]
+}

@@ -134,18 +134,14 @@ impl Poller {
                 by_session.entry(s).or_default().push(run);
             }
         }
-        let mut stores: HashMap<String, Option<store::View>> = HashMap::new();
+        let mut stores: HashMap<PathBuf, Option<store::View>> = HashMap::new();
         let mut wishes = Vec::new();
         let mut needs_you = Vec::new();
         for g in goals {
-            let store = g
-                .goal
-                .project
-                .as_deref()
-                .and_then(|p| orch::store_for(&self.home, p).ok());
-            let view = match (&g.goal.project, &store) {
-                (Some(p), Some(path)) => stores
-                    .entry(p.clone())
+            let store = orch::store_for_goal(&self.home, &g.goal).ok();
+            let view = match &store {
+                Some(path) => stores
+                    .entry(path.clone())
                     .or_insert_with(|| store::view(path, &mut warnings))
                     .clone(),
                 _ => None,
@@ -159,7 +155,9 @@ impl Poller {
                 .filter_map(|r| r.modified_unix)
                 .chain(g.modified.and_then(unix))
                 .max();
-            let window = start.zip(end).map(|(s, e)| (s as f64 - 60.0, e as f64 + 60.0));
+            let window = start
+                .zip(end)
+                .map(|(s, e)| (s as f64 - 60.0, e as f64 + 60.0));
             let memory = match &g.goal.project {
                 Some(p) => recorded(&self.home, p, &g.goal.wish, window, &mut warnings),
                 None => None,
@@ -348,9 +346,8 @@ fn stages(
     memory: Option<&[MemoryEntry]>,
 ) -> Vec<Stage> {
     use Status::*;
-    let open = |kind: &str| {
-        scan.is_some_and(|s| s.open.iter().any(|c| c.kind.as_deref() == Some(kind)))
-    };
+    let open =
+        |kind: &str| scan.is_some_and(|s| s.open.iter().any(|c| c.kind.as_deref() == Some(kind)));
     let finished = |kind: &str| scan.is_some_and(|s| s.finished.get(kind).is_some_and(|n| *n > 0));
     let closed = goal.status != "active";
     let rows = store.map_or(&[][..], |s| s.stages.as_slice());
@@ -485,7 +482,7 @@ fn stages(
     let (status, detail) = match goal.status.as_str() {
         "done" => (Done, None),
         "blocked" | "waiting" => match goal.reason.as_deref() {
-            Some(r @ ("interrupted" | "user_stop")) => (Failed, Some(r.into())),
+            Some(r @ ("interrupted" | "user_stop" | "disk_space")) => (Failed, Some(r.into())),
             _ => (Done, Some(goal.status.clone())),
         },
         _ if memory_status != NotStarted => (Running, None),

@@ -33,12 +33,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let temp_root = common::repo_root().join(".axiom-tmp/subdir-paths-1");
-        fs::create_dir_all(&temp_root).unwrap();
-        let temp = tempfile::tempdir_in(temp_root).unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         let project = root.join("proj");
-        let store = temp.path().join("store");
+        let store = temp.path().join("orchestrate/store");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(store.join("inbox")).unwrap();
         git(&root, &["init", "-q"]);

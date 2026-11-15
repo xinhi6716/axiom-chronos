@@ -4,39 +4,49 @@ fn asset(path: &str) -> &'static str {
     FILES.iter().find(|(name, _)| *name == path).unwrap().1
 }
 
-fn contains(text: &str, phrase: &str) -> bool {
-    text.contains(phrase)
+fn phrase_count(text: &str, phrase: &str) -> usize {
+    text.matches(phrase).count()
 }
 
 #[test]
 fn contract_sentences_are_embedded() {
-    let unit_mode = "Dispatch a registered unit with exactly `project`, `unit`, `role` (`terra` or `sol`) and `cwd`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
+    let unit_mode = "Dispatch a registered unit with `project`, `unit`, `role` (`terra` or `sol`), `cwd`, and `cycle: true`, or register and dispatch a new one in the same call by adding `track` and `brief_file`; never add `brief` or `save_to`. Brief mode is for Astra only.";
     let cases = [
         ("DISPATCH.md", "SCOPE lists paths only; notes such as \"(new)\" go in CONTEXT."),
         ("DISPATCH.md", "VERIFY runs under `cmd` on Windows and `sh` on Linux: write commands without `set` or `%VAR%`, and rely on the inherited CARGO_HOME."),
         ("DISPATCH.md", unit_mode),
-        ("DISPATCH.md", "Tests that write temp files put them under `.axiom-tmp/<unit>/` in the project root (pytest: `--basetemp=.axiom-tmp/<unit>` in VERIFY); the bridge leaves that directory out of the SCOPE check and removes it after the unit."),
+        ("DISPATCH.md", "SCOPE may span lines or bullets; every path counts."),
+        ("DISPATCH.md", "Workers and VERIFY get private scratch (TMP, TEMP, TMPDIR, pytest `--basetemp`) automatically; workers' scratch is a sandbox writable root."),
+        ("DISPATCH.md", "Write all module briefs in one call: a single Bash heredoc, or Write for one unit."),
+        ("agents/dispatcher.md", r#"`orch` `["module-context", <module>, "--repo", <dir>]`"#),
+        ("agents/dispatcher.md", "For any `incomplete` section, Grep its named source file."),
+        ("agents/dispatcher.md", "call `memory_search` once per module"),
+        ("agents/dispatcher.md", r#"unless the core says "no memory"; then skip it."#),
+        ("agents/dispatcher.md", "SCOPE may span lines or bullets. Write and register briefs only for your own module: a foreign brief or `--track` is denied."),
+        ("agents/dispatcher.md", r#"A `codex_run` reply may carry `status: "refused"` (`already_running`, `already_verified`) with the `owner`; report it, never retry it."#),
+        ("agents/dispatcher.md", "Write all module briefs in one call: a Bash heredoc, or Write for one unit."),
+        ("agents/dispatcher.md", "The PostToolUse hook records the review;"),
+        ("agents/dispatcher.md", "only when the hook says the review was not recorded, after fixing the cause."),
+        ("agents/dispatcher.md", "process every `{unit, pack}` in `review`"),
+        ("agents/dispatcher.md", "For `wait`, a later unit runs ACCEPT, or `reason` names what to do."),
+        ("agents/dispatcher.md", "For `fix`, run `unit add --fixes <old>` (CONTEXT: findings/contract); engine auto-escalates TIER/EFFORT; dispatch cycle."),
+        ("agents/dispatcher.md", "the outcome saying `module_done` is the report: return it without calling `orch report` or `orch status`"),
         ("agents/dispatcher.md", "The `unit add` reply ends with the unit's next step: dispatch it only when that is `ready`; `wait ...` names the units to finish first. Never edit `units.tsv`, `claims.tsv` or evidence files by hand; a superseded unit stays registered."),
         ("agents/dispatcher.md", "Before dispatching a fix, register it separately with `orch` `[\"unit\", \"add\", <new>, \"--track\", <module>, \"--brief\", <path>, \"--fixes\", <old>]`."),
         ("agents/dispatcher.md", "For other takeovers by a later unit of the same module, call `orch` `[\"unit\", \"supersede\", <old>, \"--by\", <new>]`"),
         ("agents/dispatcher.md", "If the reply is `fix_rounds`, report it to the core."),
-        ("agents/dispatcher.md", "Take the pack path from the VERIFY reply: `codex_run` `pack`, or `orch verify` `pack=`."),
         ("agents/dispatcher.md", "Call `orch` `[\"review-pack\", <unit>, \"--repo\", <dir>]` only to rebuild a pack."),
         ("agents/dispatcher.md", "the reviewer writes its verdict file, not you."),
-        ("agents/dispatcher.md", "Call `orch` `[\"review\", <unit>, \"--repo\", <dir>, \"--reviewer\", \"chronos:reviewer\"]` for each unit."),
         ("agents/dispatcher.md", "Skip step 7 when you are named one module"),
         ("agents/dispatcher.md", "A `stale review` error means files in the unit's SCOPE changed after its VERIFY ran: call `orch` `[\"verify\", <unit>, \"--repo\", <dir>]`, follow the ACCEPT reply rule, then review again."),
-        ("DISPATCH.md", "`EFFORT` (`low`, `medium` or `high`) sets the reasoning effort, and `TIER luna` runs a terra unit on the luna model."),
+        ("DISPATCH.md", "Both TIER and EFFORT are required together."),
         ("DISPATCH.md", "The bridge reads them from the registered brief, so `codex_run` takes no argument for them, and the worker never sees them."),
-        ("agents/dispatcher.md", "put `EFFORT` and `TIER` in its brief as DISPATCH.md describes; never pass them to `codex_run`."),
+        ("agents/dispatcher.md", "The dispatcher and core never choose worker model or effort; routing alone does and terra is the floor."),
         ("agents/dispatcher.md", "Before writing any brief, call `memory_search`"),
         ("agents/dispatcher.md", "`memory_get`"),
         ("agents/dispatcher.md", unit_mode),
-        ("agents/dispatcher.md", "A unit that is ready to run is registered by its own `codex_run` call: add `track` (the module id, or \"build\") and `brief_file` (the brief path) to the dispatch, in the same message as the Write."),
         ("agents/dispatcher.md", "Register every unit, fix units included, under its module id as track; with a map, only a `sol` unit may use another track."),
         ("agents/dispatcher.md", "A unit's `codex_run` reply carries `accept`. When `accept.ran` is true, ACCEPT already ran for the module; do not call it again. When `accept.reason` is `units_pending` or `claimed`, a later unit of the module will run it. For any other reason, call `orch` `[\"accept\", <module>, \"--repo\", <dir>]` yourself."),
-        ("agents/dispatcher.md", "Give `chronos:reviewer` one whole unit per call: the unit id, every file of the unit including tests, and the module CONTRACT."),
-        ("agents/dispatcher.md", "The `orch` `[\"review\", ...]` reply lists the ready and waiting units; use it instead of a separate `[\"ready\"]` call."),
         ("agents/reviewer.md", "You review one whole unit per call: the unit id, every file in it, tests included, and its contract."),
         ("agents/reviewer.md", "{\"unit\": \"<unit id>\", \"tree\": \"<tree id>\", \"verdict\": \"pass\" | \"fail\", \"findings\": ["),
         ("agents/reviewer.md", "Write the unit id you were given into `unit`, and the pack's `Tree reviewed` value into `tree`."),
@@ -59,9 +69,29 @@ fn contract_sentences_are_embedded() {
     ];
     for (path, phrase) in cases {
         let text = asset(path);
-        assert!(contains(text, phrase), "{path}: {phrase}");
-        assert!(!contains(&text.replace(phrase, ""), phrase), "{path}: {phrase}");
+        assert_eq!(phrase_count(text, phrase), 1, "{path}: {phrase}");
     }
+}
+
+#[test]
+fn made_up_contract_sentence_is_not_embedded() {
+    assert_eq!(
+        phrase_count(asset("agents/dispatcher.md"), "For `fix`, ask the moon to dispatch a unicorn."),
+        0
+    );
+}
+
+#[test]
+fn removed_workarounds_are_gone() {
+    fn has_workaround(text: &str) -> bool {
+        [".axiom-tmp", "space-separated", "single SCOPE line", "\"needs\": null"]
+            .iter()
+            .any(|phrase| text.contains(phrase))
+    }
+    for path in ["DISPATCH.md", "agents/dispatcher.md"] {
+        assert!(!has_workaround(asset(path)), "{path}");
+    }
+    assert!(has_workaround(".axiom-tmp"));
 }
 
 const FIRST: &str = "1. Read `<store>/units.tsv` and list the units whose state is `verified`; skip every other unit without reading its files.";
@@ -104,4 +134,11 @@ fn reviewer_and_critic_use_claude() {
     let critic_description = asset("agents/critic.md").lines().find(|line| line.starts_with("description:")).unwrap();
     assert!(!critic_description.contains("Gemini"));
     assert!(!critic_description.contains("unavailable"));
+}
+
+#[test]
+fn dispatcher_drops_per_unit_search_and_ready_poll() {
+    let text = asset("agents/dispatcher.md");
+    assert!(!text.contains("call `memory_search` for each unit"));
+    assert!(!text.contains(r#"Call `orch` `["ready"]` and dispatch"#));
 }

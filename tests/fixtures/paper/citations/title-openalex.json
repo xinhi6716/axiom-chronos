@@ -1,0 +1,25 @@
+{
+  "id": "https://openalex.org/W2",
+  "doi": "https://doi.org/10.1038/nature12373",
+  "display_name": "Nanometre-scale thermometry in a living cell",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Georg Kucsko"
+      }
+    }
+  ],
+  "publication_year": 2013,
+  "primary_location": {
+    "source": {
+      "display_name": "Nature"
+    }
+  },
+  "biblio": {
+    "volume": "1",
+    "issue": "2",
+    "first_page": "54",
+    "last_page": "58",
+    "article_number": null
+  }
+}

@@ -1,0 +1,1 @@
+{"wish": "Legacy fixture", "status": "blocked", "reason": "interrupted", "project": "demo", "cwd": "/work/project", "amendments": ["preserve legacy"], "provenance": [{"origin": "legacy"}], "future_goal": {"keep": true}}

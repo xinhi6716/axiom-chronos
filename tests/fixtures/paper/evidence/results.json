@@ -1,0 +1,4 @@
+{
+  "producer": "analysis-v1",
+  "quantities": [{"id":"q1","claim_ids":["C1"],"value":2.5,"unit":"s","n":2,"uncertainty":null,"test":null,"p_value":null,"precision":1,"locator":{"artifact":"data.csv","column":"time","row":null,"aggregate":"mean"}}]
+}

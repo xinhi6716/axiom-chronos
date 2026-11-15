@@ -177,7 +177,13 @@ Environment checks with fix hints and a re-check button; versions of the app, pl
 
 ## Closing the window
 
-If a wish started here is running, ask: **Keep working** (cancel), **Stop and close** (it can be resumed later). No silent kill. Window size and position, last screen, language and theme persist.
+Closing the window always detaches without a dialog; wishes continue in the background service (`axiom serve`). Window size and position, last screen, language and theme persist.
+
+On Windows the real tray offers **Open**, **Pause all** and **Quit**. Pause all stops hosted running wishes so they can be resumed and marks them user-stopped. Quit with running wishes broadcasts `quit_requested` and requests a desktop with `--confirm-quit`, including when none is attached. The existing alert offers **Stop and quit** or **Keep working**; Keep working cancels quitting. With no running wishes, Quit exits the service.
+
+Settings has **Start at login**, off by default. A login launch resumes eligible interrupted wishes, but not wishes marked user-stopped. Windows uses login registration, Linux uses XDG autostart when available, and macOS login registration is a no-op. The macOS and Linux tray is a no-op. Tests exercise the tray and login registration through recording adapters, not the real tray icon or real login registration; the owner checks those by hand.
+
+When disk space pauses a wish, the desktop shows the disk notice; free space and resume the wish. See [storage](storage.md).
 
 ## Accessibility and polish
 

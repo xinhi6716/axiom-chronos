@@ -1,0 +1,17 @@
+{
+  "id": "js-005",
+  "language": "js",
+  "feature": "same_name",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 3,
+      "name": "compute",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.js#function:compute"
+      }
+    }
+  ]
+}

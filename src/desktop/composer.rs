@@ -575,6 +575,9 @@ pub(super) fn recent_projects(runs: &[Run]) -> Vec<(SharedString, PathBuf)> {
 pub struct Composer {
     state: Entity<AppState>,
     wish: Entity<TextareaState>,
+    // ux:begin composer-panel-field
+    panel: panel::OptimizerPanel,
+    // ux:end composer-panel-field
     turns: Entity<InputState>,
     choose_focus: FocusHandle,
     open: bool,
@@ -607,6 +610,9 @@ impl Composer {
             wish.set_rows(6, cx);
             wish
         });
+        // ux:begin composer-panel-init
+        let panel = panel::OptimizerPanel::new(window, cx);
+        // ux:end composer-panel-init
         let turns = cx.new(|cx| InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit())));
         let changed = |this: &mut Self, event: &InputEvent, cx: &mut Context<Self>| {
             if matches!(event, InputEvent::Change) {
@@ -643,6 +649,9 @@ impl Composer {
             choose_focus: cx.focus_handle(),
             state,
             wish,
+            // ux:begin composer-panel-store
+            panel,
+            // ux:end composer-panel-store
             turns,
             open: false,
             invoker: None,
@@ -701,8 +710,14 @@ impl Composer {
             tr(cx, T, "Say what you want done and how you will know it is done."),
             tr(cx, T, "No limit"),
         );
+        // ux:begin composer-prefill
+        self.panel.reset();
+        let prefill = self.state.update(cx, |s, _| s.ux.composer_prefill.take()).unwrap_or_default();
+        // ux:end composer-prefill
         self.wish.update(cx, |s, cx| {
-            s.set_value("", window, cx);
+            // ux:begin composer-prefill-value
+            s.set_value(prefill, window, cx);
+            // ux:end composer-prefill-value
             s.set_placeholder(wish_hint, window, cx);
         });
         self.turns.update(cx, |s, cx| {
@@ -1029,8 +1044,14 @@ impl Composer {
                     this.start(cx);
                 }
             }))
+            // ux:begin composer-mode-ui
+            .children(self.mode_ui(cx))
+            // ux:end composer-mode-ui
             .child(self.folder_section(cx))
             .child(self.wish_section(cx))
+            // ux:begin composer-panel-ui
+            .child(self.panel_ui(cx))
+            // ux:end composer-panel-ui
             .child(self.creative_row(cx))
             .child(self.research_card(cx))
             .child(self.advanced_section(cx))
@@ -1208,7 +1229,9 @@ impl Composer {
             .child(
                 div()
                     .relative()
-                    .child(Textarea::new(&self.wish).h(px(WISH_H)))
+                    // ux:begin composer-wish-id
+                    .child(div().id("composer-wish").child(Textarea::new(&self.wish).h(px(WISH_H)).readonly(self.panel.wish_locked())).test_support())
+                    // ux:end composer-wish-id
                     .child({
                         // Measures how far down the window the wish box ends, so the list can stay inside it.
                         let room = self.mention_room.clone();
@@ -1631,6 +1654,16 @@ impl Render for Composer {
         div()
     }
 }
+
+// ux:begin composer-mods
+mod templates;
+mod optimizer;
+mod github;
+mod modes;
+mod panel;
+#[cfg(test)]
+mod ux_accept;
+// ux:end composer-mods
 
 #[cfg(test)]
 mod tests {

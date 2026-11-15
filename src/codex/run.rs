@@ -5,9 +5,9 @@ use crate::{
 };
 use serde_json::{json, Map, Value};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub struct RunRequest {
@@ -28,6 +28,17 @@ impl AppServer {
     pub fn run(&self, req: &RunRequest) -> Res<Value> {
         self.run_capped(req, None)
     }
+    pub fn run_with_env(&self, req: &RunRequest, env: &[(String, String)]) -> Res<Value> {
+        self.run_internal(req, None, None, env, true, &[])
+    }
+    pub fn run_with_scratch(
+        &self,
+        req: &RunRequest,
+        env: &[(String, String)],
+        writable_roots: &[PathBuf],
+    ) -> Res<Value> {
+        self.run_internal(req, None, None, env, true, writable_roots)
+    }
     /// A run that is interrupted, with status `token_cap`, once its total tokens reach the cap.
     pub fn run_capped(&self, req: &RunRequest, token_cap: Option<u64>) -> Res<Value> {
         self.run_cancellable(req, token_cap, None)
@@ -37,6 +48,17 @@ impl AppServer {
         req: &RunRequest,
         token_cap: Option<u64>,
         stop: Option<&AtomicBool>,
+    ) -> Res<Value> {
+        self.run_internal(req, token_cap, stop, &[], false, &[])
+    }
+    fn run_internal(
+        &self,
+        req: &RunRequest,
+        token_cap: Option<u64>,
+        stop: Option<&AtomicBool>,
+        env: &[(String, String)],
+        set_env: bool,
+        writable_roots: &[PathBuf],
     ) -> Res<Value> {
         base::require_directory(&req.cwd)?;
         if !SANDBOXES.contains(&req.sandbox.as_str())
@@ -82,6 +104,7 @@ impl AppServer {
             }
             Err(e) => return Err(e),
         };
+        let run_started_ms = unix_ms();
         _slot.model(&req.model)?;
         let with_wait = |mut e: Failure| {
             if let Some(note) = wait.note(limit) {
@@ -145,9 +168,25 @@ impl AppServer {
         if graph {
             thread["config"]["mcp_servers"][codegraph::NAME] = codegraph::codex_server(&req.cwd);
         }
+        if set_env {
+            let set: Map<String, Value> = env
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(value)))
+                .collect();
+            thread["config"]["shell_environment_policy"]["set"] = Value::Object(set);
+        }
+        if req.sandbox == "workspace-write" && !writable_roots.is_empty() {
+            let roots: Vec<PathBuf> = writable_roots
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<_>>()
+                .map_err(|e| Failure::new("io", e.to_string()))?;
+            thread["config"]["sandbox_workspace_write"]["writable_roots"] = json!(roots);
+        }
         if let Err(e) = stopped() {
             let mut report = report_error(req, "", "", disabled, &e.kind, &e.kind, &e.message);
             slot_wait(&mut report, &wait, limit);
+            run_times(&mut report, run_started_ms);
             return Ok(report);
         }
         let started = self.request("thread/start", thread).map_err(&with_wait)?;
@@ -172,9 +211,61 @@ impl AppServer {
             let mut report =
                 report_error(req, &thread_id, "", disabled, &e.kind, &e.kind, &e.message);
             slot_wait(&mut report, &wait, limit);
+            run_times(&mut report, run_started_ms);
             return Ok(report);
         }
+        // extreme-mode begin
+        let extreme = super::extreme::load(&self.slots_home).on;
+        let mark = if extreme {
+            turn["serviceTier"] = json!(super::extreme::TIER);
+            self.stderr_mark()
+        } else {
+            0
+        };
+        // extreme-mode end
         let result = self.request("turn/start", turn).map_err(&with_wait);
+        // extreme-mode begin
+        let tier_report = if extreme {
+            std::thread::sleep(Duration::from_millis(300));
+            let (status, detail) = super::extreme::classify(&result, &self.stderr_since(mark));
+            let check = super::extreme::Check {
+                status,
+                detail: detail.clone(),
+                at: base::now_iso(),
+                turn: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.pointer("/turn/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            };
+            if let Err(e) = super::extreme::record_check(&self.slots_home, &check) {
+                self.unsubscribe(&thread_id);
+                self.close();
+                return Err(e);
+            }
+            let tier_report = super::extreme::report(status, &detail);
+            if status == super::extreme::TierStatus::Rejected {
+                self.unsubscribe(&thread_id);
+                let mut report = report_error(
+                    req,
+                    &thread_id,
+                    "",
+                    disabled,
+                    "bridge_error",
+                    "service_tier_rejected",
+                    &detail,
+                );
+                report["service_tier"] = tier_report;
+                slot_wait(&mut report, &wait, limit);
+                run_times(&mut report, run_started_ms);
+                return Ok(report);
+            }
+            Some(tier_report)
+        } else {
+            None
+        };
+        // extreme-mode end
         let started = match result {
             Ok(v) => v,
             Err(e) => {
@@ -190,7 +281,13 @@ impl AppServer {
                         &e.kind,
                         &e.message,
                     );
+                    // extreme-mode begin
+                    if let Some(tier) = tier_report {
+                        report["service_tier"] = tier;
+                    }
+                    // extreme-mode end
                     slot_wait(&mut report, &wait, limit);
+                    run_times(&mut report, run_started_ms);
                     Ok(report)
                 } else {
                     Err(e)
@@ -206,6 +303,12 @@ impl AppServer {
         };
         self.register_turn(&thread_id, turn_id);
         let mut report = json!({"status":null,"thread_id":thread_id,"turn_id":turn_id,"model":req.model,"final_message":null,"structured_output":null,"commands":[],"file_changes":[],"refused_requests":[],"usage":null,"disabled":disabled,"started_mcp_servers":[],"error":null});
+        // extreme-mode begin
+        if let Some(tier) = tier_report {
+            report["service_tier"] = tier;
+        }
+        let mut turn_completed = false;
+        // extreme-mode end
         slot_wait(&mut report, &wait, limit);
         let mut ending: Option<Instant> = None;
         loop {
@@ -220,13 +323,18 @@ impl AppServer {
                     "timeout"
                 };
                 report["status"] = json!(status);
+                // A cancellation is the caller's own stop: report it exactly as the server's
+                // interrupted completion does, whichever is seen first, and do not probe the
+                // Codex version for it. A timeout may stem from an untested version, so note it.
                 let message = if cancelled() {
-                    "turn was cancelled".into()
+                    "turn interrupted".to_string()
                 } else {
-                    format!("turn exceeded {}s and was interrupted", req.timeout_s)
+                    self.note_untested_version(&format!(
+                        "turn exceeded {}s and was interrupted",
+                        req.timeout_s
+                    ))
                 };
-                report["error"] =
-                    json!({"kind":status,"message":self.note_untested_version(&message)});
+                report["error"] = json!({"kind":status,"message":message});
                 ending = Some(Instant::now());
             }
             // Keep the slot until completion; an unresponsive interrupted server must die first.
@@ -291,6 +399,9 @@ impl AppServer {
                     report["error"] = turn_error(&params["error"])
                 }
                 "turn/completed" if params["turn"]["id"] == turn_id => {
+                    // extreme-mode begin
+                    turn_completed = true;
+                    // extreme-mode end
                     if ending.is_some() {
                         break;
                     }
@@ -346,10 +457,43 @@ impl AppServer {
                 _ => {}
             }
         }
+        run_times(&mut report, run_started_ms);
         self.unregister_turn(&thread_id, turn_id);
         self.unsubscribe(&thread_id);
+        // extreme-mode begin
+        if extreme && turn_completed {
+            let usage = &report["usage"];
+            crate::usage::extensions::append(
+                &self.slots_home,
+                &crate::usage::extensions::ExtRecord {
+                    ts_ms: unix_ms(),
+                    provider: "codex".into(),
+                    model: Some(req.model.clone()),
+                    tier: crate::usage::extensions::Tier::Extreme,
+                    turn: Some(turn_id.to_owned()),
+                    input_tokens: usage["inputTokens"].as_u64().unwrap_or(0),
+                    cached_input_tokens: usage["cachedInputTokens"].as_u64().unwrap_or(0),
+                    output_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
+                    ..Default::default()
+                },
+            )?;
+        }
+        // extreme-mode end
         Ok(report)
     }
+}
+
+fn unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn run_times(report: &mut Value, started_ms: i64) {
+    report["run_started_ms"] = json!(started_ms);
+    report["run_ended_ms"] = json!(unix_ms().max(started_ms));
 }
 
 fn slot_wait(report: &mut Value, wait: &slots::Wait, limit: u64) {

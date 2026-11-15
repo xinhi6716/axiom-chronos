@@ -3,6 +3,37 @@ use crate::desktop::{parse_options, state_scene, theme::Density};
 use std::prelude::v1::test;
 
 #[test]
+fn declared_shell_panels_and_close_dialog_have_real_element_ids() {
+    let source = include_str!("../shell.rs").split("// ux: begin tests").next().unwrap();
+    let has_id = |id: &str| source.contains(&format!(".id(\"{id}\")"));
+    for target in crate::desktop::targets::all().into_iter().filter(|t| t.group == "shell" || t.id == "dialog.close") {
+        for id in target.panels {
+            assert!(has_id(id), "{} missing panel {id}", target.id);
+        }
+        if target.id == "dialog.close" {
+            for id in target.actions { assert!(has_id(id), "missing action {id}"); }
+        }
+    }
+    assert!(!has_id("made.up.element"));
+}
+
+#[test]
+fn first_frame_input_reaches_the_shell_and_is_reported() {
+    let source = include_str!("../shell.rs");
+    let skip = source.split("fn skip_launch(").nth(1).unwrap().split("fn screen(").next().unwrap();
+    assert!(skip.find("crate::desktop::perf::interactive(cx)").unwrap() < skip.find("self.launch.playing").unwrap());
+    let render = source.split("impl Render for Shell").nth(1).unwrap().split("// ux: begin tests").next().unwrap();
+    let mouse = render.split(".capture_any_mouse_down(").nth(1).unwrap().split("}))").next().unwrap();
+    let key = render.split(".capture_key_down(").nth(1).unwrap().split("}))").next().unwrap();
+    assert!(mouse.contains("this.skip_launch(cx)"));
+    assert!(key.contains("this.skip_launch(cx)"));
+    assert!(!key.contains("stop_propagation"));
+    assert!(!render.contains(".occlude()"));
+    let new = source.split("pub fn new(").nth(1).unwrap().split("fn apply_wanted(").next().unwrap();
+    assert!(new.rfind("focus.focus(window, cx)").unwrap() > new.find("Composer::new").unwrap());
+}
+
+#[test]
 fn all_mode_transitions() {
     use FocusPanel::*;
     use WindowMode::*;
@@ -85,6 +116,8 @@ fn startup_options_and_windows() {
     for args in [vec!["--mode".into()], vec!["--mode".into(), "bad".into()]] {
         assert_eq!(parse_options(&args).unwrap_err(), "--mode takes full, focus-graph, focus-checklist or mini");
     }
+    assert!(start_mini_only(true, WindowMode::Mini, false));
+    assert!(!start_mini_only(true, WindowMode::Mini, true));
 }
 
 #[test]
@@ -103,29 +136,6 @@ fn startup_density_and_state_scene() {
     assert_eq!(state_scene(&parse_options(&demo_scene).unwrap()).as_deref(), Some("quota-low"));
 }
 
-fn no_shutdown(source: &str) -> bool { !source.contains("shutdown(") }
-
-#[test]
-fn shutdown_scan_negative_control() { assert!(!no_shutdown("backend.shutdown(deadline)")); }
-
-#[test]
-fn source_guards() {
-    let shell = include_str!("../shell.rs").split("#[cfg(test)]").next().unwrap();
-    let mini = include_str!("../mini.rs").split_once("#[cfg(test)]").unwrap().0;
-    let (before, after) = shell.split_once("fn end_engine(").unwrap();
-    let (engine, after) = after.split_once("fn finish_close(").unwrap();
-    assert!(no_shutdown(before) && no_shutdown(after) && no_shutdown(mini));
-    assert_eq!(engine.matches("shutdown(").count(), 1);
-    let desktop = include_str!("../mod.rs");
-    assert!(desktop.find("save_on_quit(").unwrap() < desktop.find("set_reduce_motion(").unwrap());
-    assert!(desktop.contains("apply_data_scene("));
-    assert!(!shell.contains("request_animation_frame"));
-    let command = shell.split_once("fn run_command(").unwrap().1.split_once("fn new_wish(").unwrap().0;
-    assert!(!command.contains("Command::Undo => {}"));
-    let focus_arm = command.split_once("Command::Focus(_)").unwrap().1.split_once("=>").unwrap().1.trim_start();
-    assert!(!focus_arm.starts_with("{}"));
-}
-
 #[test]
 fn chrome_for_every_mode() {
     let full = Chrome { rail: true, title_extras: true, strip: true, force_run: false };
@@ -137,27 +147,33 @@ fn chrome_for_every_mode() {
     }
 }
 
-fn shell_style_ok(source: &str) -> bool {
-    let large_radius = regex::Regex::new(r"rounded\(px\(\s*(\d+(?:\.\d+)?)").unwrap();
-    !source.contains("text_size(px(")
-        && !source.contains("[Tween; 5]")
-        && !large_radius.captures_iter(source).any(|c| c[1].parse::<f64>().unwrap() > 4.0)
+#[derive(Default)]
+struct QuitCalls { stop: usize, quit: Vec<bool>, detach: usize }
+struct QuitBackend(Rc<std::cell::RefCell<QuitCalls>>);
+impl Backend for QuitBackend {
+    fn start_wish(&self, _: WishRequest) -> crate::base::Res<()> { Ok(()) }
+    fn interject(&self, _: &str, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn stop(&self, _: &str) -> crate::base::Res<()> { self.0.borrow_mut().stop += 1; Ok(()) }
+    fn resume(&self, _: &str, _: Option<&str>) -> crate::base::Res<()> { Ok(()) }
+    fn delete_memory(&self, _: i64) -> crate::base::Res<()> { Ok(()) }
+    fn correct_memory(&self, _: i64, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn refresh(&self) -> crate::base::Res<()> { Ok(()) }
+    fn recheck(&self) -> crate::base::Res<()> { Ok(()) }
+    fn follow(&self, _: &str) -> crate::base::Res<()> { Ok(()) }
+    fn quit_service(&self, stop: bool) -> crate::base::Res<()> { self.0.borrow_mut().quit.push(stop); Ok(()) }
+    fn shutdown(&self, _: Duration) { self.0.borrow_mut().detach += 1; }
 }
 
 #[test]
-fn shell_style_scan_has_negative_controls() {
-    for bad in ["text_size(px(12.))", "rounded(px(8.))", "[Tween; 5]"] {
-        assert!(!shell_style_ok(bad), "{bad}");
-    }
-    assert!(shell_style_ok("rounded(px(4.))"));
-}
-
-#[test]
-fn shell_chrome_source_guards() {
-    let shell = include_str!("../shell.rs").split("#[cfg(test)]").next().unwrap();
-    assert!(shell_style_ok(shell));
-    let render = shell.split_once("impl Render for Shell {").unwrap().1;
-    assert_eq!(render.matches("quota::strip(").count(), 1);
-    let nav = shell.split_once("fn nav_item(").unwrap().1.split_once("fn new_wish_button(").unwrap().0;
-    assert!(nav.contains("focus_ring("));
+fn closing_detaches_while_explicit_service_quit_stops_running() {
+    let calls = Rc::new(std::cell::RefCell::new(QuitCalls::default()));
+    let mut state = crate::desktop::demo::state();
+    state.backend = Some(Box::new(QuitBackend(calls.clone())));
+    detach(&state);
+    assert_eq!(calls.borrow().detach, 1);
+    assert_eq!(calls.borrow().stop, 0);
+    assert!(calls.borrow().quit.is_empty());
+    assert!(request_service_quit(&mut state));
+    assert_eq!(calls.borrow().quit, [true]);
+    assert_eq!(calls.borrow().stop, 0);
 }

@@ -2,6 +2,28 @@ use super::{both, columns_for, focus_ring, font, lift_shadow, selection_glow, sp
     Density, Hsla, Rgba, Step, TypeSize, RADIUS, RADIUS_SMALL, READ_WIDTH, TARGET_MIN, WIDE_BREAKPOINT};
 use gpui_kit::px;
 
+#[test]
+fn theme_mode_is_owned_by_the_desktop_theme() {
+    assert_eq!(std::any::type_name::<super::ThemeMode>(), "axiom::desktop::theme::ThemeMode");
+    use gpui_kit::component::ThemeMode as KitMode;
+    for (mode, kit, tokens) in [
+        (super::ThemeMode::Dark, KitMode::Dark, both()[0]),
+        (super::ThemeMode::Light, KitMode::Light, both()[1]),
+    ] {
+        assert_eq!(KitMode::from(mode), kit);
+        assert_eq!(super::ThemeMode::from(kit), mode);
+        let actual = mode.tokens();
+        assert_eq!(
+            [actual.canvas, actual.surface, actual.raised, actual.border, actual.text,
+             actual.muted, actual.gold, actual.ok, actual.run, actual.review, actual.fail,
+             actual.idle, actual.orbit],
+            [tokens.canvas, tokens.surface, tokens.raised, tokens.border, tokens.text,
+             tokens.muted, tokens.gold, tokens.ok, tokens.run, tokens.review, tokens.fail,
+             tokens.idle, tokens.orbit],
+        );
+    }
+}
+
 fn luminance(c: Hsla) -> f32 {
     let c = Rgba::from(c);
     let line = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
@@ -159,5 +181,19 @@ fn ornament_negative_control_rejects_stubs() {
     assert!(sand_height(0.3) < sand_height(0.7));
     for t in both() {
         assert!(!raised_card_shadows(&t, 1.0, 0.0).is_empty());
+    }
+}
+
+#[test]
+fn ornament_gold_glow_preserves_appearance_and_clamps_strength() {
+    use super::super::ornament::gold_glow;
+    for t in both() {
+        for (strength, alpha) in [(-1.0, 0.0), (0.5, 0.12), (1.0, 0.24), (2.0, 0.24)] {
+            let shadows = gold_glow(&t, strength);
+            assert_eq!(shadows.len(), 1);
+            assert_eq!(shadows[0].color, t.gold.opacity(alpha));
+            assert_eq!(shadows[0].blur_radius, px(12.0));
+            assert_eq!(shadows[0].spread_radius, px(0.0));
+        }
     }
 }

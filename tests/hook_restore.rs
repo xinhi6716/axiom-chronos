@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{
     ffi::OsString,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
 };
 
@@ -43,9 +43,7 @@ struct Run {
     own: PathBuf,
 }
 fn run(wish: &str) -> Run {
-    let root = Path::new(".axiom-tmp/hook-wiring-1");
-    fs::create_dir_all(root).unwrap();
-    let dir = tempfile::tempdir_in(root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let project = dir.path().join("demo");
     fs::create_dir_all(&project).unwrap();

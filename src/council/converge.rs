@@ -1,5 +1,5 @@
 //! Mechanical convergence: stances to claim status, with no judgement and no further model call.
-use super::{Claim, ClaimStatus, Council, Stance, Status, MEMBERS};
+use super::{Claim, ClaimStatus, Council, DegradedMember, Stance, Status, MEMBERS};
 use serde_json::{json, Value};
 
 const MIN_EVIDENCE_CHARS: usize = 10;
@@ -217,7 +217,31 @@ pub fn digest(council: &Council, path: &std::path::Path, reused: bool) -> Value 
     } else {
         "full"
     };
-    let mut entries: Vec<Value> = open.iter().take(OPEN_MAX).map(|c| open_entry(c)).collect();
+    let entries: Vec<Value> = open.iter().take(OPEN_MAX).map(|c| open_entry(c)).collect();
+    let mut degraded_members = Vec::new();
+    for round in &council.rounds {
+        for turn in &round.turns {
+            if turn.status != Status::Ok
+                && !degraded_members
+                    .iter()
+                    .any(|d: &DegradedMember| d.member == turn.member)
+            {
+                degraded_members.push(DegradedMember {
+                    member: turn.member.clone(),
+                    phase: round.phase.clone(),
+                    round: round.n,
+                    status: turn.status,
+                    reason: turn
+                        .detail
+                        .as_deref()
+                        .unwrap_or(turn.status.word())
+                        .chars()
+                        .take(200)
+                        .collect(),
+                });
+            }
+        }
+    }
     let mut result = json!({
         "status": "completed",
         "outcome": outcome,
@@ -225,9 +249,10 @@ pub fn digest(council: &Council, path: &std::path::Path, reused: bool) -> Value 
         "note": plain_note(council),
         "stage_note": stage_note(council),
         "degraded": council.degraded,
+        "degraded_members": degraded_members,
         "members": council.members.iter().map(|m| json!({"name":m.name,"status":m.status,"tokens":m.tokens,"usd":m.usd})).collect::<Vec<_>>(),
         "cost": council.cost,
-        "phases":council.phases,
+        "phases":council.phases.iter().map(|p|json!({"phase":p.phase,"agreement":p.agreement,"reason":cut(&p.reason,200),"open":p.open})).collect::<Vec<_>>(),
         "rounds":round_digest(council),
         "counts": {"consensus":agreed,"majority":majority,"disputed":disputed,"dropped_at_intake":council.dropped},
         "agreed": settled.iter().take(AGREED_MAX).map(|c| json!({"id":c.id,"text":cut(&c.text,100),"phase":c.phase,"round":c.round,"stance_phases":stance_phases(c),"changes":c.history.iter().rev().filter(|h|h.decision.as_deref()==Some("accepted")).take(2).map(|h|json!({"phase":h.phase,"round":h.round,"member":h.member,"change":h.change.as_ref().map(|v|cut(v,160))})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
@@ -237,11 +262,32 @@ pub fn digest(council: &Council, path: &std::path::Path, reused: bool) -> Value 
         "omitted_agreed": settled.len().saturating_sub(AGREED_MAX),
         "council_path": path,
     });
-    while result.to_string().chars().count() > DIGEST_MAX_CHARS && !entries.is_empty() {
-        entries.pop();
-        result["omitted_open"] = json!(open.len() - entries.len());
-        result["more_open"] = json!(true);
-        result["open"] = json!(entries);
-    }
+    bound_digest(&mut result);
+
     result
+}
+
+/// Keep the digest bounded even if a long session has many distinct round summaries.
+pub(super) fn bound_digest(result: &mut Value) {
+    while result.to_string().chars().count() > DIGEST_MAX_CHARS {
+        if result["open"]
+            .as_array_mut()
+            .is_some_and(|v| v.pop().is_some())
+        {
+            result["omitted_open"] = json!(result["omitted_open"].as_u64().unwrap_or(0) + 1);
+            result["more_open"] = json!(true);
+        } else if result["rounds"]
+            .as_array_mut()
+            .is_some_and(|v| v.pop().is_some())
+        {
+            // The complete rounds remain in council.json.
+        } else if result["agreed"]
+            .as_array_mut()
+            .is_some_and(|v| v.pop().is_some())
+        {
+            result["omitted_agreed"] = json!(result["omitted_agreed"].as_u64().unwrap_or(0) + 1);
+        } else {
+            break;
+        }
+    }
 }

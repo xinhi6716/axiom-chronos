@@ -1,0 +1,29 @@
+{
+  "project": "inventory",
+  "entries": [
+    {
+      "unit": "inventory-implementation",
+      "title": "Prevent duplicate reservations when stock is scarce.",
+      "summary": "Reservation checks stock before decrementing it",
+      "body": "Reject requests exceeding available stock. Reservation checks stock before decrementing it.",
+      "symbols": [
+        "src/inventory.rs#function:reserve"
+      ],
+      "files": [
+        "src/inventory.rs"
+      ],
+      "wish": "Prevent duplicate reservations when stock is scarce."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nReject requests exceeding available stock.\n",
+  "aliases": [
+    [
+      "reserve",
+      "inventory"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: reject requests exceeding available stock."
+  ]
+}

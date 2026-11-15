@@ -1,0 +1,27 @@
+{
+  "message": {
+    "DOI": "10.1371/JOURNAL.PONE.0000308",
+    "title": [
+      "A paper with an article number"
+    ],
+    "author": [
+      {
+        "given": "Jane",
+        "family": "Smith"
+      }
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          2007
+        ]
+      ]
+    },
+    "container-title": [
+      "PLoS ONE"
+    ],
+    "volume": "1",
+    "issue": "2",
+    "article-number": "e308"
+  }
+}

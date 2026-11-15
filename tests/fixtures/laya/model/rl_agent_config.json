@@ -1,0 +1,9 @@
+{
+  "head_max_len": 32,
+  "max_len": 64,
+  "temperature": [
+    1.0,
+    1.0,
+    1.0
+  ]
+}

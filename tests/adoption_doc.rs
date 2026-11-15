@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
-const BASE: &str = "E:/codex/OPEN_DESIGN/axiom/experiments/refs-20261102/";
+const BASE: &str = "refs-20261102/";
 const LIBRARIES: [(&str, &str, &str, &str); 10] = [
     (
         "DeepSeek",

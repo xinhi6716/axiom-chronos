@@ -1,0 +1,70 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings",
+    "checked"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "revise",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "location",
+          "severity",
+          "category",
+          "issue",
+          "evidence"
+        ],
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "major",
+              "minor"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "claim_evidence",
+              "statistics",
+              "citation",
+              "journal_rules",
+              "clarity",
+              "disclosure",
+              "figure_table"
+            ]
+          },
+          "issue": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "checked": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

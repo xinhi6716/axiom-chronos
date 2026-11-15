@@ -77,8 +77,8 @@ fn every_area_has_parsable_shortcuts() {
 #[test]
 fn new_commands_are_listed_and_translated() {
     let state = demo::state();
-    let english = index(&state, Lang::En, true);
-    let chinese = index(&state, Lang::ZhTw, true);
+    let english = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
+    let chinese = index(&state, Lang::ZhTw, true, &crate::desktop::ux::prefs::UxPrefs::default());
     for (target, keys) in [
         (Command::Focus(FocusPanel::Graph), Some(keys_of(Global::ToggleFocus))),
         (Command::Focus(FocusPanel::Checklist), Some(keys_of(Global::ToggleFocus))),
@@ -185,5 +185,34 @@ fn context_menu_actions_have_effects_and_translated_labels() {
         let chinese = menu::T.iter().find(|(en, _)| *en == label).map(|(_, zh)| *zh).expect(label);
         assert!(!chinese.trim().is_empty(), "{action:?}");
         assert_ne!(label, chinese, "{action:?}");
+    }
+}
+#[test]
+fn ux_commands_follow_seams_and_data() {
+    use crate::desktop::{ux::prefs::UxPrefs, wishes::read_state::{change_mark, ReadAction}};
+    let mut state = demo::state();
+    let mut prefs = UxPrefs::default();
+    let commands = |s: &AppState, p: &UxPrefs| index(s, Lang::En, true, p).into_iter().filter_map(|i| match i.target { Target::Command(c) => Some(c), _ => None }).collect::<Vec<_>>();
+    state.ux.seams.storage = None; state.ux.seams.modes = None;
+    state.ux.usage_sessions.clear(); state.current = None; state.runs.clear();
+    let c = commands(&state, &prefs);
+    for missing in [Command::Storage,Command::Chat,Command::QuickTask,Command::Plaza,Command::UsageForWish,Command::CompareUsage,Command::MarkAllRead,Command::ExtremeOff] { assert!(!c.contains(&missing), "{missing:?}"); }
+    assert!(c.contains(&Command::ExtremeOn));
+    state = demo::state();
+    state.ux.seams = crate::desktop::ux::Seams::demo();
+    let c = commands(&state, &prefs);
+    for present in [Command::Storage,Command::Chat,Command::QuickTask,Command::Plaza,Command::UsageForWish,Command::CompareUsage,Command::MarkAllRead,Command::ExtremeOn] { assert!(c.contains(&present), "{present:?}"); }
+    prefs.extreme = true;
+    for r in &state.runs { change_mark(r, &mut prefs, ReadAction::MarkRead); }
+    let c = commands(&state, &prefs);
+    assert!(c.contains(&Command::ExtremeOff));
+    assert!(!c.contains(&Command::ExtremeOn));
+    assert!(!c.contains(&Command::MarkAllRead));
+    let one = state.ux.usage_sessions[0].wish.clone();
+    for s in &mut state.ux.usage_sessions { s.wish = one.clone(); }
+    assert!(!commands(&state,&prefs).contains(&Command::CompareUsage));
+    for target in [Command::Storage,Command::Chat,Command::QuickTask,Command::Plaza,Command::UsageForWish,Command::ExtremeOff] {
+        let find = |lang| index(&state,lang,true,&prefs).into_iter().find(|i| i.target == Target::Command(target)).unwrap().title;
+        assert_ne!(find(Lang::En),find(Lang::ZhTw));
     }
 }

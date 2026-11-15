@@ -302,6 +302,10 @@ fn unix_now() -> i64 {
 pub fn state_at(now: i64) -> AppState {
     use crate::usage::quota::{ProviderQuota, Quotas, Window, WindowKind};
     let window = |kind, left: f32| Some(Window { kind, used: 1.0 - left, observed_at: now, resets_at: Some(now + match kind { WindowKind::FiveHour => 10_800, WindowKind::Weekly => 3 * 86_400 }), status: None });
+    // ux: begin demo runs
+    let runs = vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()];
+    let ux = super::ux::UxState::demo(&runs, now * 1000);
+    // ux: end
     let mut state = AppState {
         feeds: Feeds::default(),
         undo: UndoStack::default(),
@@ -318,13 +322,16 @@ pub fn state_at(now: i64) -> AppState {
         board: Default::default(),
         evolve: EvolveState::default(),
         view: Screen::Run,
-        runs: vec![sample_run(), waiting_run(), blocked_run(), finished_run(), empty_run()],
+        // ux: begin runs
+        runs,
+        // ux: end
+        mesh_graph: Default::default(),
         current: Some(0),
         selection: Selection::None,
         memory: vec![
-            MemoryEntry { id: 48, project: "chronos-r5".into(), title: "Stop hook blocks idle turns".into(), body: "While a goal is active the Stop hook refuses to end the turn, so long waits turn into polling. A waiting status lets the session end.".into(), stale: false, wish: "把剩下的精讀改成背景批次".into(), confirmed: "Nov 8, 21:40".into(), corrected: false },
-            MemoryEntry { id: 41, project: "ml_hfo2".into(), title: "Page images beat tiled sheets".into(), body: "Single pages at 300 dpi, eight per call, cost less than 2x2 tiles because tiles are downscaled and need more tokens per page.".into(), stale: false, wish: "Read every PDF page and keep the original page numbers".into(), confirmed: "Nov 5, 09:12".into(), corrected: true },
-            MemoryEntry { id: 33, project: "chronos-r4".into(), title: "CRLF breaks doc tests on Linux".into(), body: "Read documents tolerating CRLF and write them with LF.".into(), stale: true, wish: "Fix the failing Linux tests".into(), confirmed: "Oct 29, 14:03".into(), corrected: false },
+            MemoryEntry { id: 48, project: "chronos-r5".into(), title: "Stop hook blocks idle turns".into(), body: "While a goal is active the Stop hook refuses to end the turn, so long waits turn into polling. A waiting status lets the session end.".into(), stale: false, wish: "把剩下的精讀改成背景批次".into(), confirmed: "Nov 8, 21:40".into(), corrected: false, graph: None },
+            MemoryEntry { id: 41, project: "ml_hfo2".into(), title: "Page images beat tiled sheets".into(), body: "Single pages at 300 dpi, eight per call, cost less than 2x2 tiles because tiles are downscaled and need more tokens per page.".into(), stale: false, wish: "Read every PDF page and keep the original page numbers".into(), confirmed: "Nov 5, 09:12".into(), corrected: true, graph: None },
+            MemoryEntry { id: 33, project: "chronos-r4".into(), title: "CRLF breaks doc tests on Linux".into(), body: "Read documents tolerating CRLF and write them with LF.".into(), stale: true, wish: "Fix the failing Linux tests".into(), confirmed: "Oct 29, 14:03".into(), corrected: false, graph: None },
         ],
         checks: vec![
             Check { name: "claude".into(), status: CheckStatus::Ok, detail: "2.1.317 (Claude Code)".into() },
@@ -336,11 +343,15 @@ pub fn state_at(now: i64) -> AppState {
         reduce_motion: false,
         composing: false,
         backend: None,
+        service_background: None,
         scene: None,
         errors: vec![],
         next_error: 0,
         renames: Default::default(),
         address: None,
+        // ux: begin state
+        ux,
+        // ux: end
     };
     for kind in [FeedKind::Runs, FeedKind::Memory, FeedKind::Checks, FeedKind::Usage, FeedKind::Quota] {
         state.feeds.get_mut(kind).loaded = true;

@@ -1,6 +1,7 @@
 //! Quota meters in the real Shell and Mini, with isolated demo state.
 use axiom::desktop::{demo, i18n, theme, Shell, Store};
 use axiom::usage::quota::{ProviderQuota, Window, WindowKind};
+use axiom::usage::pools::{Pool, PoolStatus, PoolStrip, Remaining};
 use gpui_kit::component::ThemeMode;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{px, size, AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, Point, TestAppContext, WindowBounds, WindowOptions};
@@ -95,6 +96,35 @@ fn check(cx: &mut TestAppContext, handle: AnyWindowHandle, mini: bool, zh: bool)
 fn main_quota_meters(cx: &mut TestAppContext) {
     let (main, _) = open(cx);
     check(cx, main, false, false);
+    for (lang, unknown) in [(i18n::Lang::En, "unknown"), (i18n::Lang::ZhTw, "未知")] {
+        cx.update(|cx| i18n::set(lang, cx));
+        frame(cx, main);
+        cx.update_window(main, |_, window, _| {
+            let texts = gpui_kit::base::test_support::texts(window);
+            for (id, label) in [("quota-pool-hydrogen_flash", "Hydrogen/Flash"), ("quota-pool-argon", "Argon")] {
+                let id: ElementId = id.into();
+                let painted: Vec<_> = texts.iter().filter(|t| t.path().contains(&id) && t.visible()).map(|t| t.text()).collect();
+                assert!(painted.contains(&label), "{painted:?}");
+                assert!(painted.iter().any(|t| t.contains(unknown) && t.contains('—') && !t.contains('$')), "{painted:?}");
+            }
+        }).unwrap();
+    }
+    cx.update(|cx| cx.set_global(PoolStrip(Pool::ALL.into_iter().map(|pool| PoolStatus {
+        pool, used_tokens: Some(12_300), cost_usd: None, remaining: Remaining::Unknown, exhausted_until_ms: Some(1),
+    }).collect())));
+    for (lang, exhausted) in [(i18n::Lang::En, "exhausted"), (i18n::Lang::ZhTw, "已耗盡")] {
+        cx.update(|cx| i18n::set(lang, cx));
+        frame(cx, main);
+        cx.update_window(main, |_, window, _| {
+            let texts = gpui_kit::base::test_support::texts(window);
+            for id in ["quota-pool-hydrogen_flash", "quota-pool-argon"] {
+                let id: ElementId = id.into();
+                assert!(texts.iter().any(|t| t.path().contains(&id) && t.visible() && t.text().contains(exhausted) && !t.text().contains('$')));
+            }
+        }).unwrap();
+    }
+    cx.update(|cx| i18n::set(i18n::Lang::En, cx));
+    frame(cx, main);
     cx.update_window(main, |_, window, _| {
         let text = gpui_kit::base::test_support::texts(window).iter().map(|t|t.text().to_string()).collect::<Vec<_>>().join(" ");
         assert!(text.contains("Codex parallel — / 48"), "{text}");

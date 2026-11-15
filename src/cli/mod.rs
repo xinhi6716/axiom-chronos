@@ -1,4 +1,12 @@
 pub(crate) mod doctor;
+mod modes; // 2c modes
+// p5b-cli begin
+mod workshop;
+mod extreme;
+pub mod research_budget;
+// p5b-cli end
+mod launch;
+mod storage;
 use crate::{base, bridge, evolve, hook, memory::Memory, orch, session};
 use std::{ffi::OsString, io, path::PathBuf};
 
@@ -68,6 +76,13 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             "--creative" if skill == "wish" => creative = true,
             "--no-architect" if skill == "wish" => no_architect = true,
             "--advanced-research" => launch.advanced_research = true,
+            "--need-space" => match value(args, &mut i, "--need-space").and_then(|s| {
+                crate::storage::preflight::parse_size(&s)
+                    .ok_or_else(|| "--need-space requires a valid size".into())
+            }) {
+                Ok(bytes) => launch.need_bytes = Some(bytes),
+                Err(e) => return usage(e),
+            },
             flag @ ("--fable-cap" | "--astra-cap" | "--council-rounds") => {
                 let key = match flag { "--fable-cap" => crate::council::budgets::FABLE_CAP, "--astra-cap" => crate::council::budgets::ASTRA_CAP, _ => crate::council::budgets::ROUNDS };
                 match value(args, &mut i, flag) { Ok(v) => { caps.insert(key, v); }, Err(e) => return usage(e) }
@@ -87,6 +102,14 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             Ok(b) => Some(b), Err(e) => return usage(e),
         };
     }
+    // p5b-cli begin
+    if launch.advanced_research {
+        match base::data_home().and_then(|home| crate::research_program::history::estimate(&home, crate::research_program::PROGRAM_TYPE, &research_budget::default_models())) {
+            Ok(estimate) => eprintln!("{}", estimate.line()),
+            Err(e) => eprintln!("estimate unavailable: {}", e.message),
+        }
+    }
+    // p5b-cli end
     if let Some(id) = resume {
         if project_set || no_architect || creative {
             return usage(RESUME_USAGE);
@@ -101,6 +124,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             &mut io::stdout(),
         ) {
             Ok(code) => code,
+            Err(e) if e.kind == "disk_space" => {
+                println!("{}", e.message);
+                75
+            }
             Err(e) => usage(e.message),
         };
     }
@@ -126,6 +153,47 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
             project.display()
         ));
     }
+    // The session preflight currently applies to wish; apply the explicit
+    // space requirement to research as well.
+    if skill == "research" && launch.need_bytes.is_some() {
+        let result = (|| -> crate::base::Res<Option<String>> {
+            let home = base::axiom_home();
+            let policy = crate::storage::Policy::load(&home)?;
+            let probe = crate::storage::preflight::os_probe();
+            let need = crate::storage::preflight::need(
+                &policy,
+                crate::storage::preflight::Kind::Wish,
+                launch.need_bytes,
+                Some(&project),
+                None,
+            )?;
+            for path in [&project, &home] {
+                let check = crate::storage::preflight::check(
+                    &home,
+                    &*probe,
+                    &policy,
+                    path,
+                    crate::storage::preflight::Kind::Wish,
+                    need,
+                )?;
+                if !check.ok {
+                    return Ok(Some(check.line()));
+                }
+            }
+            Ok(None)
+        })();
+        match result {
+            Ok(Some(line)) => {
+                println!("{line}");
+                return 75;
+            }
+            Ok(None) => (),
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                return 1;
+            }
+        }
+    }
     let text = session::wish_text(&args[i..].join(" "), creative, no_architect);
     match session::run_with(
         &session::Config::from_env(),
@@ -138,6 +206,10 @@ fn session_command(skill: &str, args: &[String]) -> i32 {
         &launch,
     ) {
         Ok(code) => code,
+        Err(e) if e.kind == "disk_space" => {
+            println!("{}", e.message);
+            75
+        }
         Err(e) => usage(e.message),
     }
 }
@@ -302,14 +374,29 @@ fn usage_command(args: &[String]) -> i32 {
         i += 1;
     }
     match crate::usage::ledger(&crate::usage::Locations::from_env(), session.as_deref()) {
+        // laya: begin
         Ok(ledger) if as_json => {
-            println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            let laya = crate::laya::home_from_env()
+                .and_then(|home| crate::usage::laya::cli_json(&home).ok().flatten());
+            if let Some(laya) = laya {
+                let mut value = serde_json::to_value(&ledger).unwrap();
+                value.as_object_mut().unwrap().insert("laya".into(), laya);
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&ledger).unwrap());
+            }
             0
         }
         Ok(ledger) => {
             print!("{}", crate::usage::render(&ledger));
+            if let Some(home) = crate::laya::home_from_env() {
+                if let Ok(text) = crate::usage::laya::cli_text(&home) {
+                    print!("{text}");
+                }
+            }
             0
         }
+        // laya: end
         Err(e) if e.kind == "invalid_argument" => usage(e.message),
         Err(e) => {
             eprintln!("axiom: {}", e.message);
@@ -386,6 +473,158 @@ fn evolve_command(args: &[String]) -> i32 {
         }
     }
 }
+fn graph_command(args: &[String]) -> i32 {
+    use crate::graph::{self, query::{ExploreRequest, View}, types::Direction, GraphStore};
+    let Some(command) = args.first().map(String::as_str) else { return usage("graph: missing command") };
+    if !matches!(command, "refresh" | "explore") { return usage("graph: unknown command") }
+    let mut dir = match std::env::current_dir() { Ok(p) => p, Err(e) => { eprintln!("axiom: {e}"); return 1; } };
+    let (mut json, mut project, mut view, mut budget, mut query) = (false, None, View::Mixed, graph::query::DEFAULT_BUDGET, Vec::new());
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => match value(args, &mut i, "--dir") { Ok(v) => dir = v.into(), Err(e) => return usage(e) },
+            "--json" if command == "refresh" => json = true,
+            "--project" if command == "explore" => match value(args, &mut i, "--project") { Ok(v) => project = Some(v), Err(e) => return usage(e) },
+            "--view" if command == "explore" => match value(args, &mut i, "--view").as_deref() { Ok("code") => view = View::Code, Ok("memory") => view = View::Memory, Ok("mixed") => view = View::Mixed, _ => return usage("--view must be code, memory, or mixed") },
+            "--budget" if command == "explore" => match value(args, &mut i, "--budget").ok().and_then(|v| v.parse::<usize>().ok()) { Some(n) if n > 0 => budget = n, _ => return usage("--budget requires a positive integer") },
+            s if s.starts_with('-') => return usage(format!("unrecognized option: {s}")),
+            s if command == "explore" => query.push(s.to_owned()),
+            _ => return usage("graph refresh: unexpected argument"),
+        }
+        i += 1;
+    }
+    if !dir.is_absolute() || !dir.is_dir() { return usage("--dir must be an absolute directory") }
+    if project.as_deref().is_some_and(|s| base::require_slug("project", s).is_err()) { return usage("--project must be a valid slug") }
+    let home = base::axiom_home();
+    if command == "explore" {
+        if query.is_empty() || query.join(" ").trim().is_empty() { return usage("graph explore: missing query") }
+        let req = ExploreRequest { project_dir: dir, worktree: None, project, query: Some(query.join(" ")), node: None, view, direction: Direction::Both, hops: graph::query::MAX_HOPS, budget, refresh: false };
+        return match graph::query::explore(&home, &req) {
+            Ok(payload) => { println!("{}", serde_json::to_string_pretty(&payload).unwrap()); 0 }
+            Err(e) => { eprintln!("axiom: {}", e.message); 1 }
+        };
+    }
+    let result = (|| -> crate::base::Res<_> {
+        let store = GraphStore::open(&home)?;
+        let report = graph::code::sync(&store, &dir, None, &Default::default())?;
+        let wish_store = if let Some(path) = std::env::var_os("ORCH_STORE").filter(|s| !s.is_empty()) {
+            Some(PathBuf::from(path))
+        } else {
+            let slug = base::slug_for_dir(&dir);
+            orch::current_wish(&home, &slug)?.map(|id| orch::wish_store(&home, &slug, Some(&id))).transpose()?.filter(|path| path.is_dir())
+        };
+        let orch_report = wish_store.map(|path| graph::ingest::orch::sync_orch(&store, &path, &dir)).transpose()?;
+        Ok((report, orch_report))
+    })();
+    match result {
+        Ok((report, orch_report)) => {
+            if json { println!("{}", serde_json::json!({"code": report, "orch": orch_report})); }
+            else { println!("graph refreshed: {} files; revision {}", report.files_seen, report.revision); }
+            0
+        }
+        Err(e) => { eprintln!("axiom: {}", e.message); 1 }
+    }
+}
+fn person_command(command: &str, args: &[String]) -> i32 {
+    let (op, id) = match args {
+        [op, id, ..] if !id.is_empty() && !id.starts_with('-') => (op.as_str(), id.as_str()),
+        _ => return usage(format!("{command}: missing operation or id")),
+    };
+    if !matches!(
+        (command, op),
+        ("approval", "approve" | "deny") | ("adjudication", "overturn")
+    ) {
+        return usage(format!("{command}: unknown operation {op}"));
+    }
+    let (mut project, mut digest, mut wish, mut reason) = (None, None, None, None);
+    let mut i = 2;
+    while i < args.len() {
+        let slot = match args[i].as_str() {
+            "--project" => &mut project,
+            "--digest" if command == "approval" => &mut digest,
+            "--wish" if command == "approval" => &mut wish,
+            "--reason" => &mut reason,
+            flag => return usage(format!("{command}: unknown option {flag}")),
+        };
+        if slot.is_some() {
+            return usage(format!("{command}: duplicate option {}", args[i]));
+        }
+        let name = &args[i];
+        i += 1;
+        let Some(v) = args.get(i).filter(|v| !v.is_empty() && !v.starts_with('-')) else {
+            return usage(format!("{name} requires a value"));
+        };
+        *slot = Some(v.as_str());
+        i += 1;
+    }
+    let Some(project) = project else {
+        return usage(format!("{command}: --project is required"));
+    };
+    if command == "approval" && digest.is_none() {
+        return usage("approval: --digest is required");
+    }
+    if (command == "adjudication" || op == "deny") && reason.is_none_or(|r| r.trim().is_empty()) {
+        return usage(format!("{command}: --reason is required"));
+    }
+    let home = match base::data_home() {
+        Ok(home) => home,
+        Err(e) => return usage(e.message),
+    };
+    let store = match wish {
+        Some(wish) => orch::wish_store(&home, project, Some(wish)),
+        None => orch::store_for(&home, project),
+    };
+    let store = match store {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            return 1;
+        }
+    };
+    if command == "adjudication" {
+        return match crate::engine::adjudicator::overturn(&store, id, reason.unwrap()) {
+            Ok(event) => {
+                println!("{}", serde_json::to_string(&event).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        };
+    }
+    let store_wish = orch::wish_of_store(&store);
+    let reply = crate::engine::approvals::reply(
+        &home,
+        &store,
+        id,
+        op == "approve",
+        digest.unwrap(),
+        &store_wish,
+        reason,
+        crate::engine::approvals::Origin::Person,
+    );
+    match reply {
+        Err(e) => {
+            eprintln!("axiom: {}", e.message);
+            1
+        }
+        Ok(event) if op == "deny" => {
+            println!("{}", serde_json::to_string(&event).unwrap());
+            0
+        }
+        Ok(_) => match crate::engine::approvals::execute(&store, id) {
+            Ok(executed) => {
+                print!("{}", executed.output_tail);
+                executed.exit_code
+            }
+            Err(e) => {
+                eprintln!("axiom: {}", e.message);
+                1
+            }
+        },
+    }
+}
 pub fn main(args: Vec<OsString>) -> i32 {
     #[cfg(windows)]
     unsafe {
@@ -411,7 +650,17 @@ pub fn main(args: Vec<OsString>) -> i32 {
             println!("axiom-chronos {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        "serve" => crate::service::serve_command(rest),
+        "storage" => storage::command(rest),
+        "launch" => launch::command(rest),
         "wish" | "research" => session_command(cmd, rest),
+        "do" => modes::do_command(rest), // 2c modes
+        "modes" => modes::modes_command(rest), // 2c modes
+        // p5b-cli begin
+        "workshop" => workshop::command(rest),
+        "extreme" => extreme::command(rest),
+        "research-budget" => research_budget::command(rest),
+        // p5b-cli end
         "wait" => wait_command(rest),
         #[cfg(feature = "app")]
         "app" => match crate::desktop::parse_options(rest) {
@@ -431,8 +680,18 @@ pub fn main(args: Vec<OsString>) -> i32 {
         "memory" => memory_command(rest),
         "lint" => lint_command(rest),
         "usage" => usage_command(rest),
+        // laya: begin
+        "laya" => crate::laya::pipeline::cli(rest),
+        // laya: end
         "evolve" => evolve_command(rest),
+        "dream" => crate::graph::dream::command(rest),
+        "graph" => graph_command(rest),
         "review" => crate::review::command(rest),
+        "stats" => match base::data_home() {
+            Ok(home) => crate::usage::review_stats::command(&home, rest),
+            Err(e) => usage(e.message),
+        },
+        "approval" | "adjudication" => person_command(cmd, rest),
         _ => usage(format!("unknown command or arguments: {cmd}")),
     }
 }

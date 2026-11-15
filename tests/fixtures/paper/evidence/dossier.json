@@ -1,0 +1,15 @@
+{
+  "question": "Does time increase?",
+  "items": [
+    {"id":"C1","claim":"Time increases.","sources":[
+      {"source":"10.1234/example","author":"A","confidence":"high","evidence":"first"},
+      {"source":"10.1234/example","author":"B","confidence":"medium","evidence":"second"},
+      {"source":"W123456789","author":"C","confidence":"high","evidence":null},
+      {"source":"https://example.org/study","author":"D","confidence":"high","evidence":null}
+    ],"confidence":"medium","independent_support":4,"contradictions":[]},
+    {"id":"C2","claim":"A second claim.","sources":[
+      {"source":"local observation","author":"E","confidence":"low","evidence":"not a reference"}
+    ],"confidence":"low","independent_support":1,"contradictions":[]}
+  ],
+  "rejected": []
+}

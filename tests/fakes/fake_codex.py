@@ -7,6 +7,9 @@ child holding its output streams (as a wrapper whose child outlives it), writing
 to the file, and --fake-break=<method>:<effect> makes that request misbehave
 with exit, silent, not-json, no-result, empty-result or <code>:<message>. Method `start` exits
 before reading anything, as when the `app-server` command line is rejected.
+--fake-interrupt-gate=<path> acknowledges an interrupt but waits for that file before
+sending turn/completed; other callers keep the existing interrupt-delay behaviour.
+--fake-script=<path> selects replies by prompt substring; --fake-log=<path> logs requests.
 """
 import json
 import os
@@ -24,6 +27,11 @@ def option(name, default=''):
     return next((arg[len(prefix):] for arg in sys.argv if arg.startswith(prefix)), default)
 
 
+def directive(text, name):
+    match = re.search(r'^' + re.escape(name) + r'[ \t]+([^\r\n]+?)[ \t]*$', text, flags=re.M)
+    return match.group(1) if match else os.getenv(name)
+
+
 if '--version' in sys.argv:
     if '--fake-version-hang' in sys.argv:
         time.sleep(60)
@@ -35,11 +43,17 @@ if '--version' in sys.argv:
         with open(option('version-holder'), 'w') as f:
             f.write(str(holder.pid))
     sys.exit(int(option('version-exit', '0')))
+script_path = option('script')
+script = []
+if script_path:
+    with open(script_path, encoding='utf-8') as script_file:
+        script = json.load(script_file)
 broken_method, _, breakage = option('break').partition(':')
 if broken_method == 'start':
     sys.exit(2)
 
 pending_turns = {}
+turn_texts = {}
 send_lock = threading.Lock()
 log_lock = threading.Lock()
 barrier = threading.Condition()
@@ -47,7 +61,7 @@ barrier_count = 0
 
 
 def log_record(method, params):
-    path = os.getenv('FAKE_CODEX_LOG')
+    path = option('log') or os.getenv('FAKE_CODEX_LOG')
     if not path:
         return
     with log_lock:
@@ -80,7 +94,11 @@ def item(thread_id, turn_id, payload):
 
 def complete(thread_id, turn_id, status='completed', error=None):
     log_record('fake/complete', {'threadId': thread_id, 'turnId': turn_id, 'status': status})
-    send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn_id, 'status': status, 'error': error, 'items': []}}})
+    turn = {'id': turn_id, 'status': status, 'error': error, 'items': []}
+    if not os.getenv('FAKE_NO_USAGE') and (thread_id, turn_id) in turn_texts:
+        length = len(turn_texts[(thread_id, turn_id)])
+        turn['usage'] = {'inputTokens': max(1, length), 'outputTokens': max(1, (length + 1) // 2)}
+    send({'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': turn}})
 
 
 threads = 0
@@ -125,8 +143,11 @@ for line in sys.stdin:
                 send({'method': 'account/other', 'params': {}})
             send({'method': 'account/rateLimits/updated', 'params': {'rateLimits': {'primary': {'usedPercent': 41, 'windowDurationMins': 300, 'resetsAt': 1900000000}}}})
     elif method == 'model/list':
-        if params.get('cursor'):
-            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-terra-lite'}]}})
+        if 'FAKE_CODEX_MODELS' in os.environ:
+            ids = [model.strip() for model in os.environ['FAKE_CODEX_MODELS'].split(',') if model.strip()]
+            send({'id': message['id'], 'result': {'data': [{'id': model} for model in ids]}})
+        elif params.get('cursor'):
+            send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6.10-terra'}, {'id': 'gpt-6-astra'}, {'id': 'gpt-6-sol'}, {'id': 'gpt-6-terra-lite'}]}})
         else:
             send({'id': message['id'], 'result': {'data': [{'id': 'gpt-6-luna', 'isDefault': True}, {'id': 'gpt-5.6-terra'}, {'model': 'gpt-6.9-terra'}], 'nextCursor': 'page-2'}})
     elif method == 'plugin/installed':
@@ -153,99 +174,235 @@ for line in sys.stdin:
         if (config.get('features') or {}).get('apps') is not False:
             send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': thread_id, 'name': 'codex_apps', 'status': 'ready'}})
     elif method == 'turn/start':
+        # extreme-mode begin
+        if params.get('serviceTier') and option('tier') == 'reject':
+            send({'id': message['id'], 'error': {'code': -32602, 'message': 'unsupported serviceTier: fast'}})
+            continue
+        if params.get('serviceTier') and option('tier') == 'not-advertised':
+            print('warning: service_tier "fast" is not advertised for this model; ignoring', file=sys.stderr, flush=True)
+        # extreme-mode end
         thread_id, text = params['threadId'], params['input'][0]['text']
         turn_id = thread_id + '-turn'
-        if 'HANGREQ' in text:
+        turn_texts[(thread_id, turn_id)] = text
+        selfcheck = (params.get('outputSchema') or {}).get('title') == 'axiom.self_check.v1'
+        script_entry = next((entry for entry in script if entry['match'] in text), None)
+        if script_entry is None and not selfcheck and 'HANGREQ' in text:
             continue
         send({'id': message['id'], 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
-        if 'CRASH' in text:
-            sys.exit(7)
-        if 'HANG' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            continue
-        if 'BARRIER' in text:
-            with barrier:
-                barrier_count += 1
-                barrier.notify_all()
-            def finish_barrier(tid=thread_id, turn=turn_id, extra='EXTRA' in text):
-                with barrier:
-                    ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
-                if ready:
-                    if extra:
-                        send({'method': 'test/other-turn', 'params': {'threadId': tid, 'turnId': 'other-turn'}})
-                        send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': tid, 'status': 'starting'}})
-                        send({'method': 'test/extra', 'params': {'threadId': tid, 'turnId': turn}})
-                    item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
-                    complete(tid, turn)
-                else:
-                    complete(tid, turn, 'failed', {'message': 'barrier timeout'})
-            threading.Thread(target=finish_barrier, daemon=True).start()
-            continue
-        if 'WAIT_FOR_INTERRUPT' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            def expire_wait(tid=thread_id, turn=turn_id):
-                time.sleep(60)
-                if pending_turns.pop(turn, None):
-                    complete(tid, turn, 'failed', {'message': 'interrupt timeout'})
-            threading.Thread(target=expire_wait, daemon=True).start()
-            continue
-        if 'SLOW' in text:
-            pending_turns[turn_id] = (thread_id, turn_id)
-            def finish_slow(tid=thread_id, turn=turn_id):
-                time.sleep(2)
-                if pending_turns.pop(turn, None):
-                    item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'slow'})
-                    complete(tid, turn)
-            threading.Thread(target=finish_slow, daemon=True).start()
-            continue
-        if 'APPROVAL' in text:
-            pending_turns['approval'] = (thread_id, turn_id)
-            send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
-            continue
-        if 'ODDSTATUS' in text:
-            complete(thread_id, turn_id, 'succeeded')
-            continue
-        if 'NOSTATUS' in text:
-            complete(thread_id, turn_id, None)
-            continue
-        if 'ODDFAILURE' in text:
-            complete(thread_id, turn_id, 'cancelled', {'message': 'kept', 'codexErrorInfo': 'other'})
-            continue
-        if 'BADMODEL' in text:
-            body = json.dumps({'type': 'error', 'status': 400, 'error': {'type': 'invalid_request_error', 'message': 'not supported', 'code': 'model_not_found'}})
-            complete(thread_id, turn_id, 'failed', {'message': body, 'codexErrorInfo': 'other'})
-            continue
-        if 'AUTH' in text:
-            complete(thread_id, turn_id, 'failed', {'message': 'auth', 'codexErrorInfo': 'AuthError'})
-            continue
-        if 'LIMIT' in text:
+        if os.getenv('FAKE_USAGE_LIMIT'):
             error = {'message': 'You have hit your usage limit.', 'codexErrorInfo': 'usageLimitExceeded'}
             send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
             complete(thread_id, turn_id, 'failed', error)
             continue
-        item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
-        item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
-                                  'changes': [{'path': 'src/mod.py', 'kind': {'type': 'add'}, 'diff': ''}]})
-        usage = {'inputTokens': 1200, 'cachedInputTokens': 800, 'outputTokens': 40, 'reasoningOutputTokens': 10, 'totalTokens': 1240, 'cacheWriteInputTokens': 0}
-        send({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'total': usage, 'last': usage}}})
-        echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
-                'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
-        final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
-        if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
-            ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
-            final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
-        if params.get('outputSchema') and 'DIFF REVIEW' in text:
-            final = json.dumps({'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'codex reviewed this diff'}]}) if 'BLOCKME' in text else json.dumps({'verdict': 'pass', 'findings': []})
-        elif params.get('outputSchema') and 'BADJSON' in text:
-            final = 'not json'
-        elif params.get('outputSchema') and 'WRONGSHAPE' in text:
-            final = json.dumps({'wrong': 'shape'})
-        item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
-        complete(thread_id, turn_id)
+        if script_entry is None and not selfcheck:
+            if 'CRASH' in text:
+                sys.exit(7)
+            if 'HANG' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                continue
+            if 'BARRIER' in text:
+                with barrier:
+                    barrier_count += 1
+                    barrier.notify_all()
+                def finish_barrier(tid=thread_id, turn=turn_id, extra='EXTRA' in text):
+                    with barrier:
+                        ready = barrier.wait_for(lambda: barrier_count >= 2, timeout=10)
+                    if ready:
+                        if extra:
+                            send({'method': 'test/other-turn', 'params': {'threadId': tid, 'turnId': 'other-turn'}})
+                            send({'method': 'mcpServer/startupStatus/updated', 'params': {'threadId': tid, 'status': 'starting'}})
+                            send({'method': 'test/extra', 'params': {'threadId': tid, 'turnId': turn}})
+                        item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'barrier'})
+                        complete(tid, turn)
+                    else:
+                        complete(tid, turn, 'failed', {'message': 'barrier timeout'})
+                threading.Thread(target=finish_barrier, daemon=True).start()
+                continue
+            if 'WAIT_FOR_INTERRUPT' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                def expire_wait(tid=thread_id, turn=turn_id):
+                    time.sleep(60)
+                    if pending_turns.pop(turn, None):
+                        complete(tid, turn, 'failed', {'message': 'interrupt timeout'})
+                threading.Thread(target=expire_wait, daemon=True).start()
+                continue
+            if 'SLOW' in text:
+                pending_turns[turn_id] = (thread_id, turn_id)
+                def finish_slow(tid=thread_id, turn=turn_id):
+                    time.sleep(2)
+                    if pending_turns.pop(turn, None):
+                        item(tid, turn, {'type': 'agentMessage', 'id': 'm', 'text': 'slow'})
+                        complete(tid, turn)
+                threading.Thread(target=finish_slow, daemon=True).start()
+                continue
+            if 'APPROVAL' in text:
+                pending_turns['approval'] = (thread_id, turn_id)
+                send({'id': 'srv-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': turn_id}})
+                continue
+            if 'ODDSTATUS' in text:
+                complete(thread_id, turn_id, 'succeeded')
+                continue
+            if 'NOSTATUS' in text:
+                complete(thread_id, turn_id, None)
+                continue
+            if 'ODDFAILURE' in text:
+                complete(thread_id, turn_id, 'cancelled', {'message': 'kept', 'codexErrorInfo': 'other'})
+                continue
+            if 'BADMODEL' in text:
+                body = json.dumps({'type': 'error', 'status': 400, 'error': {'type': 'invalid_request_error', 'message': 'not supported', 'code': 'model_not_found'}})
+                complete(thread_id, turn_id, 'failed', {'message': body, 'codexErrorInfo': 'other'})
+                continue
+            if 'AUTH' in text:
+                complete(thread_id, turn_id, 'failed', {'message': 'auth', 'codexErrorInfo': 'AuthError'})
+                continue
+            if 'LIMIT' in text:
+                error = {'message': 'You have hit your usage limit.', 'codexErrorInfo': 'usageLimitExceeded'}
+                send({'method': 'error', 'params': {'threadId': thread_id, 'turnId': turn_id, 'willRetry': False, 'error': error}})
+                complete(thread_id, turn_id, 'failed', error)
+                continue
+        delay = re.search(r'^FAKE_DELAY_MS[ \t]+(\d+)[ \t]*$', text, flags=re.M)
+        delay_ms = int(delay.group(1)) if delay else 0
+        gate = re.search(r'^FAKE_GATE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
+        gate_path = gate.group(1).strip() if gate else None
+        hold_path = directive(text, 'FAKE_HOLD')
+        # extreme-mode begin
+        wait_file = re.search(r'^WAIT_FILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M)
+        # extreme-mode end
+        def finish_normal(thread_id=thread_id, turn_id=turn_id, text=text, params=params, delay_ms=delay_ms, gate_path=gate_path, wait_file=wait_file, script_entry=script_entry, hold_path=hold_path, selfcheck=selfcheck):
+            # extreme-mode begin
+            if wait_file:
+                deadline = time.monotonic() + 30
+                while not os.path.exists(wait_file.group(1).strip()):
+                    if time.monotonic() >= deadline:
+                        complete(thread_id, turn_id, 'failed', {'message': 'WAIT_FILE timeout'})
+                        return
+                    time.sleep(0.01)
+            # extreme-mode end
+            if delay_ms:
+                time.sleep(delay_ms / 1000)
+            if gate_path:
+                deadline = time.monotonic() + 60
+                while not os.path.exists(gate_path):
+                    if time.monotonic() >= deadline:
+                        complete(thread_id, turn_id, 'failed', {'message': f'gate timeout: {gate_path}'})
+                        return
+                    time.sleep(0.02)
+            if hold_path:
+                while not os.path.exists(hold_path):
+                    time.sleep(0.02)
+            from pathlib import Path
+            import subprocess
+            cwd = Path(thread_params[thread_id].get('cwd') or os.getcwd())
+            temp = (configs[thread_id].get('shell_environment_policy') or {}).get('set', {}).get('TMP')
+            roots = (configs[thread_id].get('sandbox_workspace_write') or {}).get('writable_roots', [])
+            allowed = [cwd.resolve()] + [Path(root).resolve() for root in roots]
+            def permitted(target):
+                resolved = target.resolve()
+                return thread_params[thread_id].get('sandbox') != 'workspace-write' or any(resolved == root or root in resolved.parents for root in allowed)
+            def denied(target):
+                message = f'sandbox denied write: {target}'
+                item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'failed', 'exitCode': 1})
+                complete(thread_id, turn_id, 'failed', {'message': message})
+            # Additive phase7 tests-first scenario: stable tests, separate stub.
+            if text.startswith('TESTS-FIRST\n'):
+                for test, source in re.findall(r'^\s*FAKE_MATRIX_STUB[ \t]+(\S+)[ \t]+(\S+)', text, flags=re.M):
+                    target = cwd / test
+                    if not permitted(target) or not permitted(cwd / source):
+                        denied(target)
+                        return
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("import pathlib,unittest\nclass Seed(unittest.TestCase):\n def test_seed_result(self):\n  self.assertEqual(pathlib.Path(" + repr(source) + ").read_text(), 'fake-written\\n')\nunittest.main(verbosity=2)\n", encoding='utf-8')
+                    (cwd / source).write_text('stub\n', encoding='utf-8')
+            if selfcheck:
+                write_path = directive(text, 'FAKE_SELFCHECK_WRITE')
+                if write_path:
+                    target = cwd / write_path
+                    if not permitted(target):
+                        denied(target)
+                        return
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('fake-written\n', encoding='utf-8')
+                final = json.dumps(json.loads(directive(text, 'FAKE_SELFCHECK') or '{}'))
+                item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
+                complete(thread_id, turn_id)
+                return
+            for name in re.findall(r'^FAKE_TEMPDIR[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                target = Path(temp) if temp else cwd
+                target = target / 'pytest-of-fake' / 'pytest-0' / name.strip() / 'case.txt'
+                if not permitted(target):
+                    denied(target)
+                    return
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fake-temp\n', encoding='utf-8')
+            for name in re.findall(r'^FAKE_TEMPFILE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                env = os.environ.copy()
+                env.update((configs[thread_id].get('shell_environment_policy') or {}).get('set', {}))
+                candidates = json.loads(subprocess.check_output([sys.executable, '-c', 'import json,tempfile; print(json.dumps(tempfile._candidate_tempdir_list()))'], cwd=cwd, env=env, text=True))
+                tempdir = next(Path(p) for p in candidates if Path(p).is_dir() and os.access(p, os.W_OK))
+                target = tempdir / name.strip()
+                if not permitted(target):
+                    denied(target)
+                    return
+                subprocess.run([sys.executable, '-c', 'import sys,tempfile; f=tempfile.NamedTemporaryFile(prefix=sys.argv[1], delete=False); f.write(b"fake-temp"); f.close()', name.strip()], cwd=cwd, env=env, check=True)
+            for path in re.findall(r'^FAKE_SHELL_WRITE[ \t]+([^\r\n]+)[ \t]*$', text, flags=re.M):
+                target = cwd / path.strip()
+                if not permitted(target):
+                    denied(target)
+                    return
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fake-shell\n', encoding='utf-8')
+            item(thread_id, turn_id, {'type': 'commandExecution', 'id': 'c', 'command': 'pytest -q', 'status': 'completed', 'exitCode': 0})
+            paths = re.findall(r'^FAKE_WRITE[ \t]+([^\r\n]+)\s*$', text, flags=re.M)
+            if paths:
+                for path in paths:
+                    target = cwd / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('fake-written\n', encoding='utf-8')
+                if delay_ms:
+                    time.sleep(delay_ms / 1000)
+            else:
+                paths = ['src/mod.py']
+            item(thread_id, turn_id, {'type': 'fileChange', 'id': 'f', 'status': 'completed',
+                                      'changes': [{'path': path, 'kind': {'type': 'add'}, 'diff': ''} for path in paths]})
+            usage = {'inputTokens': 1200, 'cachedInputTokens': 800, 'outputTokens': 40, 'reasoningOutputTokens': 10, 'totalTokens': 1240, 'cacheWriteInputTokens': 0}
+            send({'method': 'thread/tokenUsage/updated', 'params': {'threadId': thread_id, 'turnId': turn_id, 'tokenUsage': {'total': usage, 'last': usage}}})
+            echo = {'model': models[thread_id], 'effort': params.get('effort'), 'brief': text, 'config': configs[thread_id],
+                    'disabled_plugin_ids': params.get('disabledPluginIds'), 'thread_params': thread_params[thread_id]}
+            final = json.dumps({'answer': 'ok'}) if params.get('outputSchema') else json.dumps(echo, ensure_ascii=False)
+            if params.get('outputSchema') and 'CROSS-EXAMINATION' in text:
+                ids = sorted(set(re.findall(r'^(C\d+) \[Position', text, flags=re.M)))
+                final = json.dumps({'stances': [{'claim': i, 'stance': 'agree', 'evidence': ''} for i in ids]})
+            if params.get('outputSchema') and 'DIFF REVIEW' in text:
+                final = json.dumps({'verdict': 'revise', 'findings': [{'severity': 'major', 'location': 'src/a.py:1', 'reason': 'codex reviewed this diff'}]}) if 'BLOCKME' in text else json.dumps({'verdict': 'pass', 'findings': []})
+            elif params.get('outputSchema') and 'BADJSON' in text:
+                final = 'not json'
+            elif params.get('outputSchema') and 'WRONGSHAPE' in text:
+                final = json.dumps({'wrong': 'shape'})
+            if script_entry is not None:
+                reply = script_entry['reply']
+                final = reply if isinstance(reply, str) else json.dumps(reply)
+            review = directive(text, 'FAKE_REVIEW')
+            model = params.get('model') or models[thread_id]
+            if model and 'astra' in model.lower() and review and params.get('outputSchema'):
+                final = json.dumps(json.loads(review))
+            item(thread_id, turn_id, {'type': 'agentMessage', 'id': 'm', 'text': final})
+            complete(thread_id, turn_id)
+        if delay_ms or gate_path or wait_file or hold_path:
+            threading.Thread(target=finish_normal, daemon=True).start()
+        else:
+            finish_normal()
     elif method == 'turn/interrupt':
         send({'id': message['id'], 'result': {}})
         turn = pending_turns.pop(params['turnId'], None)
         if turn:
+            interrupt_gate = option('interrupt-gate')
+            if interrupt_gate:
+                log_record('fake/interrupt-ack', params)
+                deadline = time.monotonic() + 120
+                while not os.path.exists(interrupt_gate):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f'interrupt gate timeout: {interrupt_gate}')
+                    time.sleep(0.02)
             time.sleep(float(option('interrupt-delay', '0')))
             complete(*turn, 'interrupted')
     time.sleep(0)

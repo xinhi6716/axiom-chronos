@@ -956,18 +956,18 @@ fn a_run_with_no_calls_costs_nothing() {
 #[test]
 fn real_working_directories_map_to_their_transcript_directories() {
     for (cwd, dir) in [
-        (r"E:\codex\ML_HfO2", "E--codex-ML-HfO2"),
-        (r"E:\codex\OPEN_DESIGN\axiom", "E--codex-OPEN-DESIGN-axiom"),
+        (r"E:\work\ML_HfO2", "E--work-ML-HfO2"),
+        (r"E:\work\OPEN_DESIGN\axiom", "E--work-OPEN-DESIGN-axiom"),
         (r"C:\Users\someone", "C--Users-someone"),
-        (r"E:\codex\OPEN_DESIGN\TW\TaiwanStockRadar", "E--codex-OPEN-DESIGN-TW-TaiwanStockRadar"),
-        (r"E:\codex\ML_SIC\OPEN_SOURCE_SKILLS", "E--codex-ML-SIC-OPEN-SOURCE-SKILLS"),
+        (r"E:\work\OPEN_DESIGN\TW\TaiwanStockRadar", "E--work-OPEN-DESIGN-TW-TaiwanStockRadar"),
+        (r"E:\work\ML_SIC\OPEN_SOURCE_SKILLS", "E--work-ML-SIC-OPEN-SOURCE-SKILLS"),
         (
-            r"E:\codex\OPEN_DESIGN\axiom\experiments\bench\ledger-r3",
-            "E--codex-OPEN-DESIGN-axiom-experiments-bench-ledger-r3",
+            r"E:\work\OPEN_DESIGN\axiom\experiments\bench\ledger-r3",
+            "E--work-OPEN-DESIGN-axiom-experiments-bench-ledger-r3",
         ),
         (
-            r"C:\Users\someone\AppData\Local\Temp\claude\E--codex-OPEN-DESIGN-axiom\51327f98-867e-4182-ad6c-b4efb141f64a\scratchpad\toy-rust",
-            "C--Users-someone-AppData-Local-Temp-claude-E--codex-OPEN-DESIGN-axiom-51327f98-867e-4182-ad6c-b4efb141f64a-scratchpad-toy-rust",
+            r"C:\Users\someone\AppData\Local\Temp\claude\E--work-OPEN-DESIGN-axiom\51327f98-867e-4182-ad6c-b4efb141f64a\scratchpad\toy-rust",
+            "C--Users-someone-AppData-Local-Temp-claude-E--work-OPEN-DESIGN-axiom-51327f98-867e-4182-ad6c-b4efb141f64a-scratchpad-toy-rust",
         ),
     ] {
         assert_eq!(transcript_dir_name(cwd), dir);

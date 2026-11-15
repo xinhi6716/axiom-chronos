@@ -1,0 +1,16 @@
+{
+  "id": "ts-006",
+  "language": "ts",
+  "feature": "dynamic_call",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 2,
+      "name": "registry",
+      "nth": 1,
+      "expect": {
+        "resolution": "unresolved"
+      }
+    }
+  ]
+}

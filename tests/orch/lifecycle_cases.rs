@@ -65,6 +65,23 @@ fn legacy_bare_verify_identity_is_read_but_not_reused() {
 }
 
 #[test]
+fn a_completed_unit_whose_evidence_never_verified_it_is_not_reused() {
+    let (store, repo) = setup();
+    let tree = snapshot(&repo, &["a.txt".into()]);
+    fs::write(
+        store.join("reports/a.evidence.tsv"),
+        format!("kind\tcommand\texit_code\tcommit\tts\nrun\tgpt-worker\t0\t\t1\nverify\ttest\t0\t{tree}\t2\n"),
+    )
+    .unwrap();
+    let units = fs::read_to_string(store.join("units.tsv")).unwrap();
+    fs::write(store.join("units.tsv"), units.replace("\tpending\t", "\tverified\t")).unwrap();
+    // Built on a VERIFY that matches, but no evidence ever verified it: units.tsv is the record.
+    assert_eq!(derive_state(&evidence(&store, "a").unwrap(), false), "built");
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
+    fs::remove_dir_all(store.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn review_requires_repo() {
     let (store, _) = setup();
     let verdict = store.join("verdict.json");
@@ -112,7 +129,7 @@ fn lifecycle_reuse_scope_and_limit() {
             .err()
             .unwrap()
             .kind,
-        "busy"
+        "already_running"
     );
     let report = json!({"status":"completed","final_message":"done","file_changes":[]});
     let finished = finish_unit(
@@ -135,12 +152,16 @@ fn lifecycle_reuse_scope_and_limit() {
             store.join("reports").join("a.verify.txt").display()
         )
     );
+    let mut expected_report = report.clone();
+    expected_report["brief_sha256"] = json!(axiom::seams::sha256_hex(
+        b"GOAL test\nSCOPE a.txt\nVERIFY echo ok\n"
+    ));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(
             &fs::read(store.join("reports/a.json")).unwrap()
         )
         .unwrap(),
-        report
+        expected_report
     );
     let pointer = fs::read_dir(store.join("inbox"))
         .unwrap()
@@ -154,8 +175,14 @@ fn lifecycle_reuse_scope_and_limit() {
             store.join("reports").join("a.md").display()
         )));
     record_review(&store, &["a".into()], "claude-review", true, &repo).unwrap();
-    assert!(matches!(begin(&store, &repo), Begin::Reused));
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
     fs::write(repo.join("a.txt"), "changed").unwrap();
+    // tests/resume_201.rs: a changed tree alone never runs verified work again.
+    // VERIFY on the new files reopens it for reuse; a failed review, for a fix.
+    assert_eq!(begin_unit(&store, "a", "worker", &repo, false).err().unwrap().kind, "already_verified");
+    record_verify(&store, "a", &repo).unwrap();
+    assert!(matches!(begin(&store, &repo), Begin::Reused));
+    record_review(&store, &["a".into()], "claude-review", false, &repo).unwrap();
     assert!(matches!(
         begin(&store, &repo),
         Begin::Run { attempt: 2, .. }
@@ -196,13 +223,7 @@ fn lifecycle_reuse_scope_and_limit() {
 #[test]
 fn sol_and_extra_commands() {
     let (store, repo) = setup();
-    assert_eq!(
-        begin_unit(&store, "a", "sol", &repo, false)
-            .err()
-            .unwrap()
-            .kind,
-        "sol_not_allowed"
-    );
+    assert_eq!(sol_refusal(&store, &repo), None);
     assert_eq!(
         begin_unit(&store, "a", "worker", &repo, true)
             .err()
@@ -259,7 +280,7 @@ fn external(store: &Path, repo: &Path, flags: &[&str]) -> Output {
 #[test]
 fn ci_failure_opens_sol_like_a_local_failure() {
     let (store, repo) = setup();
-    let refused = Some("sol_not_allowed".to_string());
+    let refused = None;
     assert_eq!(
         sol_refusal(&store, &repo),
         refused,
@@ -361,7 +382,7 @@ fn external_failure_without_real_evidence_records_nothing() {
         assert!(!repo.join("marker").exists(), "{flags:?}");
         assert_eq!(
             sol_refusal(&store, &repo).as_deref(),
-            Some("sol_not_allowed"),
+            None,
             "{flags:?}"
         );
     }
@@ -388,7 +409,7 @@ fn old_full_evidence_still_reads_beside_external_rows() {
     let (store, repo) = setup();
     let path = store.join("reports/_full.evidence.tsv");
     let header = "kind\tcommand\texit_code\tcommit\tts";
-    let refused = Some("sol_not_allowed".to_string());
+    let refused = None;
     fs::write(&path, format!("{header}\r\nfull\told\t0\t\t2000\r\n")).unwrap();
     assert_eq!(sol_refusal(&store, &repo), refused);
     fs::write(&path, format!("{header}\r\nfull\told\t3\t\t2000\r\n")).unwrap();
@@ -830,8 +851,14 @@ fn verify_command_refreshes_a_stale_unit() {
     );
     let out = verify(false);
     assert_eq!(out.exit_code, 0, "{}", out.stderr);
-    assert!(out.stdout.starts_with("a\texit=0\tbuilt\taccept\tpack="), "{}", out.stdout);
-    assert!(out.stdout.contains("\nok"), "{}", out.stdout);
+    assert_eq!(
+        out.stdout,
+        format!(
+            "a\texit=0\tbuilt\taccept\tpack={}\ntests unknown\noutput={}\n",
+            store.join("reports").join("a.review.md").display(),
+            store.join("reports").join("a.verify.txt").display(),
+        )
+    );
     assert_eq!(
         fs::read_to_string(store.join("reports/a.verify.txt")).unwrap().trim(),
         "ok"

@@ -6,7 +6,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 const UNITS: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const CLAIMS: &str = "unit\tattempt\tscope\tstarted";
 const EVIDENCE: &str = "kind\tcommand\texit_code\tcommit\tts";
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +80,7 @@ pub(crate) struct View {
 }
 
 fn read(path: &Path, label: &str, warnings: &mut Vec<String>) -> Option<String> {
-    match std::fs::read(path) {
+    match crate::storage::archive::read(path) {
         Ok(bytes) => Some(String::from_utf8_lossy(&bytes).replace('\r', "")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
@@ -119,6 +118,36 @@ fn tsv(
     }
     rows
 }
+fn claims(path: &Path, label: &str, warnings: &mut Vec<String>) -> Vec<(String, Claim)> {
+    let Some(text) = read(path, label, warnings) else {
+        return vec![];
+    };
+    let mut lines = text.split('\n');
+    let Some(columns) = lines.next().and_then(orch::claims_columns) else {
+        warnings.push(format!("{label}: unexpected header"));
+        return vec![];
+    };
+    let mut rows = Vec::new();
+    let mut bad = 0;
+    for line in lines.filter(|line| !line.is_empty()) {
+        if let Some(c) = orch::parse_claim_row(line, columns) {
+            rows.push((
+                c.unit,
+                Claim {
+                    attempt: c.attempt,
+                    started: c.started,
+                    scope: c.scope,
+                },
+            ));
+        } else {
+            bad += 1;
+        }
+    }
+    if bad > 0 {
+        warnings.push(format!("{label}: {bad} malformed row(s) skipped"));
+    }
+    rows
+}
 fn evidence(path: &Path, label: &str, warnings: &mut Vec<String>) -> Vec<Evidence> {
     let mut bad = 0;
     let rows = tsv(path, label, EVIDENCE, 5, warnings)
@@ -138,7 +167,9 @@ fn evidence(path: &Path, label: &str, warnings: &mut Vec<String>) -> Vec<Evidenc
         })
         .collect();
     if bad > 0 {
-        warnings.push(format!("{label}: {bad} row(s) with an invalid exit code skipped"));
+        warnings.push(format!(
+            "{label}: {bad} row(s) with an invalid exit code skipped"
+        ));
     }
     rows
 }
@@ -196,25 +227,7 @@ pub(crate) fn view(store: &Path, warnings: &mut Vec<String>) -> Option<View> {
         },
         None => (None, None),
     };
-    let claims: Vec<(String, Claim)> = tsv(
-        &store.join("claims.tsv"),
-        &label("claims.tsv"),
-        CLAIMS,
-        4,
-        warnings,
-    )
-    .into_iter()
-    .map(|c| {
-        (
-            c[0].clone(),
-            Claim {
-                attempt: c[1].clone(),
-                started: c[3].clone(),
-                scope: c[2].split_whitespace().map(str::to_owned).collect(),
-            },
-        )
-    })
-    .collect();
+    let claims = claims(&store.join("claims.tsv"), &label("claims.tsv"), warnings);
     let reports = store.join("reports");
     let units: Vec<UnitView> = tsv(
         &store.join("units.tsv"),
@@ -240,7 +253,7 @@ pub(crate) fn view(store: &Path, warnings: &mut Vec<String>) -> Option<View> {
         let needs_accept = map
             .as_ref()
             .is_some_and(|m| m.modules.iter().any(|x| x.id == c[1]));
-        let file = |p: PathBuf| (valid && p.is_file()).then_some(p);
+        let file = |p: PathBuf| (valid && crate::storage::archive::exists(&p)).then_some(p);
         UnitView {
             derived: orch::derive_state(&rows, needs_accept),
             attempts: rows.iter().filter(|r| r.kind == "run").count(),
@@ -305,16 +318,20 @@ pub(crate) fn view(store: &Path, warnings: &mut Vec<String>) -> Option<View> {
         &label("reports/_full.evidence.tsv"),
         warnings,
     );
-    let decisions = read(&store.join("decisions.md"), &label("decisions.md"), warnings)
-        .map(|t| {
-            t.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .take(200)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let decisions = read(
+        &store.join("decisions.md"),
+        &label("decisions.md"),
+        warnings,
+    )
+    .map(|t| {
+        t.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .take(200)
+            .map(str::to_owned)
+            .collect()
+    })
+    .unwrap_or_default();
     let astra_dir = store.join("astra");
     let review = read(
         &astra_dir.join("review.json"),

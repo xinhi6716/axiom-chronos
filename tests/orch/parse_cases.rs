@@ -27,29 +27,38 @@ fn brief_fields_and_crlf() {
 #[test]
 fn brief_settings_are_read_and_kept_from_the_worker() {
     let text =
-        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER luna\r\nVERIFY v\r\nCONTEXT c\r\n";
+        "note\r\nGOAL g\r\nEFFORT  low \r\nSCOPE a\r\nTIER terra\r\nRISK trivial\r\nVERIFY v\r\nCONTEXT c\r\n";
     let b = parse_brief(text).unwrap();
     assert_eq!(b.effort.as_deref(), Some("low"));
-    assert_eq!(b.tier.as_deref(), Some("luna"));
+    assert_eq!(b.tier.as_deref(), Some("terra"));
+    assert_eq!(b.risk.as_deref(), Some("trivial"));
     assert_eq!(
         b.text,
         "note\r\nGOAL g\r\nSCOPE a\r\nVERIFY v\r\nCONTEXT c\r\n"
     );
     assert_eq!((b.goal.as_str(), b.verify.as_str()), ("g", "v"));
     assert_eq!(b.scope, ["a"]);
-    for effort in ["low", "medium", "high"] {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
         let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nEFFORT {effort}")).unwrap();
         assert_eq!(b.effort.as_deref(), Some(effort));
         assert_eq!(b.tier, None);
+        assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
+    }
+    for tier in ["terra", "sol", "astra"] {
+        let b = parse_brief(&format!("GOAL g\nSCOPE a\nVERIFY v\nTIER {tier}")).unwrap();
+        assert_eq!(b.tier.as_deref(), Some(tier));
+        assert_eq!(b.effort, None);
         assert_eq!(b.text, "GOAL g\nSCOPE a\nVERIFY v\n");
     }
 }
 
 #[test]
 fn brief_settings_outside_the_allowed_set_are_refused() {
-    let efforts = "low, medium, high";
+    let efforts = "low, medium, high, xhigh, max";
+    let tiers = "terra, sol, astra";
     for (line, field, value, allowed) in [
-        ("EFFORT xhigh", "EFFORT", "xhigh", efforts),
+        ("EFFORT ultra", "EFFORT", "ultra", efforts),
+        ("EFFORT extreme", "EFFORT", "extreme", efforts),
         ("EFFORT Low", "EFFORT", "Low", efforts),
         ("EFFORT low please", "EFFORT", "low please", efforts),
         ("EFFORT", "EFFORT", "", efforts),
@@ -60,10 +69,9 @@ EFFORT high",
             "high",
             efforts,
         ),
-        ("TIER terra", "TIER", "terra", "luna"),
-        ("TIER sol", "TIER", "sol", "luna"),
-        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", "luna"),
-        ("TIER", "TIER", "", "luna"),
+        ("TIER gpt-6-luna", "TIER", "gpt-6-luna", tiers),
+        ("TIER 1 sources", "TIER", "1 sources", tiers),
+        ("TIER", "TIER", "", tiers),
     ] {
         let err = parse_brief(&format!(
             "GOAL g
@@ -82,11 +90,46 @@ VERIFY v
 }
 
 #[test]
+fn risk_settings_validation_and_placement() {
+    for risk in [
+        "trivial",
+        "standard",
+        "state_machine",
+        "concurrency",
+        "migration",
+        "parser",
+        "security",
+        "privacy",
+        "cross_module",
+        "prior_failure",
+        "novel",
+    ] {
+        let b = parse_brief(&format!(
+            "GOAL g\nSCOPE a\nRISK {risk}\nVERIFY v\nCONTEXT c\n"
+        ))
+        .unwrap();
+        assert_eq!(b.risk.as_deref(), Some(risk));
+        assert!(!b.text.contains("RISK "));
+    }
+    for text in [
+        "GOAL g\nSCOPE a\nVERIFY v\nRISK unknown\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nRISK standard\nRISK trivial\n",
+        "RISK standard\nGOAL g\nSCOPE a\nVERIFY v\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT c\nRISK standard\n",
+    ] {
+        assert!(parse_brief(text).is_err(), "{text}");
+    }
+    let legacy: axiom::orch::parse::Brief = serde_json::from_value(serde_json::json!({"goal":"g", "scope":["a"], "verify":"v", "context":null, "effort":null, "tier":null, "text":""})).unwrap();
+    assert_eq!(legacy.risk, None);
+}
+
+#[test]
 fn old_briefs_cannot_trip_the_settings() {
     for text in [
         "EFFORT was spent here\nTIER 1 sources\nGOAL g\nSCOPE a\nVERIFY v\n",
-        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\nTIER sol\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\nEFFORT was spent here\nTIER 1 sources\nEFFORT extreme\n  TIER sol\n",
         "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  EFFORT low\n  TIER luna\n",
+        "GOAL g\nSCOPE a\nVERIFY v\nCONTEXT\n  TIER sol\n  EFFORT high\n",
         "GOAL g\n  EFFORT low\nSCOPE a\nVERIFY v\n",
         "GOAL g\nEFFORTS low\nTIERED luna\nSCOPE a\nVERIFY v\n",
     ] {
@@ -119,7 +162,7 @@ fn misplaced_settings_are_refused_instead_of_ignored() {
             "{text}"
         );
     }
-    let placed = "GOAL g\nEFFORT high\nTIER luna\nSCOPE a\nVERIFY v\nCONTEXT c\n";
+    let placed = "GOAL g\nEFFORT high\nTIER terra\nSCOPE a\nVERIFY v\nCONTEXT c\n";
     assert_eq!(parse_brief(placed).unwrap().effort.as_deref(), Some("high"));
 }
 

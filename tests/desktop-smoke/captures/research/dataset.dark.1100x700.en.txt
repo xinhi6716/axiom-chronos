@@ -1,0 +1,43 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: Paused: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	Ready
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	Map
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	Sources
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	Evidence
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	Dataset
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	Exports
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-layer-extracted	Extracted
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-layer-raw	Raw
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-validation	Stale: 000000000000 → 83e94d7a2489
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-missing	sha256 0/60
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0	P0 · C1 · voltage · HfO2 · Original: 0 V · Canonical: 0 V · Grade: A · Flags: 
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-dataset-evidence-0	E1
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-spot-confirm-0	Confirm
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-spot-dispute-0	Dispute
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-0/research-dataset-correct-0	Correct
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1	P1 · C1 · voltage · HfO2 · Original: empty: not reported V · Canonical: empty: not reported V · Grade: A · Flags: 
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-dataset-evidence-1	E2
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-spot-confirm-1	Confirm
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-spot-dispute-1	Dispute
+gpui_component::window_border::WindowBorder/root/research-page/research-dataset-panel/research-dataset-rows/research-dataset-row-1/research-dataset-correct-1	Correct
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 hours
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	Show what is blocking

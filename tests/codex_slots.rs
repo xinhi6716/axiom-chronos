@@ -3,6 +3,8 @@ use axiom::codex::{AppServer, RunRequest};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
+    io::Read,
+    ops::{Deref, DerefMut},
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
@@ -17,12 +19,20 @@ use std::{
 // release must not overlap with tests that spawn. Production only sees a momentary overcount.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[track_caller]
 fn until(mut condition: impl FnMut() -> bool) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + PROGRESS_TIMEOUT;
     while !condition() {
         assert!(Instant::now() < end, "child did not make progress");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+fn queued(home: &Path, id: &str) {
+    // AppServer construction is not evidence that run_cancellable has captured cancellation
+    // or tried the locks. This marker comes from acquire's existing full-pool progress event.
+    until(|| home.join(format!("{id}.queued")).exists());
 }
 fn locked(home: &Path) -> File {
     fs::create_dir_all(home.join("codex-slots")).unwrap();
@@ -36,23 +46,52 @@ fn locked(home: &Path) -> File {
     f.lock().unwrap();
     f
 }
-fn child(home: &Path, id: &str, cap: &str, action: &str) -> Child {
-    Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "slot_child", "--nocapture"])
-        .env("SLOT_TEST_HOME", home)
-        .env("SLOT_TEST_ID", id)
-        .env("SLOT_TEST_ACTION", action)
-        .env("AXIOM_DATA_HOME", home)
-        .env("AXIOM_HOME", home)
-        .env("AXIOM_CODEX_MAX_PARALLEL", cap)
-        .env("FAKE_CODEX_LOG", home.join(format!("{id}.log")))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+struct ChildGuard(Child);
+
+impl Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        axiom::base::proc::kill_tree(&mut self.0);
+    }
+}
+
+fn child(home: &Path, id: &str, cap: &str, action: &str) -> ChildGuard {
+    child_with_stdout(home, id, cap, action, Stdio::null())
+}
+fn child_with_stdout(home: &Path, id: &str, cap: &str, action: &str, stdout: Stdio) -> ChildGuard {
+    ChildGuard(
+        axiom::base::proc::spawn_group(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "slot_child", "--nocapture"])
+                .env("SLOT_TEST_HOME", home)
+                .env("SLOT_TEST_ID", id)
+                .env("SLOT_TEST_ACTION", action)
+                .env("AXIOM_DATA_HOME", home)
+                .env("AXIOM_HOME", home)
+                .env("AXIOM_CODEX_MAX_PARALLEL", cap)
+                .env("FAKE_CODEX_LOG", home.join(format!("{id}.log")))
+                .stdout(stdout)
+                .stderr(Stdio::null()),
+        )
+        .unwrap(),
+    )
 }
 fn result(home: &Path, id: &str, c: &mut Child) -> Value {
     until(|| c.try_wait().unwrap().is_some());
+    assert!(
+        c.try_wait().unwrap().unwrap().success(),
+        "slot child {id} failed"
+    );
     serde_json::from_slice(&fs::read(home.join(format!("{id}.json"))).unwrap()).unwrap()
 }
 fn turns(home: &Path, id: &str) -> usize {
@@ -73,17 +112,51 @@ fn slot_child() {
     let home = Path::new(&home);
     let id = std::env::var("SLOT_TEST_ID").unwrap();
     let action = std::env::var("SLOT_TEST_ACTION").unwrap();
+    if action == "success" {
+        return;
+    }
+    if action == "spawner" {
+        let descendant_id = format!("{id}-descendant");
+        let descendant = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "slot_child", "--nocapture"])
+            .env("SLOT_TEST_ID", &descendant_id)
+            .env("SLOT_TEST_ACTION", "holder")
+            .spawn()
+            .unwrap();
+        fs::write(home.join(format!("{id}.pid")), descendant.id().to_string()).unwrap();
+        until(|| home.join(format!("{descendant_id}.ready")).exists());
+        fs::write(home.join(format!("{id}.ready")), "").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
     if action == "holder" {
         let _lock = locked(home);
         fs::write(home.join(format!("{id}.ready")), "").unwrap();
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            // The parent deliberately kills this process to test OS lock recovery.
+            std::thread::park();
         }
     }
-    let server = Arc::new(AppServer::new(common::fake_codex(&[
-        "--fake-interrupt-delay=0.4",
-    ])));
-    fs::write(home.join(format!("{id}.ready")), "").unwrap();
+    let active = action == "active";
+    let command = if active {
+        common::fake_codex(&[&format!(
+            "--fake-interrupt-gate={}",
+            home.join(format!("{id}.complete")).display()
+        )])
+    } else {
+        common::fake_codex(&[])
+    };
+    let server = Arc::new(AppServer::new(command));
+    // Only the timeout test intentionally has a short call deadline; other calls must
+    // survive both the 15-second full-pool progress interval and busy-machine startup.
+    let timeout_s = if action == "timeout" { 1 } else { 120 };
+    let waiting = home.join(format!("{id}.queued"));
+    let progress = axiom::base::progress::Progress::new(Value::Null, move |event| {
+        if event["params"]["message"] == "waiting for a Codex slot" {
+            fs::write(&waiting, "").unwrap();
+        }
+    });
     let stop = Arc::new(AtomicBool::new(false));
     if action == "cancel" || action == "close" || action == "active" || action == "stop" {
         let s = server.clone();
@@ -100,7 +173,6 @@ fn slot_child() {
             }
         });
     }
-    let active = std::env::var("SLOT_TEST_ACTION").unwrap() == "active";
     let req = RunRequest {
         brief: if active { "HANG" } else { "ok" }.into(),
         cwd: home.to_string_lossy().into_owned(),
@@ -109,16 +181,152 @@ fn slot_child() {
         effort: None,
         output_schema: None,
         developer_instructions: None,
-        timeout_s: if active { 10 } else { 1 },
+        timeout_s,
         lean: false,
         keep_plugins: vec![],
         web_search: false,
     };
-    let r = match server.run_cancellable(&req, None, Some(&stop)) {
+    let r = match axiom::base::progress::scope(Some(progress), || {
+        server.run_cancellable(&req, None, Some(&stop))
+    }) {
         Ok(v) => v,
         Err(e) => json!({"error":e.to_json()}),
     };
     fs::write(home.join(format!("{id}.json")), r.to_string()).unwrap();
+}
+
+// If tree termination itself regresses, don't leave this test's descendant behind.
+// Assertions record the guard's outcome before this fallback runs.
+struct DescendantCleanup<'a> {
+    home: &'a Path,
+    id: &'a str,
+    armed: bool,
+}
+impl Drop for DescendantCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(contents) = fs::read_to_string(self.home.join(format!("{}.pid", self.id))) else {
+            return;
+        };
+        let Ok(pid) = contents.parse::<u32>() else {
+            return;
+        };
+        if !axiom::base::proc::pid_alive(pid) {
+            return;
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::{
+                Foundation::CloseHandle,
+                System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+            };
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !handle.is_null() {
+                TerminateProcess(handle, 1);
+                CloseHandle(handle);
+            }
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        let _ = axiom::base::proc::wait_pid_exit(pid, Duration::from_secs(15));
+    }
+}
+
+#[test]
+fn child_guard_cleans_up_on_panic() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let t = common::temp();
+    let home = t.path();
+    let mut cleanup = DescendantCleanup {
+        home,
+        id: "panic",
+        armed: true,
+    };
+    let mut pids = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let c = child(home, "panic", "1", "spawner");
+        until(|| home.join("panic.ready").exists());
+        let descendant: u32 = fs::read_to_string(home.join("panic.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        pids = Some((c.id(), descendant));
+        assert!(axiom::base::proc::pid_alive(c.id()));
+        assert!(axiom::base::proc::pid_alive(descendant));
+        panic!("forced panic");
+    }));
+    let panic = outcome.expect_err("expected forced panic");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"forced panic"));
+    let (pid, descendant) = pids.unwrap();
+    let child_exited = axiom::base::proc::wait_pid_exit(pid, Duration::from_secs(15));
+    let descendant_exited = axiom::base::proc::wait_pid_exit(descendant, Duration::from_secs(15));
+    cleanup.armed = !descendant_exited;
+    drop(cleanup);
+    assert!(
+        child_exited && descendant_exited,
+        "child exited: {child_exited}, descendant exited: {descendant_exited}"
+    );
+}
+
+#[test]
+fn child_guard_cleans_up_on_timeout_and_closes_stdout() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let t = common::temp();
+    let home = t.path();
+    let mut cleanup = DescendantCleanup {
+        home,
+        id: "guard-timeout",
+        armed: true,
+    };
+    let mut c = child_with_stdout(home, "guard-timeout", "1", "spawner", Stdio::piped());
+    until(|| home.join("guard-timeout.ready").exists());
+    let descendant: u32 = fs::read_to_string(home.join("guard-timeout.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pid = c.id();
+    assert!(axiom::base::proc::pid_alive(pid));
+    assert!(axiom::base::proc::pid_alive(descendant));
+    let mut stdout = c.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = tx.send(stdout.read_to_end(&mut bytes));
+    });
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < deadline && c.try_wait().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(c.try_wait().unwrap().is_none(), "child exited before timeout");
+    drop(c);
+    let child_exited = axiom::base::proc::wait_pid_exit(pid, Duration::from_secs(15));
+    let descendant_exited = axiom::base::proc::wait_pid_exit(descendant, Duration::from_secs(15));
+    let eof = rx.recv_timeout(Duration::from_secs(5));
+    cleanup.armed = !descendant_exited;
+    drop(cleanup);
+    if eof.is_ok() || rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+        reader.join().unwrap();
+    }
+    assert!(
+        child_exited && descendant_exited,
+        "child exited: {child_exited}, descendant exited: {descendant_exited}"
+    );
+    assert!(matches!(eof, Ok(Ok(_))), "stdout did not reach EOF: {eof:?}");
+}
+
+#[test]
+fn child_guard_is_harmless_after_success() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let t = common::temp();
+    let mut c = child(t.path(), "success", "1", "success");
+    let pid = c.id();
+    assert!(c.wait().unwrap().success());
+    drop(c);
+    assert!(axiom::base::proc::wait_pid_exit(pid, Duration::from_secs(15)));
 }
 
 #[test]
@@ -128,8 +336,7 @@ fn another_process_waits_then_reports_its_wait() {
     let home = t.path();
     let lock = locked(home);
     let mut c = child(home, "wait", "1", "run");
-    until(|| home.join("wait.ready").exists());
-    std::thread::sleep(Duration::from_millis(350));
+    queued(home, "wait");
     let started = turns(home, "wait");
     drop(lock);
     let r = result(home, "wait", &mut c);
@@ -150,8 +357,7 @@ fn queued_calls_honour_cancel_and_close_without_starting_codex() {
         let home = t.path();
         let _lock = locked(home);
         let mut c = child(home, action, "1", action);
-        until(|| home.join(format!("{action}.ready")).exists());
-        std::thread::sleep(Duration::from_millis(200));
+        queued(home, action);
         fs::write(home.join(format!("{action}.signal")), "").unwrap();
         let r = result(home, action, &mut c);
         assert_eq!(turns(home, action), 0, "{r}");
@@ -166,7 +372,7 @@ fn waiting_obeys_the_call_timeout() {
     let t = common::temp();
     let home = t.path();
     let _lock = locked(home);
-    let mut c = child(home, "timeout", "1", "run");
+    let mut c = child(home, "timeout", "1", "timeout");
     let r = result(home, "timeout", &mut c);
     assert_eq!(turns(home, "timeout"), 0, "{r}");
     assert_eq!(r["status"], "timeout", "{r}");
@@ -180,8 +386,7 @@ fn crash_releases_os_lock_and_stale_files_are_free() {
     let mut holder = child(home, "holder", "1", "holder");
     until(|| home.join("holder.ready").exists());
     let mut c = child(home, "crash", "1", "run");
-    until(|| home.join("crash.ready").exists());
-    std::thread::sleep(Duration::from_millis(200));
+    queued(home, "crash");
     let started = turns(home, "crash");
     holder.kill().unwrap();
     holder.wait().unwrap();
@@ -225,24 +430,29 @@ fn concurrent_processes_share_the_pool_and_reuse_released_slots() {
     }
 
     let mut c = child(home, "c", "2", "run");
-    until(|| home.join("c.ready").exists());
-    std::thread::sleep(Duration::from_millis(200));
+    queued(home, "c");
     let started = turns(home, "c");
     fs::write(home.join("a.signal"), "").unwrap();
     until(|| {
         fs::read_to_string(home.join("a.log"))
             .unwrap_or_default()
-            .contains("turn/interrupt")
+            .contains("fake/interrupt-ack")
     });
-    std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
         axiom::codex::slots::in_use(home).unwrap(),
         2,
         "interrupt acknowledgement must retain the slot until turn/completed"
     );
+    assert!(
+        a.try_wait().unwrap().is_none(),
+        "interrupted call returned before completion"
+    );
+    assert_eq!(turns(home, "c"), 0, "queued call started before completion");
+    fs::write(home.join("a.complete"), "").unwrap();
     let ar = result(home, "a", &mut a);
     let cr = result(home, "c", &mut c);
     fs::write(home.join("b.signal"), "").unwrap();
+    fs::write(home.join("b.complete"), "").unwrap();
     let br = result(home, "b", &mut b);
     assert_eq!(started, 0);
     assert_eq!(ar["status"], "interrupted");

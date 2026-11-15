@@ -24,3 +24,12 @@ pub fn board_runs(state: &AppState) -> Vec<usize> {
     runs.sort_by_key(|&i| !needs_you(&state.runs[i]));
     runs
 }
+
+/// Board ordering with attention state applied; attention-needed runs remain visible.
+pub fn board_runs_with_prefs(state: &AppState, prefs: &crate::desktop::ux::prefs::UxPrefs) -> Vec<usize> {
+    let mut runs: Vec<_> = state.runs.iter().enumerate().filter(|(_, run)|
+        run.status != RunStatus::Done && (needs_you(run) || crate::desktop::wishes::read_state::is_unread(run, prefs))
+    ).map(|(i, _)| i).collect();
+    runs.sort_by_key(|&i| !needs_you(&state.runs[i]));
+    runs
+}

@@ -18,6 +18,9 @@ use std::{
 
 pub const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 struct Connection {
+    // extreme-mode begin
+    stderr: Mutex<(u64, std::collections::VecDeque<(u64, String)>)>,
+    // extreme-mode end
     child: Mutex<Child>,
     input: Mutex<ChildStdin>,
     alive: AtomicBool,
@@ -38,6 +41,31 @@ pub struct AppServer {
     request_timeout: Option<Duration>,
 }
 impl AppServer {
+    // extreme-mode begin
+    pub fn stderr_mark(&self) -> u64 {
+        self.connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |c| c.stderr.lock().unwrap().0)
+    }
+    pub fn stderr_since(&self, mark: u64) -> Vec<String> {
+        self.connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or_else(Vec::new, |c| {
+                c.stderr
+                    .lock()
+                    .unwrap()
+                    .1
+                    .iter()
+                    .filter(|(n, _)| *n > mark)
+                    .map(|(_, line)| line.clone())
+                    .collect()
+            })
+    }
+    // extreme-mode end
     pub fn new(command: Vec<String>) -> Self {
         Self::with_request_timeout(command, None)
     }
@@ -116,6 +144,9 @@ impl AppServer {
         let output = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let c = Arc::new(Connection {
+            // extreme-mode begin
+            stderr: Mutex::new((0, std::collections::VecDeque::new())),
+            // extreme-mode end
             child: Mutex::new(child),
             input: Mutex::new(input),
             alive: AtomicBool::new(true),
@@ -181,13 +212,21 @@ impl AppServer {
             reader.pending.lock().unwrap().clear();
             reader.events.lock().unwrap().clear();
         });
+        // extreme-mode begin
+        let stderr_connection = c.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
-                if line.is_err() {
-                    break;
+                let Ok(line) = line else { break };
+                let mut ring = stderr_connection.stderr.lock().unwrap();
+                ring.0 += 1;
+                let seq = ring.0;
+                ring.1.push_back((seq, line));
+                if ring.1.len() > 200 {
+                    ring.1.pop_front();
                 }
             }
         });
+        // extreme-mode end
         if let Err(e) = self.request_on(&c, "initialize", json!({"clientInfo":{"name":"axiom-chronos","title":"Axiom Chronos","version":"0.1.0"}})).and_then(|_| Self::send(&c, json!({"method":"initialized"}))) { self.close(); return Err(self.protocol_failure(&format!("handshake: {}", e.message))); }
         self.generation.fetch_add(1, Ordering::Release);
         Ok(c)
@@ -421,7 +460,8 @@ mod tests {
 
     #[test]
     fn notifications_and_cancel_reach_the_registered_turn() {
-        let python = if cfg!(windows) { "python" } else { "python3" };
+        let python = std::env::var("AXIOM_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let fake =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake_codex.py");
         let server = AppServer::new(vec![

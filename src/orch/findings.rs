@@ -6,6 +6,44 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const CHECKED_KIND: &str = "checked";
+
+pub fn review_verdict_path(store: &Path, unit: &str, reviewer: &str) -> PathBuf {
+    let suffix = if reviewer == "chronos:pm-qa" {
+        ".pm-qa.verdict.json"
+    } else if reviewer.starts_with("engine-astra:") {
+        ".astra.verdict.json"
+    } else {
+        ".verdict.json"
+    };
+    store.join("reports").join(format!("{unit}{suffix}"))
+}
+
+pub fn review_id(unit: &str, n: usize) -> String {
+    format!("{unit}#{n}")
+}
+
+pub fn rejections(rows: &[Evidence]) -> Vec<(usize, String)> {
+    let Some(index) = rows.iter().rposition(|row| row.kind == "review") else {
+        return Vec::new();
+    };
+    let review = &rows[index];
+    rows[index + 1..]
+        .iter()
+        .filter(|row| row.kind == CHECKED_KIND && row.commit == review.commit)
+        .filter_map(|row| {
+            let (number, reason) = row.command.split_once(" rejected ")?;
+            if number.is_empty()
+                || !number.bytes().all(|c| c.is_ascii_digit())
+                || reason.trim().is_empty()
+            {
+                return None;
+            }
+            Some((number.parse().ok().filter(|&n| n > 0)?, reason.to_owned()))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
     Blocker,
@@ -72,7 +110,7 @@ pub fn parse_verdict(text: &str) -> Res<Verdict> {
                 _ => Severity::Minor,
             };
             let needs = match item.get("needs") {
-                None => None,
+                None | Some(Value::Null) => None,
                 Some(Value::String(s)) if s == "smoke" => Some(Needs::Smoke),
                 Some(Value::String(s)) if s == "manual" => Some(Needs::Manual),
                 Some(other) => {

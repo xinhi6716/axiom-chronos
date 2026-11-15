@@ -2,20 +2,43 @@
 use super::i18n::{translate, Lang, Table};
 use crate::base::{Failure, Res};
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod feed;
+pub mod facade;
 mod undo;
 mod menu;
 mod board;
-pub use feed::*;
+pub use feed::{FeedKind, FeedStatus, PanelState, panel_state};
 pub use undo::*;
 pub use menu::*;
 pub use board::*;
+#[doc(hidden)]
+pub use super::live::smoke_read;
 #[cfg(test)]
 mod accept;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Feeds {
+    pub runs: FeedStatus,
+    pub memory: FeedStatus,
+    pub checks: FeedStatus,
+    pub usage: FeedStatus,
+    pub quota: FeedStatus,
+    pub quit_requested: bool,
+    pub login_start: bool,
+}
+
+impl Feeds {
+    pub fn get(&self, kind: FeedKind) -> &FeedStatus {
+        match kind { FeedKind::Runs => &self.runs, FeedKind::Memory => &self.memory, FeedKind::Checks => &self.checks, FeedKind::Usage => &self.usage, FeedKind::Quota => &self.quota }
+    }
+    pub fn get_mut(&mut self, kind: FeedKind) -> &mut FeedStatus {
+        match kind { FeedKind::Runs => &mut self.runs, FeedKind::Memory => &mut self.memory, FeedKind::Checks => &mut self.checks, FeedKind::Usage => &mut self.usage, FeedKind::Quota => &mut self.quota }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -326,6 +349,7 @@ pub struct MemoryEntry {
     pub confirmed: SharedString,
     /// A person rewrote the text, so it is no longer what the engine first wrote.
     pub corrected: bool,
+    pub graph: Option<crate::graph::desktop::GraphRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -458,8 +482,10 @@ pub trait Backend: 'static {
     fn recheck(&self) -> Res<()>;
     /// The user is looking at this run: read its logs and usage in full.
     fn follow(&self, session: &str) -> Res<()>;
-    /// The window is closing: end the engine, which stops every wish this app hosts, and wait at
-    /// most `wait` for that to finish. Safe to call more than once.
+    fn quit_service(&self, _stop_running: bool) -> Res<()> { Err(Failure::new("unsupported", "service quit is not supported")) }
+    fn set_login_start(&self, _on: bool) -> Res<()> { Err(Failure::new("unsupported", "login start is not supported")) }
+    /// Detach from the service, waiting at most `wait`; wishes continue running.
+    /// Safe to call more than once.
     fn shutdown(&self, _wait: Duration) {}
 }
 
@@ -492,6 +518,7 @@ pub struct AppState {
     pub evolve: EvolveState,
     pub view: Screen,
     pub runs: Vec<Run>,
+    pub mesh_graph: BTreeMap<String, crate::graph::desktop::GraphRef>,
     pub current: Option<usize>,
     pub selection: Selection,
     pub memory: Vec<MemoryEntry>,
@@ -499,6 +526,8 @@ pub struct AppState {
     pub reduce_motion: bool,
     pub composing: bool,
     pub backend: Option<Box<dyn Backend>>,
+    /// Identity of the service seam installed alongside the live backend.
+    pub(crate) service_background: Option<std::sync::Weak<dyn super::ux::seams::BackgroundService>>,
     /// Demo only: a scene name that a screen acts on at startup, so states can be captured.
     pub scene: Option<String>,
     /// Newest last. Ids only grow, so a screen can tell which ones it has already shown.
@@ -508,6 +537,9 @@ pub struct AppState {
     pub renames: HashMap<SharedString, SharedString>,
     /// Set by the details panel; the control bar takes it and opens its box with the text in it.
     pub address: Option<Address>,
+    // ux: begin state
+    pub ux: super::ux::UxState,
+    // ux: end
 }
 
 /// The run to open when none is selected: live work first, otherwise the newest.

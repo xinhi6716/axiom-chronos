@@ -1,0 +1,3 @@
+Command (run in tests/fixtures/paper/pdf): tectonic -X compile sample.tex
+Tectonic version: Tectonic 0.17.0
+Date: 2026-11-13

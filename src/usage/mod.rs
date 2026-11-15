@@ -4,8 +4,14 @@
 //! headless stream-json log: the log holds every assistant event at stream start, so its
 //! `output_tokens` are far below what was billed.
 
+pub mod laya;
 pub mod price;
+// r9-p5b begin
+pub mod extensions;
+// r9-p5b end
 pub mod quota;
+pub mod pools;
+pub mod review_stats;
 mod report;
 mod scan;
 
@@ -31,6 +37,23 @@ pub const DAY_MS: i64 = 86_400_000;
 const MAIN: &str = "main";
 const UNKNOWN_AGENT: &str = "unknown";
 
+fn no_missing<const N: usize>(missing: &[bool; N]) -> bool {
+    !missing.iter().any(|flag| *flag)
+}
+
+fn serialize_unknown<S: serde::Serializer, const N: usize>(missing: &[bool; N], names: [&str; N], serializer: S) -> Result<S::Ok, S::Error> {
+    names.into_iter().zip(missing).filter_map(|(name, missing)| missing.then_some(name)).collect::<Vec<_>>().serialize(serializer)
+}
+
+fn serialize_tally_unknown<S: serde::Serializer>(missing: &[bool; 4], serializer: S) -> Result<S::Ok, S::Error> {
+    // Call reports and existing readers store cache_read before cache_write.
+    serialize_unknown(&[missing[0], missing[2], missing[1], missing[3]], ["input", "cache_write", "cache_read", "output"], serializer)
+}
+
+fn serialize_codex_unknown<S: serde::Serializer>(missing: &[bool; 3], serializer: S) -> Result<S::Ok, S::Error> {
+    serialize_unknown(missing, ["input", "cached_input", "output"], serializer)
+}
+
 #[derive(Serialize, Default, Clone, Debug)]
 pub struct Tally {
     pub calls: u64,
@@ -48,7 +71,7 @@ pub struct Tally {
     pub gap_rewrites: u64,
     pub gap_rewrite_tokens: u64,
     pub gap_rewrite_usd: f64,
-    #[serde(skip)]
+    #[serde(rename = "unknown", skip_serializing_if = "no_missing", serialize_with = "serialize_tally_unknown")]
     pub missing: [bool; 4],
 }
 impl Tally {
@@ -105,7 +128,7 @@ pub struct CodexTokens {
     pub output: u64,
     pub reasoning_output: u64,
     pub total: u64,
-    #[serde(skip)]
+    #[serde(rename = "unknown", skip_serializing_if = "no_missing", serialize_with = "serialize_codex_unknown")]
     pub missing: [bool; 3],
 }
 impl CodexTokens {
@@ -280,7 +303,10 @@ struct Run {
 }
 impl Run {
     fn touch(&mut self, path: &Path) {
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let modified = std::fs::metadata(path)
+            .or_else(|_| std::fs::metadata(crate::storage::archive::archived_path(path)))
+            .and_then(|m| m.modified())
+            .ok();
         self.activity = self.activity.max(modified);
     }
     fn has_records(&self) -> bool {
@@ -293,31 +319,18 @@ fn io_failure(path: &Path, e: std::io::Error) -> Failure {
 }
 
 fn entries_with_suffix(dir: &Path, suffix: &str) -> Res<Vec<PathBuf>> {
-    let reader = match std::fs::read_dir(dir) {
-        Ok(reader) => reader,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io_failure(dir, e)),
-    };
-    let mut paths = Vec::new();
-    for entry in reader {
-        let path = entry.map_err(|e| io_failure(dir, e))?.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(suffix))
-        {
-            paths.push(path);
-        }
+    match crate::storage::archive::list(dir, suffix) {
+        Ok(paths) => Ok(paths),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(io_failure(dir, e)),
     }
-    paths.sort();
-    Ok(paths)
 }
 
 fn find_transcript(projects: &Path, session: &str, cwd: Option<&str>) -> Res<Option<PathBuf>> {
     let name = format!("{session}.jsonl");
     if let Some(cwd) = cwd {
         let path = projects.join(transcript_dir_name(cwd)).join(&name);
-        if path.is_file() {
+        if crate::storage::archive::exists(&path) {
             return Ok(Some(path));
         }
     }
@@ -334,16 +347,13 @@ fn find_transcript(projects: &Path, session: &str, cwd: Option<&str>) -> Res<Opt
     Ok(dirs
         .into_iter()
         .map(|d| d.join(&name))
-        .find(|p| p.is_file()))
+        .find(|p| crate::storage::archive::exists(p)))
 }
 
 /// Session identities recorded by Chronos goals and wish logs, regardless of age.
 pub fn chronos_sessions(home: &Path) -> Res<BTreeSet<String>> {
     let mut sessions = BTreeSet::new();
-    for goal in entries_with_suffix(&home.join("goals"), ".json")?
-        .into_iter()
-        .filter(|path| path.is_file())
-    {
+    for goal in entries_with_suffix(&home.join("goals"), ".json")? {
         if let Some(session) = goal.file_stem().and_then(|s| s.to_str()) {
             sessions.insert(session.to_owned());
         }
@@ -356,7 +366,7 @@ pub fn chronos_sessions(home: &Path) -> Res<BTreeSet<String>> {
     Ok(sessions)
 }
 
-fn discover(locations: &Locations, scoped: bool) -> Res<BTreeMap<String, Run>> {
+fn discover(locations: &Locations) -> Res<BTreeMap<String, Run>> {
     let mut runs = BTreeMap::<String, Run>::new();
     for log in entries_with_suffix(&locations.home.join("logs"), ".jsonl")? {
         let Some((session, cwd)) = scan::log_identity(&log) else {
@@ -368,13 +378,10 @@ fn discover(locations: &Locations, scoped: bool) -> Res<BTreeMap<String, Run>> {
         run.logs.push(log);
     }
     for goal in entries_with_suffix(&locations.home.join("goals"), ".json")? {
-        if scoped && !goal.is_file() {
-            continue;
-        }
         let Some(session) = goal.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let cwd = std::fs::read(&goal)
+        let cwd = crate::storage::archive::read(&goal)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .and_then(|v| v["cwd"].as_str().map(str::to_owned));
@@ -395,7 +402,7 @@ fn locate(locations: &Locations, session: Option<&str>) -> Res<(String, Run)> {
     if let Some(session) = session {
         base::require_slug("session", session)?;
     }
-    let mut runs = discover(locations, false)?;
+    let mut runs = discover(locations)?;
     let Some(session) = session else {
         return runs
             .into_iter()
@@ -465,7 +472,7 @@ fn subagent_sources(transcript: &Path) -> Res<Vec<SourceFile>> {
         let Some(instance) = stem.strip_prefix("agent-") else {
             continue;
         };
-        let meta = std::fs::read(path.with_extension("meta.json"))
+        let meta = crate::storage::archive::read(&path.with_extension("meta.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .unwrap_or(Value::Null);
@@ -546,6 +553,13 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
     let mut claude_code_usd = None;
 
     for source in &sources {
+        let scanned = match scan::scan(&source.path) {
+            Ok(scanned) => scanned,
+            Err(_) => {
+                skipped_lines += 1;
+                continue;
+            }
+        };
         let FileScan {
             calls,
             large_reads,
@@ -557,7 +571,7 @@ fn build(session: String, run: Run, window: Option<(i64, i64)>) -> Res<Built> {
             compactions: compacted,
             claude_code_usd: reported,
             ..
-        } = scan::scan(&source.path)?;
+        } = scanned;
         copied_calls += copied;
         compactions += compacted;
         skipped_lines += skipped;
@@ -828,7 +842,7 @@ fn period_impl(locations: &Locations, now_ms: i64, since_days: u32, scoped: bool
     let start_ms = now_ms
         .checked_sub(i64::from(since_days) * DAY_MS)
         .ok_or_else(|| Failure::new("invalid_argument", "period start is out of range"))?;
-    let mut runs = discover(locations, scoped)?;
+    let mut runs = discover(locations)?;
     if !scoped {
         let dirs = match std::fs::read_dir(&locations.projects) {
             Ok(dirs) => Some(dirs),

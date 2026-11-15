@@ -1,0 +1,8 @@
+{
+  "title": "Study",
+  "abstract": {"id":"a", "text":"The mean was {{q:q1}} [@study2020]2020.", "claims":[{"claim":"C1", "evidence":[]}]},
+  "keywords": [],
+  "sections": [{"id":"s1", "heading":"1 Results", "paragraphs":[{"id":"p1", "text":"See section {{sec:s1}} and [@study2020].", "claims":[]}]}],
+  "figures": [],
+  "tables": []
+}

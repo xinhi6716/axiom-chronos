@@ -1,0 +1,48 @@
+{
+  "title": "Study 2020",
+  "abstract": {
+    "id": "abstract",
+    "text": "An overview.",
+    "claims": []
+  },
+  "keywords": [
+    "study"
+  ],
+  "sections": [],
+  "figures": [
+    {
+      "id": "fig1",
+      "kind": "line",
+      "artifact": "data.csv",
+      "x": "time",
+      "y": [
+        "value"
+      ],
+      "error": "none",
+      "preset": "default",
+      "caption": {
+        "id": "fc",
+        "text": "The outcome in {{fig:fig1}}.",
+        "claims": []
+      }
+    }
+  ],
+  "tables": [
+    {
+      "id": "tab1",
+      "artifact": "data.csv",
+      "columns": [
+        {
+          "column": "value",
+          "header": "Value",
+          "precision": 1
+        }
+      ],
+      "caption": {
+        "id": "tc",
+        "text": "Summary in {{tab:tab1}}.",
+        "claims": []
+      }
+    }
+  ]
+}

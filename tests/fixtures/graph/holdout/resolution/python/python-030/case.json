@@ -1,0 +1,16 @@
+{
+  "id": "python-030",
+  "language": "python",
+  "feature": "dynamic_import_ambiguous",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 6,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "ambiguous"
+      }
+    }
+  ]
+}

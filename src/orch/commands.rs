@@ -3,6 +3,30 @@ use crate::base::{self, Failure, Res};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+fn check_text(summary: &serde_json::Value) -> String {
+    let tests = match summary["tests"].as_object() {
+        Some(t) => format!(
+            "tests passed={} failed={} ignored={}",
+            t["passed"], t["failed"], t["ignored"]
+        ),
+        None => "tests unknown".to_string(),
+    };
+    let mut lines = vec![tests];
+    lines.extend(
+        summary["failing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_owned),
+    );
+    lines.push(format!(
+        "output={}",
+        summary["output_file"].as_str().unwrap_or("")
+    ));
+    lines.join("\n")
+}
+
 fn cut(text: &str) -> String {
     let mut chars = text.chars();
     let mut result: String = chars.by_ref().take(240).collect();
@@ -15,6 +39,7 @@ fn cut(text: &str) -> String {
 pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
     let cmd = args.first()?.as_str();
     if ![
+        "policy",
         "ready",
         "verify",
         "accept",
@@ -27,6 +52,9 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         "handoff",
         "resume",
         "waive",
+        "schedule",
+        "activity",
+        "setup",
     ]
     .contains(&cmd)
     {
@@ -46,6 +74,117 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         };
         let has = |name: &str| args.iter().any(|s| s == name);
         match cmd {
+            "policy" => {
+                let policy = match args {
+                    [_, sub] if sub == "show" => crate::engine::policy::load(store)?,
+                    [_, sub, key, value] if sub == "set" => crate::engine::policy::set(store, key, value)?,
+                    _ => return Err(invalid("expected policy show or policy set <key> <value>")),
+                };
+                let value = serde_json::to_value(policy).expect("policy serializes");
+                Ok((0, serde_json::to_string_pretty(&value).unwrap(), value))
+            }
+            "schedule" => {
+                use super::lifecycle::scheduler;
+                let sub = args.get(1).map(String::as_str).unwrap_or("");
+                let value = match sub {
+                    "next" => {
+                        let cursor = if has("--cursor") {
+                            Some(
+                                option("--cursor")?
+                                    .parse::<u64>()
+                                    .map_err(|_| invalid("invalid cursor"))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let seconds = if has("--timeout") {
+                            option("--timeout")?
+                                .parse::<u64>()
+                                .map_err(|_| invalid("invalid timeout"))?
+                        } else {
+                            300
+                        };
+                        if seconds > 1800 {
+                            return Err(invalid("timeout must be at most 1800 seconds"));
+                        }
+                        serde_json::to_value(scheduler::next(
+                            store,
+                            cursor,
+                            std::time::Duration::from_secs(seconds),
+                        )?)
+                        .unwrap()
+                    }
+                    "claim" => {
+                        let module = args
+                            .get(2)
+                            .filter(|s| !s.starts_with("--"))
+                            .ok_or_else(|| invalid("missing module"))?;
+                        scheduler::claim(store, module)?;
+                        clear_adjudication(store, module, true)?;
+                        serde_json::json!({"claimed":module})
+                    }
+                    "release" => {
+                        let module = args
+                            .get(2)
+                            .filter(|s| !s.starts_with("--"))
+                            .ok_or_else(|| invalid("missing module"))?;
+                        scheduler::release(store, module, option("--reason")?)?;
+                        serde_json::json!({"released":module})
+                    }
+                    _ => return Err(invalid("expected schedule next, claim or release")),
+                };
+                Ok((0, value.to_string(), value))
+            }
+            "activity" => {
+                let module = option("--module")?;
+                let actor = option("--actor")?;
+                let phase = option("--phase")?;
+                let value = match args.get(1).map(String::as_str) {
+                    Some("start") => {
+                        let e = super::events::activity_start(store, module, actor, phase)?;
+                        serde_json::json!({"id":e.data["activity"]})
+                    }
+                    Some("finish") => {
+                        let id = if has("--id") {
+                            Some(option("--id")?)
+                        } else {
+                            None
+                        };
+                        let outcome = if has("--outcome") {
+                            option("--outcome")?
+                        } else {
+                            "finished"
+                        };
+                        if !["finished", "cancelled", "failed"].contains(&outcome) {
+                            return Err(invalid("invalid outcome"));
+                        }
+                        serde_json::json!({"event":super::events::activity_finish(store, module, actor, phase, id, outcome)?})
+                    }
+                    _ => return Err(invalid("expected activity start or finish")),
+                };
+                let text = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                Ok((0, text, value))
+            }
+            "setup" => {
+                let ids: Vec<String> = args.iter().skip(2).cloned().collect();
+                let statuses = match args.get(1).map(String::as_str) {
+                    Some("start") => crate::setup::start(store, Path::new(option("--repo")?))?,
+                    Some("status") => crate::setup::status(store)?,
+                    Some("keep") if !ids.is_empty() => crate::setup::keep(store, &ids)?,
+                    Some("cancel") => crate::setup::cancel(
+                        store,
+                        if ids.is_empty() { None } else { Some(&ids) },
+                        "cancelled by core",
+                    )?,
+                    _ => return Err(invalid("expected setup start, status, keep or cancel")),
+                };
+                let value = serde_json::to_value(statuses).unwrap();
+                Ok((0, value.to_string(), value))
+            }
             "report" => {
                 let repo = Path::new(option("--repo")?);
                 let module = if args.iter().any(|s| s == "--module") {
@@ -150,20 +289,20 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                 };
                 let next = next_step_for(store, unit)?;
                 let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-                let tail: String = result
-                    .output
-                    .chars()
-                    .rev()
-                    .take(2000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
+                let output_file = store.join("reports").join(format!("{unit}.verify.txt"));
+                let mut value = summary::summary(
+                    Some(result.exit_code),
+                    &result.output,
+                    Some(&output_file),
+                    None,
+                );
                 let pack_text = pack
                     .as_ref()
                     .map(|p| format!("\tpack={}", p.display()))
                     .unwrap_or_default();
-                let mut value = serde_json::json!({"exit_code":result.exit_code,"state":state,"next":next,"output":tail,"pack":pack});
+                value["state"] = serde_json::json!(state);
+                value["next"] = serde_json::json!(next);
+                value["pack"] = serde_json::json!(pack);
                 if let Some(error) = pack_error {
                     value["pack_error"] = serde_json::json!(error);
                 }
@@ -172,7 +311,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     format!(
                         "{unit}\texit={}\t{state}\t{next}{pack_text}\n{}",
                         result.exit_code,
-                        tail.trim_end()
+                        check_text(&value)
                     ),
                     value,
                 ))
@@ -208,6 +347,17 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     };
                     ("fulltest", record_full(store, repo, command)?)
                 };
+                if cmd == "accept" {
+                    let output_file = accept_output_path(store, name);
+                    let value = summary::summary(
+                        Some(result.exit_code),
+                        &result.output,
+                        Some(&output_file),
+                        None,
+                    );
+                    let text = format!("{name}\texit={}\n{}", result.exit_code, check_text(&value));
+                    return Ok((if result.exit_code == 0 { 0 } else { 1 }, text, value));
+                }
                 let tail: String = result
                     .output
                     .chars()
@@ -270,6 +420,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     }
                 })?;
                 let v = parse_verdict(&data)?;
+                crate::laya::router::observe_verdict(store, &v); // laya-shadow
                 let reviewed_unit = &v.unit;
                 if *reviewed_unit != units[0] {
                     return Err(invalid(&format!(
@@ -304,7 +455,7 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                         ),
                     ));
                 }
-                let rows = record_review(store, &units, reviewer, pass, repo)?;
+                let rows = super::evidence::record_review_with_verdict(store, &units, reviewer, pass, repo, Some(&v))?;
                 if path != default_path {
                     base::atomic_write(&default_path, data.as_bytes())
                         .map_err(|e| Failure::new("io", e.to_string()))?;
@@ -384,6 +535,9 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
                     &waive_row(number, reason, &review.commit, remaining == 0),
                 )?;
                 let state = update_unit_state(store, unit)?;
+                if remaining == 0 {
+                    clear_adjudication(store, unit, false)?;
+                }
                 Ok((
                     0,
                     format!("{unit}\twaived #{number}\t{state}\tremaining={remaining}"),
@@ -419,7 +573,11 @@ pub fn run_extra(store: &Path, args: &[String], json: bool) -> Option<Output> {
         Err(e) => Output {
             exit_code: if e.kind == "not_found" { 2 } else { 1 },
             stdout: String::new(),
-            stderr: format!("error: {}\n", e.message),
+            stderr: if cmd == "schedule" {
+                format!("error: {e}\n")
+            } else {
+                format!("error: {}\n", e.message)
+            },
         },
     })
 }

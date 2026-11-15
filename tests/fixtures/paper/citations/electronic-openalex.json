@@ -1,0 +1,25 @@
+{
+  "id": "https://openalex.org/W5",
+  "doi": "https://doi.org/10.1371/journal.pone.0000308",
+  "display_name": "A paper with an article number",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Jane Smith"
+      }
+    }
+  ],
+  "publication_year": 2007,
+  "primary_location": {
+    "source": {
+      "display_name": "PLoS ONE"
+    }
+  },
+  "biblio": {
+    "volume": "1",
+    "issue": "2",
+    "first_page": null,
+    "last_page": null,
+    "article_number": "e308"
+  }
+}

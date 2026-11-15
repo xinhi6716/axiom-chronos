@@ -1,0 +1,34 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: 已暫停: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	已就緒
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	地圖
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	來源
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	證據
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	資料集
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	匯出
+gpui_component::window_border::WindowBorder/root/research-page/research-exports-panel/research-exports-vault-status	此版本不包含知識庫與記憶功能
+gpui_component::window_border::WindowBorder/root/research-page/research-exports-panel/research-exports-repro	重現性：失敗: P0
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	<tmp>\rram\project
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 小時
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	每週
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	已用 — · 剩餘 未知
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	已用 — · 剩餘 未知
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex 並行 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	顯示阻礙事項

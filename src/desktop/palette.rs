@@ -25,6 +25,14 @@ mod accept;
 pub(super) mod menu;
 
 pub(super) const T: Table = &[
+    // --- research workspace (phase 9) ---
+    ("Research workbench", "研究查核台"),
+    // --- end research workspace (phase 9) ---
+    // ux: begin commands
+    ("Storage", "儲存空間"), ("Chat", "對話"), ("Quick task", "快速任務"), ("Plaza", "廣場討論"),
+    ("Usage for this wish", "這個願望的用量"), ("Compare usage", "比較用量"), ("Mark all read", "全部標為已讀"),
+    ("Extreme mode on", "開啟極限模式"), ("Extreme mode off", "關閉極限模式"),
+    // ux: end
     ("Search wishes, goals, modules, units and memory, or run a command", "搜尋願望、目標、模組、單元與記憶，或執行指令"),
     ("Command", "指令"),
     ("Wish", "願望"),
@@ -484,6 +492,9 @@ pub(super) fn marked(text: SharedString, positions: &[usize], strong: Hsla) -> S
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Command {
+    // --- research workspace (phase 9) ---
+    Research,
+    // --- end research workspace (phase 9) ---
     NewWish,
     Open(Screen),
     ToggleTheme,
@@ -497,6 +508,9 @@ pub(super) enum Command {
     ToggleDensity,
     ToggleOnTop,
     Undo,
+    // ux: begin commands
+    Storage, Chat, QuickTask, Plaza, UsageForWish, CompareUsage, MarkAllRead, ExtremeOn, ExtremeOff,
+    // ux: end
 }
 
 /// Where choosing a result goes. Runs, modules and units are named by id, so a refresh that
@@ -619,7 +633,7 @@ pub(super) fn goal_lead(run: &Run, goal: &GoalItem) -> Option<usize> {
 }
 
 /// Everything the palette can find, in the order it is listed before anything is typed.
-pub(super) fn index(state: &AppState, lang: Lang, dark: bool) -> Vec<Item> {
+pub(super) fn index(state: &AppState, lang: Lang, dark: bool, prefs: &super::ux::prefs::UxPrefs) -> Vec<Item> {
     let t = |en: &'static str| translate(lang, T, en);
     let mut items = vec![command("Make a new wish", Command::NewWish, IconKind::Plus, Some(keys_of(Global::NewWish)), lang)];
     if let Some(run) = state.run() {
@@ -667,6 +681,20 @@ pub(super) fn index(state: &AppState, lang: Lang, dark: bool) -> Vec<Item> {
         items.push(command(title, target, icon, keys, lang));
     }
     items.push(command("Keyboard shortcuts", Command::Shortcuts, IconKind::Keys, Some(keys_of(Global::Shortcuts)), lang));
+    // --- research workspace (phase 9) ---
+    if state.ux.research.research_home.is_some() { items.push(command("Research workbench", Command::Research, IconKind::Module, None, lang)); }
+    // --- end research workspace (phase 9) ---
+    // ux: begin commands
+    if state.ux.seams.storage.is_some() { items.push(command("Storage", Command::Storage, IconKind::Settings, None, lang)); }
+    if state.ux.seams.modes.is_some() {
+        for (title, target, icon) in [("Chat",Command::Chat,IconKind::Run),("Quick task",Command::QuickTask,IconKind::Goal),("Plaza",Command::Plaza,IconKind::Module)] { items.push(command(title,target,icon,None,lang)); }
+    }
+    if state.run().is_some() { items.push(command("Usage for this wish",Command::UsageForWish,IconKind::Usage,None,lang)); }
+    if state.ux.usage_sessions.iter().map(|s| &s.wish).collect::<std::collections::HashSet<_>>().len() >= 2 { items.push(command("Compare usage",Command::CompareUsage,IconKind::Usage,None,lang)); }
+    if super::wishes::read_state::unread_count(&state.runs,prefs) > 0 { items.push(command("Mark all read",Command::MarkAllRead,IconKind::Wishes,None,lang)); }
+    let (title, target) = if prefs.extreme { ("Extreme mode off",Command::ExtremeOff) } else { ("Extreme mode on",Command::ExtremeOn) };
+    items.push(command(title,target,IconKind::Settings,None,lang));
+    // ux: end
 
     for (i, run) in state.runs.iter().enumerate() {
         let current = state.current == Some(i);
@@ -1001,7 +1029,7 @@ impl Palette {
         let lang = *cx.global::<Lang>();
         let dark = cx.theme().is_dark();
         self.keep = self.selected_target();
-        let items = Arc::new(index(self.state.read(cx), lang, dark));
+        let items = Arc::new(index(self.state.read(cx), lang, dark, &super::settings::Store::current(cx).ux));
         // The shown results index the old list until the search answers, so they move with it now.
         self.hits = remap_hits(&self.items, &self.hits, &items);
         self.selected = self.selected.min(self.hits.len().saturating_sub(1));
@@ -1488,7 +1516,7 @@ mod tests {
     #[test]
     fn the_empty_query_lists_commands_then_recent_wishes() {
         let state = demo::state();
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let hits = search(&items, "  ", LIMIT);
         let kinds: Vec<Kind> = hits.iter().map(|hit| items[hit.item].kind).collect();
         let first_wish = kinds.iter().position(|k| *k == Kind::Wish).expect("wishes listed");
@@ -1500,7 +1528,7 @@ mod tests {
     #[test]
     fn one_box_finds_every_kind_of_thing() {
         let state = demo::state();
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let first_kind = |query: &str| search(&items, query, LIMIT).first().map(|hit| items[hit.item].kind);
         assert_eq!(first_kind("new wish"), Some(Kind::Command));
         assert_eq!(first_kind("pdftext"), Some(Kind::Module));
@@ -1514,7 +1542,7 @@ mod tests {
     #[test]
     fn every_word_must_be_found_somewhere() {
         let state = demo::state();
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let hits = search(&items, "read ml_hfo2", LIMIT);
         assert!(!hits.is_empty());
         for hit in &hits {
@@ -1528,7 +1556,7 @@ mod tests {
     #[test]
     fn memory_bodies_are_searched_for_words_not_scattered_letters() {
         let state = demo::state();
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let memory_titles = |query: &str| -> Vec<String> {
             search(&items, query, LIMIT).iter().filter(|h| items[h.item].kind == Kind::Memory).map(|h| items[h.item].title.to_string()).collect()
         };
@@ -1543,14 +1571,14 @@ mod tests {
         let twin = state.runs[0].clone();
         state.runs.push(Run { session: "twin".into(), ..twin });
         state.current = Some(0);
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let hits = search(&items, "pdftext", LIMIT);
         let modules: Vec<&Item> = hits.iter().map(|h| &items[h.item]).filter(|i| i.kind == Kind::Module).collect();
         assert!(modules.len() >= 2, "the demo runs share their modules");
         assert!(modules[0].current && modules[1..].iter().all(|m| !m.current));
         assert_eq!(modules[0].target, Target::Module(state.runs[0].session.clone(), "pdftext".into()));
         state.current = Some(5);
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let first = search(&items, "pdftext", LIMIT).into_iter().map(|h| &items[h.item]).find(|i| i.kind == Kind::Module).unwrap();
         assert_eq!(first.target, Target::Module("twin".into(), "pdftext".into()));
     }
@@ -1558,7 +1586,7 @@ mod tests {
     #[test]
     fn equal_scores_keep_the_index_order() {
         let state = demo::state();
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let hits = search(&items, "verified", LIMIT);
         for pair in hits.windows(2) {
             assert!(pair[0].score > pair[1].score || pair[0].item < pair[1].item);
@@ -1573,7 +1601,7 @@ mod tests {
             run.session = format!("copy-{i}").into();
             state.runs.push(run);
         }
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         assert!(items.len() > 1000);
         assert_eq!(search(&items, "e", 25).len(), 25);
     }
@@ -1585,7 +1613,7 @@ mod tests {
             state.runs[0].status = status;
             state.runs[0].hosted = hosted;
             state.current = Some(0);
-            index(&state, Lang::En, true)
+            index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default())
                 .into_iter()
                 .filter_map(|item| match item.target {
                     Target::Command(c @ (Command::Stop | Command::Resume)) => Some(c),
@@ -1602,13 +1630,13 @@ mod tests {
         assert_eq!(commands(RunStatus::Done, true), vec![]);
         let mut none = demo::state();
         none.current = None;
-        assert!(!index(&none, Lang::En, true).iter().any(|i| matches!(i.target, Target::Command(Command::Stop | Command::Resume))));
+        assert!(!index(&none, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default()).iter().any(|i| matches!(i.target, Target::Command(Command::Stop | Command::Resume))));
     }
 
     #[test]
     fn the_theme_command_offers_the_other_theme() {
         let state = demo::state();
-        let theme = |dark: bool| index(&state, Lang::En, dark).into_iter().find(|i| i.target == Target::Command(Command::ToggleTheme)).unwrap().title;
+        let theme = |dark: bool| index(&state, Lang::En, dark, &crate::desktop::ux::prefs::UxPrefs::default()).into_iter().find(|i| i.target == Target::Command(Command::ToggleTheme)).unwrap().title;
         assert_eq!(theme(true).as_ref(), "Switch to the light theme");
         assert_eq!(theme(false).as_ref(), "Switch to the dark theme");
     }
@@ -1616,7 +1644,7 @@ mod tests {
     #[test]
     fn commands_are_found_by_their_english_words_in_chinese_too() {
         let state = demo::state();
-        let items = index(&state, Lang::ZhTw, true);
+        let items = index(&state, Lang::ZhTw, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let first = |q: &str| search(&items, q, LIMIT).first().map(|h| items[h.item].target.clone());
         assert!(search(&items, "go to memory", LIMIT).iter().any(|h| items[h.item].target == Target::Command(Command::Open(Screen::Memory))));
         assert_eq!(first("前往記憶"), Some(Target::Command(Command::Open(Screen::Memory))));
@@ -1645,7 +1673,7 @@ mod tests {
             run.session = format!("copy-{i}").into();
             state.runs.push(run);
         }
-        let items = index(&state, Lang::En, true);
+        let items = index(&state, Lang::En, true, &crate::desktop::ux::prefs::UxPrefs::default());
         let started = std::time::Instant::now();
         for query in ["r", "re", "rea", "read", "read b", "zz"] {
             search(&items, query, LIMIT);

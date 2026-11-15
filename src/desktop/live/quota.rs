@@ -3,6 +3,19 @@ use crate::{base::{self, Failure, Res}, codex::AppServer};
 use serde_json::Value;
 use std::{sync::{Arc, Mutex, mpsc::Receiver}, time::{Duration, Instant}};
 
+/// Rate limits are read again at least this often.
+const REFRESH_SECS: u64 = 180;
+/// While runs are active and have changed since the last read, they are read again this often.
+const ACTIVE_REFRESH_SECS: u64 = 60;
+
+pub(super) fn pool_snapshot(home: &std::path::Path, now_ms: i64) -> Vec<crate::usage::pools::PoolStatus> {
+    crate::usage::pools::status(home, now_ms).unwrap_or_else(|_| super::super::quota::unknown_pools())
+}
+
+pub fn publish_pools(statuses: Vec<crate::usage::pools::PoolStatus>, cx: &mut gpui_kit::App) {
+    cx.set_global(crate::usage::pools::PoolStrip(statuses));
+}
+
 pub(super) trait RateSource: Send + Sync {
     fn read(&self) -> Res<Value>;
     fn generation(&self) -> u64;
@@ -61,11 +74,11 @@ impl RateSource for SharedCodex {
 /// `last` records the start, generation and runs revision of the previous read.
 pub(super) fn due(now: Instant, started: Instant, last: Option<(Instant, u64, u64)>, generation: u64, revision: u64, active: bool) -> bool {
     match last {
-        None => active || now.saturating_duration_since(started) >= Duration::from_secs(180),
+        None => active || now.saturating_duration_since(started) >= Duration::from_secs(REFRESH_SECS),
         Some((at, old_generation, old_revision)) => {
             let elapsed = now.saturating_duration_since(at);
-            generation != old_generation || elapsed >= Duration::from_secs(180)
-                || (active && revision != old_revision && elapsed >= Duration::from_secs(60))
+            generation != old_generation || elapsed >= Duration::from_secs(REFRESH_SECS)
+                || (active && revision != old_revision && elapsed >= Duration::from_secs(ACTIVE_REFRESH_SECS))
         }
     }
 }
@@ -73,6 +86,28 @@ pub(super) fn due(now: Instant, started: Instant, last: Option<(Instant, u64, u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_snapshot_reads_home_and_falls_back_on_error() {
+        use crate::usage::pools::{self, Pool, Remaining};
+        let home = tempfile::tempdir().unwrap();
+        pools::charge(home.path(), "gemini-4-hydrogen-xhigh", Some(12_300), None, "test").unwrap();
+        pools::mark_exhausted(home.path(), Pool::Argon, 10_000, "test").unwrap();
+        let statuses = pool_snapshot(home.path(), 1_000);
+        assert_eq!(statuses[0].used_tokens, Some(12_300));
+        assert_eq!(statuses[0].cost_usd, None);
+        assert_eq!(statuses[1].exhausted_until_ms, Some(10_000));
+        std::fs::write(home.path().join("usage/pools.jsonl"), "bad json\n").unwrap();
+        let statuses = pool_snapshot(home.path(), 1_000);
+        assert_eq!(statuses.len(), 2);
+        for (status, pool) in statuses.iter().zip(Pool::ALL) {
+            assert_eq!(status.pool, pool);
+            assert_eq!(status.used_tokens, None);
+            assert_eq!(status.cost_usd, None);
+            assert_eq!(status.remaining, Remaining::Unknown);
+            assert_eq!(status.exhausted_until_ms, None);
+        }
+    }
 
     #[test]
     fn refresh_boundaries() {

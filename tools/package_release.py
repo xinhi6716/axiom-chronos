@@ -8,6 +8,14 @@ import tarfile
 import zipfile
 
 INSTALLERS = Path(__file__).resolve().parent / 'installers'
+PAYLOAD_FILES = [
+    "tools/installers/install.ps1",
+    "tools/installers/uninstall.ps1",
+    "tools/installers/install.sh",
+    "tools/installers/INSTALL-windows.txt",
+    "tools/installers/INSTALL-linux.txt"
+]
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def package_release(version, out_dir, windows_axiom=None, windows_chronos=None,
@@ -29,15 +37,15 @@ def package_release(version, out_dir, windows_axiom=None, windows_chronos=None,
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             z.write(windows_axiom, 'axiom.exe')
             z.write(windows_chronos, 'chronos.exe')
-            for name in ('install.ps1', 'uninstall.ps1'):
-                z.write(INSTALLERS / name, name)
+            for source in PAYLOAD_FILES[:2]:
+                z.write(ROOT / source, Path(source).name)
             z.writestr('INSTALL.txt', install_text('windows', version))
         archives.append(archive)
     if linux_axiom:
         archive = out_dir / f'axiom-chronos-{version}-linux-x64.tar.gz'
         with tarfile.open(archive, 'w:gz') as tar:
             for source, name, mode in ((Path(linux_axiom), 'axiom', 0o755),
-                                       (INSTALLERS / 'install.sh', 'install.sh', 0o755)):
+                                       (ROOT / PAYLOAD_FILES[2], 'install.sh', 0o755)):
                 info = tar.gettarinfo(str(source), arcname=name)
                 info.mode = mode
                 with source.open('rb') as stream:
@@ -63,7 +71,8 @@ def package_release(version, out_dir, windows_axiom=None, windows_chronos=None,
 
 
 def install_text(platform, version):
-    return (INSTALLERS / f'INSTALL-{platform}.txt').read_text(encoding='utf-8').replace('@VERSION@', version)
+    source = {'windows': PAYLOAD_FILES[3], 'linux': PAYLOAD_FILES[4]}[platform]
+    return (ROOT / source).read_text(encoding='utf-8').replace('@VERSION@', version)
 
 
 def main():

@@ -48,7 +48,7 @@ impl Fixture {
             let brief = store.join(format!("{id}.brief"));
             fs::write(
                 &brief,
-                format!("GOAL build\nSCOPE src/mod.py\nVERIFY {verify}\n"),
+                format!("GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY {verify}\n"),
             )
             .unwrap();
             rows.push_str(&format!("{id}\tm\tpending\t\t\t\t{}\n", brief.display()));
@@ -96,6 +96,7 @@ impl Fixture {
         )
         .unwrap();
         g.project = Some("demo".into());
+        g.wish_id = None;
         fs::write(
             self.temp.path().join("goals/session.json"),
             serde_json::to_vec(&g).unwrap(),
@@ -147,10 +148,8 @@ fn auto_accept_and_verify_failure() {
     assert_eq!(f.accepts("one"), 1);
     let f = Fixture::new(&[("one", "exit 1")], "echo accepted");
     let result = f.run("one");
-    assert_eq!(
-        result["accept"],
-        json!({"ran":false,"reason":"not_built","detail":""})
-    );
+    assert_eq!(result["accept"]["reason"], "not_built");
+    assert!(result["accept"]["output_file"].is_null());
     assert_eq!(f.accepts("one"), 0);
 }
 
@@ -209,7 +208,7 @@ fn registers_the_unit_in_the_dispatch_call() {
     let f = Fixture::new(&[], "echo accepted");
     fs::create_dir_all(f.store.join("briefs")).unwrap();
     let brief = f.store.join("briefs/new.md");
-    fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+    fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
     let dispatch = |track: &str| {
         call(
             &f.bridge,

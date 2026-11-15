@@ -17,6 +17,15 @@ SPEC.loader.exec_module(PACKAGE)
 
 
 class PackageReleaseTest(unittest.TestCase):
+    def test_payload_files_are_declared_and_exist(self):
+        self.assertEqual(PACKAGE.PAYLOAD_FILES, [
+            'tools/installers/install.ps1', 'tools/installers/uninstall.ps1',
+            'tools/installers/install.sh', 'tools/installers/INSTALL-windows.txt',
+            'tools/installers/INSTALL-linux.txt',
+        ])
+        for path in PACKAGE.PAYLOAD_FILES:
+            self.assertTrue((ROOT / path).is_file(), path)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='chronos-package-')
         self.addCleanup(self.temp.cleanup)

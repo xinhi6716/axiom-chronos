@@ -5,7 +5,11 @@ use axiom::{
     goal, orch,
 };
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 struct Fixture {
     temp: tempfile::TempDir,
@@ -15,12 +19,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    fn new(goal: Option<(&str, &str, &str)>) -> Self {
         let temp = common::temp();
         let repo = temp.path().join("repo");
-        let store = orch::store_for(temp.path(), "demo").unwrap();
         fs::create_dir_all(repo.join("src")).unwrap();
-        fs::create_dir_all(store.join("inbox")).unwrap();
         fs::write(repo.join("src/mod.py"), "fixture").unwrap();
         for args in [
             vec!["init", "-q"],
@@ -42,21 +44,10 @@ impl Fixture {
                 .unwrap()
                 .success());
         }
-        fs::write(
-            store.join("modules.md"),
-            "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
-        )
-        .unwrap();
-        let brief = store.join("one.brief");
-        fs::write(&brief, "GOAL build\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
-        fs::write(
-            store.join("units.tsv"),
-            format!(
-                "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\none\tm\tpending\t\t\t\t{}\n",
-                brief.to_string_lossy().replace('\\', "/")
-            ),
-        )
-        .unwrap();
+        if let Some((wish, status, project)) = goal {
+            Self::write_goal(temp.path(), &repo, wish, status, project);
+        }
+        let store = Self::setup_store(temp.path());
         let mut config = Config::from_env();
         config.data_home = Some(temp.path().into());
         config.codex = Ok(common::fake("fake_codex"));
@@ -71,18 +62,33 @@ impl Fixture {
         }
     }
 
-    fn write_goal(&self, wish: &str, status: &str, project: &str) {
-        let mut g = goal::open(
-            self.temp.path(),
-            "session",
-            wish,
-            Some(self.repo.to_str().unwrap()),
+    fn setup_store(home: &Path) -> PathBuf {
+        let store = orch::store_for(home, "demo").unwrap();
+        fs::create_dir_all(store.join("inbox")).unwrap();
+        fs::write(
+            store.join("modules.md"),
+            "## m\nPURPOSE x\nPATHS src/mod.py\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\n",
         )
         .unwrap();
+        let brief = store.join("one.brief");
+        fs::write(&brief, "GOAL build\nRISK trivial\nSCOPE src/mod.py\nVERIFY echo ok\n").unwrap();
+        fs::write(
+            store.join("units.tsv"),
+            format!(
+                "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\none\tm\tpending\t\t\t\t{}\n",
+                brief.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        store
+    }
+
+    fn write_goal(home: &Path, repo: &Path, wish: &str, status: &str, project: &str) {
+        let mut g = goal::open(home, "session", wish, Some(repo.to_str().unwrap())).unwrap();
         g.project = Some(project.into());
         g.status = status.into();
         fs::write(
-            self.temp.path().join("goals/session.json"),
+            home.join("goals/session.json"),
             serde_json::to_vec(&g).unwrap(),
         )
         .unwrap();
@@ -136,8 +142,7 @@ fn every_wish_requires_astra_before_dispatch() {
         "[no-architect] [astra] build",
         "[creative] build",
     ] {
-        let f = Fixture::new();
-        f.write_goal(wish, "active", "demo");
+        let f = Fixture::new(Some((wish, "active", "demo")));
         f.assert_gated();
         f.prerequisites();
         f.assert_completed();
@@ -152,10 +157,7 @@ fn runs_without_active_goal_are_not_gated() {
         Some(("blocked", "demo")),
         Some(("active", "other")),
     ] {
-        let f = Fixture::new();
-        if let Some((status, project)) = goal {
-            f.write_goal("build", status, project);
-        }
+        let f = Fixture::new(goal.map(|(status, project)| ("build", status, project)));
         assert!(!f.store.join("astra").exists());
         f.assert_completed();
         assert!(!f.store.join("astra").exists());
@@ -164,7 +166,7 @@ fn runs_without_active_goal_are_not_gated() {
 
 #[test]
 fn legacy_goal_json_and_resume_keep_gate() {
-    let f = Fixture::new();
+    let mut f = Fixture::new(None);
     fs::create_dir_all(f.temp.path().join("goals")).unwrap();
     let file = f.temp.path().join("goals/session.json");
     let raw = serde_json::to_vec(&json!({"wish":"[astra] 修理", "cwd": f.repo, "status":"active", "amendments":[], "project":"demo", "extra":42})).unwrap();
@@ -174,7 +176,8 @@ fn legacy_goal_json_and_resume_keep_gate() {
     assert!(!goal::creative_requested(&g));
     f.assert_gated();
     assert_eq!(fs::read(&file).unwrap(), raw);
-    f.write_goal("build", "active", "demo");
+    Fixture::write_goal(f.temp.path(), &f.repo, "build", "active", "demo");
+    f.store = Fixture::setup_store(f.temp.path());
     goal::interrupt(f.temp.path(), "session", "crash").unwrap();
     goal::reopen(f.temp.path(), "session").unwrap();
     f.assert_gated();

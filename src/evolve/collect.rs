@@ -68,6 +68,22 @@ fn paths(dir: &Path, gaps: &mut Vec<Gap>, family: &str) -> Vec<PathBuf> {
         }
     }
 }
+fn archived_paths(dir: &Path, suffixes: &[&str], gaps: &mut Vec<Gap>, family: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for suffix in suffixes {
+        match crate::storage::archive::list(dir, suffix) {
+            Ok(paths) => out.extend(paths),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
+            Err(e) => {
+                gap(gaps, family, &dir.display().to_string(), e);
+                return vec![];
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
 fn gap(gaps: &mut Vec<Gap>, family: &str, location: &str, reason: impl ToString) {
     gaps.push(Gap {
         family: family.into(),
@@ -126,7 +142,7 @@ fn event(problem: String, detail: String, snapshot: bool, source: Source) -> Eve
     }
 }
 fn modified(path: &Path) -> Option<i64> {
-    let time = fs::metadata(path).ok()?.modified().ok()?;
+    let time = fs::metadata(path).or_else(|_| fs::metadata(crate::storage::archive::archived_path(path))).ok()?.modified().ok()?;
     match time.duration_since(UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_millis()).ok(),
         Err(e) => i64::try_from(e.duration().as_millis()).ok()?.checked_neg(),
@@ -190,10 +206,10 @@ fn parse_ms(s: &str) -> Option<i64> {
     )
 }
 fn log_has_session(path: &Path, session: &str) -> bool {
-    let Ok(file) = fs::File::open(path) else {
+    let Ok(file) = crate::storage::archive::read(path) else {
         return false;
     };
-    BufReader::new(file)
+    BufReader::new(std::io::Cursor::new(file))
         .lines()
         .take(20)
         .filter_map(Result::ok)
@@ -212,7 +228,7 @@ fn json_file<T: serde::de::DeserializeOwned>(
     gaps: &mut Vec<Gap>,
 ) -> Option<T> {
     let loc = path.display().to_string();
-    match fs::read(path)
+    match crate::storage::archive::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
     {
@@ -287,16 +303,16 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
                             .join(format!("{}.jsonl", run.session))
                     });
                     direct
-                        .filter(|p| p.is_file())
+                        .filter(|p| crate::storage::archive::exists(p))
                         .or_else(|| {
                             paths(&inputs.projects, &mut out.gaps, "usage")
                                 .into_iter()
                                 .map(|p| p.join(format!("{}.jsonl", run.session)))
-                                .find(|p| p.is_file())
+                                .find(|p| crate::storage::archive::exists(p))
                         })
                         .unwrap_or_else(|| inputs.projects.clone())
                 } else {
-                    paths(&inputs.home.join("logs"), &mut out.gaps, "usage")
+                    archived_paths(&inputs.home.join("logs"), &[".jsonl"], &mut out.gaps, "usage")
                         .into_iter()
                         .find(|p| log_has_session(p, &run.session))
                         .unwrap_or_else(|| inputs.home.join("logs"))
@@ -359,7 +375,7 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
                             .with_extension("")
                             .join("subagents")
                             .join(format!("agent-{instance}.jsonl"));
-                        if agent_file.is_file() {
+                        if crate::storage::archive::exists(&agent_file) {
                             &agent_file
                         } else {
                             &file
@@ -413,10 +429,7 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
     out.sources.push(status("usage", usage_samples));
     let mut dirs = Vec::new();
     let mut goal_samples = 0;
-    for path in paths(&inputs.home.join("goals"), &mut out.gaps, "goal")
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-    {
+    for path in archived_paths(&inputs.home.join("goals"), &[".json"], &mut out.gaps, "goal") {
         goal_samples += 1;
         let loc = path.display().to_string();
         let Some(goal): Option<Goal> = json_file(&path, "goal", &mut out.gaps) else {
@@ -458,21 +471,14 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
     }
     out.sources.push(status("goal", goal_samples));
     let (mut orch_samples, mut review_samples, mut handoff_samples) = (0, 0, 0);
-    for store in paths(&inputs.home.join("orchestrate"), &mut out.gaps, "orch")
-        .into_iter()
-        .filter(|p| p.is_dir())
-    {
-        let project = store
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        for path in paths(&store.join("reports"), &mut out.gaps, "orch") {
+    let projects = paths(&inputs.home.join("orchestrate"), &mut out.gaps, "orch");
+    let mut collect_store = |store: &Path, project: String| {
+        for path in archived_paths(&store.join("reports"), &[".evidence.tsv", ".verdict.json"], &mut out.gaps, "orch") {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let loc = path.display().to_string();
             if let Some(unit) = name.strip_suffix(".evidence.tsv") {
                 orch_samples += 1;
-                let text = match fs::read_to_string(&path) {
+                let text = match crate::storage::archive::read_to_string(&path) {
                     Ok(t) => t,
                     Err(e) => {
                         gap(&mut out.gaps, "orch", &loc, e);
@@ -594,11 +600,9 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
         }
         let handoffs = store.join("handoffs");
         let wish = handoffs.join("wish.json");
-        let mut files = if wish.exists() { vec![wish] } else { vec![] };
+        let mut files = if crate::storage::archive::exists(&wish) { vec![wish] } else { vec![] };
         files.extend(
-            paths(&handoffs.join("module"), &mut out.gaps, "handoff")
-                .into_iter()
-                .filter(|p| p.extension().is_some_and(|e| e == "json")),
+            archived_paths(&handoffs.join("module"), &[".json"], &mut out.gaps, "handoff"),
         );
         for path in files {
             handoff_samples += 1;
@@ -648,17 +652,28 @@ pub fn collect(inputs: &Inputs) -> Res<Collected> {
                 out.events.push(e);
             }
         }
+    };
+    for project_dir in projects.into_iter().filter(|p| p.is_dir()) {
+        let project = project_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        collect_store(&project_dir, project.clone());
+        for store in crate::orch::wish_stores(&project_dir) {
+            collect_store(&store, project.clone());
+        }
     }
     out.sources.push(status("orch", orch_samples));
     out.sources.push(status("handoff", handoff_samples));
     out.sources.push(status("review", review_samples));
     let hook = inputs.home.join("hook/refusals.jsonl");
     let mut hook_status = status("hook", 0);
-    if !hook.exists() {
+    if !crate::storage::archive::exists(&hook) {
         hook_status.state = "not logged".into();
     } else {
         let sessions = usage::chronos_sessions(&inputs.home)?;
-        match fs::read_to_string(&hook) {
+        match crate::storage::archive::read_to_string(&hook) {
             Ok(text) => {
                 for (i, line) in text.lines().enumerate() {
                     if line.trim().is_empty() {

@@ -1,0 +1,958 @@
+//! Settings store, view memory and UX preferences.
+use crate::desktop::i18n::{self, Lang};
+use crate::desktop::layout::window;
+use crate::desktop::model::{AppState, Screen};
+use crate::desktop::theme::{self, ThemeMode};
+pub use crate::desktop::theme::Density;
+use crate::desktop::ux::ReadFilter;
+use crate::desktop::ux::seams::ModeKind;
+use gpui_kit::*;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub use crate::codex::slots::{Runtime, DEFAULT, parse, load_runtime, save_runtime};
+pub use crate::engine::policy::Models;
+
+pub fn axiom_home() -> PathBuf { crate::base::axiom_home() }
+pub fn command_exists(var: &str, cmd: &str) -> bool { crate::base::resolve_command(var, cmd).is_ok() }
+pub fn on_path(cmd: &str) -> Option<String> { crate::base::on_path(cmd) }
+
+pub struct PlainWordsApply(pub fn(bool, &mut App));
+impl Global for PlainWordsApply {}
+
+pub fn login_start(state: &AppState) -> bool { state.feeds.login_start }
+pub fn set_login_start(state: &mut AppState, on: bool) {
+    let result = state.backend.as_ref().map(|backend| backend.set_login_start(on));
+    match result {
+        Some(Ok(())) => (),
+        Some(Err(error)) => state.report(crate::desktop::model::Action::Engine, None, error.message),
+        None => state.report(crate::desktop::model::Action::Engine, None, "Not connected to the engine."),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadMark {
+    pub key: u64,
+    pub archived: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UxPrefs {
+    pub extreme: bool,
+    pub read: BTreeMap<String, ReadMark>,
+    pub read_filter: ReadFilter,
+    pub usage_wish: Option<String>,
+    pub usage_compare: Option<String>,
+    pub drafts: BTreeMap<String, String>,
+    pub draft_ids: BTreeMap<String, String>,
+    pub last_mode: ModeKind,
+}
+impl UxPrefs {
+    pub fn parse(v: &Value) -> Self {
+        let string = |key| v.get(key).and_then(Value::as_str).map(str::to_owned);
+        Self {
+            extreme: v.get("extreme").and_then(Value::as_bool).unwrap_or(false),
+            read: v
+                .get("read")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| {
+                            Some((
+                                k.clone(),
+                                ReadMark {
+                                    key: v.get("key")?.as_u64()?,
+                                    archived: v.get("archived")?.as_bool()?,
+                                },
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            read_filter: match string("read_filter").as_deref() {
+                Some("unread") => ReadFilter::Unread,
+                Some("archived") => ReadFilter::Archived,
+                _ => ReadFilter::All,
+            },
+            usage_wish: string("usage_wish"),
+            usage_compare: string("usage_compare"),
+            drafts: v
+                .get("drafts")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            draft_ids: v
+                .get("draft_ids")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            last_mode: match string("last_mode").as_deref() {
+                Some("chat") => ModeKind::Chat,
+                Some("quick_task") => ModeKind::QuickTask,
+                Some("plaza") => ModeKind::Plaza,
+                _ => ModeKind::Wish,
+            },
+        }
+    }
+    pub fn to_json(&self) -> Value {
+        let read: serde_json::Map<String, Value> = self
+            .read
+            .iter()
+            .map(|(k, v)| (k.clone(), json!({"key":v.key,"archived":v.archived})))
+            .collect();
+        json!({"extreme":self.extreme,"read":read,"read_filter":match self.read_filter { ReadFilter::All=>"all",ReadFilter::Unread=>"unread",ReadFilter::Archived=>"archived" },"usage_wish":self.usage_wish,"usage_compare":self.usage_compare,"drafts":self.drafts,"draft_ids":self.draft_ids,"last_mode":match self.last_mode { ModeKind::Wish=>"wish",ModeKind::Chat=>"chat",ModeKind::QuickTask=>"quick_task",ModeKind::Plaza=>"plaza" }})
+    }
+    pub fn draft_client_id(&mut self, session: &str, make: impl FnOnce() -> String) -> String {
+        self.draft_ids.entry(session.to_owned()).or_insert_with(make).clone()
+    }
+    pub fn rotate_draft_client_id(&mut self, session: &str, id: String) {
+        self.draft_ids.insert(session.to_owned(), id);
+    }
+    pub fn clear_draft(&mut self, session: &str) {
+        self.drafts.remove(session);
+        self.draft_ids.remove(session);
+    }
+}
+
+const FILE_NAME: &str = "app-settings.json";
+const MAX_RECENT_PROJECTS: usize = 12;
+/// Long enough that dragging a window does not write on every step.
+const SAVE_DELAY_MILLIS: u64 = 500;
+const SAVE_DELAY: Duration = Duration::from_millis(SAVE_DELAY_MILLIS);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LanguageChoice {
+    #[default]
+    System,
+    ZhTw,
+    English,
+}
+
+impl LanguageChoice {
+    pub fn resolve(self) -> Lang {
+        match self {
+            Self::System => i18n::system_lang(),
+            Self::ZhTw => Lang::ZhTw,
+            Self::English => Lang::En,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    pub fn resolve(self, system: WindowAppearance) -> ThemeMode {
+        match self {
+            Self::System => gpui_kit::component::ThemeMode::from(system).into(),
+            Self::Light => ThemeMode::Light,
+            Self::Dark => ThemeMode::Dark,
+        }
+    }
+}
+
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusPanel {
+    Graph,
+    Checklist,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowMode {
+    #[default]
+    Full,
+    Focus(FocusPanel),
+    Mini,
+}
+impl WindowMode {
+    pub fn toggle_focus(self, panel: FocusPanel) -> Self {
+        if self == Self::Focus(panel) {
+            Self::Full
+        } else {
+            Self::Focus(panel)
+        }
+    }
+    pub fn toggle_mini(self) -> Self {
+        if self == Self::Mini {
+            Self::Full
+        } else {
+            Self::Mini
+        }
+    }
+    pub fn back_to_full(self) -> Self {
+        Self::Full
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoardChoice {
+    #[default]
+    Luna,
+    Haiku,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnWidths {
+    pub checklist: f32,
+    pub details: f32,
+}
+impl ColumnWidths {
+    /// Ranges are expected to be non-empty and have finite endpoints.
+    pub fn clamped(
+        self,
+        available: f32,
+        checklist: Range<f32>,
+        details: Range<f32>,
+        graph_min: f32,
+    ) -> Self {
+        // Range has an exclusive end; keep even an oversized saved width inside it.
+        let upper = |end: f32| {
+            if end == 0.0 {
+                -f32::from_bits(1)
+            } else if end > 0.0 {
+                f32::from_bits(end.to_bits() - 1)
+            } else {
+                f32::from_bits(end.to_bits() + 1)
+            }
+        };
+        let bound = |v: f32, range: &Range<f32>| {
+            if v.is_finite() {
+                v.clamp(range.start, upper(range.end))
+            } else {
+                range.start
+            }
+        };
+        let mut a = bound(self.checklist, &checklist);
+        let mut b = bound(self.details, &details);
+        let available = if available.is_finite() {
+            available
+        } else {
+            0.0
+        };
+        let graph_min = if graph_min.is_finite() {
+            graph_min.max(0.0)
+        } else {
+            0.0
+        };
+        let excess = (a as f64 + b as f64 - (available as f64 - graph_min as f64)).max(0.0);
+        let room_a = (a as f64 - checklist.start as f64).max(0.0);
+        let room_b = (b as f64 - details.start as f64).max(0.0);
+        let room = room_a + room_b;
+        if room > 0.0 {
+            let fraction = (excess / room).min(1.0);
+            a = (a as f64 - room_a * fraction) as f32;
+            b = (b as f64 - room_b * fraction) as f32;
+        }
+        Self {
+            checklist: a.clamp(checklist.start, upper(checklist.end)),
+            details: b.clamp(details.start, upper(details.end)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewMemory {
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub scroll: f32,
+    pub selected: Option<String>,
+}
+impl ViewMemory {
+    fn sanitize(&mut self) {
+        for text in [&mut self.filter, &mut self.sort, &mut self.selected] {
+            if text.as_ref().is_some_and(|s| s.chars().count() > 200) {
+                *text = None;
+            }
+        }
+        if !self.scroll.is_finite() || self.scroll < 0.0 {
+            self.scroll = 0.0;
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoardTokens {
+    pub input: u64,
+    pub output: u64,
+    pub unreported: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SettingPrior {
+    Theme(ThemeChoice),
+    Language(LanguageChoice),
+    ReduceMotion(Option<bool>),
+    PlainWords(bool),
+    Density(Density),
+    Mode(WindowMode),
+    MiniOnTop(bool),
+    Board(BoardChoice),
+}
+
+const LANGUAGE_KEYS: [(LanguageChoice, &str); 3] = [
+    (LanguageChoice::System, "system"),
+    (LanguageChoice::ZhTw, "zh-TW"),
+    (LanguageChoice::English, "en"),
+];
+const THEME_KEYS: [(ThemeChoice, &str); 3] = [
+    (ThemeChoice::System, "system"),
+    (ThemeChoice::Light, "light"),
+    (ThemeChoice::Dark, "dark"),
+];
+const SCREEN_KEYS: [(Screen, &str); 5] = [
+    (Screen::Run, "run"),
+    (Screen::Wishes, "wishes"),
+    (Screen::Memory, "memory"),
+    (Screen::Usage, "usage"),
+    (Screen::Doctor, "settings"),
+];
+
+fn key_of<T: PartialEq + Copy>(table: &[(T, &'static str)], value: T) -> &'static str {
+    table.iter().find(|(v, _)| *v == value).map_or("", |(_, key)| key)
+}
+
+fn value_of<T: Copy>(table: &[(T, &'static str)], key: Option<&str>) -> Option<T> {
+    table.iter().find(|(_, k)| Some(*k) == key).map(|(v, _)| *v)
+}
+
+const KNOWN_KEYS: &[&str] = &[
+    "ux", "codex_max_parallel", "council_budgets", "language", "theme", "plain_words",
+    "reduce_motion", "window", "last_screen", "recent_projects", "first_day_done", "density",
+    "mode", "mini_on_top", "columns", "views", "board", "board_tokens",
+];
+
+/// The window's restore rectangle, and whether it opens maximized over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+}
+
+impl WindowPlacement {
+    pub fn of(bounds: WindowBounds) -> Self {
+        let rect = bounds.get_bounds();
+        Self {
+            x: rect.origin.x.as_f32(),
+            y: rect.origin.y.as_f32(),
+            width: rect.size.width.as_f32(),
+            height: rect.size.height.as_f32(),
+            maximized: matches!(bounds, WindowBounds::Maximized(_)),
+        }
+    }
+
+    fn parse(value: &Value) -> Option<Self> {
+        let number = |key: &str| value.get(key)?.as_f64().map(|n| n as f32).filter(|n| n.is_finite());
+        let (width, height) = (number("width")?, number("height")?);
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            x: number("x")?,
+            y: number("y")?,
+            width,
+            height,
+            maximized: value.get("maximized").and_then(|value| value.as_bool()).unwrap_or(false),
+        })
+    }
+
+    /// Where to reopen, moved fully onto the display it overlaps most. `None` when the title
+    /// strip would not be reachable on any connected display.
+    pub fn restored(&self, displays: &[Bounds<Pixels>], min: Size<Pixels>) -> Option<WindowBounds> {
+        let saved = Bounds {
+            origin: point(px(self.x), px(self.y)),
+            size: size(px(self.width).max(min.width), px(self.height).max(min.height)),
+        };
+        let strip = Bounds {
+            origin: saved.origin,
+            size: size(saved.size.width, px(TITLE_STRIP_HEIGHT)),
+        };
+        let overlap = |display: &Bounds<Pixels>| {
+            let shared = display.intersect(&strip);
+            shared.size.width.max(Pixels::ZERO).as_f32() * shared.size.height.max(Pixels::ZERO).as_f32()
+        };
+        let display = displays
+            .iter()
+            .filter(|d| overlap(d) >= MIN_REACHABLE_STRIP)
+            .max_by(|a, b| overlap(a).total_cmp(&overlap(b)))?;
+        let width = saved.size.width.min(display.size.width).max(min.width);
+        let height = saved.size.height.min(display.size.height).max(min.height);
+        let origin = point(
+            saved.origin.x.min(display.right() - width).max(display.left()),
+            saved.origin.y.min(display.bottom() - height).max(display.top()),
+        );
+        let rect = Bounds { origin, size: size(width, height) };
+        Some(if self.maximized { WindowBounds::Maximized(rect) } else { WindowBounds::Windowed(rect) })
+    }
+}
+
+const TITLE_STRIP_HEIGHT: f32 = 34.0;
+/// A strip about 120 by 24 pixels: enough to grab and drag.
+const MIN_REACHABLE_STRIP: f32 = 2880.0;
+
+/// Keep invalid drafts visible across restarts; the shared parser blocks advanced wishes.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct BudgetInputs { pub fable: String, pub astra: String, pub argon: String, pub rounds: String }
+impl Default for BudgetInputs {
+    fn default() -> Self { Self { fable:"5".into(), astra:"200000".into(), argon:"400000".into(), rounds:"3".into() } }
+}
+impl BudgetInputs {
+    fn parse(value: Option<&Value>) -> Self {
+        let d=Self::default();
+        let word=|key, fallback|value.and_then(|v|v.get(key)).map(|v|v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string())).unwrap_or(fallback);
+        Self { fable:word("fable",d.fable), astra:word("astra",d.astra), argon:word("argon",d.argon), rounds:word("rounds",d.rounds) }
+    }
+    pub fn values(&self) -> [String;4] { [self.fable.clone(),self.astra.clone(),self.argon.clone(),self.rounds.clone()] }
+    pub fn set(&mut self,index:usize,value:String) { match index {0=>self.fable=value,1=>self.astra=value,2=>self.argon=value,_=>self.rounds=value} }
+    pub fn validate(&self) -> Result<crate::council::Budgets,crate::council::budgets::BudgetError> {
+        use crate::council::budgets::*;
+        crate::council::Budgets::parse(|key| match key {FABLE_CAP=>Some(self.fable.clone()),ASTRA_CAP=>Some(self.astra.clone()),ARGON_CAP=>Some(self.argon.clone()),ROUNDS=>Some(self.rounds.clone()),_=>None})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    unknown: serde_json::Map<String, Value>,
+    pub language: LanguageChoice,
+    pub theme: ThemeChoice,
+    pub plain_words: bool,
+    /// `None` follows the system's own setting.
+    pub reduce_motion: Option<bool>,
+    pub window: Option<WindowPlacement>,
+    pub last_screen: Screen,
+    /// Most recent first.
+    pub recent_projects: Vec<PathBuf>,
+    /// The first-day checklist was completed once; it never comes back.
+    pub first_day_done: bool,
+    pub density: Density,
+    pub mode: WindowMode,
+    pub mini_on_top: bool,
+    pub columns: Option<ColumnWidths>,
+    pub views: BTreeMap<String, ViewMemory>,
+    pub board: BoardChoice,
+    pub board_tokens: BoardTokens,
+    pub council_budgets: BudgetInputs,
+    pub codex_max_parallel: String,
+    // ux: begin preferences
+    pub ux: UxPrefs,
+    // ux: end
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            unknown: Default::default(),
+            language: LanguageChoice::default(),
+            theme: ThemeChoice::default(),
+            plain_words: true,
+            reduce_motion: None,
+            window: None,
+            last_screen: Screen::Run,
+            recent_projects: vec![],
+            first_day_done: false,
+            density: Density::default(),
+            mode: WindowMode::default(),
+            mini_on_top: false,
+            columns: None,
+            views: BTreeMap::new(),
+            board: BoardChoice::default(),
+            board_tokens: BoardTokens::default(),
+            council_budgets: BudgetInputs::default(),
+            codex_max_parallel: crate::codex::slots::DEFAULT.to_string(),
+            // ux: begin defaults
+            ux: Default::default(),
+            // ux: end
+        }
+    }
+}
+
+impl Settings {
+    /// Reads what it can: a damaged value costs only that value, a damaged file only the defaults.
+    pub fn parse(text: &str) -> Self {
+        let root: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or(serde_json::Value::Null);
+        let word = |key: &str| root.get(key).and_then(|value| value.as_str());
+        let mut unknown = root.as_object().cloned().unwrap_or_default();
+        for key in KNOWN_KEYS { unknown.remove(*key); }
+        Self {
+            unknown,
+            // ux: begin parse
+            ux: root.get("ux").map(UxPrefs::parse).unwrap_or_default(),
+            // ux: end
+            language: value_of(&LANGUAGE_KEYS, word("language")).unwrap_or_default(),
+            theme: value_of(&THEME_KEYS, word("theme")).unwrap_or_default(),
+            plain_words: root.get("plain_words").and_then(|value| value.as_bool()).unwrap_or(true),
+            reduce_motion: root.get("reduce_motion").and_then(|value| value.as_bool()),
+            window: root.get("window").and_then(WindowPlacement::parse),
+            last_screen: value_of(&SCREEN_KEYS, word("last_screen")).unwrap_or(Screen::Run),
+            recent_projects: root
+                .get("recent_projects")
+                .and_then(|value| value.as_array())
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .filter(|path| !path.is_empty())
+                        .take(MAX_RECENT_PROJECTS)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            first_day_done: root.get("first_day_done").and_then(|value| value.as_bool()).unwrap_or(false),
+            density: match word("density") { Some("dense") => Density::Dense, _ => Density::Comfortable },
+            mode: match word("mode") { Some("focus-graph") => WindowMode::Focus(FocusPanel::Graph), Some("focus-checklist") => WindowMode::Focus(FocusPanel::Checklist), Some("mini") => WindowMode::Mini, _ => WindowMode::Full },
+            mini_on_top: root.get("mini_on_top").and_then(|value| value.as_bool()).unwrap_or(false),
+            columns: root.get("columns").and_then(|value| value.as_object()).map(|v| ColumnWidths {
+                checklist: nonnegative(v.get("checklist")), details: nonnegative(v.get("details")),
+            }),
+            views: root.get("views").and_then(|value| value.as_object()).map(|views| views.iter().filter_map(|(key, v)| {
+                if !valid_view_key(key) || !v.is_object() { return None; }
+                let string = |name| v.get(name).and_then(|value| value.as_str()).map(str::to_owned);
+                let mut memory = ViewMemory { filter: string("filter"), sort: string("sort"), scroll: nonnegative(v.get("scroll")), selected: string("selected") };
+                memory.sanitize();
+                Some((key.clone(), memory))
+            }).collect()).unwrap_or_default(),
+            council_budgets: BudgetInputs::parse(root.get("council_budgets")),
+            codex_max_parallel: root.get("codex_max_parallel").map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_else(|| crate::codex::slots::DEFAULT.to_string()),
+            board: match word("board") { Some("haiku") => BoardChoice::Haiku, Some("off") => BoardChoice::Off, _ => BoardChoice::Luna },
+            board_tokens: BoardTokens {
+                input: root.pointer("/board_tokens/input").and_then(|value| value.as_u64()).unwrap_or(0),
+                output: root.pointer("/board_tokens/output").and_then(|value| value.as_u64()).unwrap_or(0),
+                unreported: root.pointer("/board_tokens/unreported").and_then(|value| value.as_u64()).unwrap_or(0),
+            },
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        let window = self.window.map(|w| {
+            json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized })
+        });
+        let recent: Vec<_> = self.recent_projects.iter().map(|p| p.to_string_lossy()).collect();
+        let columns = self.columns.map(|w| json!({"checklist": w.checklist, "details": w.details}));
+        let views: serde_json::Map<String, Value> = self.views.iter().map(|(key, v)| (key.clone(), json!({
+            "filter": v.filter, "sort": v.sort, "scroll": v.scroll, "selected": v.selected,
+        }))).collect();
+        let mut body = json!({
+            // ux: begin save
+            "ux": self.ux.to_json(),
+            // ux: end
+            "codex_max_parallel": self.codex_max_parallel,
+            "council_budgets":self.council_budgets,
+            "language": key_of(&LANGUAGE_KEYS, self.language),
+            "theme": key_of(&THEME_KEYS, self.theme),
+            "plain_words": self.plain_words,
+            "reduce_motion": self.reduce_motion,
+            "window": window,
+            "last_screen": key_of(&SCREEN_KEYS, self.last_screen),
+            "recent_projects": recent,
+            "first_day_done": self.first_day_done,
+            "density": match self.density { Density::Comfortable => "comfortable", Density::Dense => "dense" },
+            "mode": match self.mode { WindowMode::Full => "full", WindowMode::Focus(FocusPanel::Graph) => "focus-graph", WindowMode::Focus(FocusPanel::Checklist) => "focus-checklist", WindowMode::Mini => "mini" },
+            "mini_on_top": self.mini_on_top,
+            "columns": columns,
+            "views": views,
+            "board": match self.board { BoardChoice::Luna => "luna", BoardChoice::Haiku => "haiku", BoardChoice::Off => "off" },
+            "board_tokens": { "input": self.board_tokens.input, "output": self.board_tokens.output, "unreported": self.board_tokens.unreported },
+        });
+        let entries = body.as_object_mut().expect("settings object");
+        for (key, value) in &self.unknown { entries.insert(key.clone(), value.clone()); }
+        serde_json::to_string_pretty(&body).unwrap_or_default()
+    }
+    pub fn codex_limit(&self) -> Result<u64, crate::council::budgets::BudgetError> {
+        crate::codex::slots::parse(Some(self.codex_max_parallel.clone()))
+    }
+}
+
+fn nonnegative(value: Option<&Value>) -> f32 {
+    value.and_then(|value| value.as_f64()).map(|n| n as f32).filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0)
+}
+fn valid_view_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 24 && key.bytes().all(|c| c.is_ascii_lowercase() || c == b'-' || c == b'.')
+}
+
+impl Settings {
+    pub fn set_theme(&mut self, value: ThemeChoice) -> SettingPrior { SettingPrior::Theme(std::mem::replace(&mut self.theme, value)) }
+    pub fn set_language(&mut self, value: LanguageChoice) -> SettingPrior { SettingPrior::Language(std::mem::replace(&mut self.language, value)) }
+    pub fn set_reduce_motion(&mut self, value: Option<bool>) -> SettingPrior { SettingPrior::ReduceMotion(std::mem::replace(&mut self.reduce_motion, value)) }
+    pub fn set_plain_words(&mut self, value: bool) -> SettingPrior { SettingPrior::PlainWords(std::mem::replace(&mut self.plain_words, value)) }
+    pub fn set_density(&mut self, value: Density) -> SettingPrior { SettingPrior::Density(std::mem::replace(&mut self.density, value)) }
+    pub fn set_mode(&mut self, value: WindowMode) -> SettingPrior { SettingPrior::Mode(std::mem::replace(&mut self.mode, value)) }
+    pub fn set_mini_on_top(&mut self, value: bool) -> SettingPrior { SettingPrior::MiniOnTop(std::mem::replace(&mut self.mini_on_top, value)) }
+    pub fn set_board(&mut self, value: BoardChoice) -> SettingPrior { SettingPrior::Board(std::mem::replace(&mut self.board, value)) }
+    pub fn restore(&mut self, prior: SettingPrior) -> SettingPrior {
+        match prior {
+            SettingPrior::Theme(v) => self.set_theme(v), SettingPrior::Language(v) => self.set_language(v),
+            SettingPrior::ReduceMotion(v) => self.set_reduce_motion(v), SettingPrior::PlainWords(v) => self.set_plain_words(v),
+            SettingPrior::Density(v) => self.set_density(v), SettingPrior::Mode(v) => self.set_mode(v),
+            SettingPrior::MiniOnTop(v) => self.set_mini_on_top(v), SettingPrior::Board(v) => self.set_board(v),
+        }
+    }
+    pub fn with_columns(&mut self, w: ColumnWidths) {
+        let valid = |n: f32| if n.is_finite() && n >= 0.0 { n } else { 0.0 };
+        let widths = ColumnWidths { checklist: valid(w.checklist), details: valid(w.details) };
+        self.columns = Some(widths);
+        let memory = self.views.entry("run.columns".into()).or_default();
+        memory.filter = Some(widths.checklist.to_string());
+        memory.sort = Some(widths.details.to_string());
+    }
+    pub fn view_memory(&self, key: &str) -> ViewMemory {
+        self.views.get(key).cloned().unwrap_or_else(|| {
+            if key == "run.columns" {
+                if let Some(w) = self.columns {
+                    return ViewMemory { filter: Some(w.checklist.to_string()), sort: Some(w.details.to_string()), ..Default::default() };
+                }
+            }
+            ViewMemory::default()
+        })
+    }
+    pub fn with_view(&mut self, key: &str, change: impl FnOnce(&mut ViewMemory)) {
+        if !valid_view_key(key) { return; }
+        let initial = self.view_memory(key);
+        let view = self.views.entry(key.to_owned()).or_insert(initial);
+        change(view);
+        view.sanitize();
+    }
+    pub fn add_board_tokens(&mut self, input: Option<u64>, output: Option<u64>) {
+        if input.is_none() && output.is_none() {
+            self.board_tokens.unreported = self.board_tokens.unreported.saturating_add(1);
+        } else {
+            self.board_tokens.input = self.board_tokens.input.saturating_add(input.unwrap_or(0));
+            self.board_tokens.output = self.board_tokens.output.saturating_add(output.unwrap_or(0));
+        }
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        let folded = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+        folded(a) == folded(b)
+    } else {
+        a == b
+    }
+}
+
+fn push_recent(list: &mut Vec<PathBuf>, path: PathBuf) {
+    list.retain(|known| !same_path(known, &path));
+    list.insert(0, path);
+    list.truncate(MAX_RECENT_PROJECTS);
+}
+
+fn load(path: &Path) -> Settings {
+    std::fs::read_to_string(path).map(|text| Settings::parse(&text)).unwrap_or_default()
+}
+
+fn save(path: &Path, json: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::base::atomic_write(path, json.as_bytes())
+}
+
+struct PendingWrite {
+    path: PathBuf,
+    json: String,
+    version: u64,
+    written: Arc<Mutex<u64>>,
+}
+impl PendingWrite {
+    fn flush(self) -> std::io::Result<()> {
+        let mut newest = self.written.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.version <= *newest { return Ok(()); }
+        save(&self.path, &self.json)?;
+        *newest = self.version;
+        Ok(())
+    }
+}
+
+/// The loaded settings and where they go. With no path nothing is ever written.
+pub struct Store {
+    pub settings: Settings,
+    path: Option<PathBuf>,
+    version: u64,
+    /// The newest version on disk. Holding the lock is what keeps writes one at a time.
+    written: Arc<Mutex<u64>>,
+    pending: Option<Task<()>>,
+    error: Option<SharedString>,
+    system_motion: Option<bool>,
+}
+
+impl Global for Store {}
+
+fn capture_system_motion(existing: Option<bool>, current: bool) -> Option<bool> {
+    existing.or(Some(current))
+}
+
+fn resolve_none_motion(captured: Option<bool>, _current: bool) -> bool {
+    // The current value may be an override; it is not a safe system fallback.
+    captured.unwrap_or(false)
+}
+
+impl Store {
+    pub fn open(ephemeral: bool) -> Self {
+        let path = (!ephemeral).then(|| crate::base::axiom_home().join(FILE_NAME));
+        Self::at(path)
+    }
+
+    pub fn at(path: Option<PathBuf>) -> Self {
+        Self {
+            settings: path.as_deref().map(load).unwrap_or_default(),
+            path,
+            version: 0,
+            written: Arc::new(Mutex::new(0)),
+            pending: None,
+            error: None,
+            system_motion: None,
+        }
+    }
+
+    pub fn current(cx: &App) -> &Settings {
+        &cx.global::<Self>().settings
+    }
+
+    pub fn last_error(cx: &App) -> Option<SharedString> {
+        cx.global::<Self>().error.clone()
+    }
+
+    fn edit_pending(&mut self, change: impl FnOnce(&mut Settings)) -> Option<PendingWrite> {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        if self.settings == before || self.path.is_none() { return None; }
+        self.version += 1;
+        self.pending_write()
+    }
+
+    fn pending_write(&self) -> Option<PendingWrite> {
+        Some(PendingWrite { path: self.path.clone()?, json: self.settings.to_json(), version: self.version, written: self.written.clone() })
+    }
+
+    /// Applies a change and, when it changed anything, saves shortly after on a background thread.
+    pub fn edit(cx: &mut App, change: impl FnOnce(&mut Settings)) {
+        let store = cx.global_mut::<Self>();
+        if store.edit_pending(change).is_none() {
+            return;
+        }
+        let pending = cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let Some(write) = cx.update(Self::write) else { return };
+            let outcome = write.await.err().map(SharedString::from);
+            cx.update(|cx| {
+                let store = cx.global_mut::<Self>();
+                if store.error != outcome {
+                    store.error = outcome;
+                    cx.refresh_windows();
+                }
+            });
+        });
+        cx.global_mut::<Self>().pending = Some(pending);
+    }
+
+    fn write(cx: &mut App) -> Option<Task<Result<(), String>>> {
+        let write = cx.global::<Self>().pending_write()?;
+        Some(cx.background_spawn(async move { write.flush().map_err(|error| error.to_string()) }))
+    }
+
+    /// Flushes a change that is still waiting for its delay when the app exits.
+    pub fn save_on_quit(cx: &mut App) {
+        let current = cx.reduce_motion();
+        let store = cx.global_mut::<Self>();
+        store.system_motion = capture_system_motion(store.system_motion, current);
+        cx.on_app_quit(|cx| {
+            let write = Self::write(cx);
+            async move {
+                if let Some(write) = write {
+                    let _ = write.await;
+                }
+            }
+        })
+        .detach();
+    }
+}
+
+pub fn set_language(choice: LanguageChoice, window: &mut Window, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Language(Store::current(cx).language);
+    Store::edit(cx, |s| prior = s.set_language(choice));
+    i18n::set(choice.resolve(), cx);
+    window.refresh();
+    prior
+}
+
+pub fn set_theme(choice: ThemeChoice, window: &mut Window, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Theme(Store::current(cx).theme);
+    Store::edit(cx, |s| prior = s.set_theme(choice));
+    apply_theme(window, cx);
+    prior
+}
+
+fn apply_theme(window: &mut Window, cx: &mut App) {
+    let mode = Store::current(cx).theme.resolve(window.appearance());
+    theme::apply(mode, Some(window), cx);
+    window.refresh();
+}
+
+pub fn system_appearance_changed(window: &mut Window, cx: &mut App) {
+    if Store::current(cx).theme == ThemeChoice::System {
+        apply_theme(window, cx);
+    }
+}
+
+pub fn set_reduce_motion(on: bool, state: &Entity<AppState>, cx: &mut App) -> SettingPrior {
+    set_motion(Some(on), state, cx)
+}
+
+fn set_motion(value: Option<bool>, state: &Entity<AppState>, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::ReduceMotion(Store::current(cx).reduce_motion);
+    if cx.global::<Store>().system_motion.is_none() && Store::current(cx).reduce_motion.is_none() && value.is_some() {
+        let system_motion = cx.reduce_motion();
+        let store = cx.global_mut::<Store>();
+        store.system_motion = capture_system_motion(store.system_motion, system_motion);
+    }
+    Store::edit(cx, |s| prior = s.set_reduce_motion(value));
+    let on = value.unwrap_or_else(|| resolve_none_motion(cx.global::<Store>().system_motion, cx.reduce_motion()));
+    cx.set_reduce_motion(on);
+    state.update(cx, |state, cx| { state.reduce_motion = on; cx.notify(); });
+    prior
+}
+
+pub fn set_plain_words(on: bool, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::PlainWords(Store::current(cx).plain_words);
+    Store::edit(cx, |s| prior = s.set_plain_words(on));
+    if cx.has_global::<PlainWordsApply>() {
+        (cx.global::<PlainWordsApply>().0)(on, cx);
+    }
+    prior
+}
+pub fn set_density(d: Density, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Density(Store::current(cx).density);
+    Store::edit(cx, |s| prior = s.set_density(d));
+    theme::set_density(d, cx);
+    prior
+}
+pub fn set_mode(mode: WindowMode, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Mode(Store::current(cx).mode);
+    Store::edit(cx, |s| prior = s.set_mode(mode)); prior
+}
+pub fn set_mini_on_top(on: bool, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::MiniOnTop(Store::current(cx).mini_on_top);
+    Store::edit(cx, |s| prior = s.set_mini_on_top(on)); prior
+}
+pub fn set_board(board: BoardChoice, cx: &mut App) -> SettingPrior {
+    let mut prior = SettingPrior::Board(Store::current(cx).board);
+    Store::edit(cx, |s| prior = s.set_board(board)); prior
+}
+pub fn restore(prior: SettingPrior, state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    match prior {
+        SettingPrior::Theme(v) => { set_theme(v, window, cx); }
+        SettingPrior::Language(v) => { set_language(v, window, cx); }
+        SettingPrior::ReduceMotion(v) => { set_motion(v, state, cx); }
+        SettingPrior::PlainWords(v) => { set_plain_words(v, cx); }
+        SettingPrior::Density(v) => { set_density(v, cx); }
+        SettingPrior::Mode(v) => { set_mode(v, cx); }
+        SettingPrior::MiniOnTop(v) => { set_mini_on_top(v, cx); }
+        SettingPrior::Board(v) => { set_board(v, cx); }
+    }
+}
+pub fn remember_columns(w: ColumnWidths, cx: &mut App) {
+    Store::edit(cx, |s| s.with_columns(w));
+}
+pub fn columns(cx: &App) -> Option<ColumnWidths> { Store::current(cx).columns }
+pub fn view_memory(cx: &App, key: &str) -> ViewMemory { Store::current(cx).view_memory(key) }
+pub fn remember_view(key: &'static str, change: impl FnOnce(&mut ViewMemory), cx: &mut App) {
+    Store::edit(cx, |s| s.with_view(key, change));
+}
+pub fn add_board_tokens(input: Option<u64>, output: Option<u64>, cx: &mut App) {
+    Store::edit(cx, |s| s.add_board_tokens(input, output));
+}
+pub fn board_tokens(cx: &App) -> BoardTokens { Store::current(cx).board_tokens }
+
+pub fn remember_window(bounds: WindowBounds, cx: &mut App) {
+    Store::edit(cx, |s| s.window = Some(WindowPlacement::of(bounds)));
+}
+
+pub fn remember_screen(screen: Screen, cx: &mut App) {
+    Store::edit(cx, |s| s.last_screen = screen);
+}
+
+pub fn remember_project(path: PathBuf, cx: &mut App) {
+    Store::edit(cx, |s| push_recent(&mut s.recent_projects, path));
+}
+
+/// Records that the first-day checklist is complete, for good.
+pub fn finish_first_day(cx: &mut App) {
+    Store::edit(cx, |s| s.first_day_done = true);
+}
+
+pub fn first_day_done(cx: &App) -> bool {
+    Store::current(cx).first_day_done
+}
+
+pub fn has_recent_project(cx: &App) -> bool {
+    !Store::current(cx).recent_projects.is_empty()
+}
+
+// called by the screens
+#[allow(dead_code)]
+pub fn recent_projects(cx: &App) -> &[PathBuf] {
+    &Store::current(cx).recent_projects
+}
+
+/// Where the window opens: its saved spot if a connected display can still show it, otherwise centered.
+fn recovered_bounds(settings: &Settings, displays: &[Bounds<Pixels>], default: Size<Pixels>, min: Size<Pixels>) -> WindowBounds {
+    let saved = settings.window.map(|w| Bounds {
+        origin: point(px(w.x), px(w.y)),
+        size: size(px(w.width), px(w.height)),
+    });
+    let default = displays.first().filter(|d| {
+        let w = d.size.width.as_f32();
+        let h = d.size.height.as_f32();
+        w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0
+    }).map_or(default, |d| size(default.width.min(d.size.width), default.height.min(d.size.height)));
+    let rect = window::recover(saved, displays, default, min);
+    if settings.window.is_some_and(|w| w.maximized) {
+        WindowBounds::Maximized(rect)
+    } else {
+        WindowBounds::Windowed(rect)
+    }
+}
+
+pub fn opening_bounds(settings: &Settings, default: Size<Pixels>, min: Size<Pixels>, cx: &App) -> WindowBounds {
+    let displays: Vec<_> = cx.displays().iter().map(|d| d.visible_bounds()).collect();
+    recovered_bounds(settings, &displays, default, min)
+}
+
+// p7-runtime seam
+pub fn save_runtime_and_models(
+    home: &Path,
+    models: &crate::engine::policy::Models,
+    runtime: &crate::codex::slots::Runtime,
+) -> crate::base::Res<(u64, u64)> {
+    models.validate()?;
+    runtime.validate()?;
+    let models_version = crate::engine::policy::save_global_models(home, models)?;
+    let runtime_version = crate::codex::slots::save_runtime(home, runtime)?;
+    Ok((models_version, runtime_version))
+}
+// end p7-runtime seam
+
+
+#[cfg(test)]
+#[path = "settings_accept.rs"]
+mod accept;

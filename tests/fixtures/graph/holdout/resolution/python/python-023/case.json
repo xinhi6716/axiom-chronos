@@ -1,0 +1,17 @@
+{
+  "id": "python-023",
+  "language": "python",
+  "feature": "relative_import",
+  "refs": [
+    {
+      "file": "pkg/main.py",
+      "line": 2,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "pkg/lib.py#function:render"
+      }
+    }
+  ]
+}

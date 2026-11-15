@@ -6,6 +6,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 
 sys.stdin.reconfigure(encoding='utf-8')
 sys.stdout.reconfigure(encoding='utf-8')
@@ -17,7 +18,7 @@ if sys.argv[1:4] == ['plugin', 'list', '--json']:
     sys.exit(0)
 scenario = os.environ.get('FAKE_CLAUDE_SCENARIO', 'ok')
 session = os.environ.get('FAKE_CLAUDE_SESSION', '12345678-1234-1234-1234-123456789abc')
-record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_CODEX_MAX_PARALLEL', 'AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'AXIOM_FABLE_CAP_USD', 'AXIOM_ASTRA_TOKEN_CAP', 'AXIOM_ARGON_TOKEN_CAP', 'AXIOM_COUNCIL_ROUNDS', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')}, 'messages': []}
+record = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k: os.environ.get(k) for k in ('AXIOM_CODEX_MAX_PARALLEL', 'AXIOM_DATA_HOME', 'AXIOM_PYTHON', 'AXIOM_HEADLESS', 'AXIOM_BIN', 'AXIOM_ADVANCED_RESEARCH', 'AXIOM_FABLE_CAP_USD', 'AXIOM_ASTRA_TOKEN_CAP', 'AXIOM_ARGON_TOKEN_CAP', 'AXIOM_COUNCIL_ROUNDS', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', 'FAKE_ROLLING_STORE', 'FAKE_ROLLING_GATE', 'FAKE_ROLLING_CONTROL')}, 'messages': []}
 
 def save():
     with open(os.environ['FAKE_CLAUDE_RECORD'], 'w', encoding='utf-8') as f:
@@ -27,6 +28,56 @@ def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
 record['provenance_env'] = os.environ.get('AXIOM_PROVENANCE')
+
+if scenario == 'stages':
+    def argument(name, default):
+        return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+    session = argument('--resume', session)
+    model = argument('--model', 'claude-opus-5-5')
+    record_path = Path(os.environ['FAKE_CLAUDE_RECORD'])
+    if '--resume' in sys.argv and record_path.exists():
+        previous = json.loads(record_path.read_text(encoding='utf-8'))
+        record['turn_models'] = previous.get('turn_models', [])
+        record['control_requests'] = previous.get('control_requests', [])
+        record['results'] = previous.get('results', [])
+    else:
+        record['turn_models'] = []
+        record['control_requests'] = []
+    save()
+    initialized = False
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        record['messages'].append(message)
+        if not initialized:
+            emit({'type': 'system', 'subtype': 'init', 'session_id': session,
+                  'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'connected'}]})
+            initialized = True
+        if message.get('type') == 'control_request':
+            record['control_requests'].append(message)
+            request = message.get('request') or {}
+            accepted = request.get('subtype') == 'set_model' and os.getenv('FAKE_CLAUDE_SET_MODEL') == 'supported' and isinstance(request.get('model'), str) and bool(request['model'])
+            if accepted:
+                model = request['model']
+            response = {'subtype': 'success' if accepted else 'error', 'request_id': message.get('request_id')}
+            if not accepted:
+                response['error'] = 'unsupported control request'
+            save()
+            emit({'type': 'control_response', 'response': response})
+        elif message.get('type') == 'user':
+            record['turn_models'].append(model)
+            result = {'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': session,
+                      'uuid': f'{record_path.stem}-{len(record["turn_models"])}',
+                      'result': 'done', 'modelUsage': {model: {'inputTokens': 10, 'outputTokens': 5}}}
+            record.setdefault('results', []).append(result)
+            save()
+            emit(result)
+        else:
+            save()
+    sys.exit(0)
 
 incoming = queue.Queue()
 def read_input():
@@ -45,6 +96,108 @@ first = incoming.get()
 if first is None:
     sys.exit(0)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'mcp_servers': [{'name': 'plugin:chronos:bridge', 'status': 'failed' if scenario == 'no-bridge' else 'connected'}]})
+if scenario == 'background-budget':
+    emit({'type': 'system', 'subtype': 'task_started', 'task_id': 'budget-task', 'is_backgrounded': True})
+    emit({'type': 'result', 'is_error': False, 'result': 'in progress', 'total_cost_usd': .1})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
+if scenario == 'background-order':
+    emit({'type': 'system', 'subtype': 'task_started', 'task_id': 'a', 'is_backgrounded': True})
+    emit({'type': 'result', 'is_error': False, 'result': 'initial', 'total_cost_usd': .1})
+    emit({'type': 'result', 'is_error': False, 'result': 'completion before notification', 'total_cost_usd': .2})
+    emit({'type': 'system', 'subtype': 'task_notification', 'task_id': 'a', 'status': 'failed'})
+    emit({'type': 'result', 'is_error': False, 'result': 'after notification', 'total_cost_usd': .3})
+    while incoming.get(timeout=5) is not None:
+        pass
+    sys.exit(0)
+if scenario == 'rolling':
+    store = Path(os.environ['FAKE_ROLLING_STORE'])
+    gate = Path(os.environ['FAKE_ROLLING_GATE'])
+    control = os.getenv('FAKE_ROLLING_CONTROL', '')
+    foreground = os.getenv('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS') == '1'
+    completed = queue.Queue()
+    cursor = None
+    def orch(*args):
+        result = subprocess.run([os.environ['AXIOM_BIN'], 'orch', '--store', str(store), '--json', *args], capture_output=True, text=True, encoding='utf-8')
+        if result.returncode:
+            raise RuntimeError(f'orch {args}: {result.stderr} {result.stdout}')
+        return json.loads(result.stdout)
+    def dispatch(module):
+        activity = orch('activity', 'start', '--module', module, '--actor', 'dispatcher', '--phase', 'brief')['id']
+        if module == 'slow':
+            deadline = time.monotonic() + 12
+            while not gate.exists():
+                if time.monotonic() >= deadline:
+                    os._exit(7)
+                time.sleep(.02)
+        if module == 'fast':
+            brief = store / 'fast.brief'
+            orch('unit', 'add', 'fast-unit', '--track', 'fast', '--brief', str(brief))
+            reports = store / 'reports'
+            reports.mkdir(exist_ok=True)
+            (reports / 'fast-unit.evidence.tsv').write_text('kind\tcommand\texit_code\tcommit\tts\n' + ''.join(f'{k}\t{cmd}\t0\ttree:1\t2026-01-01T00:00:00Z\n' for k, cmd in (('run', 'terra'), ('verify', 'verify'), ('accept', 'accept'), ('review', 'engine-astra:fixture'))), encoding='utf-8')
+        orch('activity', 'finish', '--module', module, '--actor', 'dispatcher', '--phase', 'brief', '--id', activity)
+        completed.put(module)
+    def schedule():
+        global cursor
+        args = ['schedule', 'next', '--timeout', '0']
+        if cursor is not None:
+            args += ['--cursor', str(cursor)]
+        reply = orch(*args)
+        cursor = reply['cursor']
+        for module in reply['start']:
+            emit({'type': 'system', 'subtype': 'task_started', 'task_id': module, 'is_backgrounded': not foreground})
+            if foreground:
+                dispatch(module)
+            else:
+                threading.Thread(target=dispatch, args=(module,), daemon=True).start()
+    schedule()
+    emit({'type': 'result', 'is_error': False, 'result': 'dispatching', 'total_cost_usd': .1})
+    while True:
+        try:
+            message = incoming.get_nowait()
+            if message is None:
+                sys.exit(0)
+        except queue.Empty:
+            pass
+        try:
+            module = completed.get(timeout=.02)
+        except queue.Empty:
+            continue
+        emit({'type': 'system', 'subtype': 'task_notification', 'task_id': module, 'status': 'completed'})
+        schedule()
+        emit({'type': 'result', 'is_error': False, 'result': 'completion turn', 'total_cost_usd': .2})
+if scenario == 'tick':
+    emit_lock = threading.Lock()
+    def emit_text(text):
+        with emit_lock:
+            emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+    def ticker():
+        n = 0
+        while True:
+            time.sleep(int(os.environ.get('FAKE_CLAUDE_TICK_MS', '200')) / 1000)
+            n += 1
+            emit_text(f'tick {n}')
+    threading.Thread(target=ticker, daemon=True).start()
+    while True:
+        message = incoming.get()
+        if message is None:
+            # Keep ticking until killed, even after stdin closes.
+            threading.Event().wait()
+        text = message.get('message', {}).get('content', [{}])[0].get('text', '')
+        emit_text(f'heard: {text}')
+if scenario == 'alive':
+    time.sleep(int(os.environ.get('FAKE_CLAUDE_ALIVE_MS', '800')) / 1000)
+    path = Path(os.environ['AXIOM_DATA_HOME']) / 'goals' / (session + '.json')
+    goal = json.loads(path.read_text(encoding='utf-8'))
+    goal['status'] = 'done'
+    path.write_text(json.dumps(goal, ensure_ascii=False) + '\n', encoding='utf-8')
+    emit({'type': 'result', 'is_error': False, 'result': 'done'})
+    sys.exit(0)
+if scenario == 'max-turns':
+    emit({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True, 'num_turns': int(os.environ.get('FAKE_CLAUDE_TURNS', '7')), 'result': ''})
+    sys.exit(0)
 if scenario == 'limit':
     emit({'type': 'result', 'is_error': True, 'result': "You've hit your usage limit"})
     sys.exit(0)
@@ -131,6 +284,33 @@ if scenario in ('idle', 'idle-progress', 'idle-refusal'):
     emit({'type': 'result', 'is_error': False, 'result': 'fake safety ceiling'})
     while incoming.get(timeout=5) is not None:
         pass
+    sys.exit(0)
+if scenario == 'script':
+    script = json.loads(Path(os.environ['FAKE_CLAUDE_SCRIPT']).read_text(encoding='utf-8'))
+    started = {entry.get('id', f't{i}') for i, entry in enumerate(script) if entry['name'] == 'Agent'}
+    roots = dict.fromkeys(entry['agent'] for entry in script if entry['agent'] not in started)
+    def tools(parent, entries):
+        emit({'type': 'assistant', 'parent_tool_use_id': parent, 'message': {'content': [
+            {'type': 'tool_use', 'id': ident, 'name': name, 'input': input}
+            for ident, name, input in entries]}})
+        for ident, _, _ in entries:
+            emit({'type': 'user', 'parent_tool_use_id': parent, 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': ident, 'content': 'done'}]}})
+    for root in roots:
+        tools(None, [(root, 'Agent', {'subagent_type': 'chronos:dispatcher'})])
+    i = 0
+    while i < len(script):
+        entry = script[i]
+        group = entry.get('group')
+        entries = []
+        while i < len(script):
+            current = script[i]
+            if entries and (group is None or current.get('group') != group or current['agent'] != entry['agent']):
+                break
+            entries.append((current.get('id', f't{i}'), current['name'], current['input']))
+            i += 1
+        tools(entry['agent'], entries)
+    emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'})
     sys.exit(0)
 emit({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'content': [{'type': 'text', 'text': '開始處理'}, {'type': 'tool_use', 'id': 'a1', 'name': 'Agent', 'input': {'subagent_type': 'chronos:dispatcher', 'description': 'Dispatch wish'}}]}})
 emit({'type': 'assistant', 'parent_tool_use_id': 'a1', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__plugin_chronos_bridge__orch', 'input': {'args': ['unit', 'add', 'u1']}}, {'type': 'tool_use', 'id': 't2', 'name': 'mcp__plugin_chronos_bridge__codex_run', 'input': {'role': 'terra', 'brief': 'GOAL    todo.py defines stats(items).\nSCOPE   todo.py'}}, {'type': 'tool_use', 'id': 't3', 'name': 'Read', 'input': {}}]}})

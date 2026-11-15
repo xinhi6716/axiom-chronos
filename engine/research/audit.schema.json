@@ -18,7 +18,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "area", "location", "evidence", "problem", "change", "verify"],
+        "required": ["id", "area", "location", "evidence", "problem", "change", "verify", "tier", "effort", "risk", "reason"],
         "properties": {
           "id": {"type": "string", "description": "One word without spaces or commas, unique in this plan, such as C1."},
           "area": {"type": "string", "enum": ["design", "feature", "algorithm", "correctness", "performance", "tests"]},
@@ -26,7 +26,11 @@
           "evidence": {"type": "string"},
           "problem": {"type": "string"},
           "change": {"type": "string"},
-          "verify": {"type": "string"}
+          "verify": {"type": "string"},
+          "tier": {"type": "string", "enum": ["terra", "sol", "astra"]},
+          "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
+          "risk": {"type": "string", "enum": ["trivial", "standard", "state_machine", "concurrency", "migration", "parser", "security", "privacy", "cross_module", "prior_failure", "novel"]},
+          "reason": {"type": "string"}
         }
       }
     },

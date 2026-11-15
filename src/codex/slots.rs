@@ -13,6 +13,60 @@ pub const ENV: &str = "AXIOM_CODEX_MAX_PARALLEL";
 pub const DEFAULT: u64 = 48;
 pub const POSITIVE_INTEGER: &str = "Codex parallel limit must be a positive whole number.";
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Runtime {
+    pub codex_max_parallel: u64,
+    #[serde(default)]
+    pub codex_command: Vec<String>,
+}
+impl Runtime {
+    pub fn validate(&self) -> Res<()> {
+        if self.codex_max_parallel == 0 {
+            return Err(Failure::new("invalid_argument", POSITIVE_INTEGER));
+        }
+        if self.codex_command.iter().any(|s| s.is_empty()) {
+            return Err(Failure::new("invalid_argument", "codex_command must contain only non-empty strings"));
+        }
+        Ok(())
+    }
+}
+#[derive(serde::Deserialize)]
+struct SavedRuntime {
+    #[serde(flatten)]
+    runtime: Runtime,
+    version: u64,
+}
+pub fn save_runtime(home: &Path, r: &Runtime) -> Res<u64> {
+    r.validate()?;
+    let previous = load_runtime(home).ok().flatten().map(|(_, version)| version).unwrap_or(0);
+    let version = previous.checked_add(1).ok_or_else(|| Failure::new("codex_slots", "runtime version overflow"))?;
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "codex_max_parallel": r.codex_max_parallel,
+        "codex_command": r.codex_command,
+        "version": version,
+    })).map_err(|e| Failure::new("codex_slots", e.to_string()))?;
+    let folder = home.join("settings");
+    fs::create_dir_all(&folder).map_err(failure)?;
+    base::atomic_write(&folder.join("runtime.json"), &bytes).map_err(failure)?;
+    Ok(version)
+}
+pub fn load_runtime(home: &Path) -> Res<Option<(Runtime, u64)>> {
+    let bytes = match fs::read(home.join("settings/runtime.json")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(failure(e)),
+    };
+    let saved: SavedRuntime = serde_json::from_slice(&bytes).map_err(|e| Failure::new("codex_slots", e.to_string()))?;
+    saved.runtime.validate()?;
+    Ok(Some((saved.runtime, saved.version)))
+}
+pub fn cap(home: &Path) -> Res<u64> {
+    match load_runtime(home)? {
+        Some((runtime, _)) => Ok(runtime.codex_max_parallel),
+        None => parse(crate::council::budgets::env_value(ENV)).map_err(Into::into),
+    }
+}
+
 pub fn parse(value: Option<String>) -> Result<u64, BudgetError> {
     match value {
         None => Ok(DEFAULT),
@@ -28,7 +82,7 @@ pub fn parse(value: Option<String>) -> Result<u64, BudgetError> {
     }
 }
 pub fn from_env() -> Res<u64> {
-    parse(crate::council::budgets::env_value(ENV)).map_err(Into::into)
+    cap(&home())
 }
 pub fn home() -> PathBuf {
     base::data_home().unwrap_or_else(|_| base::axiom_home())

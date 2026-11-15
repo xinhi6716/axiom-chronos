@@ -56,6 +56,7 @@ fn all_present_and_missing_codex() {
     );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("trigram"));
+    assert!(text.contains("graph index"));
     assert!(text.contains("claude"));
     assert!(text.lines().any(|line| line.starts_with("ok   claude")));
     assert!(text.lines().any(|line| line.starts_with("ok   codex")));

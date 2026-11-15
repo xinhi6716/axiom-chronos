@@ -1,0 +1,335 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manuscript",
+    "change_log"
+  ],
+  "properties": {
+    "manuscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "abstract",
+        "keywords",
+        "sections",
+        "figures",
+        "tables"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "abstract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "text",
+            "claims"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "claim",
+                  "evidence"
+                ],
+                "properties": {
+                  "claim": {
+                    "type": "string"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "heading",
+              "paragraphs"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "heading": {
+                "type": "string"
+              },
+              "paragraphs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "text",
+                    "claims"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "claims": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "claim",
+                          "evidence"
+                        ],
+                        "properties": {
+                          "claim": {
+                            "type": "string"
+                          },
+                          "evidence": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "figures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "kind",
+              "artifact",
+              "x",
+              "y",
+              "error",
+              "preset",
+              "caption"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "line",
+                  "scatter",
+                  "error_bar",
+                  "bar"
+                ]
+              },
+              "artifact": {
+                "type": "string"
+              },
+              "x": {
+                "type": "string"
+              },
+              "y": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "error": {
+                "type": "string"
+              },
+              "preset": {
+                "type": "string"
+              },
+              "caption": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "text",
+                  "claims"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "claims": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "claim",
+                        "evidence"
+                      ],
+                      "properties": {
+                        "claim": {
+                          "type": "string"
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "artifact",
+              "columns",
+              "caption"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "artifact": {
+                "type": "string"
+              },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "column",
+                    "header",
+                    "precision"
+                  ],
+                  "properties": {
+                    "column": {
+                      "type": "string"
+                    },
+                    "header": {
+                      "type": "string"
+                    },
+                    "precision": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "caption": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "text",
+                  "claims"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "claims": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "claim",
+                        "evidence"
+                      ],
+                      "properties": {
+                        "claim": {
+                          "type": "string"
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "change_log": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "location",
+          "kind",
+          "reason"
+        ],
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "added",
+              "removed",
+              "edited",
+              "moved",
+              "style"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -81,3 +81,18 @@ pub(in crate::desktop) fn context_menu(
     }
     menu
 }
+
+/// Append run attention actions without extending the shared MenuAction contract.
+pub(in crate::desktop) fn append_read_actions(mut menu: PopupMenu, session: gpui_kit::SharedString, state: Entity<AppState>, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    use crate::desktop::{settings::Store, wishes::read_state::{action_label, read_actions}};
+    let actions = state.read(cx).runs.iter().find(|r| r.session == session)
+        .map(|run| read_actions(run, &Store::current(cx).ux)).unwrap_or_default();
+    let lang = *cx.global::<crate::desktop::i18n::Lang>();
+    for action in actions {
+        let state = state.clone(); let session = session.clone();
+        menu = menu.item(PopupMenuItem::new(action_label(action, lang)).on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| state.apply_read_action(&session, action, cx));
+        }));
+    }
+    menu
+}

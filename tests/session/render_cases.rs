@@ -24,6 +24,7 @@ fn command_and_message() {
         "mcp__plugin_chronos_bridge__memory_record",
         "mcp__plugin_chronos_bridge__memory_search",
         "mcp__plugin_chronos_bridge__memory_get",
+        "mcp__plugin_chronos_bridge__graph_explore",
         "mcp__plugin_chronos_bridge__memory_digest",
         "mcp__plugin_chronos_bridge__goal",
     ];
@@ -154,9 +155,7 @@ fn codex_briefs() {
 }
 #[test]
 fn codex_brief_files() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".axiom-tmp/render-label-1");
-    std::fs::create_dir_all(&dir).unwrap();
-    let temp = tempfile::tempdir_in(&dir).unwrap();
+    let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let name = format!("{BRIDGE}codex_run");
     let file = dir.join("brief.txt");
@@ -318,4 +317,22 @@ fn codex_summary_two_missing_usage() {
         codex_summary(&[json!(r#"{}"#), json!(r#"{"usage":false}"#)]),
         "codex tokens: none reported (2 runs reported no usage)\n"
     );
+}
+
+#[test]
+fn command_with_model_uses_given_model() {
+    let config = Config { claude: Ok(vec!["claude".into()]), home: PathBuf::from("home"), bin: PathBuf::new(), clock: Clock::system() };
+    let args = axiom::session::command_with_model(&config, Path::new("plugin"), None, false, "sonnet").unwrap();
+    assert_eq!(&args[args.len()-2..], ["--model", "sonnet"]);
+    let args = command(&config, Path::new("plugin"), None, false).unwrap();
+    assert_eq!(&args[args.len()-2..], ["--model", "opus"]);
+}
+#[test]
+fn command_model_is_not_duplicated_with_graph_and_max_turns() {
+    let config = Config { claude: Ok(vec!["claude".into()]), home: PathBuf::from("home"), bin: PathBuf::new(), clock: Clock::system() };
+    for graph in [false, true] { for turns in [None, Some(7)] {
+        let args = axiom::session::command_with_model(&config, Path::new("plugin"), turns, graph, "sonnet").unwrap();
+        assert_eq!(args.iter().filter(|s| *s == "--model").count(), 1);
+        assert_eq!(args[args.iter().position(|s| s == "--model").unwrap()+1], "sonnet");
+    }}
 }

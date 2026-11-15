@@ -6,6 +6,11 @@ use super::{ornament, theme, settings};
 use super::theme::{Step, TypeSize};
 use std::{cell::Cell, rc::Rc};
 mod logic;
+pub(in crate::desktop) mod wish_scope;
+pub(in crate::desktop) mod compare;
+#[cfg(test)] mod wish_scope_accept;
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::IndexPath;
 #[cfg(test)] mod accept;
 use super::theme::{Tokened as _, Tokens};
 use gpui_kit::base::{
@@ -16,6 +21,7 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
 use gpui_kit::base::ElementExt as _;
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
@@ -26,6 +32,11 @@ use gpui_kit::*;
 use std::collections::BTreeMap;
 
 const TEXT: i18n::Table = &[
+    ("All wishes", "全部願望"),
+    ("Search wishes", "搜尋願望"),
+    ("Compare with…", "比較…"),
+    ("Incomplete", "資料不完整"),
+    ("Difference", "差額"),
     ("Summary board", "摘要看板"),
     ("{input} in · {output} out", "輸入 {input} · 輸出 {output}"),
     ("1 call without usage", "1 次呼叫未回報用量"),
@@ -273,6 +284,25 @@ fn sort_costs(rows: &mut [CostRow]) {
     });
 }
 
+fn add_usage_details(summary: &mut Summary, usage: &Usage) {
+    summary.unpriced |= !usage.unpriced().is_empty();
+    summary.incomplete |= !usage.incomplete().is_empty();
+    for model in &usage.models {
+        summary.input += model.input.unwrap_or(0);
+        summary.cached += model.cached.unwrap_or(0);
+        summary.output += model.output.unwrap_or(0);
+        for (ix, value) in [model.input, model.cached, model.output].iter().enumerate() {
+            summary.token_reported[ix] |= value.is_some();
+            summary.token_missing[ix] |= value.is_none();
+        }
+    }
+    for role in &usage.roles {
+        let key = role_key(&role.role);
+        add_cost(&mut summary.roles, &key, role.usd, [Some(role.input), Some(role.cached), None, Some(role.output), Some(role.input + role.cached + role.output)]);
+        if let Some(row) = summary.roles.iter_mut().find(|row| row.name == key) { add_id(&mut row.ids, &role.role); }
+    }
+}
+
 /// Adds up the given runs. Callers pass one run for "This run" and all of them for "All runs".
 fn summarize(runs: &[Run]) -> Summary {
     let mut summary = Summary { runs: runs.len(), ..Default::default() };
@@ -285,22 +315,9 @@ fn summarize(runs: &[Run]) -> Summary {
         let cost = run_cost(usage);
         summary.cost.add(cost);
         if cost.is_some() && (usage.total_usd.is_none() || unpriced || incomplete) { summary.cost.missing += 1; }
+        add_usage_details(&mut summary, usage);
         for model in &usage.models {
             add_cost(&mut summary.models, &model.model, model.usd, [model.input, model.cached, model.cache_write, model.output, model.total]);
-            summary.input += model.input.unwrap_or(0);
-            summary.cached += model.cached.unwrap_or(0);
-            summary.output += model.output.unwrap_or(0);
-            for (ix, value) in [model.input, model.cached, model.output].iter().enumerate() {
-                summary.token_reported[ix] |= value.is_some();
-                summary.token_missing[ix] |= value.is_none();
-            }
-        }
-        for role in &usage.roles {
-            let key = role_key(&role.role);
-            add_cost(&mut summary.roles, &key, role.usd, [Some(role.input), Some(role.cached), None, Some(role.output), Some(role.input + role.cached + role.output)]);
-            if let Some(row) = summary.roles.iter_mut().find(|row| row.name == key) {
-                add_id(&mut row.ids, &role.role);
-            }
         }
         let mut peaks: BTreeMap<SharedString, (u64, Vec<SharedString>)> = BTreeMap::new();
         for context in usage.contexts.iter().filter(|context| context.peak_tokens > 0) {
@@ -589,7 +606,8 @@ fn totals(summary: &Summary, cx: &App) -> Div {
     let mut cost_notes = Vec::new();
     if summary.unpriced { cost_notes.push(tr(cx, TEXT, "Some models are unpriced").to_owned()); }
     if summary.incomplete { cost_notes.push(tr(cx, TEXT, "Some amounts are unknown; the total is partial.").to_owned()); }
-    if cost_notes.is_empty() && summary.cost.known.is_some() && summary.cost.missing > 0 {
+    if summary.incomplete || summary.unpriced { cost_notes.push(tr(cx, TEXT, "Incomplete").to_owned()); }
+    if summary.cost.missing > 0 {
         cost_notes.push(
             tr(cx, TEXT, "{missing} of {runs} runs not reported")
                 .replace("{missing}", &summary.cost.missing.to_string())
@@ -610,7 +628,7 @@ fn totals(summary: &Summary, cx: &App) -> Div {
         }
     });
     let tiles = [
-        tile(t, theme::density(cx), tr(cx, TEXT, "Cost at API prices"), fmt_dollars(summary.cost), t.gold, cost_note.map(|note| (note, t.muted))),
+        tile(t, theme::density(cx), tr(cx, TEXT, "Cost at API prices"), fmt_dollars(summary.cost), t.gold, None),
         tile(t, theme::density(cx), tr(cx, TEXT, "Input"), fmt_count(summary.input, summary.token_reported[0], summary.token_missing[0]), t.text, None),
         tile(t, theme::density(cx), tr(cx, TEXT, "Cached"), fmt_count(summary.cached, summary.token_reported[1], summary.token_missing[1]), t.text, None),
         tile(t, theme::density(cx), tr(cx, TEXT, "Output"), fmt_count(summary.output, summary.token_reported[2], summary.token_missing[2]), t.text, None),
@@ -628,6 +646,10 @@ fn totals(summary: &Summary, cx: &App) -> Div {
         .child(h_flex().children(tiles.into_iter().enumerate().map(|(ix, tile)| {
             tile.when(ix > 0, |tile| tile.border_l_1().border_color(t.border))
         })))
+        .when_some(cost_note, |frame, note| frame.child(
+            div().px(theme::space(theme::density(cx), Step::Lg))
+                .text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(note),
+        ))
         .child(
             h_flex()
                 .gap(theme::space(theme::density(cx), Step::Sm))
@@ -917,18 +939,45 @@ fn cost_panel(id: &'static str, title: &'static str, name_label: &'static str, r
         })
         .when(name_label == "Model" && unpriced, |panel| {
             panel.child(
-                div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(tr(
-                    cx,
-                    TEXT,
-                    "Unpriced models are excluded from the total.",
-                )),
+                div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted)
+                    .child(format!("{} · {}", tr(cx, TEXT, "Unpriced models are excluded from the total."), tr(cx, TEXT, "Incomplete"))),
             )
         })
+}
+
+#[derive(Clone, PartialEq)]
+struct WishChoice { id: SharedString, label: SharedString }
+impl SelectItem for WishChoice {
+    type Value = SharedString;
+    fn title(&self) -> SharedString { self.label.clone() }
+    fn display_title(&self) -> Option<AnyElement> { Some(div().child(self.label.clone().test_text(self.label.clone())).into_any_element()) }
+    fn value(&self) -> &SharedString { &self.id }
+    fn matches(&self, query: &str) -> bool { let query = query.trim().to_lowercase(); self.label.to_lowercase().contains(&query) || self.id.to_lowercase().contains(&query) }
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement { div().child(self.label.clone()) }
+}
+
+// Use the live run's usage; UX supplies wish identity where available.
+fn usage_sessions(state: &AppState) -> Vec<super::ux::usage::UsageSession> {
+    let mut sessions = Vec::new();
+    for run in &state.runs {
+        let metadata = state.ux.usage_sessions.iter().find(|s| s.session == run.session);
+        let wish = state.ux.wish_ids.get(&run.session).filter(|w| !w.is_empty()).cloned()
+            .or_else(|| metadata.map(|s| s.wish.clone()).filter(|w| !w.is_empty())).unwrap_or_else(|| run.session.clone());
+        sessions.push(super::ux::usage::UsageSession {
+            wish, session: run.session.clone(), label: run.wish.clone(), usage: run.usage.clone(),
+            complete: metadata.map_or(run.status == RunStatus::Done, |s| s.complete), started_at: run.started_at,
+        });
+    }
+    sessions.extend(state.ux.usage_sessions.iter().filter(|s| !state.runs.iter().any(|run| run.session == s.session)).cloned());
+    sessions
 }
 
 pub struct UsageView {
     state: Entity<AppState>,
     evolve: Entity<EvolvePanel>,
+    wish_picker: Entity<SelectState<SearchableVec<WishChoice>>>,
+    compare_picker: Entity<SelectState<SearchableVec<WishChoice>>>,
+    choices: Vec<WishChoice>,
     scope: Scope,
     row_focus: Vec<FocusHandle>,
     warning_focus: FocusHandle,
@@ -963,13 +1012,68 @@ impl UsageView {
         let initial_scope = saved_scope.unwrap_or(if scene.contains("usage-all") { Scope::AllRuns } else { Scope::ThisRun });
         let initial_scope = if initial_scope == Scope::ThisRun && !can_this { Scope::AllRuns } else { initial_scope };
         let evolve = cx.new(|cx| EvolvePanel::new(state.clone(), window, cx));
+        let choices = Self::choices(&usage_sessions(state.read(cx)), cx);
+        let prefs = &settings::Store::current(cx).ux;
+        let wish_index = prefs.usage_wish.as_ref().and_then(|id| choices.iter().position(|c| c.id.as_ref() == id)).unwrap_or(0);
+        let compare_index = prefs.usage_compare.as_ref().and_then(|id| choices.iter().position(|c| c.id.as_ref() == id)).unwrap_or(0);
+        let wish_picker = cx.new(|cx| SelectState::new(SearchableVec::new(choices.clone()), Some(IndexPath::new(wish_index)), window, cx).searchable(true));
+        let mut compare_choices = choices.clone(); compare_choices[0].label = tr(cx, TEXT, "Compare with…").into();
+        let compare_picker = cx.new(|cx| SelectState::new(SearchableVec::new(compare_choices), Some(IndexPath::new(compare_index)), window, cx).searchable(true));
+        cx.subscribe_in(&wish_picker, window, |this, _, event: &SelectEvent<SearchableVec<WishChoice>>, _, cx| {
+            let SelectEvent::Confirm(value) = event;
+            let value = value.clone().filter(|v| !v.is_empty());
+            this.state.update(cx, |s, cx| s.show_usage_for(value, cx));
+        }).detach();
+        cx.subscribe_in(&compare_picker, window, |this, _, event: &SelectEvent<SearchableVec<WishChoice>>, _, cx| {
+            let SelectEvent::Confirm(value) = event;
+            let value = value.clone().filter(|v| !v.is_empty());
+            this.state.update(cx, |s, cx| s.set_usage_compare(value, cx));
+        }).detach();
         Self {
             state,
-            evolve,
+            evolve, wish_picker, compare_picker, choices,
             scope: initial_scope,
             row_focus: Vec::new(), warning_focus: cx.focus_handle(), warnings_expanded: false, selected, saved_scroll, restore: logic::Restore::default(), scroll: ScrollHandle::new(),
             last_scroll: Rc::new(Cell::new(saved_scroll)), scroll_ready: Rc::new(Cell::new(false)), restore_pending: Rc::new(Cell::new(false)),
         }
+    }
+
+    fn choices(sessions: &[super::ux::usage::UsageSession], cx: &App) -> Vec<WishChoice> {
+        let mut choices: Vec<_> = std::iter::once(WishChoice { id: "".into(), label: tr(cx, TEXT, "All wishes").into() })
+            .chain(wish_scope::wishes(sessions).into_iter().map(|(id, label)| WishChoice { id, label })).collect();
+        let prefs = &settings::Store::current(cx).ux;
+        for id in [prefs.usage_wish.as_ref(), prefs.usage_compare.as_ref()].into_iter().flatten() {
+            if !id.is_empty() && !choices.iter().any(|c| c.id.as_ref() == id) {
+                choices.push(WishChoice { id: id.clone().into(), label: id.clone().into() });
+            }
+        }
+        choices
+    }
+    fn sync_pickers(&mut self, sessions: &[super::ux::usage::UsageSession], window: &mut Window, cx: &mut Context<Self>) {
+        let choices = Self::choices(sessions, cx);
+        let prefs = &settings::Store::current(cx).ux;
+        let wi = prefs.usage_wish.as_ref().and_then(|id| choices.iter().position(|c| c.id.as_ref() == id));
+        let ci = prefs.usage_compare.as_ref().and_then(|id| choices.iter().position(|c| c.id.as_ref() == id));
+        // Keep unavailable saved IDs intact: the feed may still be loading.
+        let mut comparison = choices.clone(); comparison[0].label = tr(cx, TEXT, "Compare with…").into();
+        if choices != self.choices { self.choices = choices.clone();
+            self.wish_picker.update(cx, |s, cx| s.set_items(SearchableVec::new(choices), window, cx));
+            self.compare_picker.update(cx, |s, cx| s.set_items(SearchableVec::new(comparison), window, cx));
+        }
+        let desired_wish = self.choices[wi.unwrap_or(0)].id.clone();
+        let desired_compare = self.choices[ci.unwrap_or(0)].id.clone();
+        if self.wish_picker.read(cx).selected_value() != Some(&desired_wish) {
+            self.wish_picker.update(cx, |s, cx| s.set_selected_value(&desired_wish, window, cx));
+        }
+        if self.compare_picker.read(cx).selected_value() != Some(&desired_compare) {
+            self.compare_picker.update(cx, |s, cx| s.set_selected_value(&desired_compare, window, cx));
+        }
+    }
+
+    fn scope_bar(&self, cx: &App) -> Div {
+        h_flex().gap(theme::space(theme::density(cx), Step::Md))
+            .child(div().id("usage-wish-picker").w(px(240.)).child(Select::new(&self.wish_picker).small().search_placeholder(tr(cx, TEXT, "Search wishes"))))
+            .child(div().id("usage-compare").w(px(240.)).child(Select::new(&self.compare_picker).small().search_placeholder(tr(cx, TEXT, "Search wishes"))))
     }
 
     fn warning_summary(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1142,17 +1246,42 @@ impl Render for UsageView {
             return empty.child(self.render_empty(cx)).into_any_element();
         }
         let current = state.current.filter(|index| *index < state.runs.len());
-        let scope = if current.is_some() { self.scope } else { Scope::AllRuns };
-        let selected = match (scope, current) {
-            (Scope::ThisRun, Some(index)) => &state.runs[index..=index],
-            _ => &state.runs[..],
-        };
-        let summary = summarize(selected);
-        let rows = run_rows(&state.runs);
+        let sessions = usage_sessions(state);
+        let wish = settings::Store::current(cx).ux.usage_wish.clone();
+        let other = settings::Store::current(cx).ux.usage_compare.clone();
+        let scope = if wish.is_some() || current.is_none() { Scope::AllRuns } else { self.scope };
+        let scoped_sessions: Vec<_> = sessions.iter().filter(|s| scope == Scope::AllRuns || current.is_some_and(|i| state.runs[i].session == s.session)).cloned().collect();
+        let aggregate = wish_scope::aggregate(&scoped_sessions, wish.as_deref());
+        let selected_sessions = wish_scope::unique(&scoped_sessions, wish.as_deref());
+        let selected_runs: Vec<Run> = selected_sessions.iter().filter_map(|s| state.runs.iter().find(|r| r.session == s.session).cloned()).collect();
+        let mut summary = summarize(&selected_runs);
+        for session in &selected_sessions {
+            if !selected_runs.iter().any(|run| run.session == session.session) {
+                add_usage_details(&mut summary, &session.usage);
+            }
+        }
+        sort_costs(&mut summary.roles);
+        summary.runs = aggregate.sessions;
+        summary.cost = Dollars { known: aggregate.total_usd, missing: selected_sessions.iter().filter(|s| wish_scope::is_incomplete(s)).count() };
+        summary.unpriced |= selected_sessions.iter().any(|s| !s.usage.unpriced().is_empty());
+        summary.incomplete |= aggregate.incomplete;
+        for row in &mut summary.roles {
+            if row.usd.missing > 0 || selected_sessions.iter().any(|s| s.usage.roles.is_empty()) { row.usd.known = None; }
+        }
+        summary.models.clear();
+        for m in &aggregate.models {
+            add_cost(&mut summary.models, &m.model, m.usd, [m.input, m.cached, m.cache_write, m.output, m.total]);
+        }
+        sort_costs(&mut summary.models);
+        let mut rows = run_rows(&state.runs);
+        let ids: std::collections::HashSet<_> = selected_sessions.iter().map(|s| s.session.clone()).collect();
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|r| ids.contains(&state.runs[r.index].session) && seen.insert(state.runs[r.index].session.clone()));
         let subtitle: SharedString = match (scope, current) {
             (Scope::ThisRun, Some(index)) => format!("{} · {}", state.runs[index].project, state.runs[index].wish.split_whitespace().collect::<Vec<_>>().join(" ")).into(),
-            _ if state.runs.len() == 1 => tr(cx, TEXT, "1 run").into(),
-            _ => tr(cx, TEXT, "{n} runs").replace("{n}", &state.runs.len().to_string()).into(),
+            _ if wish.is_some() => aggregate.label.clone(),
+            _ if aggregate.sessions == 1 => tr(cx, TEXT, "1 run").into(),
+            _ => tr(cx, TEXT, "{n} runs").replace("{n}", &aggregate.sessions.to_string()).into(),
         };
         while self.row_focus.len() < rows.len() {
             self.row_focus.push(cx.focus_handle());
@@ -1164,6 +1293,8 @@ impl Render for UsageView {
         let wide = !compact;
         let handle = self.scroll.clone(); let last = self.last_scroll.clone(); let ready = self.scroll_ready.clone();
         let all_runs = scope == Scope::AllRuns;
+        let comparison = other.as_deref().map(|b| compare::compare(&sessions, wish.as_deref(), Some(b)));
+        self.sync_pickers(&sessions, window, cx);
         let has_roles = !summary.roles.is_empty();
         v_flex()
             .size_full()
@@ -1187,9 +1318,29 @@ impl Render for UsageView {
                                     .child(ornament::page_title(&t, tr(cx, TEXT, "Usage")))
                                     .child(div().truncate().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(subtitle)),
                             )
-                            .child(h_flex().gap(theme::space(theme::density(cx), Step::Md)).flex_none().child(self.scope_tabs(scope, current.is_some(), cx)).child(self.evolve.clone())),
+                            .child(h_flex().gap(theme::space(theme::density(cx), Step::Md)).flex_none().when(wish.is_none(), |bar| bar.child(self.scope_tabs(scope, current.is_some(), cx))).child(self.evolve.clone())),
                     )
                     .when(matches!(panel_state, PanelState::Stale(_)), |view| { if let PanelState::Stale(message) = &panel_state { view.child(self.retry_note(message.clone(), cx)) } else { view } })
+                    .child(self.scope_bar(cx))
+                    .when(aggregate.incomplete, |view| view.child(div().text_color(t.muted).child(tr(cx, TEXT, "Incomplete"))))
+                    .when_some(comparison, |view, (a, b, delta)| {
+                        let cols = [grow(), right(140.)];
+                        let label = if wish.is_none() { SharedString::from(tr(cx, TEXT, "All wishes")) } else { a.label.clone() };
+                        let values = [
+                            (label, fmt_cost(a.total_usd), a.incomplete),
+                            (b.label.clone(), fmt_cost(b.total_usd), b.incomplete),
+                            (SharedString::from(tr(cx, TEXT, "Difference")), delta.map_or_else(|| UNKNOWN.to_owned(), |d| if d < 0. { format!("−{}", fmt_usd(-d)) } else { fmt_usd(d) }), false),
+                        ];
+                        view.child(panel(t, theme::density(cx)).child(
+                            BaseTable::new("usage-compare-table").row_count(4).column_count(2)
+                                .child(header_row(t, &cols, &["Wish", "API cost"], cx))
+                                .child(BaseBody::new("body").children(values.into_iter().enumerate().map(|(i, (label, value, incomplete))| {
+                                    BaseRow::new(("comparison", i), i + 2).flex().flex_row().h(theme::row_height(theme::density(cx)))
+                                        .child(data_cell(0, cols[0], h_flex().gap(theme::space(theme::density(cx), Step::Sm)).child(label.clone().test_text(label)).when(incomplete, |v| v.child(tr(cx, TEXT, "Incomplete").test_text(tr(cx, TEXT, "Incomplete")))), theme::density(cx)))
+                                        .child(data_cell(1, cols[1], div().child(value.clone().test_text(value)), theme::density(cx)))
+                                })))
+                        ))
+                    })
                     .child(totals(&summary, cx))
                     .child(div().text_size(theme::font(theme::density(cx), TypeSize::Caption)).text_color(t.muted).child(format!("{} · {}", tr(cx, TEXT, "Summary board"), board_text)))
                     .when(wide, |view| view.child(context_panel(&summary, all_runs, cx)).child(warnings_panel(&summary, all_runs, cx)))

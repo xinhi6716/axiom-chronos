@@ -1,0 +1,17 @@
+{
+  "id": "python-011",
+  "language": "python",
+  "feature": "shadowing",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 6,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.py#function:run.measure"
+      }
+    }
+  ]
+}

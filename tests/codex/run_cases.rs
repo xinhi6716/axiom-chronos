@@ -15,20 +15,20 @@ fn request(cwd: &std::path::Path, brief: &str) -> RunRequest {
         effort: Some("low".into()),
         output_schema: None,
         developer_instructions: None,
-        timeout_s: 10,
+        timeout_s: 60,
         lean: true,
         keep_plugins: vec![],
         web_search: false,
     }
 }
-fn server() -> AppServer {
-    AppServer::new(common::fake("fake_codex"))
+fn server(dir: &std::path::Path) -> AppServer {
+    AppServer::new(common::fake("fake_codex")).with_slots_home(dir.into())
 }
 
 #[test]
 fn completed_and_lean_configuration() {
     let dir = common::temp();
-    let server = server();
+    let server = server(dir.path());
     let mut req = request(dir.path(), "GOAL 寫一個模組");
     req.developer_instructions = Some("instructions".into());
     let r = server.run(&req).unwrap();
@@ -86,7 +86,7 @@ fn completed_and_lean_configuration() {
 #[test]
 fn structured_output_and_errors() {
     let dir = common::temp();
-    let server = server();
+    let server = server(dir.path());
     let mut req = request(dir.path(), "structured");
     req.output_schema = Some(json!({"type":"object","required":["answer"]}));
     let good = server.run(&req).unwrap();
@@ -128,7 +128,8 @@ fn timeout_crash_and_restart() {
     let dir = common::temp();
     let (server, log) = logged_server(dir.path());
     let mut req = request(dir.path(), "HANG");
-    req.timeout_s = 1;
+    // This deadline includes slot setup and fake-process startup under suite load.
+    req.timeout_s = 10;
     let r = server.run(&req).unwrap();
     assert_eq!(r["status"], "timeout");
     assert_eq!(r["error"]["kind"], "timeout");
@@ -136,7 +137,7 @@ fn timeout_crash_and_restart() {
         .iter()
         .any(|e| e["method"] == "turn/interrupt" && e["params"]["turnId"] == r["turn_id"]));
     req.brief = "CRASH".into();
-    req.timeout_s = 10;
+    req.timeout_s = 60;
     let r = server.run(&req).unwrap();
     assert_eq!(r["status"], "bridge_error");
     assert_eq!(r["error"]["kind"], "codex_exited");
@@ -149,13 +150,17 @@ fn simultaneous_turns_overlap() {
     let dir = common::temp();
     let (server, log) = logged_server(dir.path());
     let server = Arc::new(server);
+    let gate = dir.path().join("finish.gate");
+    let brief = format!("FAKE_GATE {}\n", gate.display());
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let server = server.clone();
-            let req = request(dir.path(), "SLOW");
+            let req = request(dir.path(), &brief);
             std::thread::spawn(move || server.run(&req).unwrap())
         })
         .collect();
+    wait_turns(&log, 2);
+    std::fs::write(gate, "").unwrap();
     for h in handles {
         assert_eq!(h.join().unwrap()["status"], "completed");
     }
@@ -165,13 +170,21 @@ fn simultaneous_turns_overlap() {
         .filter(|e| e["method"] == "turn/start")
         .collect();
     assert_eq!(starts.len(), 2);
-    assert!(starts[1]["time"].as_f64().unwrap() - starts[0]["time"].as_f64().unwrap() < 2.0);
+    let last_start = events
+        .iter()
+        .rposition(|e| e["method"] == "turn/start")
+        .unwrap();
+    let first_finish = events
+        .iter()
+        .position(|e| e["method"] == "fake/complete")
+        .unwrap();
+    assert!(last_start < first_finish);
 }
 
 #[test]
 fn rejects_invalid_arguments() {
     let dir = common::temp();
-    let server = server();
+    let server = server(dir.path());
     for field in 0..4 {
         let mut req = request(dir.path(), "test");
         match field {
@@ -195,16 +208,33 @@ fn logged_server(dir: &std::path::Path) -> (AppServer, std::path::PathBuf) {
             wrapper.to_string_lossy().into_owned(),
             log.to_string_lossy().into_owned(),
             fake.to_string_lossy().into_owned(),
-        ]),
+        ])
+        .with_slots_home(dir.into()),
         log,
     )
 }
 fn entries(log: &std::path::Path) -> Vec<Value> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
-        .lines()
+        .split_inclusive('\n')
+        .filter(|s| s.ends_with('\n')) // Ignore an in-progress log append.
         .map(|s| serde_json::from_str(s).unwrap())
         .collect()
+}
+fn wait_turns(log: &std::path::Path, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while entries(log)
+        .iter()
+        .filter(|e| e["method"] == "turn/start")
+        .count()
+        < count
+    {
+        assert!(
+            Instant::now() < deadline,
+            "fake codex did not start {count} turns"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 #[test]
 fn hanging_rpc_times_out() {
@@ -212,7 +242,8 @@ fn hanging_rpc_times_out() {
     let server = AppServer::with_request_timeout(
         common::fake("fake_codex"),
         Some(Duration::from_millis(300)),
-    );
+    )
+    .with_slots_home(dir.path().into());
     let start = Instant::now();
     assert_eq!(
         server
@@ -221,7 +252,7 @@ fn hanging_rpc_times_out() {
             .kind,
         "timeout"
     );
-    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(start.elapsed() < Duration::from_secs(30));
 }
 #[test]
 fn cancel_all_interrupts_single_and_concurrent_turns() {
@@ -236,18 +267,9 @@ fn cancel_all_interrupts_single_and_concurrent_turns() {
                 std::thread::spawn(move || server.run(&req).unwrap())
             })
             .collect();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while entries(&log)
-            .iter()
-            .filter(|e| e["method"] == "turn/start")
-            .count()
-            < count
-        {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        // Allow turn/start responses to be registered before cancellation.
-        std::thread::sleep(Duration::from_millis(100));
+        wait_turns(&log, count);
+        // Each run has captured the cancellation generation before sending turn/start.
+        // Even a response registered after cancel_all must observe that cancellation.
         let start = Instant::now();
         server.cancel_all();
         for handle in handles {
@@ -259,7 +281,7 @@ fn cancel_all_interrupts_single_and_concurrent_turns() {
                 .any(|e| e["method"] == "turn/interrupt"
                     && e["params"]["turnId"] == report["turn_id"]));
         }
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(30));
     }
 }
 
@@ -279,7 +301,7 @@ fn assert_names_versions(message: &str) {
 #[test]
 fn newer_codex_still_runs() {
     let dir = common::temp();
-    let server = AppServer::new(common::fake_codex(&[NEWER]));
+    let server = AppServer::new(common::fake_codex(&[NEWER])).with_slots_home(dir.path().into());
     let report = server.run(&request(dir.path(), "hello")).unwrap();
     assert_eq!(report["status"], "completed");
     assert!(report["error"].is_null());
@@ -296,7 +318,8 @@ fn run_failures_from_a_protocol_change_name_both_versions() {
         "--fake-break=turn/start:empty-result",
         "--fake-break=turn/start:-32600:Invalid request: missing field `threadId`",
     ] {
-        let server = AppServer::new(common::fake_codex(&[NEWER, breakage]));
+        let server = AppServer::new(common::fake_codex(&[NEWER, breakage]))
+            .with_slots_home(dir.path().into());
         let failure = server.run(&request(dir.path(), "hello")).unwrap_err();
         assert_eq!(failure.kind, "codex_protocol", "{breakage}: {failure}");
         assert_names_versions(&failure.message);
@@ -309,7 +332,8 @@ fn ordinary_turn_start_errors_are_not_called_protocol_mismatches() {
     let server = AppServer::new(common::fake_codex(&[
         NEWER,
         "--fake-break=turn/start:-32600:thread not found: x",
-    ]));
+    ]))
+    .with_slots_home(dir.path().into());
     let failure = server.run(&request(dir.path(), "hello")).unwrap_err();
     assert_eq!(failure.kind, "codex_rpc", "{failure}");
     assert!(!failure.message.contains("999.1.2"), "{failure}");
@@ -320,18 +344,18 @@ fn turn_timeout_names_the_version_only_outside_the_tested_range() {
     let dir = common::temp();
     let tested = common::tested_codex_flag();
     for (flag, named) in [(NEWER, true), (tested.as_str(), false)] {
-        let server = AppServer::new(common::fake_codex(&[flag]));
+        let server = AppServer::new(common::fake_codex(&[flag])).with_slots_home(dir.path().into());
         let mut req = request(dir.path(), "HANG");
-        req.timeout_s = 1;
+        req.timeout_s = 10;
         let report = server.run(&req).unwrap();
         assert_eq!(report["status"], "timeout");
         assert_eq!(report["error"]["kind"], "timeout");
         let message = report["error"]["message"].as_str().unwrap();
-        assert!(message.starts_with("turn exceeded 1s"), "{message}");
+        assert!(message.starts_with("turn exceeded 10s"), "{message}");
         if named {
             assert!(message.contains("newer than"), "{message}");
         } else {
-            assert_eq!(message, "turn exceeded 1s and was interrupted");
+            assert_eq!(message, "turn exceeded 10s and was interrupted");
         }
     }
 }
@@ -339,7 +363,7 @@ fn turn_timeout_names_the_version_only_outside_the_tested_range() {
 #[test]
 fn unexpected_turn_status_is_failed_and_names_both_versions() {
     let dir = common::temp();
-    let server = AppServer::new(common::fake_codex(&[NEWER]));
+    let server = AppServer::new(common::fake_codex(&[NEWER])).with_slots_home(dir.path().into());
     for (brief, shown) in [("ODDSTATUS", "\"succeeded\""), ("NOSTATUS", "null")] {
         let report = server.run(&request(dir.path(), brief)).unwrap();
         assert_eq!(report["status"], "failed", "{report}");

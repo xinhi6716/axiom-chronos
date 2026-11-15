@@ -1,0 +1,52 @@
+gpui_component::window_border::WindowBorder/root/gpui_component::title_bar::TitleBar/title-bar/bar/title-search/gpui_component::kbd::Kbd	Ctrl+K
+gpui_component::window_border::WindowBorder/root/research-page/research-blocker	screen: Paused: rate limited
+gpui_component::window_border::WindowBorder/root/research-page/research-load	Ready
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-map	Map
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-sources	Sources
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-evidence	Evidence
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-dataset	Dataset
+gpui_component::window_border::WindowBorder/root/research-page/research-tab-exports	Exports
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-total	Total: 40
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-deduplicated	Deduplicated: 39
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-duplicates	Duplicates: 1
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_in	Screened in: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out	Screened out: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:out of scope	  out of scope: 6
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-screened_out:wrong device	  wrong device: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-pending	Pending: 10
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-unprocessed	Unprocessed: 5
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read	Read: 11
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed	Read failed: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-node-read_failed:read failed	  read failed: 2
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-0	c0b3ff2c5cff · 10.1234/same · Group: dup · Included
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-1	8341ce564805 · 10.1234/same · Group: dup · Excluded: out of scope
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-2	f125c3f4685e · 10.1234/2 · Group: dup · Failed: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-3	c0b3ff2c5cff · 10.1234/3 · Group: dup · Duplicate: dup
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-4	80ff5c683424 · 10.1234/4 · Group:  · Failed: read failed
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-list/research-sources-row-5	e5288ff41ecc · 10.1234/5 · Group:  · Excluded: wrong device
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-page	1–40 / 40
+gpui_component::window_border::WindowBorder/root/research-page/research-sources-panel/research-sources-sample	Sample 5 for spot-check
+gpui_component::window_border::WindowBorder/root/research-page/research-recent-0	<tmp>\rram\project
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude	Claude
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	5 hours
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-five-hour	62%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-claude/quota-claude-weekly	41%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex	Codex
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	weekly
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-codex/quota-codex-weekly	58%
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	Hydrogen/Flash
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-hydrogen_flash	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	Argon
+gpui_component::window_border::WindowBorder/root/quota-strip/quota-pool-argon	used — · remaining unknown
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	12
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	4
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	2
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models	·
+gpui_component::window_border::WindowBorder/root/quota-strip/running-models/running-model	1
+gpui_component::window_border::WindowBorder/root/quota-strip/codex-parallel	Codex parallel 15 / 48
+gpui_component::window_border::WindowBorder/root/research-page/gpui_component::button::button::Button/gpui_base::button::Button/research-primary	Show what is blocking

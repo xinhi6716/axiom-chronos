@@ -1,0 +1,17 @@
+{
+  "id": "ts-023",
+  "language": "ts",
+  "feature": "relative_import",
+  "refs": [
+    {
+      "file": "pkg/main.ts",
+      "line": 2,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "pkg/lib.ts#function:render"
+      }
+    }
+  ]
+}

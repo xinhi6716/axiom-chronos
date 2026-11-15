@@ -1,0 +1,6 @@
+[
+  {"path": "bin/axiom", "pattern": "ghp", "reason": "Literal credential-prefix detector in src/laya/curate/mod.rs, not a credential."},
+  {"path": "bin/axiom", "pattern": "github-pat", "reason": "Literal credential-prefix detector in src/laya/curate/mod.rs, not a credential."},
+  {"path": "bin/chronos", "pattern": "ghp", "reason": "Literal credential-prefix detector in src/laya/curate/mod.rs, not a credential."},
+  {"path": "bin/chronos", "pattern": "github-pat", "reason": "Literal credential-prefix detector in src/laya/curate/mod.rs, not a credential."}
+]

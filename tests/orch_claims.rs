@@ -84,10 +84,17 @@ fn persisted_claim_is_unknown_in_another_process_and_release_checks_id() {
     let id = f.begin();
     let claims = fs::read_to_string(f.store.join("claims.tsv")).unwrap();
     let mut lines = claims.lines();
-    assert_eq!(lines.next(), Some("unit\tattempt\tscope\tstarted"));
+    assert_eq!(
+        lines.next(),
+        Some("unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers")
+    );
     let fields: Vec<_> = lines.next().unwrap().split('\t').collect();
     assert_eq!(&fields[..3], &["a", &id, "a.txt"]);
     assert!(!fields[3].is_empty());
+    assert_eq!(
+        &fields[4..7],
+        &["m", "demo", &std::process::id().to_string()]
+    );
     assert!(lines.next().is_none());
     for unit in ["a", "b"] {
         assert_eq!(
@@ -95,7 +102,11 @@ fn persisted_claim_is_unknown_in_another_process_and_release_checks_id() {
                 .err()
                 .unwrap()
                 .kind,
-            "busy"
+            if unit == "a" {
+                "already_running"
+            } else {
+                "busy"
+            }
         );
     }
     assert!(!orch::ready_units(&f.store)
@@ -169,6 +180,45 @@ fn vanished_claim_blocks_overlap_and_stale_attempt_cannot_release_newer() {
 }
 
 #[test]
+fn independent_claims_record_each_other_as_peers() {
+    let f = Fixture::new();
+    let brief = f.store.join("b.brief");
+    fs::write(&brief, "GOAL test\nSCOPE b.txt\nVERIFY echo ok\n").unwrap();
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.store.join("units.tsv"))
+            .unwrap(),
+        "b\tm\tpending\t\t\t\t{}",
+        brief.display()
+    )
+    .unwrap();
+    let a = f.begin();
+    let Begin::Run { attempt_id: b, .. } =
+        orch::begin_unit(&f.store, "b", "worker", &f.repo, false).unwrap()
+    else {
+        panic!()
+    };
+    let claims = fs::read_to_string(f.store.join("claims.tsv")).unwrap();
+    let rows: Vec<Vec<&str>> = claims
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][7], b);
+    assert_eq!(rows[1][7], a);
+    let owner = orch::unit_owner(&f.store, "a").unwrap().unwrap();
+    assert_eq!(
+        (&owner.wish, &owner.module, &owner.unit, &owner.attempt),
+        (&"demo".into(), &"m".into(), &"a".into(), &a)
+    );
+    assert!(orch::abort_unit(&f.store, "a", &a));
+    assert!(orch::abort_unit(&f.store, "b", &b));
+}
+
+#[test]
 fn verify_output_is_readable_and_failure_is_recorded() {
     let f = Fixture::new();
     let id = f.begin();
@@ -207,13 +257,20 @@ fn fresh_process_claim() {
         let err = orch::begin_unit(Path::new(&store), unit, "worker", Path::new(&repo), false)
             .err()
             .unwrap();
-        assert_eq!(err.kind, "outcome_unknown");
+        assert_eq!(
+            err.kind,
+            if unit == "a" {
+                "already_running"
+            } else {
+                "busy"
+            }
+        );
         assert!(err.message.contains(&id));
     }
 }
 
 #[test]
-fn verify_output_truncation() {
+fn verify_output_preserves_capture_and_bounds_tail() {
     let f = Fixture::new();
     let expected = "01234567\r\n".repeat(2100);
     fs::write(f.repo.join("long-output.txt"), &expected).unwrap();
@@ -240,7 +297,7 @@ fn verify_output_truncation() {
     assert_eq!(result.verify_exit, Some(0));
     assert_eq!(
         fs::read_to_string(result.verify_output.unwrap()).unwrap(),
-        expected[1000..]
+        expected
     );
     assert_eq!(result.verify_tail, expected[19000..]);
 }

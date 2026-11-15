@@ -1,0 +1,17 @@
+{
+  "id": "python-017",
+  "language": "python",
+  "feature": "qualified_path",
+  "refs": [
+    {
+      "file": "main.py",
+      "line": 2,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.py#function:measure"
+      }
+    }
+  ]
+}

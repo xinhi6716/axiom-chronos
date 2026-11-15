@@ -1,0 +1,17 @@
+{
+  "id": "rust-024",
+  "language": "rust",
+  "feature": "re_export",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 3,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.rs#function:render"
+      }
+    }
+  ]
+}

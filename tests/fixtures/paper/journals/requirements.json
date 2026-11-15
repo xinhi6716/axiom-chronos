@@ -1,0 +1,19 @@
+{
+  "abstract": "cancer immune therapy trial",
+  "keywords": [
+    "cancer biomarker",
+    "genomics"
+  ],
+  "max_quartile": "q1",
+  "tier_scheme": "sjr",
+  "access": "open_access",
+  "apc_limit": {
+    "amount_minor": 300000,
+    "currency": "USD"
+  },
+  "require_no_fee": false,
+  "categories": [
+    "oncology"
+  ],
+  "free_text": []
+}

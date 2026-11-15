@@ -1,0 +1,8 @@
+{
+  "pilot": {
+    "accuracy": 0.93
+  },
+  "acceptance": {
+    "accuracy": 0.91
+  }
+}

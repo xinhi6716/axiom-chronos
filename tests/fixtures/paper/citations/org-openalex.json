@@ -1,0 +1,18 @@
+{
+  "id": "https://openalex.org/W901",
+  "doi": "https://doi.org/10.1038/orgtest1",
+  "display_name": "Global health report",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "World Health Organization"
+      }
+    }
+  ],
+  "publication_year": 2020,
+  "primary_location": {
+    "source": {
+      "display_name": "WHO Bulletin"
+    }
+  }
+}

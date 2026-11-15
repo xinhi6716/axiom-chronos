@@ -1,9 +1,16 @@
+pub mod scheduler;
+#[cfg(test)]
+mod read_cost_tests;
+#[cfg(test)]
+use super::evidence::read_count;
 use super::*;
 use crate::base::{self, Failure, Res};
 use serde_json::Value;
 use std::{
+    cell::{OnceCell, RefCell},
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -18,19 +25,145 @@ pub enum Begin {
     },
     Reused,
 }
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct Owner {
+    pub wish: String,
+    pub module: String,
+    pub unit: String,
+    pub attempt: String,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct Finished {
     pub state: String,
     pub verify_exit: Option<i32>,
     pub verify_tail: String,
     pub verify_output: Option<PathBuf>,
     pub outside_scope: Vec<String>,
+    pub ignored: Vec<(String, String)>,
+    pub unattributed: Vec<String>,
+    pub changed: Vec<String>,
     pub pack: Option<PathBuf>,
     pub pack_error: Option<String>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    unit: String,
+    attempt: u32,
+    attempt_id: String,
+    base_tree: String,
+    brief_sha256: String,
+    routing: Option<crate::codex::routing::RoutingSnapshot>,
+    stage: String,
+    pid: u32,
+    updated: String,
+    #[serde(default)]
+    worker_result: Option<Value>,
+    #[serde(default)]
+    finished: Option<Finished>,
+    #[serde(default)]
+    finished_tree: String,
+    #[serde(default)]
+    evidence_start: usize,
+    #[serde(default)]
+    red_tree: Option<String>,
+}
+pub(crate) fn checkpoint_worker(store: &Path, unit: &str, attempt: &str, report: Option<&Value>) -> Res<Option<Value>> {
+    with_lock(store, false, || {
+        let data = std::fs::read(checkpoint_path(store, unit)).map_err(|e| Failure::new("io", e.to_string()))?;
+        let mut cp: Checkpoint = serde_json::from_slice(&data).map_err(|e| Failure::new("io", e.to_string()))?;
+        if cp.attempt_id != attempt { return Err(Failure::new("claim_mismatch", "checkpoint attempt mismatch")); }
+        if let Some(report) = report {
+            cp.worker_result = Some(report.clone());
+            if cp.stage == "claimed" { cp.stage = "worker_done".into(); }
+            cp.updated = base::now_iso();
+            write_checkpoint(store, &cp)?;
+        }
+        Ok(cp.worker_result)
+    })
+}
+// Stage transitions and their durable result share the claim's store lock.
+pub(crate) fn checkpoint_stage(store: &Path, unit: &str, attempt: &str, stage: &str, repo: &Path) -> Res<()> {
+    with_lock(store, false, || {
+        let path = checkpoint_path(store, unit);
+        let mut cp: Checkpoint = serde_json::from_slice(&std::fs::read(&path)
+            .map_err(|e| Failure::new("io", e.to_string()))?)
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        if cp.attempt_id != attempt { return Err(Failure::new("claim_mismatch", "checkpoint attempt mismatch")); }
+        let rank = |s: &str| match s { "reviewed" => 4, "selfchecked" => 3, "verified" => 2, "worker_done" => 1, _ => 0 };
+        if rank(stage) > rank(&cp.stage) { cp.stage = stage.into(); }
+        // A self-check may repair the tree and verify it again. Cache that result,
+        // not the pre-repair tree, so a crash after self-check does not verify twice.
+        if stage == "selfchecked" {
+            let brief = unit_brief(store, unit)?;
+            let tree = snapshot(repo, &brief.scope);
+            if let Some(check) = evidence(store, unit)?.iter().rev().find(|r| r.kind == "verify" && r.commit == tree) {
+                cp.finished_tree = tree;
+                if let Some(finished) = &mut cp.finished { finished.verify_exit = Some(check.exit_code); }
+            }
+        }
+        cp.updated = base::now_iso();
+        write_checkpoint(store, &cp)
+    })
+}
+fn checkpoint_path(store: &Path, unit: &str) -> PathBuf {
+    store.join("checkpoints").join(format!("{unit}.json"))
+}
+fn write_checkpoint(store: &Path, cp: &Checkpoint) -> Res<()> {
+    let path = checkpoint_path(store, &cp.unit);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| Failure::new("io", e.to_string()))?;
+    let data = serde_json::to_vec(cp).map_err(|e| Failure::new("io", e.to_string()))?;
+    base::atomic_write(&path, &data).map_err(|e| Failure::new("io", e.to_string()))
+}
+/// Whether a unit can finish on its last VERIFY without a new worker run:
+/// built, with an unchanged brief and that VERIFY passing on its files now.
+fn reusable(store: &Path, u: &Unit, scope: &[String], rows: &[Evidence], repo: &Path, needs_accept: bool) -> Res<bool> {
+    // A matching scope tree alone cannot justify reusing a changed brief.
+    Ok(derive_state(rows, needs_accept) == "built"
+        && completed_brief_matches(store, &u.id, Path::new(&u.brief))?
+        && rows.iter().rev().find(|r| r.kind == "verify").is_some_and(|r| {
+            r.exit_code == 0 && !r.commit.is_empty() && snapshot(repo, scope) == r.commit
+        }))
+}
+/// Whether a unit that units.tsv records as verified is reusable because
+/// evidence appended after its own evidence verified it reopened it. Without
+/// that, units.tsv is the record: legacy evidence may never derive verified.
+fn completed_reusable(store: &Path, unit: &str, u: &Unit, rows: &[Evidence], repo: &Path) -> Res<bool> {
+    let needs = needs_accept(store, unit)?;
+    if !(1..rows.len()).any(|n| derive_state(&rows[..n], needs) == "verified") {
+        return Ok(false);
+    }
+    reusable(store, u, &unit_brief(store, unit)?.scope, rows, repo, needs)
+}
+fn verified_owner(store: &Path, u: &Unit, rows: &[Evidence]) -> Owner {
+    Owner {
+        wish: wish_of_store(store),
+        module: u.track.clone(),
+        unit: u.id.clone(),
+        attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+    }
+}
+fn completed_brief_matches(store: &Path, unit: &str, brief_path: &Path) -> Res<bool> {
+    let saved: Option<Value> = std::fs::read(store.join("reports").join(format!("{unit}.json")))
+        .ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    // Older reports have no digest; preserve their existing resume behavior.
+    let Some(digest) = saved.as_ref().and_then(|v| v["brief_sha256"].as_str()) else {
+        return Ok(true);
+    };
+    let bytes = std::fs::read(brief_path).map_err(|e| Failure::new("io", e.to_string()))?;
+    Ok(crate::seams::sha256_hex(&bytes) == digest)
+}
+pub(crate) fn checkpoint_routing(store: &Path, unit: &str, snapshot: &crate::codex::routing::RoutingSnapshot) -> Res<()> {
+    with_lock(store, false, || {
+        let path = checkpoint_path(store, unit);
+        let data = std::fs::read(path).map_err(|e| Failure::new("io", e.to_string()))?;
+        let mut cp: Checkpoint = serde_json::from_slice(&data).map_err(|e| Failure::new("io", e.to_string()))?;
+        if cp.attempt_id != snapshot.attempt_id { return Err(Failure::new("claim_mismatch", "checkpoint attempt mismatch")); }
+        cp.routing = Some(snapshot.clone());
+        cp.updated = base::now_iso();
+        write_checkpoint(store, &cp)
+    })
+}
 struct Claim {
-    // Units of different projects never block or excuse each other.
-    store: PathBuf,
-    scope: Vec<String>,
     dirty: BTreeSet<String>,
     attempt_id: String,
     base: String,
@@ -42,10 +175,63 @@ fn key(store: &Path, unit: &str) -> String {
 fn claims() -> &'static Mutex<HashMap<String, Claim>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
+fn claim_owner(store: &Path, c: &DiskClaim, units: &[Unit]) -> Owner {
+    Owner {
+        wish: if c.wish.is_empty() {
+            wish_of_store(store)
+        } else {
+            c.wish.clone()
+        },
+        module: if c.module.is_empty() {
+            units
+                .iter()
+                .find(|u| u.id == c.unit)
+                .map(|u| u.track.clone())
+                .unwrap_or_default()
+        } else {
+            c.module.clone()
+        },
+        unit: c.unit.clone(),
+        attempt: c.attempt.clone(),
+    }
+}
+fn owner_text(owner: &Owner) -> String {
+    format!(
+        "wish {}, module {}, unit {}, attempt {}",
+        owner.wish, owner.module, owner.unit, owner.attempt
+    )
+}
+pub fn unit_owner(store: &Path, unit: &str) -> Res<Option<Owner>> {
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        if let Some(c) = read_claims(store)?.iter().find(|c| c.unit == unit) {
+            return Ok(Some(claim_owner(store, c, &units)));
+        }
+        let Some(u) = units.iter().find(|u| u.id == unit) else {
+            return Ok(None);
+        };
+        let rows = evidence(store, unit)?;
+        if derive_state(&rows, needs_accept(store, unit)?) != "verified" {
+            return Ok(None);
+        }
+        Ok(Some(Owner {
+            wish: wish_of_store(store),
+            module: u.track.clone(),
+            unit: unit.into(),
+            attempt: rows.iter().filter(|r| r.kind == "run").count().to_string(),
+        }))
+    })
+}
 fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     let out = base::proc::cmd("git")
         .current_dir(repo)
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=traditional",
+        ])
         .output()
         .map_err(|e| Failure::new("process", e.to_string()))?;
     if !out.status.success() {
@@ -81,59 +267,272 @@ fn dirty(repo: &Path) -> Res<BTreeSet<String>> {
     }
     Ok(result)
 }
-fn known_track(store: &Path, u: &Unit) -> Res<bool> {
-    if !store.join("modules.md").exists() {
-        return Ok(true);
+/// A unit's evidence and the state derived from it.
+struct UnitState {
+    rows: Vec<Evidence>,
+    needs_accept: bool,
+    state: String,
+}
+/// One read of a store shared by the scheduling read paths of a single call.
+///
+/// Units, claims, the module map, each unit's evidence and brief, and each module's missing
+/// dependencies are read or derived at most once, so one call costs one pass over the store
+/// instead of one pass per unit and per dependency. Each part is read when a read path first
+/// needs it, so a call reads nothing it did not read before and fails on the same input.
+/// It never takes the store lock.
+pub(crate) struct Scan<'a> {
+    store: &'a Path,
+    units: Vec<Unit>,
+    claims: OnceCell<Vec<DiskClaim>>,
+    map: OnceCell<Option<Map>>,
+    states: RefCell<HashMap<String, Rc<UnitState>>>,
+    missing: RefCell<HashMap<String, Rc<Vec<String>>>>,
+    briefs: RefCell<HashMap<String, Rc<Res<Brief>>>>,
+    ready: OnceCell<Vec<String>>,
+    waiting: OnceCell<Vec<Waiting>>,
+}
+impl<'a> Scan<'a> {
+    pub(crate) fn new(store: &'a Path) -> Res<Self> {
+        Ok(Self::with_units(store, read_units(store)?))
     }
-    let text = std::fs::read_to_string(store.join("modules.md"))
-        .map_err(|e| Failure::new("io", e.to_string()))?;
-    let map = parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
-    Ok(map.modules.iter().any(|m| m.id == u.track))
+    fn with_units(store: &'a Path, units: Vec<Unit>) -> Self {
+        Self {
+            store,
+            units,
+            claims: OnceCell::new(),
+            map: OnceCell::new(),
+            states: RefCell::default(),
+            missing: RefCell::default(),
+            briefs: RefCell::default(),
+            ready: OnceCell::new(),
+            waiting: OnceCell::new(),
+        }
+    }
+    pub(crate) fn units(&self) -> &[Unit] {
+        &self.units
+    }
+    fn claims(&self) -> Res<&[DiskClaim]> {
+        if let Some(claims) = self.claims.get() {
+            return Ok(claims);
+        }
+        let claims = read_claims(self.store)?;
+        Ok(self.claims.get_or_init(|| claims))
+    }
+    /// The parsed modules.md, or `None` when the store has none.
+    fn map(&self) -> Res<Option<&Map>> {
+        if let Some(map) = self.map.get() {
+            return Ok(map.as_ref());
+        }
+        let path = self.store.join("modules.md");
+        let map = if path.exists() {
+            #[cfg(test)]
+            read_count::map();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| Failure::new("io", e.to_string()))?;
+            Some(parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?)
+        } else {
+            None
+        };
+        Ok(self.map.get_or_init(|| map).as_ref())
+    }
+    /// Whether the unit's track is a module; without a map every track is known.
+    fn known_track(&self, u: &Unit) -> Res<bool> {
+        Ok(self
+            .map()?
+            .is_none_or(|map| map.modules.iter().any(|m| m.id == u.track)))
+    }
+    /// The unit's evidence and derived state, as `derive_state(evidence, needs_accept)`. As in
+    /// `needs_accept`, the first row with the unit's id decides whether it needs an accept.
+    fn unit_state(&self, u: &Unit) -> Res<Rc<UnitState>> {
+        if let Some(state) = self.states.borrow().get(&u.id) {
+            return Ok(state.clone());
+        }
+        let rows = evidence(self.store, &u.id)?;
+        let track = self
+            .units
+            .iter()
+            .find(|x| x.id == u.id)
+            .map_or(&u.track, |x| &x.track);
+        let needs_accept = self
+            .map()?
+            .is_some_and(|map| map.modules.iter().any(|m| &m.id == track));
+        let state = Rc::new(UnitState {
+            state: derive_state(&rows, needs_accept),
+            rows,
+            needs_accept,
+        });
+        self.states.borrow_mut().insert(u.id.clone(), state.clone());
+        Ok(state)
+    }
+    pub(crate) fn state(&self, u: &Unit) -> Res<String> {
+        Ok(self.unit_state(u)?.state.clone())
+    }
+    fn brief(&self, unit: &str) -> Rc<Res<Brief>> {
+        if let Some(brief) = self.briefs.borrow().get(unit) {
+            return brief.clone();
+        }
+        let brief = Rc::new(unit_brief(self.store, unit));
+        self.briefs
+            .borrow_mut()
+            .insert(unit.to_owned(), brief.clone());
+        brief
+    }
+    /// The units of the modules `u`'s module depends on that are not verified. They depend
+    /// only on the module, so each module's list is derived once.
+    fn missing(&self, u: &Unit) -> Res<Rc<Vec<String>>> {
+        if let Some(missing) = self.missing.borrow().get(&u.track) {
+            return Ok(missing.clone());
+        }
+        let mut missing = Vec::new();
+        if let Some(map) = self.map()? {
+            let deps = map
+                .modules
+                .iter()
+                .find(|m| m.id == u.track)
+                .map(|m| m.depends.as_slice())
+                .unwrap_or(&[]);
+            for dep in deps {
+                let registered: Vec<_> = self.units.iter().filter(|x| &x.track == dep).collect();
+                if registered.is_empty() {
+                    missing.push(format!("{dep} (no units registered)"));
+                }
+                let mut seen = BTreeSet::new();
+                for other in registered {
+                    let Some(standing) = standing_unit(&self.units, other) else {
+                        missing.push(format!(
+                            "{} ({}; replacement chain is broken)",
+                            other.id, other.state
+                        ));
+                        continue;
+                    };
+                    if !seen.insert(&standing.id) {
+                        continue;
+                    }
+                    let s = self.unit_state(standing)?;
+                    if s.state != "verified" {
+                        missing.push(format!(
+                            "{} ({}; next {})",
+                            standing.id,
+                            s.state,
+                            next_step(&s.rows, &s.state, s.needs_accept)
+                        ));
+                    }
+                }
+            }
+        }
+        let missing = Rc::new(missing);
+        self.missing
+            .borrow_mut()
+            .insert(u.track.clone(), missing.clone());
+        Ok(missing)
+    }
+    fn runs(rows: &[Evidence]) -> usize {
+        rows.iter().filter(|r| r.kind == "run").count()
+    }
+    pub(crate) fn ready(&self) -> Res<&[String]> {
+        if let Some(ready) = self.ready.get() {
+            return Ok(ready);
+        }
+        let disk = self.claims()?;
+        let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
+        let mut result = vec![];
+        for u in self.units.iter().filter(|u| u.superseded_by().is_none()) {
+            let s = self.unit_state(u)?;
+            if !self.known_track(u)?
+                || !["pending", "failed"].contains(&s.state.as_str())
+                || Self::runs(&s.rows) >= 2
+                || !self.missing(u)?.is_empty()
+            {
+                continue;
+            }
+            let brief = self.brief(&u.id);
+            let brief = match &*brief {
+                Ok(b) => b,
+                Err(e) if e.kind == "no_brief" => continue,
+                Err(e) => return Err(e.clone()),
+            };
+            if disk.iter().any(|c| c.unit == u.id)
+                || selected.iter().any(|s| overlaps(s, &brief.scope))
+            {
+                continue;
+            }
+            selected.push(brief.scope.clone());
+            result.push(u.id.clone());
+        }
+        Ok(self.ready.get_or_init(|| result))
+    }
+    pub(crate) fn waiting(&self) -> Res<&[Waiting]> {
+        if let Some(waiting) = self.waiting.get() {
+            return Ok(waiting);
+        }
+        let ready = self.ready()?;
+        // Copy the attempts out so no file is read while the process-wide claims are locked.
+        let active: HashMap<String, String> = claims()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, c)| (k.clone(), c.attempt_id.clone()))
+            .collect();
+        let disk = self.claims()?;
+        let mut waiting = Vec::new();
+        for u in self.units.iter().filter(|u| u.superseded_by().is_none()) {
+            let s = self.unit_state(u)?;
+            let state = &s.state;
+            let known = self.known_track(u)?;
+            if (known && state == "verified" && !disk.iter().any(|c| c.unit == u.id))
+                || ready.contains(&u.id)
+            {
+                continue;
+            }
+            let next = if !known {
+                "unknown_track".into()
+            } else if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
+                if active
+                    .get(&key(self.store, &u.id))
+                    .is_some_and(|a| *a == c.attempt)
+                {
+                    "running".to_string()
+                } else {
+                    format!("unknown {}", c.attempt)
+                }
+            } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
+                next_step(&s.rows, state, s.needs_accept)
+            } else {
+                let missing = self.missing(u)?;
+                if !missing.is_empty() {
+                    format!("wait {}", missing.join(", "))
+                } else if Self::runs(&s.rows) >= 2 || self.brief(&u.id).is_err() {
+                    "blocked".into()
+                } else {
+                    "busy".into()
+                }
+            };
+            waiting.push(Waiting {
+                unit: u.id.clone(),
+                state: state.clone(),
+                next,
+            });
+        }
+        Ok(self.waiting.get_or_init(|| waiting))
+    }
+    /// What `unit` waits on: "ready", a waiting unit's next step, or "verified".
+    pub(crate) fn next_step(&self, unit: &str) -> Res<String> {
+        if self.ready()?.iter().any(|id| id == unit) {
+            return Ok("ready".into());
+        }
+        Ok(self
+            .waiting()?
+            .iter()
+            .find(|w| w.unit == unit)
+            .map(|w| w.next.clone())
+            .unwrap_or_else(|| "verified".into()))
+    }
+}
+fn known_track(store: &Path, u: &Unit) -> Res<bool> {
+    Scan::with_units(store, vec![]).known_track(u)
 }
 fn dependencies(store: &Path, u: &Unit, units: &[Unit]) -> Res<Vec<String>> {
-    if !store.join("modules.md").exists() {
-        return Ok(vec![]);
-    }
-    let text = std::fs::read_to_string(store.join("modules.md"))
-        .map_err(|e| Failure::new("io", e.to_string()))?;
-    let map = parse_map(&text).map_err(|e| Failure::new("invalid_argument", e))?;
-    let deps = map
-        .modules
-        .iter()
-        .find(|m| m.id == u.track)
-        .map(|m| m.depends.as_slice())
-        .unwrap_or(&[]);
-    let mut missing = Vec::new();
-    for dep in deps {
-        let registered: Vec<_> = units.iter().filter(|x| &x.track == dep).collect();
-        if registered.is_empty() {
-            missing.push(format!("{dep} (no units registered)"));
-        }
-        let mut seen = BTreeSet::new();
-        for other in registered {
-            let Some(standing) = standing_unit(units, other) else {
-                missing.push(format!(
-                    "{} ({}; replacement chain is broken)",
-                    other.id, other.state
-                ));
-                continue;
-            };
-            if !seen.insert(&standing.id) {
-                continue;
-            }
-            let rows = evidence(store, &standing.id)?;
-            let needs = needs_accept(store, &standing.id)?;
-            let state = derive_state(&rows, needs);
-            if state != "verified" {
-                missing.push(format!(
-                    "{} ({state}; next {})",
-                    standing.id,
-                    next_step(&rows, &state, needs)
-                ));
-            }
-        }
-    }
-    Ok(missing)
+    Ok(Scan::with_units(store, units.to_vec()).missing(u)?.to_vec())
 }
 fn next_step(rows: &[Evidence], state: &str, needs_accept: bool) -> String {
     match state {
@@ -159,6 +558,42 @@ pub fn begin_unit(
     repo: &Path,
     astra_required: bool,
 ) -> Res<Begin> {
+    Ok(begin_inner(store, unit, role, repo, astra_required, false, &mut None)?.unwrap_or(Begin::Reused))
+}
+
+/// Performs the normal begin gates atomically, returning None for a resumable build.
+pub fn begin_unit_cycle(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+) -> Res<Option<Begin>> {
+    begin_inner(store, unit, role, repo, astra_required, true, &mut None)
+}
+
+pub(crate) fn begin_dispatch(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+    cycle: bool,
+) -> (Res<Option<Begin>>, Option<Owner>) {
+    let mut owner = None;
+    let result = begin_inner(store, unit, role, repo, astra_required, cycle, &mut owner);
+    (result, owner)
+}
+
+fn begin_inner(
+    store: &Path,
+    unit: &str,
+    role: &str,
+    repo: &Path,
+    astra_required: bool,
+    _cycle: bool,
+    refused_owner: &mut Option<Owner>,
+) -> Res<Option<Begin>> {
     let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
     with_lock(store, false, || {
         let units = read_units(store)?;
@@ -167,24 +602,61 @@ pub fn begin_unit(
             .find(|u| u.id == unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
         u.refuse_superseded()?;
-        let brief = unit_brief(store, unit)?;
         let rows = evidence(store, unit)?;
         let mut disk = read_claims(store)?;
-        if let Some(c) = disk
-            .iter()
-            .find(|c| c.unit == unit || overlaps(&brief.scope, &c.scope))
-        {
-            let held = active
-                .get(&key(store, &c.unit))
-                .is_some_and(|a| a.attempt_id == c.attempt);
-            return Err(if held {
-                Failure::new("busy", format!("scope busy: {unit}"))
-            } else {
-                Failure::new(
-                    "outcome_unknown",
-                    format!("claim outcome unknown: {}", c.attempt),
-                )
-            });
+        if let Some(index) = disk.iter().position(|c| c.unit == unit) {
+            let c = &disk[index];
+            let held = active.get(&key(store, unit)).is_some_and(|a| a.attempt_id == c.attempt);
+            let owner = claim_owner(store, c, &units);
+            let text = owner_text(&owner);
+            *refused_owner = Some(owner);
+            if held || c.pid.parse().ok().is_some_and(base::proc::pid_alive) {
+                return Err(Failure::new("already_running", format!("unit {unit} is already running: {text}")));
+            }
+            let cp: Checkpoint = std::fs::read(checkpoint_path(store, unit)).ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+                .filter(|cp: &Checkpoint| cp.unit == unit && cp.attempt_id == c.attempt && matches!(cp.stage.as_str(), "claimed" | "worker_done" | "verified" | "selfchecked" | "reviewed"))
+                .ok_or_else(|| Failure::new("outcome_unknown", format!("claim outcome unknown: {text}")))?;
+            // Later checkpoints only finish the existing attempt; a claimed
+            // checkpoint would start a worker again for completed work.
+            if u.state == "verified" && cp.stage == "claimed" {
+                return Err(Failure::new("already_verified", format!("unit {unit} is already verified; nothing to run")));
+            }
+            let bytes = std::fs::read(&u.brief).map_err(|e| Failure::new("io", e.to_string()))?;
+            if crate::seams::sha256_hex(&bytes) != cp.brief_sha256 {
+                return Err(Failure::new("brief_changed", "brief changed since claim"));
+            }
+            let brief = unit_brief(store, unit)?;
+            let before = dirty(repo)?;
+            disk[index].pid = std::process::id().to_string();
+            let mut cp = cp;
+            cp.pid = std::process::id();
+            cp.updated = base::now_iso();
+            write_checkpoint(store, &cp)?;
+            save_claims(store, &disk)?;
+            active.insert(key(store, unit), Claim { dirty: before, attempt_id: cp.attempt_id.clone(), base: cp.base_tree.clone() });
+            return Ok(Some(Begin::Run { brief, attempt: cp.attempt, attempt_id: cp.attempt_id }));
+        }
+        // A legacy store may have no run evidence; changed trees also do not
+        // make an explicitly completed unit eligible for a new execution
+        // (tests/resume_201.rs). units.tsv only caches the state, so evidence
+        // recorded after the unit's own evidence verified it, such as a new
+        // VERIFY that awaits ACCEPT, can leave it built. It may then finish
+        // on that VERIFY without a worker, never with one.
+        let completed = u.state == "verified";
+        if completed && !matches!(completed_reusable(store, unit, u, &rows, repo), Ok(true)) {
+            *refused_owner = Some(verified_owner(store, u, &rows));
+            return Err(Failure::new("already_verified", format!("unit {unit} is already verified; nothing to run")));
+        }
+        let brief = unit_brief(store, unit)?;
+        if let Some(c) = disk.iter().find(|c| overlaps(&brief.scope, &c.scope)) {
+            return Err(Failure::new(
+                "busy",
+                format!(
+                    "scope busy: {unit}; {}",
+                    owner_text(&claim_owner(store, c, &units))
+                ),
+            ));
         }
         if role != "sol" && !known_track(store, u)? {
             return Err(Failure::new(
@@ -218,58 +690,139 @@ pub fn begin_unit(
                 .find(|r| r.kind == "verify")
                 .is_some_and(|r| !r.commit.is_empty() && snapshot(repo, &brief.scope) == r.commit)
         {
-            return Ok(Begin::Reused);
+            let owner = verified_owner(store, u, &rows);
+            let text = owner_text(&owner);
+            *refused_owner = Some(owner);
+            return Err(Failure::new(
+                "already_verified",
+                format!("unit {unit} is already verified: {text}; nothing to run"),
+            ));
+        }
+        // A completed unit passed the check above only because it was reusable;
+        // it is not checked again, so a later tree change cannot start a worker.
+        if completed || reusable(store, u, &brief.scope, &rows, repo, needs_accept(store, unit)?)? {
+            return Ok(None);
         }
         let count = rows.iter().filter(|r| r.kind == "run").count();
+        if astra_required {
+            astra_gate(store)?;
+        }
         if count >= 2 {
             return Err(Failure::new(
                 "fix_limit",
                 format!("unit {unit} has reached its fix limit"),
             ));
         }
-        if role == "sol" {
-            let full = super::evidence::full_evidence(store)?;
-            if !full
-                .iter()
-                .rev()
-                .find(|r| r.kind == "full")
-                .is_some_and(|r| r.exit_code != 0)
-            {
-                return Err(Failure::new(
-                    "sol_not_allowed",
-                    "sol requires a failing full test",
-                ));
-            }
-        }
-        if astra_required {
-            astra_gate(store)?;
+        let state = derive_state(&rows, needs_accept(store, unit)?);
+        if state != "built"
+            && state != "verified"
+            && brief.test_matrix.is_empty()
+            && crate::codex::routing::routed_store(store)?
+        {
+            return Err(Failure::new(
+                "contract_required",
+                "routed unit requires a TEST_MATRIX",
+            ));
         }
         let attempt = count as u32 + 1;
         let attempt_id = format!("{}-{}", attempt, base::unique());
         let before = dirty(repo)?;
         let base = base_snapshot(repo, &brief.scope);
+        let peers = disk.iter().map(|c| c.attempt.clone()).collect();
+        for c in &mut disk {
+            c.peers.push(attempt_id.clone());
+        }
         disk.push(DiskClaim {
             unit: unit.into(),
             attempt: attempt_id.clone(),
             scope: brief.scope.clone(),
             started: base::now_iso(),
+            module: u.track.clone(),
+            wish: wish_of_store(store),
+            pid: std::process::id().to_string(),
+            peers,
         });
+        let bytes = std::fs::read(&u.brief).map_err(|e| Failure::new("io", e.to_string()))?;
+        let cp = Checkpoint { unit: unit.into(), attempt, attempt_id: attempt_id.clone(), base_tree: base.clone(), brief_sha256: crate::seams::sha256_hex(&bytes), routing: None, stage: "claimed".into(), pid: std::process::id(), updated: base::now_iso(), worker_result: None, finished: None, finished_tree: String::new(), evidence_start: rows.len(), red_tree: None };
+        write_checkpoint(store, &cp)?;
         save_claims(store, &disk)?;
         active.insert(
             key(store, unit),
             Claim {
-                store: store.to_path_buf(),
-                scope: brief.scope.clone(),
                 dirty: before,
                 attempt_id: attempt_id.clone(),
                 base,
             },
         );
-        Ok(Begin::Run {
+        Ok(Some(Begin::Run {
             brief,
             attempt,
             attempt_id,
-        })
+        }))
+    })
+}
+/// Resume only a built unit whose verified scope still matches and is unclaimed.
+pub fn resume_built(store: &Path, unit: &str, repo: &Path) -> Res<bool> {
+    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
+    with_lock(store, false, || {
+        let units = read_units(store)?;
+        let u = units
+            .iter()
+            .find(|u| u.id == unit)
+            .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+        u.refuse_superseded()?;
+        let brief = unit_brief(store, unit)?;
+        if let Some(c) = read_claims(store)?
+            .iter()
+            .find(|c| c.unit == unit || overlaps(&brief.scope, &c.scope))
+        {
+            return Err(
+                if active
+                    .get(&key(store, &c.unit))
+                    .is_some_and(|a| a.attempt_id == c.attempt)
+                {
+                    Failure::new("busy", format!("scope busy: {unit}"))
+                } else {
+                    Failure::new(
+                        "outcome_unknown",
+                        format!("claim outcome unknown: {}", c.attempt),
+                    )
+                },
+            );
+        }
+        let rows = evidence(store, unit)?;
+        Ok(derive_state(&rows, needs_accept(store, unit)?) == "built"
+            && completed_brief_matches(store, unit, Path::new(&u.brief))?
+            && rows
+                .iter()
+                .rev()
+                .find(|r| r.kind == "verify")
+                .is_some_and(|r| {
+                    r.exit_code == 0
+                        && !r.commit.is_empty()
+                        && snapshot(repo, &brief.scope) == r.commit
+                }))
+    })
+}
+/// Relinquish ownership without finishing (or discarding) the attempt.
+pub(crate) fn suspend_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
+    let mut active = claims().lock().unwrap_or_else(|e| e.into_inner());
+    with_lock(store, false, || {
+        let mut disk = read_claims(store)?;
+        let claim = disk.iter_mut().find(|c| c.unit == unit && c.attempt == attempt_id)
+            .ok_or_else(|| Failure::new("claim_mismatch", "claim does not match"))?;
+        let mut cp: Checkpoint = serde_json::from_slice(&std::fs::read(checkpoint_path(store, unit))
+            .map_err(|e| Failure::new("io", e.to_string()))?)
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        if cp.attempt_id != attempt_id { return Err(Failure::new("claim_mismatch", "checkpoint does not match")); }
+        cp.pid = 0;
+        cp.updated = base::now_iso();
+        write_checkpoint(store, &cp)?;
+        // Empty is deliberately not a live PID (including on Unix, where PID 0 is a group).
+        claim.pid.clear();
+        save_claims(store, &disk)?;
+        active.remove(&key(store, unit));
+        Ok(())
     })
 }
 pub fn release_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
@@ -285,13 +838,31 @@ pub fn release_claim(store: &Path, unit: &str, attempt_id: &str) -> Res<()> {
                     "claim not found or attempt does not match",
                 )
             })?;
-        disk.remove(index);
+        let removed = disk.remove(index);
         save_claims(store, &disk)?;
+        match std::fs::remove_file(checkpoint_path(store, unit)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(Failure::new("io", e.to_string())),
+        }
+
         if active
             .get(&key(store, unit))
             .is_some_and(|c| c.attempt_id == attempt_id)
         {
             active.remove(&key(store, unit));
+        }
+        if store.join("modules.md").is_file()
+            && !removed.module.is_empty()
+            && scheduler::module_verified(store, &removed.module)?
+        {
+            super::events::append_event(
+                store,
+                super::events::MODULE_VERIFIED,
+                Some(&removed.module),
+                None,
+                serde_json::json!({}),
+            )?;
         }
         Ok(())
     })
@@ -310,33 +881,7 @@ pub fn running() -> Vec<String> {
     v
 }
 pub fn ready_units(store: &Path) -> Res<Vec<String>> {
-    let units = read_units(store)?;
-    let disk = read_claims(store)?;
-    let mut selected: Vec<Vec<String>> = disk.iter().map(|c| c.scope.clone()).collect();
-    let mut result = vec![];
-    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
-        let rows = evidence(store, &u.id)?;
-        let state = derive_state(&rows, needs_accept(store, &u.id)?);
-        if !known_track(store, u)?
-            || !["pending", "failed"].contains(&state.as_str())
-            || rows.iter().filter(|r| r.kind == "run").count() >= 2
-            || !dependencies(store, u, &units)?.is_empty()
-        {
-            continue;
-        }
-        let brief = match unit_brief(store, &u.id) {
-            Ok(b) => b,
-            Err(e) if e.kind == "no_brief" => continue,
-            Err(e) => return Err(e),
-        };
-        if disk.iter().any(|c| c.unit == u.id) || selected.iter().any(|s| overlaps(s, &brief.scope))
-        {
-            continue;
-        }
-        selected.push(brief.scope);
-        result.push(u.id.clone());
-    }
-    Ok(result)
+    Ok(Scan::new(store)?.ready()?.to_vec())
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Waiting {
@@ -346,63 +891,10 @@ pub struct Waiting {
 }
 
 pub fn waiting_units(store: &Path) -> Res<Vec<Waiting>> {
-    let ready = ready_units(store)?;
-    let active = claims().lock().unwrap_or_else(|e| e.into_inner());
-    let units = read_units(store)?;
-    let disk = read_claims(store)?;
-    let mut waiting = Vec::new();
-    for u in units.iter().filter(|u| u.superseded_by().is_none()) {
-        let rows = evidence(store, &u.id)?;
-        let needs = needs_accept(store, &u.id)?;
-        let state = derive_state(&rows, needs);
-        let known = known_track(store, u)?;
-        if (known && state == "verified" && !disk.iter().any(|c| c.unit == u.id))
-            || ready.contains(&u.id)
-        {
-            continue;
-        }
-        let next = if !known {
-            "unknown_track".into()
-        } else if let Some(c) = disk.iter().find(|c| c.unit == u.id) {
-            if active
-                .get(&key(store, &u.id))
-                .is_some_and(|a| a.attempt_id == c.attempt)
-            {
-                "running".to_string()
-            } else {
-                format!("unknown {}", c.attempt)
-            }
-        } else if ["built", "accept-failed", "review-failed"].contains(&state.as_str()) {
-            next_step(&rows, &state, needs)
-        } else {
-            let missing = dependencies(store, u, &units)?;
-            if !missing.is_empty() {
-                format!("wait {}", missing.join(", "))
-            } else if rows.iter().filter(|r| r.kind == "run").count() >= 2
-                || unit_brief(store, &u.id).is_err()
-            {
-                "blocked".into()
-            } else {
-                "busy".into()
-            }
-        };
-        waiting.push(Waiting {
-            unit: u.id.clone(),
-            state,
-            next,
-        });
-    }
-    Ok(waiting)
+    Ok(Scan::new(store)?.waiting()?.to_vec())
 }
 pub fn next_step_for(store: &Path, unit: &str) -> Res<String> {
-    if ready_units(store)?.iter().any(|id| id == unit) {
-        return Ok("ready".into());
-    }
-    Ok(waiting_units(store)?
-        .into_iter()
-        .find(|w| w.unit == unit)
-        .map(|w| w.next)
-        .unwrap_or_else(|| "verified".into()))
+    Scan::new(store)?.next_step(unit)
 }
 #[derive(Debug)]
 pub enum AutoAccept {
@@ -410,6 +902,7 @@ pub enum AutoAccept {
         module: String,
         exit_code: i32,
         output: String,
+        output_file: PathBuf,
         states: Vec<(String, String)>,
     },
     Skipped {
@@ -448,12 +941,29 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         .iter()
         .filter(|u| u.track == trigger.track && u.superseded_by().is_none())
         .collect();
-    let claims = read_claims(store)?;
-    let claimed: Vec<_> = module_units
-        .iter()
-        .filter(|u| claims.iter().any(|c| c.unit == u.id))
-        .map(|u| u.id.clone())
-        .collect();
+    let claimed = with_lock(store, false, || {
+        let claims = read_claims(store)?;
+        let mut claimed = Vec::new();
+        for other in &module_units {
+            let Some(claim) = claims.iter().find(|c| c.unit == other.id) else { continue; };
+            if claim.unit == unit && claim.pid == std::process::id().to_string() { continue; }
+            // Resume keeps ownership through ACCEPT/review. A peer that has finished
+            // self-check can no longer mutate its build and must not block ACCEPT.
+            let checkpoint = match std::fs::read(checkpoint_path(store, &other.id)) {
+                Ok(bytes) => Some(serde_json::from_slice::<Checkpoint>(&bytes)
+                    .map_err(|e| Failure::new("io", e.to_string()))?),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(Failure::new("io", e.to_string())),
+            };
+            if !checkpoint.is_some_and(|cp| cp.attempt_id == claim.attempt
+                && matches!(cp.stage.as_str(), "selfchecked" | "reviewed")
+                && cp.finished.is_some_and(|f| f.verify_exit == Some(0)))
+            {
+                claimed.push(other.id.clone());
+            }
+        }
+        Ok(claimed)
+    })?;
     if !claimed.is_empty() {
         return Ok(skipped("claimed", claimed.join(", ")));
     }
@@ -508,6 +1018,7 @@ pub fn accept_if_ready(store: &Path, unit: &str, repo: &Path) -> Res<AutoAccept>
         module: trigger.track.clone(),
         exit_code: result.exit_code,
         output,
+        output_file: super::evidence::accept_output_path(store, &trigger.track),
         states,
     })
 }
@@ -530,6 +1041,30 @@ pub(crate) fn report_paths(report: &Value, repo: &Path) -> Vec<String> {
         })
         .collect()
 }
+
+fn ignored_reason(repo: &Path, path: &str) -> Option<&'static str> {
+    let mut parts = path.split('/');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next().unwrap_or("");
+    let scratch = path.starts_with(TEMP_DIR)
+        || (first
+            .strip_prefix("pytest-of-")
+            .is_some_and(|name| !name.is_empty())
+            && second.strip_prefix("pytest-").is_some_and(|n| {
+                n == "current" || (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+            && parts.next().is_some());
+    if scratch {
+        return Some("test-scratch");
+    }
+    base::proc::cmd("git")
+        .current_dir(repo)
+        .args(["check-ignore", "-q", "--", path])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| "git-ignored")
+}
 pub fn finish_unit(
     store: &Path,
     unit: &str,
@@ -539,6 +1074,12 @@ pub fn finish_unit(
     model: &str,
     report: &Value,
 ) -> Res<Finished> {
+    finish_inner(store, unit, attempt_id, repo, role, model, report, false)
+}
+pub(crate) fn finish_checkpointed(store: &Path, unit: &str, attempt_id: &str, repo: &Path, role: &str, model: &str, report: &Value) -> Res<Finished> {
+    finish_inner(store, unit, attempt_id, repo, role, model, report, true)
+}
+fn finish_inner(store: &Path, unit: &str, attempt_id: &str, repo: &Path, role: &str, model: &str, report: &Value, keep_claim: bool) -> Res<Finished> {
     struct Release<'a>(&'a Path, &'a str, &'a str);
     impl Drop for Release<'_> {
         fn drop(&mut self) {
@@ -547,29 +1088,61 @@ pub fn finish_unit(
     }
 
     let brief = unit_brief(store, unit)?;
-    let (before, others, base_tree) = {
+    let (before, had_peers, base_tree) = {
         let active = claims().lock().unwrap_or_else(|e| e.into_inner());
         let c = active
             .get(&key(store, unit))
             .filter(|c| c.attempt_id == attempt_id)
             .ok_or_else(|| Failure::new("claim_mismatch", "unit attempt is not running"))?;
-        if !read_claims(store)?
-            .iter()
-            .any(|d| d.unit == unit && d.attempt == attempt_id)
-        {
-            return Err(Failure::new("claim_mismatch", "disk claim does not match"));
-        }
-        (
-            c.dirty.clone(),
-            active
+        let had_peers = with_lock(store, false, || {
+            let disk = read_claims(store)?;
+            let own = disk
                 .iter()
-                .filter(|(id, c)| c.store == store && **id != key(store, unit))
-                .flat_map(|(_, c)| c.scope.clone())
-                .collect::<Vec<_>>(),
-            c.base.clone(),
-        )
+                .find(|d| d.unit == unit && d.attempt == attempt_id)
+                .ok_or_else(|| Failure::new("claim_mismatch", "disk claim does not match"))?;
+            Ok(!own.peers.is_empty() || disk.iter().any(|d| d.attempt != attempt_id))
+        })?;
+        (c.dirty.clone(), had_peers, c.base.clone())
     };
-    let _release = Release(store, unit, attempt_id);
+    let _release = (!keep_claim).then(|| Release(store, unit, attempt_id));
+    let mut cp: Checkpoint = with_lock(store, false, || {
+        serde_json::from_slice(&std::fs::read(checkpoint_path(store, unit))
+            .map_err(|e| Failure::new("io", e.to_string()))?)
+            .map_err(|e| Failure::new("io", e.to_string()))
+    })?;
+    if cp.finished_tree == snapshot(repo, &brief.scope) {
+        if let Some(finished) = &cp.finished { return Ok(finished.clone()); }
+    }
+    let append_once = |row: Evidence| -> Res<()> {
+        with_lock(store, false, || {
+            if evidence(store, unit)?.iter().skip(cp.evidence_start).any(|r| r.kind == row.kind) { return Ok(()); }
+            super::evidence::append_evidence_locked(store, unit, &row)
+        })
+    };
+    struct ScratchCleanup(PathBuf, PathBuf, crate::storage::Owner);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let result = crate::storage::retention::remove_scratch(
+                &self.1,
+                &self.0,
+                &self.2,
+                "unit_ended",
+                false,
+            );
+            if result.outcome != "done" {
+                eprintln!("scratch cleanup: {}", result.outcome);
+            }
+        }
+    }
+    let (home, owner) = super::store::storage_context(store);
+    let attempt_scratch = scratch_dir(store, &[unit, attempt_id]);
+    crate::storage::ensure_dir(
+        &home,
+        &attempt_scratch,
+        crate::storage::Class::Scratch,
+        &owner,
+    )?;
+    let _scratch = ScratchCleanup(attempt_scratch, home.clone(), owner.clone());
     let status = report
         .get("status")
         .and_then(Value::as_str)
@@ -581,18 +1154,14 @@ pub fn finish_unit(
         commit,
         ts: base::now_iso(),
     };
-    append_evidence(
-        store,
-        unit,
-        &mk(
+    append_once(mk(
             "run",
             model,
             if status == "completed" { 0 } else { 1 },
             base_tree,
-        ),
-    )?;
+        ))?;
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(|e| Failure::new("io", e.to_string()))?;
+    crate::storage::ensure_dir(&home, &dir, crate::storage::Class::Evidence, &owner)?;
     let md = dir.join(format!("{unit}.md"));
     base::atomic_write(
         &md,
@@ -603,27 +1172,69 @@ pub fn finish_unit(
             .as_bytes(),
     )
     .map_err(|e| Failure::new("io", e.to_string()))?;
-    let json = serde_json::to_vec_pretty(report)
+    let mut saved_report = report.clone();
+    saved_report["brief_sha256"] = serde_json::json!(cp.brief_sha256);
+    let json = serde_json::to_vec_pretty(&saved_report)
         .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
     base::atomic_write(&dir.join(format!("{unit}.json")), &json)
         .map_err(|e| Failure::new("io", e.to_string()))?;
     append_inbox(store, role, unit, status, Some(&md.to_string_lossy()))?;
-    let mut paths: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
-    paths.extend(report_paths(report, repo));
-    let outside_scope: Vec<_> = paths
-        .into_iter()
-        .filter(|p| !p.starts_with(TEMP_DIR) && !covers(&brief.scope, p) && !covers(&others, p))
+    let tree: BTreeSet<String> = dirty(repo)?.difference(&before).cloned().collect();
+    let mut paths: BTreeSet<String> = report_paths(report, repo).into_iter().collect();
+    if !had_peers {
+        paths.extend(tree.iter().cloned());
+    }
+    let changed: Vec<_> = paths.into_iter().collect();
+    if let Ok(bytes) = serde_json::to_vec(&changed) {
+        let _ = base::atomic_write(&dir.join(format!("{unit}.changed.json")), &bytes);
+    }
+    let ignored: Vec<_> = changed
+        .iter()
+        .filter_map(|p| ignored_reason(repo, p).map(|reason| (p.clone(), reason.to_owned())))
         .collect();
-    append_evidence(
-        store,
-        unit,
-        &mk(
+    let outside_scope: Vec<_> = changed
+        .iter()
+        .filter(|p| !ignored.iter().any(|(path, _)| path == *p) && !covers(&brief.scope, p))
+        .cloned()
+        .collect();
+    let unattributed: Vec<_> = if had_peers {
+        tree.into_iter()
+            .filter(|p| {
+                !changed.contains(p)
+                    && !covers(&brief.scope, p)
+                    && ignored_reason(repo, p).is_none()
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    append_once(mk(
             "scope",
             &outside_scope.join(" "),
             if outside_scope.is_empty() { 0 } else { 1 },
             String::new(),
-        ),
-    )?;
+        ))?;
+    if !ignored.is_empty() {
+        let command = ignored
+            .iter()
+            .map(|(path, reason)| format!("{path} ({reason})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        append_once(mk("scope-ignored", &command, 0, String::new()))?;
+    }
+    if !unattributed.is_empty() {
+        append_once(mk(
+                "scope-unattributed",
+                &unattributed.join(" "),
+                0,
+                String::new(),
+            ))?;
+    }
+    let scope_json = serde_json::json!({"outside": outside_scope, "ignored": ignored.iter().map(|(path, reason)| serde_json::json!({"path": path, "reason": reason})).collect::<Vec<_>>(), "unattributed": unattributed});
+    let bytes = serde_json::to_vec_pretty(&scope_json)
+        .map_err(|e| Failure::new("invalid_argument", e.to_string()))?;
+    base::atomic_write(&dir.join(format!("{unit}.scope.json")), &bytes)
+        .map_err(|e| Failure::new("io", e.to_string()))?;
     let mut verify_output = None;
     let mut verify_exit = None;
     let mut verify_tail = String::new();
@@ -631,20 +1242,43 @@ pub fn finish_unit(
     let mut pack = None;
     let mut pack_error = None;
     if status == "completed" && outside_scope.is_empty() {
-        match base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800)) {
+        let verified_tree = snapshot(repo, &brief.scope);
+        let existing = evidence(store, unit)?.into_iter().skip(cp.evidence_start)
+            .rev().find(|r| r.kind == "verify" && r.command == brief.verify && r.commit == verified_tree);
+        let output_path = dir.join(format!("{unit}.verify.txt"));
+        if let Some(check) = existing.filter(|_| output_path.is_file()) {
+            verify_exit = Some(check.exit_code);
+            verify_tail = std::fs::read_to_string(&output_path).unwrap_or_default();
+            verify_output = Some(output_path);
+            if check.exit_code == 0 {
+                match super::report::review_pack(store, unit, repo) {
+                    Ok(info) => pack = Some(info.path),
+                    Err(e) => pack_error = Some(e.message),
+                }
+            }
+        } else {
+        super::evidence::guard_verify(store, unit, repo)?;
+        let verify_scratch = scratch_dir(store, &[unit, attempt_id, "verify"]);
+        crate::storage::ensure_dir(
+            &home,
+            &verify_scratch,
+            crate::storage::Class::Scratch,
+            &owner,
+        )?;
+        let verify_cleanup = ScratchCleanup(verify_scratch.clone(), home.clone(), owner.clone());
+        let lease = crate::storage::Ledger::open(&home)?.lease(&verify_scratch)?;
+        let mut verify_env = base::proc::scratch_env(&verify_scratch)
+            .map_err(|e| Failure::new("io", e.to_string()))?;
+        verify_env.extend(crate::storage::worktree::worker_env(&home, repo, &owner)?);
+        let verify_result =
+            base::proc::run_shell_env(&brief.verify, repo, Duration::from_secs(1800), &verify_env);
+        drop(lease);
+        drop(verify_cleanup);
+        match verify_result {
             Ok(result) => {
                 verify_exit = Some(result.exit_code);
                 let path = dir.join(format!("{unit}.verify.txt"));
-                let output: String = result
-                    .output
-                    .chars()
-                    .rev()
-                    .take(20000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                base::atomic_write(&path, output.as_bytes())
+                base::atomic_write(&path, result.output.as_bytes())
                     .map_err(|e| Failure::new("io", e.to_string()))?;
                 verify_output = Some(path);
                 verify_tail = result
@@ -675,6 +1309,7 @@ pub fn finish_unit(
                 }
             }
             Err(e) => verify_error = Some(e.message),
+        }
         }
     }
     let temp = repo.join(TEMP_DIR);
@@ -707,13 +1342,137 @@ pub fn finish_unit(
     )
     .map_err(|e| Failure::new("io", e.to_string()))?;
     let state = update_unit_state(store, unit)?;
-    Ok(Finished {
+    let finished = Finished {
         state,
         verify_exit,
         verify_tail,
         verify_output,
         outside_scope,
+        ignored,
+        unattributed,
+        changed,
         pack,
         pack_error,
+    };
+    cp.finished = Some(finished.clone());
+    cp.finished_tree = snapshot(repo, &brief.scope);
+    cp.stage = if finished.verify_exit.is_some() { "verified" } else { "worker_done" }.into();
+    cp.updated = base::now_iso();
+    with_lock(store, false, || write_checkpoint(store, &cp))?;
+    Ok(finished)
+}
+
+
+fn matrix_tree(repo: &Path, brief: &Brief) -> String {
+    snapshot(repo, &brief.test_matrix.iter().map(|r| r.file.clone()).collect::<Vec<_>>())
+}
+fn matrix_cp(store: &Path, unit: &str, attempt: &str) -> Res<Checkpoint> {
+    let path = checkpoint_path(store, unit);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::read(store.join("reports").join(format!("{unit}.{attempt}.red.json")))
+            .map_err(|e| Failure::new("red_invalid", format!("matrix row has no engine RED receipt: {e}")))?,
+        Err(e) => return Err(Failure::new("io", e.to_string())),
+    };
+    let cp: Checkpoint = serde_json::from_slice(&bytes)
+        .map_err(|e| Failure::new("io", e.to_string()))?;
+    if cp.attempt_id != attempt { return Err(Failure::new("red_invalid", "RED attempt mismatch")); }
+    Ok(cp)
+}
+fn matrix_command(store: &Path, unit: &str, attempt: &str, row: &super::parse::MatrixRow, repo: &Path, kind: &str) -> Res<base::proc::ShellRun> {
+    let (home, owner) = super::store::storage_context(store);
+    let scratch = scratch_dir(store, &[unit, attempt, kind, &row.id]);
+    crate::storage::ensure_dir(&home, &scratch, crate::storage::Class::Scratch, &owner)?;
+    let mut env = base::proc::scratch_env(&scratch).map_err(|e| Failure::new("io", e.to_string()))?;
+    env.extend(crate::storage::worktree::worker_env(&home, repo, &owner)?);
+    let lease = crate::storage::Ledger::open(&home)?.lease(&scratch)?;
+    let result = base::proc::run_shell_env(&row.command, repo, Duration::from_secs(1800), &env);
+    drop(lease);
+    let _ = crate::storage::retention::remove_scratch(&home, &scratch, &owner, "unit_ended", false);
+    let result = result?;
+    let dir = store.join("reports");
+    crate::storage::ensure_dir(&home, &dir, crate::storage::Class::Evidence, &owner)?;
+    base::atomic_write(&dir.join(format!("{unit}.{attempt}.{kind}.{}.txt", row.id)), result.output.as_bytes())
+        .map_err(|e| Failure::new("io", e.to_string()))?;
+    Ok(result)
+}
+fn compile_or_missing(output: &str, code: i32, case: &str) -> bool {
+    let o = output.to_lowercase();
+    [127,9009].contains(&code) || ["could not compile", "error[e", "syntaxerror", "compilation failed", "not recognized"].iter().any(|s|o.contains(s)) ||
+        (!failing_case(output,case) && (o.contains("not found") || o.lines().any(|l|l.trim_start().starts_with("error:"))))
+}
+fn failing_case(output: &str, case: &str) -> bool {
+    output.lines().any(|line| {
+        let l=line.trim(); let lower=l.to_lowercase();
+        l.contains(case) && (lower.starts_with("fail:") || lower.starts_with("failed ") || lower.split_whitespace().any(|s|s=="failed") || lower.ends_with("... fail") || lower.ends_with("... failed") || (lower.starts_with("test ") && lower.ends_with(" failed")))
     })
+}
+fn passing_tests(output: &str) -> bool {
+    output.lines().any(|line| {
+        let l=line.trim().to_lowercase();
+        (l.starts_with("test ") && l.ends_with(" ... ok")) || l.ends_with(" ... ok") ||
+        l.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| w[0].parse::<usize>().is_ok_and(|n|n>0) && matches!(w[1], "passed" | "passed;"))
+    }) || (output.lines().any(|l|l.trim()=="OK") && output.lines().any(|l| {
+        let words:Vec<_>=l.split_whitespace().collect(); words.len()>=3 && words[0]=="Ran" && words[1].parse::<usize>().is_ok_and(|n|n>0) && words[2].starts_with("test")
+    }))
+}
+/// Only engine-observed RED rows belonging to this checkpoint and test-file tree count.
+pub fn validate_red(store: &Path, unit: &str, attempt: &str, repo: &Path) -> Res<bool> {
+    let brief=unit_brief(store,unit)?;
+    if brief.test_matrix.is_empty() { return Ok(true); }
+    let cp=matrix_cp(store,unit,attempt)?;
+    let Some(tree)=cp.red_tree else { return Ok(false); };
+    if tree.is_empty() || tree!=matrix_tree(repo,&brief) {
+        return Err(Failure::new("red_tampered", format!("matrix row {} test files changed after RED", brief.test_matrix[0].id)));
+    }
+    let rows=evidence(store,unit)?;
+    for entry in &brief.test_matrix {
+        let command=format!("{attempt}|{}|{}",entry.id,entry.command);
+        let output=std::fs::read_to_string(store.join("reports").join(format!("{unit}.{attempt}.red.{}.txt",entry.id))).unwrap_or_default();
+        if !rows.iter().skip(cp.evidence_start).any(|r|r.kind=="red" && r.command==command && r.commit==tree && r.exit_code!=0 && !compile_or_missing(&output,r.exit_code,&entry.case) && failing_case(&output,&entry.case)) {
+            return Err(Failure::new("red_invalid",format!("matrix row {} has no valid RED for this attempt and tree",entry.id)));
+        }
+    }
+    Ok(true)
+}
+pub fn record_red(store: &Path, unit: &str, attempt: &str, repo: &Path) -> Res<()> {
+    let brief=unit_brief(store,unit)?;
+    let tree=matrix_tree(repo,&brief);
+    let mut invalid = None;
+    for entry in &brief.test_matrix {
+        if !repo.join(&entry.file).is_file() {
+            return Err(Failure::new("red_invalid",format!("matrix row {} test file is missing",entry.id)));
+        }
+        let result=matrix_command(store,unit,attempt,entry,repo,"red")?;
+        super::evidence::append_evidence(store,unit,&Evidence{kind:"red".into(),command:format!("{attempt}|{}|{}",entry.id,entry.command),exit_code:result.exit_code,commit:tree.clone(),ts:base::now_iso()})?;
+        if result.exit_code==0 || compile_or_missing(&result.output,result.exit_code,&entry.case) || !failing_case(&result.output,&entry.case) {
+            if invalid.is_none() { invalid = Some(Failure::new("red_invalid",format!("matrix row {} did not fail a named assertion test",entry.id))); }
+        }
+    }
+    if let Some(error) = invalid { return Err(error); }
+    if tree.is_empty() || matrix_tree(repo,&brief)!=tree { return Err(Failure::new("red_invalid","matrix row files changed during RED")); }
+    with_lock(store,false,|| {
+        let mut cp=matrix_cp(store,unit,attempt)?;
+        cp.red_tree=Some(tree);
+        let bytes=serde_json::to_vec(&cp).map_err(|e|Failure::new("io",e.to_string()))?;
+        base::atomic_write(&store.join("reports").join(format!("{unit}.{attempt}.red.json")),&bytes)
+            .map_err(|e|Failure::new("io",e.to_string()))?;
+        write_checkpoint(store,&cp)
+    })
+}
+pub fn final_matrix(store: &Path, unit: &str, repo: &Path, attempt: &str) -> Res<()> {
+    let brief=unit_brief(store,unit)?;
+    if brief.test_matrix.is_empty() { return Ok(()); }
+    if !validate_red(store,unit,attempt,repo)? { return Err(Failure::new("red_invalid","matrix row has no engine RED")); }
+    let mut failed = None;
+    for entry in &brief.test_matrix {
+        let result=matrix_command(store,unit,attempt,entry,repo,"matrix")?;
+        super::evidence::append_evidence(store,unit,&Evidence{kind:"matrix".into(),command:format!("{attempt}|{}|{}",entry.id,entry.command),exit_code:result.exit_code,commit:snapshot(repo,&brief.scope),ts:base::now_iso()})?;
+        let kind=if result.exit_code!=0 { Some("matrix_failed") } else if !passing_tests(&result.output) { Some("matrix_not_run") } else { None };
+        if failed.is_none() { if let Some(kind)=kind { failed=Some(Failure::new(kind,format!("matrix row {} did not pass tests",entry.id))); } }
+    }
+    validate_red(store,unit,attempt,repo)?;
+    super::report::review_pack(store,unit,repo)?;
+    if let Some(error) = failed { return Err(error); }
+    Ok(())
 }

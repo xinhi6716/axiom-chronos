@@ -2,9 +2,11 @@
 //! engine settles what they agree on mechanically. The switch is explicit: a session gets the
 //! bridge's `council` tool only when `--advanced-research` launched it.
 pub mod budgets;
+pub mod settings;
 pub use budgets::Budgets;
 mod converge;
 mod member;
+pub use member::{claude_call, MemberUsage};
 pub mod running;
 pub use converge::{digest, stage_note, DIGEST_MAX_CHARS};
 
@@ -181,7 +183,17 @@ pub struct Council {
     pub degraded: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DegradedMember {
+    pub member: String,
+    pub phase: String,
+    pub round: u64,
+    pub status: Status,
+    pub reason: String,
+}
+
 pub struct Setup {
+    pub argon_every_round: bool,
     pub fable: Res<Vec<String>>,
     pub argon: Res<Vec<String>>,
     pub fable_cap_usd: f64,
@@ -194,6 +206,7 @@ pub struct Setup {
 impl Setup {
     pub fn new(fable: Res<Vec<String>>, argon: Res<Vec<String>>) -> Self {
         Self {
+            argon_every_round: true,
             fable,
             argon,
             fable_cap_usd: DEFAULT_FABLE_CAP_USD,
@@ -218,6 +231,12 @@ impl Setup {
         setup.astra_token_cap = budgets.astra_token_cap;
         setup.argon_token_cap = budgets.argon_token_cap;
         setup.rounds = budgets.rounds;
+        setup.argon_every_round = match settings::parse_argon_every_round(budgets::env_value(
+            settings::ARGON_EVERY_ROUND_ENV,
+        ))? {
+            Some(value) => value,
+            None => settings::load(&base::axiom_home())?.argon_every_round,
+        };
         Ok(Some(setup))
     }
 }
@@ -237,6 +256,7 @@ pub struct CrossRequest {
 pub struct CrossReply {
     pub status: Status,
     pub output: Option<Value>,
+    pub raw: Option<String>,
     pub tokens: u64,
     pub model: Option<String>,
     pub detail: Option<String>,
@@ -261,17 +281,80 @@ pub fn ask_agy(
             schema,
             timeout,
             stop,
+            raw_path: None,
         },
         schema_path,
     );
     CrossReply {
         status: answer.status,
         output: answer.output,
+        raw: answer.raw,
         tokens: answer.tokens,
         model: Some(ARGON_MODEL.to_owned()),
         detail: answer.detail,
     }
 }
+// BEGIN research-program single Fable call
+pub fn ask_fable_once(
+    setup: &Setup,
+    prompt: &str,
+    cwd: &Path,
+    schema: &Value,
+    _schema_path: &Path,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> CrossReply {
+    let ledger = std::env::temp_dir().join(format!(
+        "research-fable-{}-{}.json",
+        std::process::id(),
+        base::unique()
+    ));
+    let mut meter = match Meter::open(&ledger, "single", setup.fable_cap_usd) {
+        Ok(meter) => meter,
+        Err(e) => {
+            return CrossReply {
+                status: Status::Failed,
+                output: None,
+                raw: None,
+                tokens: 0,
+                model: Some(FABLE_MODEL.into()),
+                detail: Some(e.message),
+            }
+        }
+    };
+    let mut answer = ask_fable(
+        &setup.fable,
+        Ask {
+            prompt: prompt.to_owned(),
+            cwd,
+            schema,
+            timeout,
+            stop,
+            raw_path: None,
+        },
+        "",
+        &mut meter,
+    );
+    if answer.status == Status::Ok && (meter.exceeded() || !meter.observed()) {
+        answer.status = Status::BudgetCut;
+        answer.output = None;
+        answer.detail = Some(if !meter.observed() {
+            "no usage was reported, so its cost cannot be bounded".into()
+        } else {
+            "Fable budget spent".into()
+        });
+    }
+    let _ = std::fs::remove_file(ledger);
+    CrossReply {
+        status: answer.status,
+        output: answer.output,
+        raw: answer.raw,
+        tokens: answer.tokens,
+        model: Some(FABLE_MODEL.into()),
+        detail: answer.detail,
+    }
+}
+// END research-program single Fable call
 /// The longest prompt `ask_agy` accepts, in UTF-16 units; it travels on the command line.
 pub const AGY_PROMPT_LIMIT: usize = member::ARGV_LIMIT_UTF16;
 
@@ -348,17 +431,37 @@ fn claims_of(position: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Member names cannot reach a reader through the text of another member's claim.
+/// Replace explicit attributions and self-identification, not technical identifiers.
 fn anonymised(text: &str) -> String {
-    static NAMES: OnceLock<regex::Regex> = OnceLock::new();
-    NAMES
-        .get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)(astra|fable|argon|gemini|claude|anthropic|codex|openai|gpt-?\d*)",
+    static SUFFIX: OnceLock<regex::Regex> = OnceLock::new();
+    static PREFIX: OnceLock<regex::Regex> = OnceLock::new();
+    static PAIR: OnceLock<regex::Regex> = OnceLock::new();
+    let names = r"astra|fable|argon|gemini|claude|anthropic|codex|openai";
+    let suffix = SUFFIX.get_or_init(|| regex::Regex::new(&format!(
+        r"(?i)(^|[^\w.-])({names})(\b(?:'s|:| says| said| proposes| suggests| argues| believes| recommends| evidence| problem| summary| wrote| reviewed| found| concluded| identified| notes| reports| states| explains| fix))"
+    )).unwrap());
+    let prefix = PREFIX.get_or_init(|| {
+        regex::Regex::new(&format!(
+            r"(?i)\b(by|from|according to|as|i am|i'm)\s+({names})\b(?:$|[^\w.-])"
+        ))
+        .unwrap()
+    });
+    let pair = PAIR.get_or_init(|| regex::Regex::new(&format!(
+        r"(?i)(^|[^\w.-])({names})\s+and\s+({names})(\s+(?:fix|say|said|propose|agree|recommend|review))"
+    )).unwrap());
+    let text = pair.replace_all(text, "${1}[member] and [member]${4}");
+    let text = suffix.replace_all(&text, "${1}[member]${3}");
+    prefix
+        .replace_all(&text, |caps: &regex::Captures| {
+            let full = &caps[0];
+            let name = caps.get(2).unwrap();
+            let end = name.end() - caps.get(0).unwrap().start();
+            format!(
+                "{}[member]{}",
+                &full[..name.start() - caps.get(0).unwrap().start()],
+                &full[end..]
             )
-            .unwrap()
         })
-        .replace_all(text, "[member]")
         .into_owned()
 }
 
@@ -413,8 +516,9 @@ fn save_council(path: &Path, council: &Council) -> Res<()> {
 fn finish(dir: &Path, council: &Council, reused: bool) -> Res<Value> {
     let mut result = digest(council, &dir.join("council.json"), reused);
     let digest_path = dir.join("council-digest.json");
-    base::atomic_write(&digest_path, result.to_string().as_bytes()).map_err(io)?;
     result["digest_path"] = json!(digest_path);
+    converge::bound_digest(&mut result);
+    base::atomic_write(&digest_path, result.to_string().as_bytes()).map_err(io)?;
     Ok(result)
 }
 /// Astra's existing plan is the first turn. No other member is paid without that plan.
@@ -423,6 +527,16 @@ pub fn run(
     request: &Request,
     astra: &(dyn Fn(&CrossRequest) -> CrossReply + Sync),
     stop: &AtomicBool,
+) -> Res<Value> {
+    run_with_events(setup, request, astra, stop, &|_| {})
+}
+
+pub fn run_with_events(
+    setup: &Setup,
+    request: &Request,
+    astra: &(dyn Fn(&CrossRequest) -> CrossReply + Sync),
+    stop: &AtomicBool,
+    events: &(dyn Fn(&Value) + Sync),
 ) -> Res<Value> {
     Budgets {
         fable_cap_usd: setup.fable_cap_usd,
@@ -461,13 +575,38 @@ pub fn run(
         .parent()
         .ok_or_else(|| invalid("plan_path has no parent".into()))?
         .to_path_buf();
-    let key = sha256(format!("{}\0{}", request.brief, sha256(&plan_bytes)).as_bytes());
+    let key = sha256(
+        format!(
+            "{}\0{}\0{}",
+            request.brief,
+            sha256(&plan_bytes),
+            setup.argon_every_round
+        )
+        .as_bytes(),
+    );
     let council_path = dir.join("council.json");
     if let Some(existing) = load_council(&council_path).filter(|c| c.key == key) {
         return finish(&dir, &existing, true);
     }
     let work = dir.join("council");
-    std::fs::create_dir_all(&work).map_err(io)?;
+    let real_store =
+        dir.ancestors()
+            .take_while(|p| p.file_name().is_none_or(|name| name != "scratch"))
+            .find(|p| {
+                let project = if crate::orch::store::is_wish_id(
+                    &p.file_name().unwrap_or_default().to_string_lossy(),
+                ) {
+                    p.parent().unwrap_or(p)
+                } else {
+                    p
+                };
+                project.parent().is_some_and(|parent| {
+                    parent.file_name().is_some_and(|name| name == "orchestrate")
+                }) && (p.join("units.tsv").is_file() || p.join("reports").is_dir())
+            });
+    let store = real_store.unwrap_or(&dir);
+    let (home, owner) = crate::orch::store::storage_context(store);
+    crate::storage::ensure_dir(&home, &work, crate::storage::Class::ResearchCache, &owner)?;
     let mut meter = Meter::open(
         &dir.join("council-spend.json"),
         &sha256(request.brief.as_bytes()),
@@ -476,6 +615,44 @@ pub fn run(
     let schema2 = turn_schema();
     let schema2_path = work.join("turn.schema.json");
     base::atomic_write(&schema2_path, schema2.to_string().as_bytes()).map_err(io)?;
+    let call_argon = |ask: Ask| -> Answer {
+        if let Err(e) = crate::usage::pools::check(&home, ARGON_MODEL) {
+            return Answer {
+                status: Status::Failed,
+                output: None,
+                raw: None,
+                tokens: 0,
+                detail: Some(e.message),
+            };
+        }
+        let answer = ask_argon(&setup.argon, ask, &schema2_path);
+        let charged = if real_store.is_some() {
+            crate::engine::budgets::record_model(
+                store,
+                &home,
+                crate::engine::budgets::Role::CouncilMember,
+                ARGON_MODEL,
+                None,
+                0,
+                answer.tokens,
+                "council",
+            )
+            .map(|_| ())
+        } else {
+            crate::usage::pools::charge(&home, ARGON_MODEL, Some(answer.tokens), None, "council")
+                .map(|_| ())
+        };
+        if let Err(e) = charged {
+            return Answer {
+                status: Status::Failed,
+                output: None,
+                raw: answer.raw,
+                tokens: answer.tokens,
+                detail: Some(e.message),
+            };
+        }
+        answer
+    };
     let mut seats = [
         Seat::new("astra", "astra"),
         Seat::new("fable", FABLE_MODEL),
@@ -502,7 +679,13 @@ pub fn run(
                 positions: vec![],
                 turns: vec![],
             };
-            let speakers: &[usize] = if phase == "B" { &[2] } else { &[0, 1] };
+            let speakers: &[usize] = if setup.argon_every_round {
+                &[0, 1, 2]
+            } else if phase == "B" {
+                &[2]
+            } else {
+                &[0, 1]
+            };
             let mut failed = false;
             let mut approved = false;
             for &index in speakers {
@@ -522,6 +705,9 @@ pub fn run(
                 if seat.status != Status::Ok {
                     reason = format!("{}: {}", seat.name, seat.status.word());
                     failed = true;
+                    if setup.argon_every_round {
+                        continue;
+                    }
                     break;
                 }
                 if index == 0 && seat.tokens >= setup.astra_token_cap {
@@ -550,8 +736,12 @@ pub fn run(
                     seat.cut("no usage was reported, so its cost cannot be bounded");
                 }
                 let mut schema_for = schema2.clone();
-                if index == 1 && phase == "A" {
+                if (index == 1 || (index == 2 && setup.argon_every_round)) && phase == "A" {
                     schema_for["required"] = json!(["stances", "approved"]);
+                }
+                if index == 2 {
+                    base::atomic_write(&schema2_path, schema_for.to_string().as_bytes())
+                        .map_err(io)?;
                 }
                 let prompt = format!(
                     "{}\nPlan phase agreement: {}. Open plan disputes: {}.",
@@ -563,27 +753,30 @@ pub fn run(
                         &schema_for,
                         phase,
                         n,
-                        &objections
+                        &objections,
+                        setup.argon_every_round
                     ),
                     phases.first().map(|p: &Phase| p.agreement).unwrap_or(false),
-                    phase_a_open(&claims).join(", ")
+                    phase_a_open(&claims, setup.argon_every_round).join(", ")
                 );
                 let timeout = if phase == "A" && n == 1 {
                     setup.round1_timeout
                 } else {
                     setup.round2_timeout
                 };
+                let raw_path = work.join(format!("{phase}-r{n}-{}.raw.txt", seat.name));
                 let mut answer = if seat.status == Status::BudgetCut {
                     Answer {
                         status: Status::BudgetCut,
                         output: None,
+                        raw: None,
                         tokens: 0,
                         detail: seat.detail.clone(),
                     }
                 } else if index == 0 {
                     let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         astra(&CrossRequest {
-                            prompt,
+                            prompt: prompt.clone(),
                             schema: schema_for.clone(),
                             timeout_s: timeout.as_secs().max(10),
                             token_cap: setup.astra_token_cap.saturating_sub(seat.tokens),
@@ -592,6 +785,7 @@ pub fn run(
                     .unwrap_or_else(|_| CrossReply {
                         status: Status::Failed,
                         output: None,
+                        raw: None,
                         tokens: 0,
                         model: None,
                         detail: Some("member panicked".into()),
@@ -602,16 +796,18 @@ pub fn run(
                     Answer {
                         status: reply.status,
                         output: reply.output,
+                        raw: reply.raw,
                         tokens: reply.tokens,
                         detail: reply.detail,
                     }
                 } else {
                     let ask = Ask {
-                        prompt,
+                        prompt: prompt.clone(),
                         cwd: &request.cwd,
                         schema: &schema_for,
                         timeout,
                         stop,
+                        raw_path: Some(&raw_path),
                     };
                     if index == 1 {
                         ask_fable(
@@ -625,9 +821,26 @@ pub fn run(
                             &mut meter,
                         )
                     } else {
-                        ask_argon(&setup.argon, ask, &schema2_path)
+                        call_argon(ask)
                     }
                 };
+                if index == 0 {
+                    if let Some(raw) = &answer.raw {
+                        base::atomic_write(&raw_path, raw.as_bytes()).map_err(io)?;
+                    }
+                }
+                // Astra's raw reply has been saved above; only now parse it for validation.
+                if index == 0 && answer.status == Status::Ok && answer.output.is_none() {
+                    if let Some(raw) = &answer.raw {
+                        match serde_json::from_str(raw) {
+                            Ok(value) => answer.output = Some(value),
+                            Err(e) => {
+                                answer.status = Status::Malformed;
+                                answer.detail = Some(format!("astra: {e}"));
+                            }
+                        }
+                    }
+                }
                 if index == 1
                     && answer.status == Status::Ok
                     && (meter.exceeded() || !meter.observed())
@@ -646,7 +859,10 @@ pub fn run(
                 } else {
                     setup.argon_token_cap
                 };
-                if index != 1 && seat.tokens >= cap && answer.status == Status::Ok {
+                if index != 1
+                    && seat.tokens >= cap
+                    && matches!(answer.status, Status::Ok | Status::Malformed)
+                {
                     answer.status = Status::BudgetCut;
                     answer.output = None;
                     answer.detail = Some(format!("{} tokens reached the {} cap", seat.tokens, cap));
@@ -681,6 +897,82 @@ pub fn run(
                         answer.detail = Some("no position was returned".into());
                     }
                 }
+                if index == 2 && answer.status == Status::Malformed {
+                    let first = answer
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| "malformed reply".into());
+                    let repair_prompt = format!("{prompt}\nREPAIR: The previous review failed validation: {first}\nReturn the same review reshaped to match this schema: {schema_for}");
+                    let repair_path =
+                        work.join(format!("{phase}-r{n}-{}.repair.raw.txt", seat.name));
+                    let mut repaired = call_argon(Ask {
+                        prompt: repair_prompt,
+                        cwd: &request.cwd,
+                        schema: &schema_for,
+                        timeout,
+                        stop,
+                        raw_path: Some(&repair_path),
+                    });
+                    seat.tokens = seat.tokens.saturating_add(repaired.tokens);
+                    if repaired.status == Status::Ok && seat.tokens >= cap {
+                        repaired.status = Status::BudgetCut;
+                        repaired.output = None;
+                        repaired.detail =
+                            Some(format!("{} tokens reached the {} cap", seat.tokens, cap));
+                    }
+                    if repaired.status == Status::Ok {
+                        let error = repaired.output.as_ref().map_or_else(
+                            || Some("no position was returned".to_owned()),
+                            |value| {
+                                base::schema::validate(&schema_for, value)
+                                    .err()
+                                    .or_else(|| {
+                                        claims
+                                            .iter()
+                                            .filter(|c| c.author != seat.name)
+                                            .any(|c| {
+                                                !value["stances"]
+                                                    .as_array()
+                                                    .into_iter()
+                                                    .flatten()
+                                                    .any(|v| v["claim"] == c.id)
+                                            })
+                                            .then(|| "missing per-claim stances".into())
+                                    })
+                            },
+                        );
+                        if let Some(error) = error {
+                            repaired.status = Status::Malformed;
+                            repaired.detail = Some(error);
+                            repaired.output = None;
+                        }
+                    }
+                    if repaired.status == Status::Malformed {
+                        repaired.detail = Some(format!(
+                            "initial: {first}; repair: {}",
+                            repaired.detail.as_deref().unwrap_or("malformed reply")
+                        ));
+                    }
+                    answer = repaired;
+                }
+                if answer.status != Status::Ok {
+                    let item = DegradedMember {
+                        member: seat.name.into(),
+                        phase: phase.into(),
+                        round: n,
+                        status: answer.status,
+                        reason: answer
+                            .detail
+                            .as_deref()
+                            .unwrap_or(answer.status.word())
+                            .chars()
+                            .take(200)
+                            .collect(),
+                    };
+                    events(
+                        &json!({"type":"council", "subtype":"member_degraded", "member":item.member, "phase":item.phase, "round":item.round, "status":item.status, "reason":item.reason}),
+                    );
+                }
                 seat.status = answer.status;
                 seat.detail = answer.detail;
                 round.turns.push(Turn {
@@ -702,6 +994,9 @@ pub fn run(
                             .unwrap_or_default()
                     );
                     failed = true;
+                    if setup.argon_every_round {
+                        continue;
+                    }
                     break;
                 }
                 if let Some(value) = answer.output {
@@ -714,7 +1009,7 @@ pub fn run(
                     if index == 1 {
                         approved = value["approved"] == true;
                     }
-                    if index == 2 {
+                    if index == 2 && phase == "B" {
                         objections = claims
                             .iter()
                             .filter(|c| {
@@ -738,9 +1033,9 @@ pub fn run(
             agreement = if phase == "B" {
                 objections.is_empty()
             } else if phase == "A" {
-                approved && phase_a_open(&claims).is_empty()
+                approved && phase_a_open(&claims, setup.argon_every_round).is_empty()
             } else {
-                phase_c_open(&claims, &objections).is_empty()
+                phase_c_open(&claims, &objections, setup.argon_every_round).is_empty()
             };
             if agreement {
                 reason = if phase == "B" {
@@ -752,11 +1047,11 @@ pub fn run(
             }
         }
         let open = if phase == "A" {
-            phase_a_open(&claims)
+            phase_a_open(&claims, setup.argon_every_round)
         } else if phase == "B" {
             objections.clone()
         } else {
-            phase_c_open(&claims, &objections)
+            phase_c_open(&claims, &objections, setup.argon_every_round)
         };
         phases.push(Phase {
             phase: phase.into(),
@@ -805,17 +1100,19 @@ pub fn run(
 fn affirmative(s: Option<&Stance>) -> bool {
     matches!(s, Some(Stance::Author | Stance::Agree | Stance::Concede))
 }
-fn phase_a_open(claims: &[Claim]) -> Vec<String> {
+fn phase_a_open(claims: &[Claim], argon: bool) -> Vec<String> {
     claims
         .iter()
         .filter(|c| {
             c.phase == "A"
-                && (!affirmative(c.stances.get("astra")) || !affirmative(c.stances.get("fable")))
+                && (!affirmative(c.stances.get("astra"))
+                    || !affirmative(c.stances.get("fable"))
+                    || (argon && !affirmative(c.stances.get("argon"))))
         })
         .map(|c| c.id.clone())
         .collect()
 }
-fn phase_c_open(claims: &[Claim], objections: &[String]) -> Vec<String> {
+fn phase_c_open(claims: &[Claim], objections: &[String], argon: bool) -> Vec<String> {
     objections
         .iter()
         .filter(|id| {
@@ -831,7 +1128,13 @@ fn phase_c_open(claims: &[Claim], objections: &[String]) -> Vec<String> {
             };
             match (resolved("astra"), resolved("fable")) {
                 (Some(a), Some(f)) => {
-                    a.decision != f.decision
+                    (argon
+                        && resolved("argon").is_none_or(|g| {
+                            g.decision != a.decision
+                                || (a.decision.as_deref() == Some("accepted")
+                                    && g.change != a.change)
+                        }))
+                        || a.decision != f.decision
                         || (a.decision.as_deref() == Some("accepted") && a.change != f.change)
                 }
                 _ => true,
@@ -908,6 +1211,7 @@ fn cross_prompt(
     phase: &str,
     n: u64,
     objections: &[String],
+    argon_every_round: bool,
 ) -> String {
     let mut others: Vec<&str> = MEMBERS.iter().copied().filter(|m| *m != reader).collect();
     others.sort_by_key(|m| sha256(format!("{key}{reader}{m}").as_bytes()));
@@ -945,7 +1249,9 @@ fn cross_prompt(
         }
     }
     let instruction=match phase {
-        "B"=>"You are the sole independent reviewer. Review the final plan or both final positions and their open disputes. Agree or object per claim, with checkable evidence. You may add claims. This is your only review turn.",
+        "B" if argon_every_round => "Review the plan and open disputes. Agree or object per claim, with checkable evidence. You may add claims. Give a stance for each claim.",
+        "B"=>"You are the sole independent reviewer. Review the final plan or both final positions and their open disputes. Agree or object per claim, with checkable evidence. You may add claims. This is your only review turn. `stances` is a required array with one entry per claim id, for example: {\"stances\":[{\"claim\":\"C1\",\"stance\":\"agree\",\"evidence\":\"src/a.rs:12\"}]}.",
+        "C" if argon_every_round => "Settle every review objection below. For each resolution give accepted with a concrete change, or rejected with a reason. All three members must settle each objection. The original review stays in the record for the core's ruling.",
         "C"=>"Settle every review objection below. For each resolution give accepted with a concrete change, or rejected with a reason. Both participants must settle each objection. The original review stays in the record for the core's ruling.",
         _=>"Agree or rebut per claim with evidence. Revise or defend the plan against the earlier replies. State approved=true only if you approve the whole plan and every rebuttal is closed. To revise one of your own claims, supply an accepted resolution with its complete revised text in change and the reason; otherwise defend it in stance evidence.",
     };
@@ -1099,3 +1405,4 @@ pub fn rule(plan_path: &Path, rulings: &[(String, String, String)]) -> Res<Value
 pub fn stage_note_at(dir: &Path) -> Option<String> {
     Some(stage_note(&load_council(&dir.join("council.json"))?))
 }
+pub mod paper_member; // p8

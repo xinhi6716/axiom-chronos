@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["question", "estimand", "causal_assumptions", "identification", "data_sources", "design", "claims", "falsification", "risks", "out_of_scope"],
+  "required": ["question", "estimand", "causal_assumptions", "identification", "data_sources", "design", "claims", "falsification", "risks", "out_of_scope", "changes"],
   "properties": {
     "question": {"type": "string"},
     "estimand": {"type": "string"},
@@ -37,6 +37,20 @@
     },
     "falsification": {"type": "array", "items": {"type": "string"}},
     "risks": {"type": "array", "items": {"type": "string"}},
-    "out_of_scope": {"type": "array", "items": {"type": "string"}}
+    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "effort", "risk", "reason"],
+        "properties": {
+          "tier": {"type": "string", "enum": ["terra", "sol", "astra"]},
+          "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
+          "risk": {"type": "string", "enum": ["trivial", "standard", "state_machine", "concurrency", "migration", "parser", "security", "privacy", "cross_module", "prior_failure", "novel"]},
+          "reason": {"type": "string"}
+        }
+      }
+    }
   }
 }

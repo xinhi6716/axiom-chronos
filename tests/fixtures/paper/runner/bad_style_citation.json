@@ -1,0 +1,49 @@
+{
+  "manuscript": {
+    "title": "Time study",
+    "abstract": {
+      "id": "abstract",
+      "text": "Time may increase by {{q:q1}} [@w123456789].",
+      "claims": [
+        {
+          "claim": "C1",
+          "evidence": [
+            "e1"
+          ]
+        }
+      ]
+    },
+    "keywords": [
+      "time"
+    ],
+    "sections": [
+      {
+        "id": "intro",
+        "heading": "Introduction",
+        "paragraphs": [
+          {
+            "id": "p",
+            "text": "Time may increase by {{q:q1}} [@10-1234-example].",
+            "claims": [
+              {
+                "claim": "C1",
+                "evidence": [
+                  "e1"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "figures": [],
+    "tables": []
+  },
+  "change_log": [
+    {
+      "location": "abstract",
+      "kind": "style",
+      "reason": "pass 4"
+    }
+  ]
+}

@@ -5,18 +5,33 @@ pub mod bridge;
 pub mod cli;
 pub mod codegraph;
 pub mod codex;
+pub mod compute;
 pub mod council;
 #[cfg(feature = "app")]
 pub mod desktop;
 pub mod engine;
 pub mod evolve;
 pub mod goal;
+pub mod graph;
 pub mod hook;
 pub mod host;
+pub mod laya;
 pub mod linux;
 pub mod memory;
+pub mod modes; // 2c modes
 pub mod orch;
+pub mod paper; // p8
 pub mod provenance;
+pub mod research_program;
+// --- research workspace (phase 9) ---
+pub mod research_workspace;
+// --- end research workspace (phase 9) ---
 pub mod review;
+pub mod routines;
+pub mod seams;
+pub mod service;
 pub mod session;
+pub mod setup;
+pub mod storage;
 pub mod usage;
+pub mod workshop;

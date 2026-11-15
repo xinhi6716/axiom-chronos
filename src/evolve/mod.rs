@@ -7,9 +7,12 @@ use std::{
 
 pub mod collect;
 pub mod digest;
+pub mod golden;
+pub mod harness;
 pub mod history;
 pub mod launch;
 pub mod lint;
+pub mod receipts;
 pub mod repo;
 
 pub const DEFAULT_SINCE_DAYS: u32 = 7;
@@ -155,6 +158,15 @@ pub fn start(
             record.state = "launch-failed".into();
             record.error = Some(message.clone());
             history::save(&inputs.home, &record)?;
+            // receipts: begin
+            if let Err(error) = receipts::write(
+                &inputs.home,
+                &receipts::from_run(&inputs.home, &record, &preview.digest.sources),
+            ) {
+                record.error = Some(format!("{message}; receipt write failed: {error}"));
+                let _ = history::save(&inputs.home, &record);
+            }
+            // receipts: end
             return Err(Failure::new("launch_failed", message));
         }
     };
@@ -165,6 +177,15 @@ pub fn start(
     record.exit_code = Some(exit_code);
     record.state = "ended".into();
     history::save(&inputs.home, &record)?;
+    // receipts: begin
+    if let Err(error) = receipts::write(
+        &inputs.home,
+        &receipts::from_run(&inputs.home, &record, &preview.digest.sources),
+    ) {
+        record.error = Some(format!("receipt write failed: {error}"));
+        let _ = history::save(&inputs.home, &record);
+    }
+    // receipts: end
     repo::remember(&inputs.home, &info.root)?;
     Ok(StartOutcome::Ran { record, exit_code })
 }

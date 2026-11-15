@@ -1,0 +1,17 @@
+{
+  "id": "js-029",
+  "language": "js",
+  "feature": "re_export_star",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 2,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.js#function:render"
+      }
+    }
+  ]
+}

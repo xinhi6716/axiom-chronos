@@ -1,0 +1,29 @@
+{
+  "project": "sessions",
+  "entries": [
+    {
+      "unit": "sessions-implementation",
+      "title": "Locate the check for expired sessions.",
+      "summary": "Session expiry uses an inclusive comparison",
+      "body": "Treat the expiry instant as expired. Session expiry uses an inclusive comparison.",
+      "symbols": [
+        "src/sessions.jsx#function:isExpired"
+      ],
+      "files": [
+        "src/sessions.jsx"
+      ],
+      "wish": "Locate the check for expired sessions."
+    }
+  ],
+  "research": [],
+  "constraints": "# Constraints\n\nTreat the expiry instant as expired.\n",
+  "aliases": [
+    [
+      "isExpired",
+      "sessions"
+    ]
+  ],
+  "amendments": [
+    "Keep the existing behavior: treat the expiry instant as expired."
+  ]
+}

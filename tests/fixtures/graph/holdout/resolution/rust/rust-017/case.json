@@ -1,0 +1,17 @@
+{
+  "id": "rust-017",
+  "language": "rust",
+  "feature": "qualified_path",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 4,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "main.rs#function:inner.measure"
+      }
+    }
+  ]
+}

@@ -1,6 +1,10 @@
 //! The Run screen: the wish, the stage rail, three resizable columns and the control bar,
 //! plus what surrounds them: setup problems, no runs yet, and the summary when a run ends.
 pub(super) mod board;
+// ux: begin run-view
+mod activity;
+mod notices;
+// ux: end
 use super::i18n::{fill, tr, translate, Lang, Table};
 use super::model::*;
 use super::theme::{self, Density, Step, TypeSize, Tokened as _, Tokens};
@@ -41,6 +45,14 @@ fn board_card_budget(details_height: f32) -> f32 {
     if details_height.is_finite() && details_height >= 0.0 {
         (details_height - DETAIL_OVERVIEW_MIN).max(0.0).min(board_card_max_height(details_height))
     } else { 0.0 }
+}
+
+/// Subtract the control bar's real height so layout does not depend on a fake height.
+fn layout_height(details_height: f32, seam_installed: bool, padding: f32) -> f32 {
+    let threshold = DETAIL_OVERVIEW_MIN + board::STRIP_ROW_HEIGHT;
+    if seam_installed && details_height.is_finite() && details_height >= threshold {
+        (details_height - f32::from(control::RUNNING_ENTRY_HEIGHT) - padding).max(threshold)
+    } else { details_height }
 }
 
 #[derive(Debug, PartialEq)]
@@ -1094,15 +1106,17 @@ impl RunView {
         let subject = control::subject_of(run, selection).filter(|_| can_say);
         let state = self.state.clone();
         let app = self.state.read(cx);
-        let runs = board_runs(app);
+        let runs = board_runs_with_prefs(app, &settings::Store::current(cx).ux);
         let d = theme::density(cx);
         let padding = f32::from(theme::space(d, Step::Sm));
-        let layout = board_layout(self.details_height.get(), runs.len(), runs.iter().filter(|&&i| needs_you(&app.runs[i])).count(), padding)
+        let height = self.details_height.get();
+        let layout_height = layout_height(height, app.ux.seams.interjections.is_some(), padding);
+        let layout = board_layout(layout_height, runs.len(), runs.iter().filter(|&&i| needs_you(&app.runs[i])).count(), padding)
             .filter(|_| *selection == Selection::None);
         let measured_height = self.details_height.clone();
         let board = layout.map(|layout| {
-            let levels: std::collections::HashMap<SharedString, f32> = board_runs(app).into_iter()
-                .map(|i| { let key = app.runs[i].session.clone(); let value = self.glows.value(&key, driver); (key, value) }).collect();
+            let levels: std::collections::HashMap<SharedString, f32> = runs.iter()
+                .map(|&i| { let key = app.runs[i].session.clone(); let value = self.glows.value(&key, driver); (key, value) }).collect();
             let lift = |key: &SharedString| levels.get(key).copied().unwrap_or(0.0);
             let weak = cx.weak_entity();
             let hover = std::rc::Rc::new(move |key: SharedString, inside: bool, cx: &mut App| {
@@ -1119,6 +1133,53 @@ impl RunView {
             };
             (layout, board)
         });
+        // ux: begin run-view
+        let lang = *cx.global::<Lang>();
+        let now = app.ux.now_ms();
+        let projection = app.ux.activity.get(&run.session);
+        let mut live_cards = Vec::new();
+        let action_state = self.state.clone();
+        let on_action: std::rc::Rc<dyn Fn(super::ux::events::NoticeAction, &mut Window, &mut App)> = std::rc::Rc::new(move |action, _, cx| {
+            action_state.update(cx, |s, cx| {
+                use super::ux::events::NoticeAction;
+                match action {
+                    NoticeAction::Resume => s.resume_current(None, cx),
+                    NoticeAction::OpenCouncil => {
+                        let selection = s.run().and_then(|r| r.modules.iter().position(|m| {
+                            let id = m.id.to_ascii_lowercase();
+                            id.contains("council") || id.contains("planning")
+                        })).map_or(Selection::None, Selection::Module);
+                        s.select(selection, cx);
+                    }
+                    NoticeAction::OpenUnit(id) => {
+                        let selection = s.run().and_then(|r| r.units.iter().position(|u| u.id.as_ref() == id)).map_or(Selection::None, Selection::Unit);
+                        s.select(selection, cx);
+                    }
+                }
+            });
+        });
+        if let Some(notices) = app.ux.notices.get(&run.session) {
+            live_cards.extend(notices.iter().map(|n| notices::notice_card(n, lang, &t, d, on_action.clone())));
+        }
+        if let Some(p) = projection {
+            if !run.units.iter().any(|u| u.state == UnitState::Running) && p.running_units.is_empty() {
+                if let Some(a) = p.claude_side() { live_cards.push(activity::claude_card(a, now, lang, &t, d)); }
+            }
+            let sessions = app.ux.seams.sessions.as_ref().map(|s| s.sessions()).unwrap_or_default();
+            let workers = super::live::activity::workers(run, p, app.ux.council.get(&run.session));
+            if !workers.is_empty() {
+                let rows = workers.into_iter().map(|w| {
+                    let session = super::concurrency::worker_session(&run.session, w.unit.as_deref(), &sessions).map(|s| SharedString::from(s.to_owned()));
+                    (w, session)
+                }).collect();
+                let watch_state = self.state.clone();
+                let watch = std::rc::Rc::new(move |id, _: &mut Window, cx: &mut App| {
+                    watch_state.update(cx, |s, cx| s.open_page(super::ux::Page::Session(id), cx));
+                });
+                live_cards.push(activity::who_running(rows, lang, &t, d, watch));
+            }
+        }
+        // ux: end
         column(
             v_flex()
                 .size_full()
@@ -1127,6 +1188,10 @@ impl RunView {
                     if measured_height.replace(height) != height { window.request_animation_frame(); }
                 })
                 .when_some(board, |this, (layout, board)| this.child(div().id("overview-board").flex_none().w_full().max_h(px(layout.max_height)).min_h(px(layout.min_height)).when(layout.mode == BoardMode::Card, |this| this.p(theme::space(d, Step::Sm))).child(board)))
+                // ux: begin run-view
+                .when(!live_cards.is_empty(), |this| this.child(div().id("run-live-cards").flex_none().w_full().max_h(relative(0.5)).overflow_y_scrollbar()
+                    .child(v_flex().w_full().p(theme::space(d, Step::Sm)).gap(theme::space(d, Step::Sm)).children(live_cards))))
+                // ux: end
                 .child(div().flex_1().min_h_0().w_full().child(self.detail.clone()))
                 .when_some(subject, |this, subject| {
                     this.child(
@@ -1919,7 +1984,15 @@ impl Render for RunView {
         }
         let animate = run.status == RunStatus::Active && !state.reduce_motion;
         let d = theme::density(cx);
-        let heights = chrome_heights(d);
+        // ux: begin run-view
+        let now = state.ux.now_ms();
+        let lang = *cx.global::<Lang>();
+        let projection = state.ux.activity.get(&run.session);
+        let live_stage = projection.and_then(|p| super::live::activity::live_stage(run, p, now, lang));
+        let heartbeat = projection.map(|p| p.pulse(now));
+        let mut heights = chrome_heights(d);
+        if heartbeat.is_some() || live_stage.is_some() { heights.rail += caption_line(d) + theme::space(d, Step::Sm); }
+        // ux: end
         for (index, unit) in run.units.iter().enumerate() {
             let key: SharedString = format!("sel:{}", unit.id).into();
             self.glows.set(&key, if state.selection == Selection::Unit(index) { 1.0 } else { 0.0 }, motion::now(cx), state.reduce_motion);
@@ -1963,7 +2036,13 @@ impl Render for RunView {
                 this.child(div().flex_none().w_full().px(theme::space(theme::density(cx), Step::Xl)).py(theme::space(theme::density(cx), Step::Md)).child(self.setup_card(&failures, cx)))
             })
             .child(div().flex_none().h(heights.header).overflow_hidden().child(self.header(run, cx)))
-            .child(div().flex_none().h(heights.rail).overflow_hidden().child(stage_rail(run, animate, cx)))
+            // ux: begin run-view
+            .child(div().flex_none().h(heights.rail).overflow_hidden().child(v_flex().w_full()
+                .child(stage_rail(run, animate, cx))
+                .when(heartbeat.is_some() || live_stage.is_some(), |this| this.child(h_flex().w_full().px(theme::space(d, Step::Xl)).gap(theme::space(d, Step::Lg))
+                    .when_some(live_stage.as_ref(), |this, stage| this.child(activity::live_stage_label(stage, now, lang, &t, d)))
+                    .when_some(heartbeat, |this, pulse| this.child(activity::heartbeat(pulse, now, lang, &t, d)))))))
+            // ux: end
             .child(
                 div().flex_1().min_h_0().w_full()
                     .key_context("RunColumns")
@@ -2063,6 +2142,28 @@ mod tests {
     use super::{brief_of, Brief, FirstDay, Tone};
     use super::{attention_title, blocked_brief_title, plain_text::Plain};
     use gpui_kit::SharedString;
+
+    #[test]
+    fn layout_height_accounts_for_the_control_bar() {
+        let threshold = super::DETAIL_OVERVIEW_MIN + super::board::STRIP_ROW_HEIGHT;
+        let padding = 8.0;
+        let height = threshold + 200.0;
+        assert_eq!(super::layout_height(height, false, padding), height);
+        assert_eq!(super::layout_height(height, true, padding),
+            height - f32::from(super::control::RUNNING_ENTRY_HEIGHT) - padding);
+        assert_eq!(super::layout_height(threshold - 1.0, true, padding), threshold - 1.0);
+        assert_eq!(super::layout_height(threshold, true, padding), threshold);
+        assert_eq!(super::layout_height(f32::INFINITY, true, padding), f32::INFINITY);
+        assert_eq!(super::layout_height(f32::NEG_INFINITY, true, padding), f32::NEG_INFINITY);
+        assert!(super::layout_height(f32::NAN, true, padding).is_nan());
+    }
+
+    #[test]
+    fn small_details_show_strip_only_when_attention_is_needed() {
+        let height = super::layout_height(super::DETAIL_OVERVIEW_MIN + super::board::STRIP_ROW_HEIGHT + 1.0, true, 8.0);
+        assert_eq!(super::board_layout(height, 1, 1, 8.0).unwrap().mode, super::BoardMode::Strip);
+        assert_eq!(super::board_layout(height, 1, 0, 8.0), None);
+    }
 
     #[test]
     fn production_code_has_no_uncapped_spinner() {

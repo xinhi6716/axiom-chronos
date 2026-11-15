@@ -6,11 +6,13 @@
 
 <p align="center"><strong>English</strong> · <a href="README.zh-TW.md">繁體中文</a></p>
 
-<p align="center"><a href="docs/releases/2.0.0.md">Release 2.0.0</a></p>
+<p align="center"><a href="docs/releases/3.0.0-beta.1.md">Pre-release 3.0.0-beta.1</a> · <a href="docs/releases/2.0.1.md">Latest stable 2.0.1</a></p>
 
 <p align="center"><a href="#begin">Quick start</a> · <a href="#desktop-app">Desktop app</a> · <a href="#the-work">Workflow</a> · <a href="#record-review">Records</a> · <a href="#status">Status</a></p>
 
-Make a wish on your codebase. Chronos plans it, splits it into modules, has Codex build them, has Claude review them, and keeps working until the change is verified or blocked.
+Make a wish on your codebase. Chronos plans it, splits it into modules, has Codex build them, reviews every unit, and keeps working until the change is verified or blocked.
+
+The code index is native and needs no external service. Since tree-sitter is unavailable offline, it uses syn for Rust and hand-written lexers for Python, TypeScript and JavaScript instead. See the [graph A/B protocol](docs/graph-ab.md).
 
 **Review each diff before committing.**
 
@@ -21,24 +23,26 @@ Make a wish on your codebase. Chronos plans it, splits it into modules, has Code
 
 Download an install package from [Releases](https://github.com/xinhi6716/axiom-chronos/releases) and extract it. You need [Claude Code](https://claude.com/claude-code) and the Codex CLI, both signed in.
 
-Windows x64: `axiom-chronos-2.0.0-windows-x64.zip`. In the extracted folder, run:
+The names below are the 3.0.0-beta.1 pre-release packages; the 2.0.1 packages stay on the same page for the latest stable release.
+
+Windows x64: `axiom-chronos-3.0.0-beta.1-windows-x64.zip`. In the extracted folder, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Linux x64: `axiom-chronos-2.0.0-linux-x64.tar.gz`. In the extracted folder, run:
+Linux x64: `axiom-chronos-3.0.0-beta.1-linux-x64.tar.gz`. In the extracted folder, run:
 
 ```sh
 sh ./install.sh
 ```
 
-Windows installs both programs to `%LOCALAPPDATA%\Programs\Axiom Chronos`, adds the user PATH and a Start menu shortcut, and upgrades 1.0.0 in place; close both programs first. Use `-Prefix DIR`, `-NoPath`, `-NoShortcut` or `-NoPlugin` to change that. Linux installs `axiom` to `~/.local/bin` (add it to PATH if needed); use `--prefix DIR` or `--no-plugin`. Both installers add or update the Claude `chronos` plugin when `claude` is available, then print `axiom doctor`; health-check problems do not fail installation. Windows includes `uninstall.ps1`; it leaves `~/.axiom` and the Claude plugin alone. Bare binaries remain available.
+Windows installs both programs to `%LOCALAPPDATA%\Programs\Axiom Chronos`, adds the user PATH and a Start menu shortcut, and upgrades an earlier install in place; close both programs first. From 3.0, closing the desktop window leaves the background service running, so choose **Quit** from the tray before upgrading. Use `-Prefix DIR`, `-NoPath`, `-NoShortcut` or `-NoPlugin` to change that. Linux installs `axiom` to `~/.local/bin` (add it to PATH if needed); use `--prefix DIR` or `--no-plugin`. Both installers add or update the Claude `chronos` plugin when `claude` is available, then print `axiom doctor`; health-check problems do not fail installation. Windows includes `uninstall.ps1`; it leaves `~/.axiom` and the Claude plugin alone. Bare binaries remain available.
 
 Or build it with Rust:
 
 ```sh
-cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --bin axiom
+cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v3.0.0-beta.1 --locked --bin axiom
 axiom doctor
 ```
 
@@ -56,9 +60,11 @@ Inside Claude Code, use `/chronos:wish` with the same text.
 
 ## Desktop app
 
-The Windows-only desktop app lets you make a wish, watch it and steer it without a terminal. Start it with `chronos` or the Start menu shortcut. Builds with the `app` feature also accept `axiom app`. To build the desktop program yourself, run `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v2.0.0 --locked --features app --bin chronos`. The bottom strip hides quota windows absent from fresh plan snapshots and shows live per-model concurrency with celestial vector glyphs; Mini falls back to the parallel total when space is short.
+The Windows-only desktop app lets you make a wish, watch it and steer it without a terminal. Start it with `chronos` or the Start menu shortcut. Builds with the `app` feature also accept `axiom app`. To build the desktop program yourself, run `cargo install --git https://github.com/xinhi6716/axiom-chronos --tag v3.0.0-beta.1 --locked --features app --bin chronos`. The bottom strip hides quota windows absent from fresh plan snapshots and shows live per-model concurrency with celestial vector glyphs; Mini falls back to the parallel total when space is short.
 
-The main screens are **Run** (a checklist of goals, modules and units, a live graph of the run, and the brief, report, verify output and review of each unit), **Wishes** (past and running wishes, and which one needs you), **Memory** (what Chronos remembers; correct or delete an entry), **Usage** (tokens and cost per run) and **Settings** (language, theme, health check). Ctrl+N makes a new wish and Ctrl+K searches everything. A wish started in a terminal shows up there too, view only.
+The main screens are **Run** (a checklist of goals, modules and units, a live graph of the run, and the brief, report, verify output and review of each unit), **Wishes** (past and running wishes, and which one needs you), **Memory** (what Chronos remembers; correct or delete an entry), **Usage** (tokens and cost per run or per wish, and a comparison of two wishes) and **Settings** (language, theme, health check). 3.0 adds **Storage** (disk use and cleanup), **Research** (an audit workbench for a project with a `research-manifest.json`), **Write paper**, the **Chat**, **Quick task**, **Plaza** and **Routine** modes, and live pages for sessions hosted by the background service. Ctrl+N makes a new wish and Ctrl+K searches everything. A wish started in a terminal shows up there too, view only.
+
+Closing the window detaches: wishes keep running in the background service (`axiom serve`), and the app reattaches when it opens again. On Windows the tray offers **Open**, **Pause all** and **Quit**. **Start at login** in Settings is off by default. See [storage](docs/storage.md) and [closing the window](docs/app-design.md#closing-the-window).
 
 A remaining-quota strip shows Claude and Codex, with an hourglass for each quota window. Use the mini window with optional always-on-top, focus mode, and comfortable or dense spacing. Right-click menus, undo, tooltips and keyboard access cover the controls; `?` lists the keys.
 
@@ -74,16 +80,16 @@ The summary board uses Codex luna, falling back to Claude Haiku, to describe eac
   <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="assets/chronos-process-dark-mobile.svg" />
   <source media="(max-width: 600px)" srcset="assets/chronos-process-mobile.svg" />
   <source media="(prefers-color-scheme: dark)" srcset="assets/chronos-process-dark.svg" />
-  <img src="assets/chronos-process.svg" width="1200" alt="Workflow: Astra plans, the critic reviews the plan, the architect splits modules, Codex builds (terra builds, sol integrates), Claude reviews the code, then full tests, CI and memory close the loop. Review changes before accepting them." />
+  <img src="assets/chronos-process.svg" width="1200" alt="Workflow: Astra plans, the critic reviews the plan, the architect splits modules, Codex writes tests first and builds each unit at its routed tier (terra, sol or astra), the Astra reviewer checks the exact files by default with a Claude check on major findings, then full tests, CI and memory close the loop. Review changes before accepting them." />
 </picture></p>
 
 Every wish starts with Astra: Astra plans the change, `chronos:critic` reviews the plan, and the core rules on it before any unit is built.
 
-The architect splits the work into modules with contracts and acceptance tests. The dispatcher sends each unit to a Codex `terra` worker; `sol` steps in only when the full suite fails after several units changed files.
+The architect splits the work into modules with contracts and acceptance tests. Astra assigns each unit a Codex tier (`terra`, `sol` or `astra`) and an effort, which the map records; `terra` is the floor, and a fix unit climbs one step. A module starts as soon as the modules it depends on are verified. Each unit writes failing tests first, and a self-check compares the contract, tests and diff before review.
 
 `AXIOM_CODEX_MAX_PARALLEL` caps Chronos Codex turns across processes sharing the data home (default 48); full pools wait and remain cancellable. Settings saves the cap for app wishes, and the quota strip and `axiom doctor` show slots in use. Codex runs you start yourself are excluded.
 
-Claude (`chronos:reviewer`, `chronos:critic`) reviews the Codex work; a Haiku narrator writes the final report from the engine digest and the core's rulings.
+In routed wishes (the architect routes every map), unit reviews go to the Astra reviewer on Codex unless policy sets `reviewer` (`claude`, `astra-max` or `both`); blocker and major findings get one quick Claude check. `chronos:critic` (Claude) reviews the plan, and a Haiku narrator writes the final report from the engine digest and the core's rulings.
 
 The binary enforces the gates: no write without a claimed unit, no verified unit without a passing review of the exact files, no finished goal without a current full test.
 
@@ -99,6 +105,7 @@ When what remains is a long batch of the project's own programs, the wish waits 
 | `--resume <session-id> [message]` | Continue a stopped or blocked wish; the message, if given, is its first turn. |
 | `--creative` | Let Chronos find one small, evidence-backed improvement. |
 | `--max-turns N` | Limit core-session turns. |
+| `--need-space SIZE` | Override the disk-space estimate checked before the wish starts, for example `20G`. |
 | `--advanced-research` | Opt in to the paid research council before planning. |
 | `--fable-cap USD`, `--astra-cap TOKENS`, `--council-rounds N` | Override council budgets; require `--advanced-research`. |
 
@@ -106,9 +113,11 @@ Put options **before** the wish; everything after them is wish text. `axiom rese
 
 More commands: `axiom review <git range>` gives a diff a second opinion from another model family (Codex first, with agy as an optional backup that never blocks; `--diff-only` sends just the diff), `axiom lint` checks a project's memory for stale or duplicate entries and broken quotes, and `axiom usage` prints a per-run ledger of tokens and cost.
 
+3.0 adds `axiom do` for one scoped quick task ([modes](docs/modes.md)), `axiom storage` for disk use and cleanup ([storage](docs/storage.md)), `axiom graph` and `axiom dream` for the native code and memory graph, and `axiom stats` for review counts and rates.
+
 `axiom evolve --dry-run` gives a self-improvement digest from Chronos's own logs for the last seven days. Review it before explicitly running `axiom evolve --repo PATH` against the Chronos source repository. It is an on-demand weekly pass, not a scheduled job: the desktop asks for confirmation; the CLI start command has no confirmation prompt.
 
-**Optional pieces.** agy (the backup reviewer) and [CodeGraph](https://github.com/colbymchenry/codegraph) (less code reading when a `.codegraph/` folder exists) are used only if installed. `--advanced-research` is the one option that costs extra: Astra and Fable discuss the plan in order (Astra first each round); Argon (Gemini 4) reviews exactly once afterward. If Argon objects, Astra and Fable answer in the same order; the core rules with every phase recorded. It is off unless you ask. Defaults are Fable $5, Astra 200k tokens, Argon 400k tokens for one review, and up to 3 rounds in each dialogue phase. Set `AXIOM_FABLE_CAP_USD`, `AXIOM_ASTRA_TOKEN_CAP`, `AXIOM_ARGON_TOKEN_CAP` and `AXIOM_COUNCIL_ROUNDS`, or use Settings → Advanced research budgets. CLI overrides: `axiom wish --advanced-research --fable-cap 20 --astra-cap 600000 --council-rounds 3 "fix the bug"`. These options require `--advanced-research`. Values must be positive; tokens and rounds must be whole numbers. Invalid values refuse startup; a Fable cap above $200 is refused as probably a typo. Agreement stops a phase early; spent budgets, failures or its round cap leave disputes for the core. Argon failure ends after the planning dialogue and is reported as not reviewed.
+**Optional pieces.** agy (the backup reviewer) and [CodeGraph](https://github.com/colbymchenry/codegraph) (less code reading when a `.codegraph/` folder exists) are used only if installed. `--advanced-research` costs extra: Astra, Fable and Argon (Gemini 4) discuss the plan in that order in every round, and objections get replies in the same order; the core rules with every phase recorded. `AXIOM_COUNCIL_ARGON_EVERY_ROUND=0`, or `argon_every_round` in `<home>/settings/council.json`, brings back the single Argon review after the Astra and Fable dialogue. It is off unless you ask. Defaults are Fable $5, Astra 200k tokens, Argon 400k tokens across its calls, and up to 3 rounds in each dialogue phase. Set `AXIOM_FABLE_CAP_USD`, `AXIOM_ASTRA_TOKEN_CAP`, `AXIOM_ARGON_TOKEN_CAP` and `AXIOM_COUNCIL_ROUNDS`, or use Settings → Advanced research budgets. CLI overrides: `axiom wish --advanced-research --fable-cap 20 --astra-cap 600000 --council-rounds 3 "fix the bug"`. These options require `--advanced-research`. Values must be positive; tokens and rounds must be whole numbers. Invalid values refuse startup; a Fable cap above $200 is refused as probably a typo. Agreement stops a phase early; spent budgets, failures or its round cap leave disputes for the core. A member that fails or runs out of budget is reported as degraded. Write paper, the Astra adjudicator, the PM/QA reviewer and dual-core mode also make extra model calls; the last three are off by default ([optional and paid](docs/releases/3.0.0-beta.1.md#optional-and-paid)).
 
 To save tokens, each module gets its own dispatcher, with a soft warning at 80% of the handoff limit and a fresh dispatcher at 150k tokens. Binding rules are restored verbatim after compaction; rarely used prompt sections load only when needed. Handoff notes are checked for instructions to hide problems. The no-progress guard stops a wish after three unchanged continuations instead of re-prompting it (`AXIOM_IDLE_CONTINUES` changes the count).
 
@@ -126,11 +135,13 @@ State lives in `~/.axiom` (set `AXIOM_HOME` to move it): work records and briefs
 
 ## Status
 
-Available: `chronos` (Windows desktop app), `axiom wish`, `axiom wait`, `axiom research`, `axiom review`, `axiom lint`, `axiom usage`, `axiom evolve`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
+**3.0.0-beta.1 is a GitHub pre-release.** 2.0.1 is the latest stable release.
 
-**Known limits.** Agent definitions set `autoCompactWindow`, but its effect has not yet been observed in a real run. The handoff-note guard has not yet been seen working in a real run either; it uses a pattern list and can miss paraphrases. Unit states come from evidence, not notes. The desktop app is Windows only.
+Available: `chronos` (Windows desktop app), `axiom wish`, `axiom wait`, `axiom research`, `axiom do`, `axiom modes`, `axiom review`, `axiom stats`, `axiom approval`, `axiom adjudication`, `axiom lint`, `axiom usage`, `axiom evolve`, `axiom graph`, `axiom dream`, `axiom storage`, `axiom serve`, `axiom workshop`, `axiom extreme`, `axiom research-budget`, `axiom laya`, `axiom doctor`. Tests run the protocols against scripted stand-ins for Claude and Codex; live-model results vary by project.
 
-[Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Release notes](docs/releases/2.0.0.md) · [Changelog](CHANGELOG.md) · [Desktop app design](docs/app-design.md)
+**Known limits.** The desktop app is partway through its move to a shared component and data layer: Wishes, the side panels, Run, the modes pages, the window shell, Mini and the overlays are still being moved, and the final screenshot and performance gates have not run. Agent definitions set `autoCompactWindow`, but its effect has not yet been observed in a real run. The handoff-note guard has not yet been seen working in a real run either; it uses a pattern list and can miss paraphrases. Unit states come from evidence, not notes. The desktop app is Windows only. The full list is in the [release notes](docs/releases/3.0.0-beta.1.md#known-limits-in-this-beta).
+
+[Bridge reference](docs/bridge.md) · [Dispatch policy](engine/DISPATCH.md) · [Wish workflow](engine/skills/wish/SKILL.md) · [Release notes](docs/releases/3.0.0-beta.1.md) · [Changelog](CHANGELOG.md) · [Desktop app design](docs/app-design.md)
 
 ---
 

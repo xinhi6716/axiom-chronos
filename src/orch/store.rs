@@ -5,12 +5,12 @@ use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 const HEADER: &str = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
-const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show";
+const COMMANDS: &str = "init, map, status, unit add|set|get|list|counts, ready, verify <unit> --repo <dir>, accept <module> --repo <dir>, review <unit> --repo <dir> --reviewer chronos:reviewer --verdict-file <path>, fulltest --repo <dir> [--command <cmd>], evidence <unit>, handoff [--module <m>] --next <text> [--in-flight|--stuck|--decisions <text>] [--repo <dir>], resume [--module <m>] [--repo <dir>], release <unit> --attempt <id>, unit supersede <unit> --by <unit>, unit add <id> --track <t> [--brief <path>] [--fixes <old>] [--routing <tier>/<effort> --reason <text>], waive <unit> <n> --reason <text>, inbox push|count|drain, ledger record|check|summary, gate park|resolve|list, standing show|add, frontier show, map [--repo <dir>], module-context <module> --repo <dir>, schedule next [--cursor N] [--timeout S] | claim <module> | release <module> --reason <text>, activity start|finish --module <m> --actor core|dispatcher --phase brief|review|decide [--id <id>], setup start --repo <dir> | status | keep <id>... | cancel [<id>...]";
 const SUPERSEDED: &str = "superseded";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -65,7 +65,114 @@ pub struct Output {
 }
 pub fn store_for(home: &Path, project: &str) -> Res<PathBuf> {
     base::require_slug("project", project)?;
-    Ok(home.join("orchestrate").join(project))
+    wish_store(home, project, current_wish(home, project)?.as_deref())
+}
+pub fn is_wish_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 22
+        && &bytes[..2] == b"w-"
+        && bytes[2..15].iter().all(u8::is_ascii_digit)
+        && bytes[15] == b'-'
+        && bytes[16..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+pub fn wish_store(home: &Path, project: &str, wish_id: Option<&str>) -> Res<PathBuf> {
+    base::require_slug("project", project)?;
+    let store = home.join("orchestrate").join(project);
+    match wish_id {
+        Some(id) if is_wish_id(id) => Ok(store.join(id)),
+        Some(id) => Err(fail(format!("invalid wish id: {id:?}"))),
+        None => Ok(store),
+    }
+}
+pub fn wish_stores(project_store: &Path) -> Vec<PathBuf> {
+    let mut stores: Vec<_> = std::fs::read_dir(project_store)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry.file_name().to_str().is_some_and(is_wish_id)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    stores.sort();
+    stores
+}
+pub fn current_wish(home: &Path, project: &str) -> Res<Option<String>> {
+    base::require_slug("project", project)?;
+    let entries = match std::fs::read_dir(home.join("goals")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    let mut active: Option<String> = None;
+    let mut any: Option<String> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(goal) = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<crate::goal::Goal>(&b).ok())
+        else {
+            continue;
+        };
+        if goal.project.as_deref() != Some(project) {
+            continue;
+        }
+        if let Some(id) = goal.wish_id {
+            if goal.status == "active" && active.as_ref().map_or(true, |old| id > *old) {
+                active = Some(id.clone());
+            }
+            if any.as_ref().map_or(true, |old| id > *old) {
+                any = Some(id);
+            }
+        }
+    }
+    Ok(active.or(any))
+}
+pub fn store_for_goal(home: &Path, goal: &crate::goal::Goal) -> Res<PathBuf> {
+    let project = goal
+        .project
+        .as_deref()
+        .ok_or_else(|| fail("goal has no project"))?;
+    wish_store(home, project, goal.wish_id.as_deref())
+}
+pub(crate) fn storage_context(store: &Path) -> (std::path::PathBuf, crate::storage::Owner) {
+    let name = store
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let wish = is_wish_id(&name).then_some(name);
+    let project_dir = if wish.is_some() {
+        store.parent().unwrap_or(store)
+    } else {
+        store
+    };
+    let project = project_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let home = project_dir
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "orchestrate"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::base::axiom_home);
+    (home, crate::storage::Owner { project, wish })
+}
+
+pub fn wish_of_store(store: &Path) -> String {
+    store
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
@@ -104,6 +211,66 @@ fn read_file(store: &Path, name: &str) -> Res<String> {
 fn write(store: &Path, name: &str, text: &str) -> Res<()> {
     base::atomic_write(&store.join(name), text.as_bytes()).map_err(io)
 }
+
+fn adjudication_entries(store: &Path) -> Res<Vec<String>> {
+    match std::fs::read_to_string(store.join("adjudication.pending")) {
+        Ok(text) => Ok(text.lines().filter(|s| !s.trim().is_empty()).map(str::to_owned).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(io(e)),
+    }
+}
+
+// Caller holds the store lock, including the read/modify/write cycle.
+pub(crate) fn add_adjudication_locked(store: &Path, reason: &str, target: &str) -> Res<()> {
+    let mut entries = adjudication_entries(store)?;
+    let entry = format!("{reason} {target}");
+    if !entries.contains(&entry) {
+        entries.push(entry);
+        write(store, "adjudication.pending", &(entries.join("\n") + "\n"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_adjudication(store: &Path, target: &str, module: bool) -> Res<()> {
+    with_lock(store, false, || {
+        let mut entries = adjudication_entries(store)?;
+        if entries.is_empty() { return Ok(()); }
+        let units = read_units(store)?;
+        let track = units.iter().find(|u| u.id == target).map(|u| u.track.as_str());
+        let mut module_resolved = !module && track.is_some();
+        if module_resolved {
+            for unit in units.iter().filter(|u| Some(u.track.as_str()) == track && u.id != target && !u.state.starts_with(SUPERSEDED)) {
+                if entries.contains(&format!("fix_rounds {}", unit.id)) {
+                    module_resolved = false;
+                    break;
+                }
+                if let Some(verdict) = super::read_verdict(store, &unit.id)? {
+                    let waived = super::waivers(&super::evidence(store, &unit.id)?)
+                        .into_iter().map(|w| w.number).collect();
+                    if !super::passes(&verdict, &waived) {
+                        module_resolved = false;
+                        break;
+                    }
+                }
+            }
+        }
+        let before = entries.len();
+        entries.retain(|entry| match entry.split_once(' ') {
+            Some(("fix_rounds", unit)) => {
+                if module { !units.iter().any(|u| u.id == unit && u.track == target) }
+                else { unit != target }
+            }
+            Some(("stuck", id)) => if module { id != target } else { !(module_resolved && Some(id) == track) },
+            _ => true,
+        });
+        if entries.len() != before {
+            let text = if entries.is_empty() { String::new() } else { entries.join("\n") + "\n" };
+            write(store, "adjudication.pending", &text)?;
+        }
+        Ok(())
+    })
+}
+
 pub fn read_units(store: &Path) -> Res<Vec<Unit>> {
     let text = read_file(store, "units.tsv")?.replace('\r', "");
     let mut lines = text.split('\n');
@@ -201,15 +368,153 @@ pub fn fixed_unit(store: &Path, unit: &str) -> Res<Option<String>> {
         .find(|row| row.kind == crate::orch::FIXES_KIND)
         .map(|row| row.command))
 }
-static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Gate>>> = OnceLock::new();
 const LOCK_WAIT: Duration = Duration::from_secs(30);
+/// The longest call name a lock file records.
+const CALL_CHARS: usize = 160;
+thread_local! {
+    static CALL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+/// Names the call this thread runs until dropped; a store lock taken meanwhile records it.
+pub struct CallScope {
+    previous: Option<String>,
+}
+impl Drop for CallScope {
+    fn drop(&mut self) {
+        CALL.with(|c| *c.borrow_mut() = self.previous.take());
+    }
+}
+pub fn call_scope(call: &str) -> CallScope {
+    let previous = CALL.with(|c| c.replace(Some(one_line(call))));
+    CallScope { previous }
+}
+fn one_line(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(CALL_CHARS)
+        .collect()
+}
+/// The call named by `call_scope`, else this process's command line.
+fn current_call() -> String {
+    CALL.with(|c| c.borrow().clone()).unwrap_or_else(|| {
+        // args_os: `std::env::args` panics on an argument that is not Unicode.
+        let mut args = std::env::args_os();
+        let program = args.next().map(|p| {
+            Path::new(&p)
+                .file_stem()
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let line = program
+            .into_iter()
+            .chain(args.map(|a| a.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        one_line(&line)
+    })
+}
+/// Who holds a store lock: line one of the lock file is the pid, then `call <name>` and
+/// `started <time>`. A lock file written before the record holds the pid alone.
+#[derive(Clone, Debug, PartialEq)]
+struct Holder {
+    pid: String,
+    call: String,
+    started: String,
+}
+impl Holder {
+    fn me() -> Holder {
+        Holder {
+            pid: std::process::id().to_string(),
+            call: current_call(),
+            started: base::now_iso(),
+        }
+    }
+    fn parse(text: &str) -> Holder {
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let mut holder = Holder {
+            pid: lines.next().unwrap_or("unknown").to_string(),
+            call: String::new(),
+            started: String::new(),
+        };
+        for line in lines {
+            if let Some(call) = line.strip_prefix("call ") {
+                holder.call = call.trim().to_string();
+            } else if let Some(started) = line.strip_prefix("started ") {
+                holder.started = started.trim().to_string();
+            }
+        }
+        holder
+    }
+    fn record(&self) -> String {
+        format!("{}\ncall {}\nstarted {}\n", self.pid, self.call, self.started)
+    }
+    /// The call and start time, or empty for a lock file that records only a pid.
+    fn about(&self) -> String {
+        match (self.call.is_empty(), self.started.is_empty()) {
+            (false, false) => format!("{}, since {}", self.call, self.started),
+            (false, true) => self.call.clone(),
+            (true, false) => format!("since {}", self.started),
+            (true, true) => String::new(),
+        }
+    }
+}
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.about() {
+            about if about.is_empty() => write!(f, "pid {}", self.pid),
+            about => write!(f, "pid {} ({about})", self.pid),
+        }
+    }
+}
+/// Lets one thread of this process at a time take a store's lock file, and names that thread.
+#[derive(Default)]
+struct Gate {
+    holder: Mutex<Option<(Holder, std::thread::ThreadId)>>,
+    free: std::sync::Condvar,
+}
+struct GateGuard(&'static Gate);
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        *self.0.holder.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.0.free.notify_one();
+    }
+}
+/// Waits for the other threads of this process until `deadline`, like a wait on another process.
+/// A thread that already holds the lock is refused at once, as it would wait for itself.
+fn enter(gate: &'static Gate, me: &Holder, deadline: Instant) -> Res<GateGuard> {
+    let thread = std::thread::current().id();
+    let mut holder = gate.holder.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some((other, owner)) = holder.as_ref() {
+        if *owner == thread {
+            return Err(fail(format!(
+                "store lock held by {other} in this same thread, which cannot wait for itself"
+            )));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(locked_out(format!(
+                "store lock held by {other} in another thread of this process"
+            )));
+        }
+        holder = gate
+            .free
+            .wait_timeout(holder, deadline - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    *holder = Some((me.clone(), thread));
+    Ok(GateGuard(gate))
+}
 struct LockFile {
     path: PathBuf,
-    pid: String,
+    record: String,
 }
 impl Drop for LockFile {
     fn drop(&mut self) {
-        if std::fs::read_to_string(&self.path).is_ok_and(|s| s.trim() == self.pid) {
+        if std::fs::read_to_string(&self.path).is_ok_and(|s| s == self.record) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -217,7 +522,7 @@ impl Drop for LockFile {
 /// Holds the lock of a store until dropped; the file goes before the next thread may enter.
 pub struct StoreLock {
     _file: LockFile,
-    _threads: MutexGuard<'static, ()>,
+    _threads: GateGuard,
 }
 /// True when `holder` is a pid and no process runs under it.
 fn dead(holder: &str) -> bool {
@@ -237,7 +542,12 @@ fn abandoned(marker: &Path) -> Option<String> {
     let claimant = std::fs::read_to_string(marker).ok()?;
     let claimant = claimant.trim();
     if claimant.is_empty() {
-        let age = std::fs::metadata(marker).ok()?.modified().ok()?.elapsed().ok()?;
+        let age = std::fs::metadata(marker)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()?;
         return (age > EMPTY_MARKER_GRACE).then(|| "unknown".to_string());
     }
     (dead(claimant) || claimant == std::process::id().to_string()).then(|| claimant.to_string())
@@ -246,8 +556,9 @@ fn abandoned(marker: &Path) -> Option<String> {
 /// saw the same dead holder cannot delete the fresh lock one of them has just taken. A marker
 /// whose claimant died is passed over by claiming one named after that claimant, which is just
 /// as exclusive, so a crash mid-reclaim never keeps the lock from being reclaimed.
-fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
-    let mut name = format!("lock.{holder}.stale");
+/// `raw` is the lock file as read when its holder, `pid`, was found dead.
+fn clear_dead_lock(path: &Path, pid: &str, raw: &str, force: bool) -> bool {
+    let mut name = format!("lock.{pid}.stale");
     let mut markers = Vec::new();
     loop {
         let marker = path.with_extension(&name);
@@ -276,32 +587,69 @@ fn clear_dead_lock(path: &Path, holder: &str, force: bool) -> bool {
             }
         }
     }
-    let cleared = std::fs::read_to_string(path).is_ok_and(|s| s.trim() == holder)
-        && std::fs::remove_file(path).is_ok();
+    let cleared =
+        std::fs::read_to_string(path).is_ok_and(|s| s == raw) && std::fs::remove_file(path).is_ok();
     for marker in &markers {
         let _ = std::fs::remove_file(marker);
     }
     cleared
 }
+/// The kind of the error a wait for the store lock ends with at its deadline.
+pub const LOCK_TIMEOUT: &str = "store_locked";
+fn locked_out(message: String) -> Failure {
+    Failure::new(LOCK_TIMEOUT, message)
+}
+thread_local! {
+    static PATIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Until dropped, a store lock this thread takes waits past the deadline instead of failing,
+/// reporting the holder each time. For writes that must not be lost, such as a unit's finish;
+/// a thread must hold no other lock while it waits this way.
+pub struct PatientScope {
+    previous: bool,
+}
+impl Drop for PatientScope {
+    fn drop(&mut self) {
+        PATIENT.with(|p| p.set(self.previous));
+    }
+}
+pub fn patient_scope() -> PatientScope {
+    PatientScope {
+        previous: PATIENT.with(|p| p.replace(true)),
+    }
+}
 fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
+    loop {
+        match acquire_once(store, force, note, wait) {
+            Err(e) if e.kind == LOCK_TIMEOUT && PATIENT.with(|p| p.get()) => {
+                eprintln!("{}; still waiting", e.message);
+            }
+            taken => return taken,
+        }
+    }
+}
+/// One wait with one deadline: the other threads of this process first, then the lock file
+/// with what is left of the time.
+fn acquire_once(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<StoreLock> {
+    let deadline = Instant::now() + wait;
     let key = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let threads: &'static Mutex<()> = *LOCKS
+    let gate: &'static Gate = *LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
-        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
-    let threads = threads.lock().unwrap_or_else(|e| e.into_inner());
+        .or_insert_with(|| Box::leak(Box::new(Gate::default())));
+    let me = Holder::me();
+    let threads = enter(gate, &me, deadline)?;
     let path = store.join(".orch.lock");
-    let pid = std::process::id().to_string();
+    let record = me.record();
     let create = || -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)?;
-        writeln!(file, "{pid}")
+        file.write_all(record.as_bytes())
     };
-    let deadline = Instant::now() + wait;
     let mut pause = 1;
     loop {
         match create() {
@@ -314,33 +662,35 @@ fn acquire(store: &Path, force: bool, note: &mut String, wait: Duration) -> Res<
                     && Instant::now() < deadline => {}
             Err(e) => return Err(io(e)),
         }
-        let holder = std::fs::read_to_string(&path).unwrap_or_default();
-        let holder = if holder.trim().is_empty() {
-            "unknown"
-        } else {
-            holder.trim()
-        };
-        let dead = dead(holder);
-        if dead && clear_dead_lock(&path, holder, force) {
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        let holder = Holder::parse(&raw);
+        let dead = dead(&holder.pid);
+        if dead && clear_dead_lock(&path, &holder.pid, &raw, force) {
+            let left = match holder.about() {
+                about if about.is_empty() => String::new(),
+                about => format!(" left by {about}"),
+            };
             note.push_str(&format!(
-                "replacing stale store lock (pid {holder} is dead)
-"
+                "replacing stale store lock (pid {} is dead){left}\n",
+                holder.pid
             ));
             continue;
         }
         if !dead && force && std::fs::remove_file(&path).is_ok() {
-            note.push_str(&format!("stealing store lock held by pid {holder}
-"));
+            note.push_str(&format!("stealing store lock held by {holder}\n"));
             continue;
         }
-        if holder == pid || Instant::now() >= deadline {
-            return Err(fail(format!("store lock held by pid {holder}")));
+        if holder.pid == me.pid {
+            return Err(fail(format!("store lock held by {holder}")));
+        }
+        if Instant::now() >= deadline {
+            return Err(locked_out(format!("store lock held by {holder}")));
         }
         std::thread::sleep(Duration::from_millis(pause));
         pause = (pause * 2).min(50);
     }
     Ok(StoreLock {
-        _file: LockFile { path, pid },
+        _file: LockFile { path, record },
         _threads: threads,
     })
 }
@@ -354,12 +704,48 @@ pub fn with_lock<T>(store: &Path, force: bool, f: impl FnOnce() -> Res<T>) -> Re
 pub fn lock_store(store: &Path) -> Res<StoreLock> {
     acquire(store, false, &mut String::new(), LOCK_WAIT)
 }
-#[derive(Clone)]
-pub(crate) struct DiskClaim {
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskClaim {
     pub unit: String,
     pub attempt: String,
     pub scope: Vec<String>,
     pub started: String,
+    pub module: String,
+    pub wish: String,
+    pub pid: String,
+    pub peers: Vec<String>,
+}
+pub fn claims_columns(header: &str) -> Option<usize> {
+    match header.strip_suffix('\r').unwrap_or(header) {
+        "unit\tattempt\tscope\tstarted" => Some(4),
+        "unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers" => Some(8),
+        _ => None,
+    }
+}
+pub fn parse_claim_row(line: &str, columns: usize) -> Option<DiskClaim> {
+    let c: Vec<_> = line
+        .strip_suffix('\r')
+        .unwrap_or(line)
+        .split('\t')
+        .collect();
+    if !matches!(columns, 4 | 8) || c.len() != columns || c[0].is_empty() || c[1].is_empty() {
+        return None;
+    }
+    Some(DiskClaim {
+        unit: c[0].into(),
+        attempt: c[1].into(),
+        scope: c[2].split_whitespace().map(str::to_owned).collect(),
+        started: c[3].into(),
+        module: c.get(4).unwrap_or(&"").to_string(),
+        wish: c.get(5).unwrap_or(&"").to_string(),
+        pid: c.get(6).unwrap_or(&"").to_string(),
+        peers: c
+            .get(7)
+            .unwrap_or(&"")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    })
 }
 pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
     let text = match std::fs::read_to_string(store.join("claims.tsv")) {
@@ -368,34 +754,30 @@ pub(crate) fn read_claims(store: &Path) -> Res<Vec<DiskClaim>> {
         Err(e) => return Err(io(e)),
     };
     let mut lines = text.lines();
-    if lines.next() != Some("unit\tattempt\tscope\tstarted") {
-        return Err(fail("claims.tsv has an invalid header"));
-    }
+    let columns = lines
+        .next()
+        .and_then(claims_columns)
+        .ok_or_else(|| fail("claims.tsv has an invalid header"))?;
     lines
         .filter(|l| !l.is_empty())
         .map(|line| {
-            let c: Vec<_> = line.split('\t').collect();
-            if c.len() != 4 || c[0].is_empty() || c[1].is_empty() {
-                return Err(fail("claims.tsv has a malformed row"));
-            }
-            Ok(DiskClaim {
-                unit: c[0].into(),
-                attempt: c[1].into(),
-                scope: c[2].split_whitespace().map(str::to_owned).collect(),
-                started: c[3].into(),
-            })
+            parse_claim_row(line, columns).ok_or_else(|| fail("claims.tsv has a malformed row"))
         })
         .collect()
 }
 pub(crate) fn save_claims(store: &Path, rows: &[DiskClaim]) -> Res<()> {
-    let mut text = String::from("unit\tattempt\tscope\tstarted\n");
+    let mut text = String::from("unit\tattempt\tscope\tstarted\tmodule\twish\tpid\tpeers\n");
     for c in rows {
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            c.unit,
-            c.attempt,
-            c.scope.join(" "),
-            c.started
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            c.unit.replace(['\t', '\r', '\n'], " "),
+            c.attempt.replace(['\t', '\r', '\n'], " "),
+            c.scope.join(" ").replace(['\t', '\r', '\n'], " "),
+            c.started.replace(['\t', '\r', '\n'], " "),
+            c.module.replace(['\t', '\r', '\n'], " "),
+            c.wish.replace(['\t', '\r', '\n'], " "),
+            c.pid.replace(['\t', '\r', '\n'], " "),
+            c.peers.join(" ").replace(['\t', '\r', '\n'], " ")
         ));
     }
     write(store, "claims.tsv", &text)
@@ -418,11 +800,25 @@ pub(crate) fn save_unit_state(store: &Path, unit: &str, state: &str) -> Res<()> 
 }
 fn supersede(store: &Path, id: &str, by: &str) -> Res<Unit> {
     let mut rows = read_units(store)?;
-    let out = supersede_rows(store, &mut rows, id, by)?;
+    let (out, cross_track) = supersede_rows(store, &mut rows, id, by)?;
     save_units(store, &rows)?;
+    if let Some((old_track, new_track, basis)) = cross_track {
+        crate::orch::events::append_event(
+            store,
+            "unit_superseded_cross_track",
+            None,
+            None,
+            serde_json::json!({"old": id, "new": by, "old_track": old_track, "new_track": new_track, "basis": basis}),
+        )?;
+    }
     Ok(out)
 }
-fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Unit> {
+fn supersede_rows(
+    store: &Path,
+    rows: &mut [Unit],
+    id: &str,
+    by: &str,
+) -> Res<(Unit, Option<(String, String, &'static str)>)> {
     let find = |name: &str| {
         rows.iter()
             .find(|u| u.id == name)
@@ -459,12 +855,29 @@ fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Un
             "unit {id} is verified and cannot be superseded; if its files changed, run orch accept <module> --repo <dir> first"
         )));
     }
-    if old.track != new.track {
-        return Err(fail(format!(
-            "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
-            new.track, old.track
-        )));
-    }
+    let cross_track = if old.track != new.track {
+        let basis = if new.state == "verified" {
+            Some("state")
+        } else if read_units(store)?.iter().any(|u| u.id == by)
+            && crate::orch::derive_state(
+                &crate::orch::evidence(store, by)?,
+                crate::orch::needs_accept(store, by)?,
+            ) == "verified"
+        {
+            Some("evidence")
+        } else {
+            None
+        };
+        let Some(basis) = basis else {
+            return Err(fail(format!(
+                "unit {by} belongs to {}, not {}; a replacement stays in its unit's track",
+                new.track, old.track
+            )));
+        };
+        Some((old.track.clone(), new.track.clone(), basis))
+    } else {
+        None
+    };
     // The replacement inherits the completion of `id` and of every unit that already stands on it.
     let mut scope: Vec<String> = vec![];
     for u in rows
@@ -493,7 +906,208 @@ fn supersede_rows(store: &Path, rows: &mut [Unit], id: &str, by: &str) -> Res<Un
     }
     let row = rows.iter_mut().find(|u| u.id == id).unwrap();
     row.state = format!("{SUPERSEDED}:{by}");
-    Ok(row.clone())
+    Ok((row.clone(), cross_track))
+}
+/// What `unit add --fixes` writes, decided from one reading of the units.
+enum FixPlan {
+    /// The chain already has two fix units: record the adjudication, then refuse.
+    Rounds(Failure),
+    Write {
+        rows: Vec<Unit>,
+        record: crate::codex::routing::FixRecord,
+        brief_text: String,
+        updated: String,
+    },
+}
+/// Every check of `unit add <row> --fixes <old>` on `rows` except the readiness scan, in the
+/// order the command makes them. It writes nothing.
+fn plan_fix(
+    store: &Path,
+    mut rows: Vec<Unit>,
+    row: &Unit,
+    old: &str,
+    explicit: Option<(crate::codex::routing::Tier, crate::codex::routing::Effort)>,
+    reason: Option<&str>,
+) -> Res<FixPlan> {
+    use crate::codex::routing::{
+        self, Escalation, FixRecord, Risk, Routing, Rule,
+    };
+    if !rows.iter().any(|u| u.id == old) {
+        return Err(Failure::new("not_found", format!("unit {old} not found")));
+    }
+    if rows.iter().any(|u| u.id == row.id) {
+        return Err(fail(format!("unit {} already exists", row.id)));
+    }
+    let chain = rows
+        .iter()
+        .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == old))
+        .map(|u| u.id.clone())
+        .collect::<Vec<_>>();
+    rows.push(row.clone());
+    supersede_rows(store, &mut rows, old, &row.id)?;
+    let mut fix_units = Vec::new();
+    for unit in &chain {
+        if fixed_unit(store, unit)?.is_some() {
+            fix_units.push(unit.as_str());
+        }
+    }
+    if fix_units.len() >= 2 {
+        return Ok(FixPlan::Rounds(Failure::new("fix_rounds", format!(
+            "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
+            fix_units.join(", ")
+        ))));
+    }
+    let parent = rows.iter().find(|u| u.id == old).unwrap();
+    let snapshot = routing::read_snapshot(store, old)?;
+    let map_text = match std::fs::read_to_string(store.join("modules.md")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io(e)),
+    };
+    let line = crate::orch::parse::parse_map(&map_text)
+        .ok()
+        .and_then(|m| m.modules.into_iter().find(|m| m.id == parent.track))
+        .and_then(|m| {
+            m.routing
+                .iter()
+                .find(|r| r.key == old)
+                .or_else(|| m.routing.iter().find(|r| r.key == "default"))
+                .cloned()
+        });
+    let invalid = |e| Failure::new("invalid_argument", e);
+    let missing = || Failure::new(
+        "routing_missing",
+        format!("routing_missing: parent unit {old} needs a routing decision and risk (ROUTING or RISK)"),
+    );
+    let (parent_tier, parent_effort) =
+        if let Some(s) = snapshot.as_ref().filter(|s| s.tier.is_some()) {
+            (s.tier, s.effort)
+        } else if snapshot.as_ref().is_some_and(|s| {
+            s.rule == Rule::ExplicitModel && s.tier.is_none()
+        }) {
+            if explicit.is_none() {
+                return Err(Failure::new("routing_missing", format!("routing_missing: parent unit {old} has an explicit model without a tier; supply --routing <tier>/<effort> --reason")));
+            }
+            (None, snapshot.as_ref().unwrap().effort)
+        } else if let Some(l) = &line {
+            (
+                Some(routing::parse_tier(&l.tier).map_err(invalid)?),
+                Some(routing::parse_effort(&l.effort).map_err(invalid)?),
+            )
+        } else {
+            return Err(missing());
+        };
+    let risk = if let Some(r) = snapshot.as_ref().and_then(|s| s.risk) {
+        r
+    } else if let Some(l) = &line {
+        serde_json::from_value(serde_json::Value::String(l.risk.clone()))
+            .map_err(|e| invalid(format!("{e}")))?
+    } else {
+        let text = std::fs::read_to_string(&parent.brief).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound || parent.brief.is_empty() {
+                missing()
+            } else {
+                io(e)
+            }
+        })?;
+        let parent_brief = parse_brief(&text).map_err(invalid)?;
+        let value = parent_brief.risk.ok_or_else(missing)?;
+        serde_json::from_value::<Risk>(serde_json::Value::String(value))
+            .map_err(|e| invalid(format!("{e}")))?
+    };
+    let (route, rule) = if let Some((tier, effort)) = explicit {
+        let r = Routing {
+            tier,
+            effort,
+            risk: Some(risk),
+            reason: reason.unwrap().trim().into(),
+        };
+        routing::check_rubric(&r).map_err(|e| {
+            Failure::new("routing_rubric", format!("routing_rubric: {e}"))
+        })?;
+        (r, Rule::PlanException)
+    } else {
+        match routing::escalate(parent_tier.ok_or_else(missing)?, parent_effort) {
+            Escalation::Next(r) => (r, Rule::FixEscalation),
+            Escalation::Saturated => {
+                return Err(Failure::new(
+                    "escalation_saturated",
+                    "escalation_saturated: parent routing is saturated",
+                ))
+            }
+        }
+    };
+    let brief_text = std::fs::read_to_string(&row.brief).map_err(io)?;
+    let parsed = parse_brief(&brief_text).map_err(invalid)?;
+    if parsed
+        .tier
+        .as_deref()
+        .is_some_and(|s| routing::parse_tier(s).ok() != Some(route.tier))
+        || parsed.effort.as_deref().is_some_and(|s| {
+            routing::parse_effort(s).ok() != Some(route.effort)
+        })
+    {
+        return Err(Failure::new(
+            "routing_mismatch",
+            "routing_mismatch: brief conflicts with routing",
+        ));
+    }
+    let tier = serde_json::to_value(route.tier)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let effort = serde_json::to_value(route.effort)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut additions = String::new();
+    if parsed.tier.is_none() {
+        additions.push_str(&format!("TIER {tier}\n"));
+    }
+    if parsed.effort.is_none() {
+        additions.push_str(&format!("EFFORT {effort}\n"));
+    }
+    let mut updated = String::new();
+    for part in brief_text.split_inclusive('\n') {
+        updated.push_str(part);
+        if part
+            .strip_prefix("GOAL")
+            .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+            && !additions.is_empty()
+        {
+            if !part.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(&additions);
+            additions.clear();
+        }
+    }
+    let record = FixRecord {
+        unit: row.id.clone(),
+        parent: old.to_string(),
+        parent_tier,
+        parent_effort,
+        tier: route.tier,
+        effort: route.effort,
+        rule,
+        reason: route.reason,
+    };
+    Ok(FixPlan::Write {
+        rows,
+        record,
+        brief_text,
+        updated,
+    })
+}
+/// The add response computes readiness: reject existing invalid data before changing either
+/// the units or evidence files. It reads the evidence of every unit, so it runs without the lock.
+fn fix_readiness_scan(store: &Path, unit: &str) -> Res<()> {
+    crate::orch::evidence(store, unit)?;
+    crate::orch::ready_units(store)?;
+    crate::orch::waiting_units(store)?;
+    Ok(())
 }
 fn push(
     store: &Path,
@@ -680,7 +1294,10 @@ fn remove_pointer(path: &Path) -> Res<()> {
     std::fs::remove_file(path).map_err(io)
 }
 fn pointers(store: &Path) -> Res<Vec<serde_json::Value>> {
-    Ok(pointer_files(store)?.into_iter().map(|(_, row)| row).collect())
+    Ok(pointer_files(store)?
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect())
 }
 fn pointer_files(store: &Path) -> Res<Vec<(PathBuf, serde_json::Value)>> {
     let dir = store.join("inbox");
@@ -1058,6 +1675,7 @@ fn status(store: &Path) -> Res<(serde_json::Value, String)> {
     ))
 }
 pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
+    let _call = call_scope(&format!("orch {}", args.join(" ")));
     let mut note = String::new();
     let mut ledger_missing = false;
     let mut extra_output = None;
@@ -1066,7 +1684,16 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
         let sub = args.get(1).map(String::as_str).unwrap_or("");
         match (cmd, sub) {
             ("init", _) => {
-                std::fs::create_dir_all(store).map_err(io)?;
+                let (home, owner) = storage_context(store);
+                crate::storage::ensure_dir(&home, store, crate::storage::Class::UnitStore, &owner)?;
+                for name in ["reports", "receipts"] {
+                    crate::storage::ensure_dir(
+                        &home,
+                        &store.join(name),
+                        crate::storage::Class::Evidence,
+                        &owner,
+                    )?;
+                }
                 locked(store, force, &mut note, || {
                     std::fs::create_dir_all(store.join("inbox")).map_err(io)?;
                     for (name, content) in [
@@ -1106,6 +1733,47 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 let fixes = option(args, "--fixes")?
                     .map(|s| required(s, "fixes"))
                     .transpose()?;
+                let routing_arg = option(args, "--routing").map_err(|e| {
+                    Failure::new(
+                        "invalid_argument",
+                        format!("invalid_argument: {}", e.message),
+                    )
+                })?;
+                let reason_arg = option(args, "--reason").map_err(|e| {
+                    Failure::new(
+                        "invalid_argument",
+                        format!("invalid_argument: {}", e.message),
+                    )
+                })?;
+                if routing_arg.is_some() != reason_arg.is_some()
+                    || (routing_arg.is_some() && fixes.is_none())
+                    || reason_arg.is_some_and(|s| s.trim().is_empty())
+                {
+                    return Err(Failure::new("invalid_argument", "invalid_argument: --routing and non-empty --reason require each other and --fixes"));
+                }
+                let explicit = routing_arg
+                    .map(|s| -> Res<_> {
+                        let (tier, effort) = s.split_once('/').ok_or_else(|| {
+                            Failure::new(
+                                "invalid_argument",
+                                "invalid_argument: routing must be tier/effort",
+                            )
+                        })?;
+                        let tier = crate::codex::routing::parse_tier(tier).map_err(|e| {
+                            Failure::new("invalid_argument", format!("invalid_argument: {e}"))
+                        })?;
+                        if tier == crate::codex::routing::Tier::Luna {
+                            return Err(Failure::new(
+                                "invalid_argument",
+                                "invalid_argument: luna is not valid for an exception",
+                            ));
+                        }
+                        let effort = crate::codex::routing::parse_effort(effort).map_err(|e| {
+                            Failure::new("invalid_argument", format!("invalid_argument: {e}"))
+                        })?;
+                        Ok((tier, effort))
+                    })
+                    .transpose()?;
                 if fixes.is_some() && brief.is_empty() {
                     return Err(fail("--fixes requires --brief"));
                 }
@@ -1121,49 +1789,68 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                 if fixes.is_none() {
                     validate_add_brief(store, &row)?;
                 }
-                locked(store, force, &mut note, || {
-                    if fixes.is_some() {
-                        validate_add_brief(store, &row)?;
+                // The readiness scan of `--fixes` reads the evidence of every unit, so it runs
+                // before the lock, on a plan that is then made again under the lock from the units
+                // as they are by then. A plan that fails here is left to the lock to refuse.
+                let mut scanned = false;
+                if let Some(old) = &fixes {
+                    let planned = validate_add_brief(store, &row)
+                        .and_then(|_| read_units(store))
+                        .and_then(|rows| plan_fix(store, rows, &row, old, explicit, reason_arg));
+                    if let Ok(FixPlan::Write { .. }) = planned {
+                        fix_readiness_scan(store, &row.id)?;
+                        scanned = true;
                     }
-                    let mut rows = read_units(store)?;
-                    if let Some(old) = &fixes {
-                        if !rows.iter().any(|u| u.id == *old) {
-                            return Err(Failure::new("not_found", format!("unit {old} not found")));
+                }
+                let fix_routing = loop {
+                    let added = locked(store, force, &mut note, || {
+                        if fixes.is_some() {
+                            validate_add_brief(store, &row)?;
                         }
-                    }
-                    if rows.iter().any(|u| u.id == row.id) {
-                        return Err(fail(format!("unit {} already exists", row.id)));
-                    }
-                    let chain = if let Some(old) = &fixes {
-                        rows.iter()
-                            .filter(|u| standing_unit(&rows, u).is_some_and(|end| end.id == *old))
-                            .map(|u| u.id.clone())
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    };
-                    rows.push(row.clone());
-                    if let Some(old) = &fixes {
-                        supersede_rows(store, &mut rows, old, &row.id)?;
-                        let mut fix_units = Vec::new();
-                        for unit in &chain {
-                            if fixed_unit(store, unit)?.is_some() {
-                                fix_units.push(unit.as_str());
+                        let mut rows = read_units(store)?;
+                        let Some(old) = &fixes else {
+                            if rows.iter().any(|u| u.id == row.id) {
+                                return Err(fail(format!("unit {} already exists", row.id)));
                             }
+                            rows.push(row.clone());
+                            save_units(store, &rows)?;
+                            return Ok(Some(None));
+                        };
+                        let (rows, record, brief_text, updated) =
+                            match plan_fix(store, rows, &row, old, explicit, reason_arg)? {
+                                FixPlan::Rounds(error) => {
+                                    add_adjudication_locked(store, "fix_rounds", old)?;
+                                    return Err(error);
+                                }
+                                FixPlan::Write {
+                                    rows,
+                                    record,
+                                    brief_text,
+                                    updated,
+                                } => (rows, record, brief_text, updated),
+                            };
+                        if !scanned {
+                            // The plan before the lock failed but this one passes: scan, unlocked.
+                            return Ok(None);
                         }
-                        if fix_units.len() >= 2 {
-                            return Err(Failure::new("fix_rounds", format!(
-                                "fix_rounds: fix units {} already belong to this chain; report to the core, which can waive the findings or close the wish as blocked",
-                                fix_units.join(", ")
-                            )));
-                        }
+                        use crate::codex::routing;
                         // Validate existing evidence before either write.
                         crate::orch::evidence(store, &row.id)?;
-                        // The add response computes readiness; reject existing invalid data
-                        // before changing either the units or evidence files.
-                        crate::orch::ready_units(store)?;
-                        crate::orch::waiting_units(store)?;
                         let original_units = std::fs::read(store.join("units.tsv")).map_err(io)?;
+                        let evidence_path = store
+                            .join("reports")
+                            .join(format!("{}.evidence.tsv", row.id));
+                        let original_evidence = match std::fs::read(&evidence_path) {
+                            Ok(v) => Some(v),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(e) => return Err(io(e)),
+                        };
+                        let fix_path = routing::fix_record_path(store, &row.id);
+                        let original_fix = match std::fs::read(&fix_path) {
+                            Ok(v) => Some(v),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(e) => return Err(io(e)),
+                        };
                         save_units(store, &rows)?;
                         let appended = crate::orch::append_evidence_locked(
                             store,
@@ -1176,23 +1863,72 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                                 ts: base::now_iso(),
                             },
                         );
-                        if let Err(error) = appended {
+                        let result = appended
+                            .and_then(|_| routing::write_fix(store, &record))
+                            .and_then(|_| {
+                                if updated != brief_text {
+                                    // Test-only final-write failure, gated like crash_point.
+                                    if cfg!(debug_assertions)
+                                        && std::env::var("AXIOM_TEST_FAIL_FIX_BRIEF_WRITE")
+                                            .ok().as_deref() == Some("1")
+                                    {
+                                        return Err(io(std::io::Error::new(
+                                            std::io::ErrorKind::PermissionDenied,
+                                            "injected fix brief write failure",
+                                        )));
+                                    }
+                                    base::atomic_write(Path::new(&row.brief), updated.as_bytes())
+                                        .map_err(io)?;
+                                }
+                                Ok(())
+                            });
+                        if let Err(error) = result {
                             base::atomic_write(&store.join("units.tsv"), &original_units)
                                 .map_err(io)?;
+                            for (path, original) in [
+                                (&evidence_path, original_evidence),
+                                (&fix_path, original_fix),
+                            ] {
+                                if let Some(bytes) = original {
+                                    base::atomic_write(path, &bytes).map_err(io)?;
+                                } else if let Err(e) = std::fs::remove_file(path) {
+                                    if e.kind() != std::io::ErrorKind::NotFound {
+                                        return Err(io(e));
+                                    }
+                                }
+                            }
                             return Err(error);
                         }
-                        Ok(())
-                    } else {
-                        save_units(store, &rows)
+                        Ok(Some(Some(record)))
+                    })?;
+                    match added {
+                        Some(record) => break record,
+                        None => {
+                            fix_readiness_scan(store, &row.id)?;
+                            scanned = true;
+                        }
                     }
-                })?;
+                };
                 let next = crate::orch::next_step_for(store, &row.id)?;
                 let mut value = serde_json::to_value(&row).unwrap();
                 value["next"] = serde_json::json!(next);
                 if let Some(old) = fixes {
                     value["fixes"] = serde_json::json!(old);
                 }
-                Ok(emit(value, format!("{}\n{next}", unit_line(&row)), json))
+                let mut text = format!("{}\n{next}", unit_line(&row));
+                if let Some(r) = fix_routing {
+                    let rule = serde_json::to_value(r.rule).unwrap();
+                    let tier = serde_json::to_value(r.tier).unwrap();
+                    let effort = serde_json::to_value(r.effort).unwrap();
+                    text.push_str(&format!(
+                        "\nrouting {}/{} {}",
+                        tier.as_str().unwrap(),
+                        effort.as_str().unwrap(),
+                        rule.as_str().unwrap()
+                    ));
+                    value["routing"] = serde_json::json!({"tier": tier, "effort": effort, "rule": rule, "reason": r.reason, "parent": {"tier": r.parent_tier, "effort": r.parent_effort}});
+                }
+                Ok(emit(value, text, json))
             }
             ("unit", "set") => {
                 let id = required(arg(args, 2)?, "unit id")?;
@@ -1546,22 +2282,53 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
             }
             ("frontier", "set") => Err(fail("frontier set is not supported")),
             ("map", _) => {
-                let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
-                let map = crate::orch::parse_map(&text).map_err(fail)?;
+                let map_path = store.join("modules.md");
+                let text = std::fs::read_to_string(&map_path).map_err(|e| {
+                    Failure::new("io", format!("cannot read {}: {e}", map_path.display()))
+                })?;
                 let plan_path = store.join("astra").join("plan-final.md");
-                match std::fs::read_to_string(&plan_path) {
-                    Ok(plan) => crate::orch::check_goals(&map, &crate::orch::parse_plan(&plan))
-                        .map_err(fail)?,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                let plan = match std::fs::read_to_string(&plan_path) {
+                    Ok(text) => Some(text),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => {
                         return Err(Failure::new(
                             "io",
                             format!("cannot read {}: {e}", plan_path.display()),
                         ))
                     }
+                };
+                let repo = option(args, "--repo")?.map(Path::new);
+                if repo.is_some_and(|p| !p.is_dir()) {
+                    return Err(fail("--repo must be an existing directory"));
+                }
+                let problems = crate::orch::lint_map(&text, plan.as_deref(), repo);
+                if !problems.is_empty() {
+                    let mut message = format!(
+                        "modules.md has {} problems; fix them all, then run orch map again:",
+                        problems.len()
+                    );
+                    for p in problems {
+                        message.push_str(&format!(
+                            "\n- {}{}: {}",
+                            p.module.map(|m| format!("{m}: ")).unwrap_or_default(),
+                            p.kind,
+                            p.message
+                        ));
+                    }
+                    return Err(fail(message));
+                }
+                if repo.is_none() {
+                    note.push_str("paths not checked: pass --repo <dir>\n");
+                }
+                let map = crate::orch::parse_map(&text).map_err(fail)?;
+                let mut map_json = serde_json::to_value(&map).unwrap();
+                for module in map_json["modules"].as_array_mut().unwrap() {
+                    let module = module.as_object_mut().unwrap();
+                    module.remove("new_paths");
+                    module.remove("shared_owner");
                 }
                 Ok(emit(
-                    serde_json::to_value(&map).unwrap(),
+                    map_json,
                     map.modules
                         .iter()
                         .map(|m| {
@@ -1570,6 +2337,16 @@ pub fn run(store: &Path, args: &[String], json: bool, force: bool) -> Output {
                         .collect::<Vec<_>>()
                         .join("\n"),
                     json,
+                ))
+            }
+            ("module-context", _) => {
+                let module = arg(args, 1)?;
+                let repo = option(args, "--repo")?.ok_or_else(|| fail("--repo is required"))?;
+                let context = crate::orch::module_context(store, module, Path::new(repo))?;
+                Ok(emit(
+                    serde_json::to_value(&context).unwrap(),
+                    crate::orch::render_module_context(&context),
+                    json || args.iter().any(|arg| arg == "--json"),
                 ))
             }
             _ => {
@@ -1610,15 +2387,26 @@ mod tests {
     fn a_holder_that_never_lets_go_ends_the_wait_with_an_error() {
         let t = tempfile::tempdir().unwrap();
         let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
-        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
         let mut holder = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
         let lock = t.path().join(".orch.lock");
-        std::fs::write(&lock, format!("{}
-", holder.id())).unwrap();
+        std::fs::write(
+            &lock,
+            format!(
+                "{}
+",
+                holder.id()
+            ),
+        )
+        .unwrap();
         let started = Instant::now();
         let refused = acquire(
             t.path(),
@@ -1660,7 +2448,11 @@ mod tests {
             .expect("an abandoned reclaim marker is itself reclaimed");
         assert!(note.contains("replacing stale store lock"), "{note}");
         drop(held);
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
 
         // A reclaimer that died before writing its pid leaves an empty marker.
         std::fs::write(&lock, "4294967295\n").unwrap();
@@ -1670,11 +2462,19 @@ mod tests {
             .unwrap();
         drop(empty);
         drop(acquire(t.path(), false, &mut String::new(), short).expect("an old empty marker"));
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
 
         // A live reclaimer keeps its claim, and every level of a dead chain is cleared once it ends.
         let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
-        command.args(if cfg!(windows) { ["/C", "more"] } else { ["-c", "cat"] });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
         let mut claimant = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1682,13 +2482,284 @@ mod tests {
             .unwrap();
         std::fs::write(&lock, "4294967295\n").unwrap();
         std::fs::write(&marker, "4294967294\n").unwrap();
-        let second = t.path().join(".orch.lock.4294967295.stale.4294967294.stale");
+        let second = t
+            .path()
+            .join(".orch.lock.4294967295.stale.4294967294.stale");
         std::fs::write(&second, format!("{}\n", claimant.id())).unwrap();
         assert!(acquire(t.path(), false, &mut String::new(), short).is_err());
         assert_eq!(std::fs::read_to_string(&lock).unwrap().trim(), "4294967295");
         drop(claimant.stdin.take());
         claimant.wait().unwrap();
         drop(acquire(t.path(), false, &mut String::new(), short).expect("the claimant died"));
-        assert!(lock_files(t.path()).is_empty(), "{:?}", lock_files(t.path()));
+        assert!(
+            lock_files(t.path()).is_empty(),
+            "{:?}",
+            lock_files(t.path())
+        );
+    }
+
+    /// A thread of this process that never releases the store lock must not freeze the
+    /// other threads: their wait ends with an error at the deadline, like a wait on another
+    /// process does.
+    #[test]
+    fn a_thread_that_never_lets_go_ends_another_threads_wait_with_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().to_path_buf();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let _call = call_scope("orch unit add pn-usage-2 --fixes pn-usage");
+                let lock = lock_store(&store).unwrap();
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                drop(lock);
+            }
+        });
+        held_rx.recv().unwrap();
+        let wait = Duration::from_millis(300);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let started = Instant::now();
+                let result = acquire(&store, false, &mut String::new(), wait).map(drop);
+                let _ = done_tx.send((result, started.elapsed()));
+            }
+        });
+        let (result, elapsed) = done_rx
+            .recv_timeout(wait + Duration::from_secs(10))
+            .expect("a waiter must not hang behind a holder in its own process");
+        let refused = result.expect_err("a held lock refuses the waiter");
+        assert!(elapsed >= wait, "{elapsed:?}");
+        assert!(
+            refused
+                .message
+                .contains(&format!("store lock held by pid {}", std::process::id())),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains(
+                "(orch unit add pn-usage-2 --fixes pn-usage, since 20"
+            ) && refused.message.ends_with("in another thread of this process"),
+            "{}",
+            refused.message
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        drop(acquire(&store, false, &mut String::new(), wait).expect("released"));
+    }
+
+    #[test]
+    fn a_thread_that_takes_the_lock_it_holds_is_refused_at_once() {
+        let t = tempfile::tempdir().unwrap();
+        let _call = call_scope("orch handoff --next x");
+        let held = lock_store(t.path()).unwrap();
+        let started = Instant::now();
+        let refused = acquire(t.path(), false, &mut String::new(), Duration::from_secs(30))
+            .err()
+            .expect("a nested take refuses");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            refused.message.contains(&format!(
+                "store lock held by pid {} (orch handoff --next x, since 20",
+                std::process::id()
+            )) && refused.message.contains("this same thread"),
+            "{}",
+            refused.message
+        );
+        drop(held);
+        drop(lock_store(t.path()).expect("released"));
+    }
+
+    #[test]
+    fn a_patient_thread_waits_past_the_deadline_and_others_still_fail() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().to_path_buf();
+        let wait = Duration::from_millis(150);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let lock = lock_store(&store).unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(700));
+                drop(lock);
+            }
+        });
+        held_rx.recv().unwrap();
+        let impatient = acquire(&store, false, &mut String::new(), wait)
+            .err()
+            .expect("an ordinary wait ends at its deadline");
+        assert_eq!(impatient.kind, LOCK_TIMEOUT, "{}", impatient.message);
+        let started = Instant::now();
+        let patient = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                let _patient = patient_scope();
+                acquire(&store, false, &mut String::new(), wait).map(drop)
+            }
+        });
+        patient.join().unwrap().expect("a patient wait outlasts the holder");
+        assert!(started.elapsed() > wait, "{:?}", started.elapsed());
+        holder.join().unwrap();
+        assert!(!PATIENT.with(|p| p.get()));
+    }
+
+    fn live_process() -> std::process::Child {
+        let mut command = crate::base::proc::cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) {
+            ["/C", "more"]
+        } else {
+            ["-c", "cat"]
+        });
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_lock_file_names_its_holder_and_waiters_report_it() {
+        let short = Duration::from_millis(150);
+        let t = tempfile::tempdir().unwrap();
+        let lock = t.path().join(".orch.lock");
+
+        // A live holder from another process: the refusal names its pid, call and start.
+        let mut holder = live_process();
+        std::fs::write(
+            &lock,
+            format!(
+                "{}\ncall orch unit add pn-usage-2 --fixes pn-usage\nstarted 2026-11-14T13:37:59Z\n",
+                holder.id()
+            ),
+        )
+        .unwrap();
+        let refused = acquire(t.path(), false, &mut String::new(), short)
+            .err()
+            .expect("a live holder keeps the lock");
+        assert!(
+            refused.message.contains(&format!(
+                "store lock held by pid {} (orch unit add pn-usage-2 --fixes pn-usage, since 2026-11-14T13:37:59Z)",
+                holder.id()
+            )),
+            "{}",
+            refused.message
+        );
+        assert!(!refused.message.contains('\n'), "{}", refused.message);
+        drop(holder.stdin.take());
+        holder.wait().unwrap();
+
+        // A dead holder's record is reclaimed by its pid.
+        std::fs::write(
+            &lock,
+            "4294967295\ncall orch verify u1 --repo r\nstarted 2026-11-14T13:00:00Z\n",
+        )
+        .unwrap();
+        let mut note = String::new();
+        let held = acquire(t.path(), false, &mut note, short).expect("a dead holder is replaced");
+        assert!(
+            note.contains("replacing stale store lock (pid 4294967295 is dead)"),
+            "{note}"
+        );
+        assert!(note.contains("orch verify u1 --repo r"), "{note}");
+
+        // The lock this process holds records its pid, its call and when it started.
+        let text = std::fs::read_to_string(&lock).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some(std::process::id().to_string().as_str()), "{text}");
+        assert!(
+            lines.clone().any(|l| l.starts_with("call ") && l.len() > "call ".len()),
+            "{text}"
+        );
+        assert!(
+            lines.any(|l| l
+                .strip_prefix("started ")
+                .is_some_and(|s| s.starts_with("20") && s.ends_with('Z'))),
+            "{text}"
+        );
+        drop(held);
+        assert!(!lock.exists());
+    }
+
+    /// `unit add --fixes` scans the evidence of every unit; that scan runs before the store
+    /// lock, which is held only to re-check the units and write.
+    #[test]
+    fn unit_add_fixes_holds_the_store_lock_briefly_on_a_large_store() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const UNITS: usize = 800;
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let call = |args: &[&str]| {
+            run(
+                p,
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                false,
+                false,
+            )
+        };
+        assert_eq!(call(&["init"]).exit_code, 0);
+        let brief = p.join("brief.md");
+        std::fs::write(&brief, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        let fix = p.join("fix.md");
+        std::fs::write(&fix, "GOAL g\nRISK trivial\nSCOPE src/a\nVERIFY echo ok\n").unwrap();
+        std::fs::write(
+            p.join("modules.md"),
+            "## core\nPURPOSE x\nPATHS src/\nDEPENDS none\nCONTRACT x\nACCEPT test `echo ok`\nROUTING\n  default terra/medium trivial reason\n",
+        )
+        .unwrap();
+        let brief = brief.to_str().unwrap();
+        let mut units = format!("{HEADER}\n");
+        for i in 0..UNITS {
+            units.push_str(&format!("u{i}\tcore\tpending\t\t\t\t{brief}\n"));
+        }
+        units.push_str(&format!("origin\tcore\tpending\t\t\t\t{brief}\n"));
+        std::fs::write(p.join("units.tsv"), units).unwrap();
+
+        let lock = p.join(".orch.lock");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let probe = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                let (mut longest, mut since) = (Duration::ZERO, None::<Instant>);
+                while !stop.load(Ordering::Relaxed) {
+                    if lock.exists() {
+                        longest = longest.max(since.get_or_insert_with(Instant::now).elapsed());
+                    } else {
+                        since = None;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                longest
+            }
+        });
+        let started = Instant::now();
+        let out = call(&[
+            "unit",
+            "add",
+            "fix",
+            "--track",
+            "core",
+            "--brief",
+            fix.to_str().unwrap(),
+            "--fixes",
+            "origin",
+        ]);
+        let total = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        let held = probe.join().unwrap();
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+        let rows = read_units(p).unwrap();
+        assert_eq!(rows.len(), UNITS + 2);
+        assert_eq!(rows[UNITS].superseded_by(), Some("fix"));
+        assert_eq!(fixed_unit(p, "fix").unwrap().as_deref(), Some("origin"));
+        eprintln!("unit add --fixes held the store lock {held:?} of {total:?}");
+        assert!(
+            held < Duration::from_secs(2),
+            "the store lock was held for {held:?} of {total:?}"
+        );
     }
 }

@@ -23,12 +23,27 @@ pub fn carried_by(row: &Evidence) -> Option<Vec<String>> {
     Some(ids.split(',').map(str::to_owned).collect())
 }
 
-fn review_passes(rows: &[Evidence], index: usize) -> bool {
+pub(crate) fn review_passes(rows: &[Evidence], index: usize) -> bool {
     let review = &rows[index];
+    if !rows.iter().any(|r| r.kind == "require") {
+        return review.exit_code == 0
+            || rows[index + 1..].iter().any(|r| {
+                (r.kind == WAIVE_KIND || r.kind == super::findings::CHECKED_KIND)
+                    && r.exit_code == 0
+                    && r.commit == review.commit
+            });
+    }
+    let end = rows[index + 1..]
+        .iter()
+        .position(|r| r.kind == "review")
+        .map_or(rows.len(), |n| index + 1 + n);
     review.exit_code == 0
-        || rows[index + 1..]
+        || rows[index + 1..end]
             .iter()
             .any(|r| r.kind == WAIVE_KIND && r.exit_code == 0 && r.commit == review.commit)
+        || rows[index + 1..].iter().any(|r| {
+            r.kind == super::findings::CHECKED_KIND && r.exit_code == 0 && r.commit == review.commit
+        })
 }
 
 pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
@@ -89,9 +104,29 @@ pub fn derive_state(rows: &[Evidence], needs_accept: bool) -> String {
             .command
             .split_once(CARRIED_MARK)
             .map_or(r.command.as_str(), |(command, _)| command);
-        base::family_of(command) == base::family_of(&run.command)
+        !command.starts_with("engine-astra:")
+            && base::family_of(command) == base::family_of(&run.command)
     }) {
         return "built".into();
+    }
+    for required in rest[v + 1..]
+        .iter()
+        .filter(|r| r.kind == "require" && r.commit == rest[v].commit)
+    {
+        if !current.iter().any(|(n, r)| {
+            r.commit == required.commit
+                && if required.command == "engine-astra:" {
+                    r.command.starts_with("engine-astra:")
+                } else {
+                    r.command
+                        .split_once(CARRIED_MARK)
+                        .map_or(r.command.as_str(), |(s, _)| s)
+                        == required.command
+                }
+                && review_passes(rest, *n)
+        }) {
+            return "built".into();
+        }
     }
     "verified".into()
 }
@@ -99,9 +134,31 @@ use super::{
     parse_map, read_claims, read_units, save_unit_state, standing_unit, unit_brief, with_lock,
 };
 use crate::base::{proc::ShellRun, Failure, Res};
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const HEADER: &str = "kind\tcommand\texit_code\tcommit\tts";
+/// Test-only counts of the store reads made on this thread, so tests can bound what one call reads.
+#[cfg(test)]
+pub(crate) mod read_count {
+    use std::cell::Cell;
+    thread_local! {
+        static EVIDENCE: Cell<usize> = const { Cell::new(0) };
+        static MAP: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn evidence() {
+        EVIDENCE.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn map() {
+        MAP.with(|c| c.set(c.get() + 1));
+    }
+    /// The evidence files read and the modules.md parses made since the last call.
+    pub(crate) fn take() -> (usize, usize) {
+        (EVIDENCE.replace(0), MAP.replace(0))
+    }
+}
 fn io(e: std::io::Error) -> Failure {
     Failure::new("io", e.to_string())
 }
@@ -109,8 +166,10 @@ fn invalid(s: impl Into<String>) -> Failure {
     Failure::new("invalid_argument", s)
 }
 fn rows(store: &Path, name: &str) -> Res<Vec<Evidence>> {
+    #[cfg(test)]
+    read_count::evidence();
     let path = store.join("reports").join(format!("{name}.evidence.tsv"));
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::storage::archive::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(io(e)),
@@ -154,6 +213,8 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
     if !["_full", "_stages"].contains(&unit) {
         base::require_slug("unit", unit)?;
     }
+    let path = store.join("reports").join(format!("{unit}.evidence.tsv"));
+    crate::storage::archive::restore(&path).map_err(io)?;
     let mut all = rows(store, unit)?;
     if unit == "_stages" {
         let dir = store.join("reports");
@@ -180,7 +241,12 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
             )
             .as_bytes(),
         );
-        std::fs::create_dir_all(&dir).map_err(io)?;
+        crate::storage::ensure_dir(
+            &super::store::storage_context(store).0,
+            &dir,
+            crate::storage::Class::Evidence,
+            &super::store::storage_context(store).1,
+        )?;
         return base::atomic_write(&path, &text).map_err(io);
     }
     all.push(row.clone());
@@ -197,7 +263,12 @@ pub fn append_evidence_locked(store: &Path, unit: &str, row: &Evidence) -> Res<(
         ));
     }
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     base::atomic_write(&dir.join(format!("{unit}.evidence.tsv")), text.as_bytes()).map_err(io)
 }
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -269,6 +340,8 @@ pub fn base_snapshot(repo: &Path, scope: &[String]) -> String {
     snapshot(repo, scope)
 }
 fn map(store: &Path) -> Res<super::Map> {
+    #[cfg(test)]
+    read_count::map();
     let text = std::fs::read_to_string(store.join("modules.md")).map_err(io)?;
     parse_map(&text).map_err(invalid)
 }
@@ -325,6 +398,16 @@ pub fn append_check(
     unit: &str,
     repo: &Path,
     check: &Evidence,
+) -> Res<Option<Vec<String>>> {
+    append_check_with_requirements(store, unit, repo, check, &[])
+}
+
+fn append_check_with_requirements(
+    store: &Path,
+    unit: &str,
+    repo: &Path,
+    check: &Evidence,
+    required: &[&str],
 ) -> Res<Option<Vec<String>>> {
     if !["accept", "verify"].contains(&check.kind.as_str()) {
         return Err(invalid("expected an accept or verify row"));
@@ -399,22 +482,82 @@ pub fn append_check(
             }
         }
         append_evidence_locked(store, unit, check)?;
+        for reviewer in required {
+            append_evidence_locked(
+                store,
+                unit,
+                &row("require", reviewer, 0, check.commit.clone()),
+            )?;
+        }
         if let Some((_, review)) = &carried {
             append_evidence_locked(store, unit, review)?;
+            review_event(store, unit, review, repo, None)?;
         }
-        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-        save_unit_state(store, unit, &state)?;
+        update_unit_state_locked(store, unit)?;
         Ok(carried.map(|(ids, _)| ids))
     })
 }
 /// Derives and saves under one lock, so a state derived from older evidence cannot land last.
 pub(crate) fn update_unit_state(store: &Path, unit: &str) -> Res<String> {
-    with_lock(store, false, || {
-        let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
-        save_unit_state(store, unit, &state)?;
-        Ok(state)
-    })
+    with_lock(store, false, || update_unit_state_locked(store, unit))
 }
+fn update_unit_state_locked(store: &Path, unit: &str) -> Res<String> {
+    let previous = read_units(store)?
+        .into_iter()
+        .find(|u| u.id == unit)
+        .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?;
+    let state = derive_state(&evidence(store, unit)?, needs_accept(store, unit)?);
+    save_unit_state(store, unit, &state)?;
+    if previous.state != state {
+        super::events::append_event(
+            store,
+            super::events::UNIT_STATE,
+            Some(&previous.track),
+            Some(unit),
+            serde_json::json!({"state":state,"previous":previous.state}),
+        )?;
+        if previous.state != "verified"
+            && super::lifecycle::scheduler::module_verified(store, &previous.track)?
+        {
+            super::events::append_event(
+                store,
+                super::events::MODULE_VERIFIED,
+                Some(&previous.track),
+                None,
+                serde_json::json!({}),
+            )?;
+        }
+    }
+    Ok(state)
+}
+pub fn accept_output_path(store: &Path, module: &str) -> PathBuf {
+    store.join("reports").join(format!("{module}.accept.txt"))
+}
+
+pub fn scratch_dir(store: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(store.join("scratch"), |path, part| path.join(part))
+}
+
+fn run_scratch(store: &Path, command: &str, repo: &Path, dir: &Path) -> Res<ShellRun> {
+    let (home, owner) = super::store::storage_context(store);
+    crate::storage::ensure_dir(&home, dir, crate::storage::Class::Scratch, &owner)?;
+    let lease = crate::storage::Ledger::open(&home)?.lease(dir)?;
+    let result = (|| {
+        let mut env = base::proc::scratch_env(dir).map_err(io)?;
+        env.extend(crate::storage::worktree::worker_env(&home, repo, &owner)?);
+        base::proc::run_shell_env(command, repo, Duration::from_secs(1800), &env)
+    })();
+    drop(lease);
+    let cleanup =
+        crate::storage::retention::remove_scratch(&home, dir, &owner, "unit_ended", false);
+    if cleanup.outcome != "done" {
+        return Err(Failure::new("storage", cleanup.outcome));
+    }
+    result
+}
+
 pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     let m = map(store)?
         .modules
@@ -429,7 +572,19 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
         .iter()
         .map(|u| unit_brief(store, &u.id).map(|b| b.scope))
         .collect::<Res<Vec<_>>>()?;
-    let result = base::proc::run_shell(&m.accept_command, repo, Duration::from_secs(1800))?;
+    let result = run_scratch(
+        store,
+        &m.accept_command,
+        repo,
+        &scratch_dir(store, &[&format!("accept-{module}"), &base::unique()]),
+    )?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &store.join("reports"),
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
+    base::atomic_write(&accept_output_path(store, module), result.output.as_bytes()).map_err(io)?;
     for (u, scope) in units.into_iter().zip(scopes) {
         append_check(
             store,
@@ -445,6 +600,84 @@ pub fn record_accept(store: &Path, module: &str, repo: &Path) -> Res<ShellRun> {
     }
     Ok(result)
 }
+pub(crate) fn guard_verify(store: &Path, unit: &str, repo: &Path) -> Res<()> {
+    use crate::storage::{preflight, Policy};
+
+    let (home, owner) = super::store::storage_context(store);
+    let mut session_goal = None;
+    let goals = match std::fs::read_dir(home.join("goals")) {
+        Ok(goals) => Some(goals),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(e)),
+    };
+    for entry in goals.into_iter().flatten() {
+        let entry = entry.map_err(io)?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if session.is_empty()
+            || session.len() > 64
+            || !session
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            continue;
+        }
+        let Some(goal) = crate::goal::load(&home, session)? else {
+            continue;
+        };
+        if goal.project.as_deref() != Some(owner.project.as_str())
+            || !(goal.status == "active"
+                || goal.status == "blocked" && goal.reason.as_deref() == Some(preflight::REASON))
+            || !super::store::store_for_goal(&home, &goal).is_ok_and(|p| p == store)
+        {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|m| m.modified()).map_err(io)?;
+        if session_goal
+            .as_ref()
+            .is_none_or(|(time, _, _)| modified > *time)
+        {
+            session_goal = Some((modified, session.to_owned(), goal));
+        }
+    }
+    let policy = Policy::load(&home)?;
+    let need = preflight::need(
+        &policy,
+        preflight::Kind::Wish,
+        session_goal
+            .as_ref()
+            .and_then(|(_, _, goal)| goal.need_bytes),
+        Some(repo),
+        None,
+    )?;
+    if let Some(check) = preflight::guard(
+        &home,
+        &*preflight::os_probe(),
+        &policy,
+        &[repo, &home],
+        preflight::Kind::Wish,
+        need,
+    )? {
+        let line = check.owner_line();
+        if let Some((_, session, _)) = &session_goal {
+            crate::goal::disk_pause(&home, session, &line)?;
+        }
+        preflight::notify_paused(
+            store,
+            preflight::EVENT_DISK_PAUSE,
+            &check,
+            serde_json::json!({"unit": unit, "stage": "verify"}),
+        )?;
+        return Err(Failure::new(preflight::REASON, line));
+    }
+    Ok(())
+}
+
 pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
     if let Some(u) = read_units(store)?.iter().find(|u| u.id == unit) {
         u.refuse_superseded()?;
@@ -461,29 +694,46 @@ pub fn record_verify(store: &Path, unit: &str, repo: &Path) -> Res<ShellRun> {
         )));
     }
     let brief = unit_brief(store, unit)?;
-    let result = base::proc::run_shell(&brief.verify, repo, Duration::from_secs(1800))?;
+    guard_verify(store, unit, repo)?;
+    let result = run_scratch(
+        store,
+        &brief.verify,
+        repo,
+        &scratch_dir(store, &[unit, &format!("verify-{}", base::unique())]),
+    )?;
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
-    let tail: String = result
-        .output
-        .chars()
-        .rev()
-        .take(20000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    base::atomic_write(&dir.join(format!("{unit}.verify.txt")), tail.as_bytes()).map_err(io)?;
-    append_check(
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
+    base::atomic_write(
+        &dir.join(format!("{unit}.verify.txt")),
+        result.output.as_bytes(),
+    )
+    .map_err(io)?;
+    let policy = crate::engine::policy::load(store)?;
+    let tree = snapshot(repo, &brief.scope);
+    use crate::engine::policy::ReviewerMode;
+    let mut required = Vec::new();
+    if policy.reviewer != ReviewerMode::Claude || policy.pm_qa {
+        if matches!(policy.reviewer, ReviewerMode::Claude | ReviewerMode::Both) {
+            required.push("chronos:reviewer");
+        }
+        if matches!(policy.reviewer, ReviewerMode::AstraMax | ReviewerMode::Both) {
+            required.push("engine-astra:");
+        }
+        if policy.pm_qa {
+            required.push("chronos:pm-qa");
+        }
+    }
+    append_check_with_requirements(
         store,
         unit,
         repo,
-        &row(
-            "verify",
-            &brief.verify,
-            result.exit_code,
-            snapshot(repo, &brief.scope),
-        ),
+        &row("verify", &brief.verify, result.exit_code, tree.clone()),
+        &required,
     )?;
     Ok(result)
 }
@@ -501,7 +751,12 @@ pub fn record_full(store: &Path, repo: &Path, command: Option<&str>) -> Res<Shel
                 .ok_or_else(|| invalid("missing FULL TEST command"))?
         }
     };
-    let result = base::proc::run_shell(&command, repo, Duration::from_secs(1800))?;
+    let result = run_scratch(
+        store,
+        &command,
+        repo,
+        &scratch_dir(store, &["fulltest", &base::unique()]),
+    )?;
     append_evidence(
         store,
         "_full",
@@ -558,7 +813,12 @@ pub fn record_external_full(
         .rev()
         .collect();
     let dir = store.join("reports");
-    std::fs::create_dir_all(&dir).map_err(io)?;
+    crate::storage::ensure_dir(
+        &super::store::storage_context(store).0,
+        &dir,
+        crate::storage::Class::Evidence,
+        &super::store::storage_context(store).1,
+    )?;
     let saved = format!("_full.external-{}.txt", base::unique());
     base::atomic_write(&dir.join(&saved), output.as_bytes()).map_err(io)?;
     append_evidence(
@@ -584,19 +844,40 @@ pub fn record_review(
     pass: bool,
     repo: &Path,
 ) -> Res<Vec<(String, String)>> {
+    record_review_with_verdict(store, units, reviewer, pass, repo, None)
+}
+
+pub(crate) fn record_review_with_verdict(
+    store: &Path,
+    units: &[String],
+    reviewer: &str,
+    pass: bool,
+    repo: &Path,
+    verdict: Option<&super::Verdict>,
+) -> Res<Vec<(String, String)>> {
     let existing = read_units(store)?;
     let mut commits = Vec::new();
     let mut stale = Vec::new();
     for unit in units {
+        if !matches!(
+            selfcheck_state(store, unit)?,
+            SelfCheckState::NotRequired | SelfCheckState::Passed
+        ) {
+            return Err(Failure::new(
+                "selfcheck_required",
+                format!("self-check required for {unit}"),
+            ));
+        }
         existing
             .iter()
             .find(|u| u.id == *unit)
             .ok_or_else(|| Failure::new("not_found", format!("unit {unit} not found")))?
             .refuse_superseded()?;
         let rs = evidence(store, unit)?;
-        if rs
-            .iter()
-            .any(|r| r.kind == "run" && base::family_of(&r.command) == base::family_of(reviewer))
+        if !reviewer.starts_with("engine-astra:")
+            && rs.iter().any(|r| {
+                r.kind == "run" && base::family_of(&r.command) == base::family_of(reviewer)
+            })
         {
             return Err(Failure::new(
                 "same_family",
@@ -624,14 +905,97 @@ pub fn record_review(
     }
     let mut result = Vec::new();
     for (unit, commit) in units.iter().zip(commits) {
-        append_evidence(
-            store,
-            unit,
-            &row("review", reviewer, if pass { 0 } else { 1 }, commit),
-        )?;
+        let review = row("review", reviewer, if pass { 0 } else { 1 }, commit);
+        with_lock(store, false, || {
+            append_evidence_locked(store, unit, &review)?;
+            review_event(store, unit, &review, repo, verdict)
+        })?;
         result.push((unit.clone(), update_unit_state(store, unit)?));
     }
     Ok(result)
+}
+
+fn review_event(
+    store: &Path,
+    unit: &str,
+    row: &Evidence,
+    repo: &Path,
+    supplied: Option<&super::Verdict>,
+) -> Res<()> {
+    let reviewer = row
+        .command
+        .split_once(CARRIED_MARK)
+        .map_or(row.command.as_str(), |(s, _)| s);
+    let commit = &row.commit;
+    let rs = evidence(store, unit)?;
+    let n = rs.iter().filter(|r| r.kind == "review").count();
+    let loaded = std::fs::read_to_string(super::review_verdict_path(store, unit, reviewer))
+        .ok()
+        .and_then(|s| super::parse_verdict(&s).ok());
+    let verdict = supplied
+        .or(loaded.as_ref())
+        .filter(|v| v.unit == unit && v.tree == *commit);
+    let findings: Vec<_> = verdict.iter().flat_map(|v| &v.findings).map(|f| serde_json::json!({
+            "number": f.number, "severity": match f.severity { super::Severity::Blocker => "blocker", super::Severity::Major => "major", super::Severity::Minor => "minor" }, "location": f.location
+        })).collect();
+    let model = reviewer.strip_prefix("engine-astra:").unwrap_or(reviewer);
+    let family = match base::family_of(model) {
+        base::Family::OpenAi => "openai",
+        base::Family::Anthropic => "anthropic",
+        base::Family::Google => "google",
+        base::Family::Unknown => "unknown",
+    };
+    let role = if reviewer.starts_with("engine-astra:") {
+        "astra-max"
+    } else if reviewer == "chronos:pm-qa" {
+        "pm-qa"
+    } else {
+        "reviewer"
+    };
+    let paths: Vec<String> = unit_brief(store, unit)
+        .map(|b| b.scope)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| {
+            let path = Path::new(&s);
+            let relative = if path.is_absolute() {
+                path.strip_prefix(repo).ok()?
+            } else {
+                path
+            };
+            if relative.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                return None;
+            }
+            Some(relative.to_string_lossy().replace('\\', "/"))
+        })
+        .collect();
+    let routing = super::receipts::read_routing(store)?
+        .into_iter()
+        .rev()
+        .find(|receipt| receipt.unit == unit);
+    super::events::append_event(
+        store,
+        crate::engine::kinds::REVIEW_RECORDED,
+        None,
+        Some(unit),
+        serde_json::json!({
+            "review_id": super::review_id(unit, n), "unit": unit, "role": role, "reviewer": reviewer, "model": model, "family": family, "tree": commit, "paths": paths, "findings": findings, "pass": row.exit_code == 0,
+            "worker_model": routing.as_ref().map(|r| r.model_used.as_ref().unwrap_or(&r.model_assigned)),
+            "worker_tier": routing.as_ref().and_then(|r| r.tier.as_ref()),
+            "worker_effort": routing.as_ref().and_then(|r| r.effort.as_ref()),
+            "risk": routing.as_ref().and_then(|r| r.risk.as_ref()),
+            "routing_rule": routing.as_ref().map(|r| &r.rule),
+            "attempt": routing.as_ref().map(|r| &r.attempt)
+        }),
+    )?;
+    Ok(())
 }
 pub fn record_stage(store: &Path, kind: &str, model: &str, ok: bool) -> Res<()> {
     if !["astra", "second_review"].contains(&kind) {
@@ -668,6 +1032,7 @@ pub fn astra_gate(store: &Path) -> Res<()> {
             return Err(Failure::new("astra_gate", format!("empty {file}")));
         }
     }
+    crate::research_program::gate(store).map_err(|e| Failure::new("astra_gate", e.message))?;
     Ok(())
 }
 pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
@@ -715,6 +1080,74 @@ pub fn done_gate(store: &Path, change_mode: bool) -> Res<()> {
             "not_done",
             "missing successful, current full test",
         ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfCheckState {
+    NotRequired,
+    Missing,
+    Stale,
+    Failed,
+    Passed,
+}
+pub fn selfcheck_state(store: &Path, unit: &str) -> Res<SelfCheckState> {
+    if unit_brief(store, unit)?.test_matrix.is_empty() {
+        return Ok(SelfCheckState::NotRequired);
+    }
+    let rows = evidence(store, unit)?;
+    let Some((index, check)) = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, r)| r.kind == "selfcheck")
+    else {
+        return Ok(SelfCheckState::Missing);
+    };
+    let verify = rows.iter().rev().find(|r| r.kind == "verify");
+    if rows[index + 1..].iter().any(|r| r.kind == "run")
+        || !verify.is_some_and(|v| !v.commit.is_empty() && v.commit == check.commit)
+    {
+        return Ok(SelfCheckState::Stale);
+    }
+    if let Some(snapshot) = crate::codex::routing::read_snapshot(store, unit)? {
+        if check.command.split('|').next() != Some(snapshot.attempt_id.as_str()) {
+            return Ok(SelfCheckState::Stale);
+        }
+    }
+    Ok(if check.exit_code == 0 {
+        SelfCheckState::Passed
+    } else {
+        SelfCheckState::Failed
+    })
+}
+
+pub fn record_matrix(store: &Path, unit: &str, repo: &Path, attempt: &str) -> Res<()> {
+    let brief = unit_brief(store, unit)?;
+    for entry in &brief.test_matrix {
+        let result = run_scratch(
+            store,
+            &entry.command,
+            repo,
+            &scratch_dir(store, &[unit, &format!("matrix-{}", base::unique())]),
+        )?;
+        append_evidence(
+            store,
+            unit,
+            &row(
+                "matrix",
+                &format!("{}|{}|{}", attempt, entry.id, entry.command),
+                result.exit_code,
+                snapshot(repo, &brief.scope),
+            ),
+        )?;
+        if result.exit_code != 0 {
+            return Err(Failure::new(
+                "matrix_failed",
+                format!("matrix row {} failed", entry.id),
+            ));
+        }
     }
     Ok(())
 }

@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long one summary job may run before it gives up.
+const JOB_DEADLINE_SECS: u64 = 60;
+
 pub(super) struct Job {
     pub session: String,
     pub revision: u64,
@@ -29,7 +32,7 @@ pub(super) fn execute(
     model: &mut Option<Arc<dyn Model>>,
     build: &dyn Fn() -> Res<Arc<dyn Model>>,
 ) -> (Res<Summary>, bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(JOB_DEADLINE_SECS);
     if job.cancel.load(Ordering::Acquire) {
         return (Err(Failure::new("cancelled", "request cancelled")), false);
     }

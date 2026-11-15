@@ -35,6 +35,7 @@ const FABLE_ENV_CLEARED: [&str; 8] = [
 pub(super) struct Answer {
     pub status: Status,
     pub output: Option<Value>,
+    pub raw: Option<String>,
     pub tokens: u64,
     pub detail: Option<String>,
 }
@@ -43,8 +44,9 @@ impl Answer {
         Self {
             status,
             output: None,
+            raw: None,
             tokens,
-            detail: Some(detail.into().trim().chars().take(240).collect()),
+            detail: Some(detail.into()),
         }
     }
 }
@@ -53,7 +55,7 @@ impl Answer {
 /// retry after a crash continues the same budget instead of starting a fresh one.
 pub(super) struct Meter {
     cap_usd: f64,
-    ledger: PathBuf,
+    ledger: Option<PathBuf>,
     key: String,
     spent_usd: f64,
     unpriced_tokens: u64,
@@ -70,6 +72,7 @@ struct Call {
     usd: f64,
     unpriced: u64,
     tokens: u64,
+    priced: bool,
 }
 impl Meter {
     pub fn open(ledger: &Path, key: &str, cap_usd: f64) -> Res<Self> {
@@ -93,7 +96,7 @@ impl Meter {
         };
         Ok(Self {
             cap_usd,
-            ledger: ledger.to_path_buf(),
+            ledger: Some(ledger.to_path_buf()),
             key: key.to_owned(),
             spent_usd,
             unpriced_tokens,
@@ -104,6 +107,21 @@ impl Meter {
             anonymous: 0,
             runs: 0,
         })
+    }
+    fn single_call() -> Self {
+        Self {
+            cap_usd: f64::INFINITY,
+            ledger: None,
+            key: String::new(),
+            spent_usd: 0.0,
+            unpriced_tokens: 0,
+            tokens: 0,
+            observed: false,
+            broken: false,
+            calls: HashMap::new(),
+            anonymous: 0,
+            runs: 0,
+        }
     }
     fn observe(&mut self, id: Option<&str>, model: &str, usage: price::CallUsage) {
         self.observed = true;
@@ -116,8 +134,8 @@ impl Meter {
         call.usage.merge(&usage);
         call.tokens = call.usage.context() + call.usage.output;
         match price::usd(model, &call.usage) {
-            Some(usd) => (call.usd, call.unpriced) = (usd, 0),
-            None => (call.usd, call.unpriced) = (0.0, call.tokens),
+            Some(usd) => (call.usd, call.unpriced, call.priced) = (usd, 0, true),
+            None => (call.usd, call.unpriced, call.priced) = (0.0, call.tokens, false),
         }
         let new = *call;
         self.spent_usd += new.usd - old.usd;
@@ -127,22 +145,24 @@ impl Meter {
         self.tokens -= old.tokens;
         let record =
             json!({"key":self.key,"usd":self.spent_usd,"unpriced_tokens":self.unpriced_tokens});
-        if crate::base::atomic_write(&self.ledger, record.to_string().as_bytes()).is_err() {
-            self.broken = true;
+        if let Some(ledger) = &self.ledger {
+            if crate::base::atomic_write(ledger, record.to_string().as_bytes()).is_err() {
+                self.broken = true;
+            }
         }
     }
     fn output_tokens(&self) -> u64 {
         self.calls.values().map(|c| c.usage.output).sum()
     }
     /// Adds whatever output the run's closing total shows beyond what was already metered.
-    fn settle_output(&mut self, output_before: u64, run_total: u64) {
+    fn settle_output(&mut self, output_before: u64, run_total: u64, model: &str) {
         let metered = self.output_tokens().saturating_sub(output_before);
         if run_total > metered {
             let hidden = price::CallUsage {
                 output: run_total - metered,
                 ..Default::default()
             };
-            self.observe(None, FABLE_MODEL, hidden);
+            self.observe(None, model, hidden);
         }
     }
     /// A model the price table cannot price still counts: its tokens run against the cap at
@@ -194,6 +214,7 @@ fn run_process(
     timeout: Duration,
     stop: &AtomicBool,
     member: &str,
+    raw_path: Option<&Path>,
     on_line: &mut dyn FnMut(&[u8]) -> bool,
 ) -> std::io::Result<Finished> {
     command
@@ -241,6 +262,7 @@ fn run_process(
     });
     let start = Instant::now();
     let mut stdout = Vec::new();
+    let mut raw_file: Option<std::fs::File> = None;
     let mut exited_at = None;
     let end = loop {
         if stop.load(Ordering::SeqCst) {
@@ -253,6 +275,18 @@ fn run_process(
         }
         match lines.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
+                if let Some(path) = raw_path {
+                    let write = (|| -> std::io::Result<()> {
+                        if raw_file.is_none() {
+                            raw_file = Some(std::fs::File::create(path)?);
+                        }
+                        raw_file.as_mut().unwrap().write_all(&line)
+                    })();
+                    if let Err(e) = write {
+                        proc::kill_tree(&mut child);
+                        return Err(e);
+                    }
+                }
                 stdout.extend_from_slice(&line);
                 if !on_line(&line) {
                     proc::kill_tree(&mut child);
@@ -340,6 +374,7 @@ fn checked(candidate: Option<Value>, shape: &Value, tokens: u64, what: &str) -> 
         Ok(()) => Answer {
             status: Status::Ok,
             output: Some(value),
+            raw: None,
             tokens,
             detail: None,
         },
@@ -362,6 +397,7 @@ pub(super) struct Ask<'a> {
     pub schema: &'a Value,
     pub timeout: Duration,
     pub stop: &'a AtomicBool,
+    pub raw_path: Option<&'a Path>,
 }
 
 /// `tools` empty means the round that may use none; the prompt goes on stdin.
@@ -370,6 +406,84 @@ pub(super) fn ask_fable(
     ask: Ask,
     tools: &str,
     meter: &mut Meter,
+) -> Answer {
+    ask_fable_model(command, ask, tools, meter, FABLE_MODEL)
+}
+
+pub(super) fn ask_fable_model(command: &Res<Vec<String>>, ask: Ask, tools: &str, meter: &mut Meter, model: &str) -> Answer {
+    ask_claude(command, ask, tools, meter, model)
+}
+
+/// Usage observed for a single Claude invocation. Input includes cache reads and writes.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct MemberUsage {
+    pub model: String,
+    pub usd: Option<f64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Run one Claude invocation with tools disabled and validate its structured answer.
+#[allow(dead_code)]
+pub fn claude_call(
+    command: &Res<Vec<String>>,
+    model: &str,
+    prompt: String,
+    cwd: &Path,
+    schema: &Value,
+    timeout: Duration,
+) -> Res<(Value, MemberUsage)> {
+    if let Err(error) = command {
+        return Err(error.clone());
+    }
+    if command
+        .as_ref()
+        .is_ok_and(|argv| argv.is_empty() || argv[0].is_empty())
+    {
+        return Err(Failure::new("not_installed", "Claude command is empty"));
+    }
+    let mut meter = Meter::single_call();
+    let stop = AtomicBool::new(false);
+    let answer = ask_claude(
+        command,
+        Ask {
+            prompt,
+            cwd,
+            schema,
+            timeout,
+            stop: &stop,
+            raw_path: None,
+        },
+        "",
+        &mut meter,
+        model,
+    );
+    let output = answer.output.ok_or_else(|| {
+        Failure::new(
+            "claude_call",
+            answer.detail.unwrap_or_else(|| answer.status.word().into()),
+        )
+    })?;
+    let usd = (meter.observed
+        && meter.calls.values().all(|call| call.priced)
+        && price::usd(model, &price::CallUsage::default()).is_some())
+    .then_some(meter.spent_usd);
+    let usage = MemberUsage {
+        model: model.to_owned(),
+        usd,
+        input_tokens: meter.calls.values().map(|call| call.usage.context()).sum(),
+        output_tokens: meter.output_tokens(),
+    };
+    Ok((output, usage))
+}
+
+fn ask_claude(
+    command: &Res<Vec<String>>,
+    ask: Ask,
+    tools: &str,
+    meter: &mut Meter,
+    model: &str,
 ) -> Answer {
     // A spent budget (also one loaded from an earlier attempt) starts no paid request.
     if meter.exceeded() {
@@ -392,7 +506,7 @@ pub(super) fn ask_fable(
         [
             "-p",
             "--model",
-            FABLE_MODEL,
+            model,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -420,6 +534,7 @@ pub(super) fn ask_fable(
         ask.timeout,
         ask.stop,
         "fable",
+        ask.raw_path,
         &mut |line| {
             let Ok(event) = serde_json::from_slice::<Value>(line) else {
                 return true;
@@ -432,18 +547,18 @@ pub(super) fn ask_fable(
                         // Stream-json stamps usage at stream start, so its output count is far
                         // below what is billed; the content so far is the better bound.
                         u.output = u.output.max(content_bytes(&message["content"]) / 3);
-                        let model = message["model"].as_str().unwrap_or(FABLE_MODEL);
-                        meter.observe(message["id"].as_str(), model, u);
+                        let reported_model = message["model"].as_str().unwrap_or(model);
+                        meter.observe(message["id"].as_str(), reported_model, u);
                     }
                 }
                 Some("result") => {
                     if let Some(total) = usage::call_usage(&event["usage"]) {
                         if usage_in_this_run {
                             // The result carries the true output total: bill what the stream hid.
-                            meter.settle_output(output_before, total.output);
+                            meter.settle_output(output_before, total.output, model);
                         } else {
                             usage_in_this_run = true;
-                            meter.observe(Some(&result_id), FABLE_MODEL, total);
+                            meter.observe(Some(&result_id), model, total);
                         }
                     }
                     result = Some(event);
@@ -457,9 +572,11 @@ pub(super) fn ask_fable(
         Ok(f) => f,
         Err(e) => return spawn_failure(e),
     };
+    let raw = (!finished.stdout.is_empty())
+        .then(|| String::from_utf8_lossy(&finished.stdout).into_owned());
     let tokens = meter.tokens() - tokens_before;
     let reply = result.as_ref().filter(|r| r["is_error"] != true);
-    match finished.end {
+    let mut answer = match finished.end {
         // A reply delivered with the event that crossed the cap is already paid for.
         End::Capped if reply.is_none() => Answer::bad(
             Status::BudgetCut,
@@ -471,7 +588,9 @@ pub(super) fn ask_fable(
         End::Exited(_) | End::Capped => {
             if let Some(reply) = reply {
                 let text = reply["result"].as_str().unwrap_or("");
-                return checked(json_in(text), ask.schema, tokens, "fable");
+                let mut answer = checked(json_in(text), ask.schema, tokens, "fable");
+                answer.raw = raw;
+                return answer;
             }
             let text = match &result {
                 Some(r) => r["result"].as_str().unwrap_or("").to_owned(),
@@ -489,7 +608,9 @@ pub(super) fn ask_fable(
             };
             Answer::bad(status, tokens, detail)
         }
-    }
+    };
+    answer.raw = raw;
+    answer
 }
 
 fn token_count(value: &Value) -> Option<u64> {
@@ -536,7 +657,9 @@ fn envelope_candidates(value: &Value) -> Vec<Value> {
 
 /// The prompt goes last, after `--print`, so it reads correctly whether `--print` takes the
 /// prompt as its value or is a switch followed by the prompt.
-pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer {
+pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer { ask_agy(command, ask, schema_path, ARGON_MODEL) }
+
+pub(super) fn ask_agy(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path, model: &str) -> Answer {
     let mut argv = match command {
         Ok(argv) => argv.clone(),
         Err(e) => return Answer::bad(Status::Missing, 0, e.message.clone()),
@@ -546,7 +669,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
     }
     argv.extend([
         "--model".to_string(),
-        ARGON_MODEL.to_string(),
+        model.to_string(),
         "--output-format".to_string(),
         "json".to_string(),
         "--json-schema".to_string(),
@@ -564,17 +687,28 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
     child.env_remove(super::ENV);
     // A margin past --print-timeout, so agy can report its own timeout first.
     let limit = ask.timeout + Duration::from_secs(30);
-    let finished = match run_process(child, None, limit, ask.stop, "argon", &mut |_| true) {
+    let finished = match run_process(
+        child,
+        None,
+        limit,
+        ask.stop,
+        "argon",
+        ask.raw_path,
+        &mut |_| true,
+    ) {
         Ok(f) => f,
         Err(e) => return spawn_failure(e),
     };
     let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
-    match finished.end {
+    let raw = (!finished.stdout.is_empty()).then(|| stdout.clone());
+    let mut answer = match finished.end {
         End::Timeout => Answer::bad(Status::Timeout, 0, "timed out"),
         End::Stopped | End::Capped => Answer::bad(Status::Failed, 0, "stopped"),
         End::Exited(Some(0)) => {
             let Ok(parsed) = serde_json::from_str::<Value>(stdout.trim()) else {
-                return Answer::bad(Status::Malformed, 0, "argon: stdout is not JSON");
+                let mut answer = Answer::bad(Status::Malformed, 0, "argon: stdout is not JSON");
+                answer.raw = raw;
+                return answer;
             };
             let tokens = token_count(&parsed).unwrap_or(0);
             let candidates = envelope_candidates(&parsed);
@@ -583,7 +717,7 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
                 .find(|c| schema::validate(ask.schema, c).is_ok())
                 .cloned();
             checked(
-                valid.or_else(|| candidates.into_iter().next()),
+                valid.or_else(|| candidates.into_iter().last()),
                 ask.schema,
                 tokens,
                 "argon",
@@ -598,5 +732,191 @@ pub(super) fn ask_argon(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path
             };
             Answer::bad(status, 0, format!("exit {code:?}: {text}"))
         }
+    };
+    answer.raw = raw;
+    answer
+}
+
+#[cfg(test)]
+mod claude_call_tests {
+    use super::*;
+
+    fn fake(extra: &[String]) -> Res<Vec<String>> {
+        let python = std::env::var("AXIOM_TEST_PYTHON").unwrap_or_else(|_| {
+            let names = if cfg!(windows) {
+                ["python", "python3"]
+            } else {
+                ["python3", "python"]
+            };
+            names
+                .into_iter()
+                .find(|name| {
+                    crate::base::proc::cmd(name)
+                        .arg("--version")
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                })
+                .expect("Python not found")
+                .to_owned()
+        });
+        let mut argv = vec![
+            python,
+            "-I".into(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fakes/fake_member.py")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        argv.extend_from_slice(extra);
+        Ok(argv)
+    }
+
+    #[test]
+    fn single_call_returns_scripted_answer_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("script.json");
+        let log = dir.path().join("log.jsonl");
+        std::fs::write(
+            &script,
+            json!([{"match":"hello", "reply":{"answer":"world"}}]).to_string(),
+        )
+        .unwrap();
+        let command = fake(&[
+            format!("--fake-script={}", script.display()),
+            format!("--fake-log={}", log.display()),
+        ]);
+        let shape = json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}});
+        let (answer, usage) = claude_call(
+            &command,
+            FABLE_MODEL,
+            "hello".into(),
+            dir.path(),
+            &shape,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(answer, json!({"answer":"world"}));
+        assert_eq!(usage.model, FABLE_MODEL);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7000, 500));
+        assert!((usage.usd.unwrap() - 0.0684).abs() < 1e-10);
+        let logged: Value =
+            serde_json::from_str(std::fs::read_to_string(log).unwrap().trim()).unwrap();
+        assert!(logged["argv"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|v| v[0] == "--model" && v[1] == FABLE_MODEL));
+        assert_eq!(logged["prompt"], "hello");
+    }
+
+    #[test]
+    fn missing_command_and_timeout_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let shape = json!({"type":"object"});
+        let missing = Err(Failure::new("not_installed", "missing"));
+        assert!(claude_call(
+            &missing,
+            FABLE_MODEL,
+            String::new(),
+            dir.path(),
+            &shape,
+            Duration::from_secs(5)
+        )
+        .is_err());
+        let absent = Ok(vec![dir
+            .path()
+            .join("no-such-command")
+            .to_string_lossy()
+            .into_owned()]);
+        assert!(claude_call(
+            &absent,
+            FABLE_MODEL,
+            String::new(),
+            dir.path(),
+            &shape,
+            Duration::from_secs(5)
+        )
+        .is_err());
+        let hanging = fake(&["--fake-scenario=hang".into()]);
+        assert!(claude_call(
+            &hanging,
+            FABLE_MODEL,
+            String::new(),
+            dir.path(),
+            &shape,
+            Duration::from_millis(250)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unpriced_usage_has_no_usd() {
+        let dir = tempfile::tempdir().unwrap();
+        let shape = json!({"type":"object"});
+        let command = fake(&["--fake-scenario=unpriced".into()]);
+        let (_, usage) = claude_call(
+            &command,
+            "claude-experimental-x",
+            String::new(),
+            dir.path(),
+            &shape,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(usage.usd, None);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7000, 500));
     }
 }
+
+// p8: BEGIN paper-only Argon stream transport
+#[allow(dead_code)]
+pub(super) fn ask_argon_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path) -> Answer { ask_agy_stdin(command, ask, schema_path, ARGON_MODEL) }
+
+pub(super) fn ask_agy_stdin(command: &Res<Vec<String>>, ask: Ask, schema_path: &Path, model: &str) -> Answer {
+    let mut argv = match command {
+        Ok(argv) => argv.clone(),
+        Err(e) => return Answer::bad(Status::Missing, 0, e.message.clone()),
+    };
+    argv.extend([
+        "--model".to_owned(), model.to_owned(),
+        "--input-format".to_owned(), "stream-json".to_owned(),
+        "--output-format".to_owned(), "stream-json".to_owned(),
+        "--json-schema".to_owned(), schema_path.to_string_lossy().into_owned(),
+        "--print-timeout".to_owned(), format!("{}s", ask.timeout.as_secs().max(1)),
+        "--sandbox".to_owned(), "--mode".to_owned(), "plan".to_owned(),
+    ]);
+    let input = format!("{}\n", json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":ask.prompt}]}}));
+    let mut child = proc::command(&argv);
+    child.current_dir(ask.cwd);
+    child.env_remove(super::ENV);
+    let finished = match run_process(child, Some(input), ask.timeout, ask.stop, "argon", ask.raw_path, &mut |_| true) {
+        Ok(f) => f,
+        Err(e) => return spawn_failure(e),
+    };
+    let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
+    let raw = (!finished.stdout.is_empty()).then(|| stdout.clone());
+    let mut answer = match finished.end {
+        End::Timeout => Answer::bad(Status::Timeout, 0, "timed out"),
+        End::Stopped | End::Capped => Answer::bad(Status::Failed, 0, "stopped"),
+        End::Exited(Some(0)) => {
+            let result = stdout.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|event| event["type"] == "result").last();
+            if let Some(result) = result {
+                let tokens = token_count(&result).unwrap_or(0);
+                let candidates = envelope_candidates(&result);
+                let valid = candidates.iter().find(|c| schema::validate(ask.schema, c).is_ok()).cloned();
+                checked(valid.or_else(|| candidates.into_iter().last()), ask.schema, tokens, "argon")
+            } else {
+                Answer::bad(Status::Malformed, 0, "argon: no stream result")
+            }
+        }
+        End::Exited(code) => {
+            let text = format!("{}\n{stdout}", finished.stderr);
+            let status = if quota(&text) { Status::Quota } else { Status::Failed };
+            Answer::bad(status, 0, format!("exit {code:?}: {text}"))
+        }
+    };
+    answer.raw = raw;
+    answer
+}
+// p8: END paper-only Argon stream transport

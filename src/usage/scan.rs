@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
     io::{BufRead, BufReader},
     path::Path,
 };
@@ -425,7 +424,7 @@ impl FileScan {
 
 pub(super) fn scan(path: &Path) -> Res<FileScan> {
     let io_error = |e: std::io::Error| Failure::new("io", format!("{}: {e}", path.display()));
-    let mut reader = BufReader::with_capacity(1 << 16, File::open(path).map_err(io_error)?);
+    let mut reader = BufReader::with_capacity(1 << 16, std::io::Cursor::new(crate::storage::archive::read(path).map_err(io_error)?));
     let mut scan = FileScan::default();
     let mut line = Vec::new();
     let mut number = 0;
@@ -442,7 +441,7 @@ pub(super) fn scan(path: &Path) -> Res<FileScan> {
 }
 
 pub(super) fn log_identity(path: &Path) -> Option<(String, Option<String>)> {
-    let mut reader = BufReader::with_capacity(1 << 16, File::open(path).ok()?);
+    let mut reader = BufReader::with_capacity(1 << 16, std::io::Cursor::new(crate::storage::archive::read(path).ok()?));
     let mut line = Vec::new();
     for _ in 0..20 {
         line.clear();
@@ -460,7 +459,7 @@ pub(super) fn log_identity(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 pub(super) fn transcript_cwd(path: &Path) -> Option<String> {
-    let mut reader = BufReader::with_capacity(1 << 16, File::open(path).ok()?);
+    let mut reader = BufReader::with_capacity(1 << 16, std::io::Cursor::new(crate::storage::archive::read(path).ok()?));
     let mut line = Vec::new();
     loop {
         line.clear();

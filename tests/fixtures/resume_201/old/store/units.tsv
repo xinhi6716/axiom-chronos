@@ -1,0 +1,6 @@
+id	track	state	branch	pr	sha	brief
+u1	build	verified				/work/project/briefs/u1.md
+u2	build	verified				/work/project/briefs/u2.md
+u3	build	verified				/work/project/briefs/u3.md
+u4	build	verified				/work/project/briefs/u1.md
+u5	build	review-failed	branch	3	abc	

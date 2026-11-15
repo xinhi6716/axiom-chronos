@@ -1,0 +1,17 @@
+{
+  "id": "ts-027",
+  "language": "ts",
+  "feature": "qualified_path",
+  "refs": [
+    {
+      "file": "main.ts",
+      "line": 2,
+      "name": "render",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.ts#function:render"
+      }
+    }
+  ]
+}

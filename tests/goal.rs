@@ -1,4 +1,4 @@
-use axiom::goal;
+use axiom::{goal, orch};
 use std::fs;
 
 #[test]
@@ -107,7 +107,8 @@ fn modes_status_and_project_gate() {
 fn done_requires_verified_units_and_current_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
-    let store = home.join("orchestrate/project");
+    goal::open(home, "s", "wish", Some("project")).unwrap();
+    let store = orch::store_for(home, "project").unwrap();
     fs::create_dir_all(store.join("reports")).unwrap();
     let header = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief\n";
     fs::write(
@@ -115,7 +116,6 @@ fn done_requires_verified_units_and_current_evidence() {
         format!("{header}unit\tt\tpending\t\t\t\t\n"),
     )
     .unwrap();
-    goal::open(home, "s", "wish", Some("project")).unwrap();
     assert_eq!(
         goal::set_status(home, "s", "done", None).unwrap_err().kind,
         "not_done"

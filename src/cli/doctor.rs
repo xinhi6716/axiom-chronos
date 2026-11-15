@@ -155,6 +155,18 @@ fn state() -> Check {
     }
 }
 
+fn graph_index() -> Check {
+    let result = std::env::current_dir().map_err(|e| e.to_string()).and_then(|cwd| crate::graph::code::health(&base::axiom_home(), &cwd).map_err(|e| e.message));
+    let (ok, detail) = match result {
+        Ok(h) => {
+            let hint = if h.state == "missing" { "; run `axiom graph refresh`" } else { "" };
+            (h.state == "ready", format!("{}: {}; parser {}; schema {:?}, FTS {}, integrity {}; index version {:?}; last sync {:?}; files {}; coverage {:?}; parse failures {}; unresolved {}; freshness {} ({} stale files){}", h.state, h.detail, h.parser, h.schema_version, h.fts_ok, h.integrity_ok, h.index_version, h.last_sync, h.files, h.coverage, h.parse_failures, h.unresolved, h.state, h.stale_files, hint))
+        }
+        Err(e) => (false, e),
+    };
+    Check { label: "graph index", ok, required: false, detail }
+}
+
 fn graph() -> Check {
     let detail = match base::on_path(codegraph::NAME) {
         None => "not on PATH (optional; runs work without it)".to_string(),
@@ -310,6 +322,7 @@ pub(crate) fn checks() -> Vec<Check> {
         sqlite(),
         state(),
         graph(),
+        graph_index(),
         agy(),
     ];
     checks.extend(plugin());

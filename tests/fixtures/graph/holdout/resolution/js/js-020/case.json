@@ -1,0 +1,16 @@
+{
+  "id": "js-020",
+  "language": "js",
+  "feature": "re_export_ambiguous",
+  "refs": [
+    {
+      "file": "main.js",
+      "line": 2,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "ambiguous"
+      }
+    }
+  ]
+}

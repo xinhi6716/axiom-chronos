@@ -1,0 +1,17 @@
+{
+  "id": "rust-013",
+  "language": "rust",
+  "feature": "relative_import",
+  "refs": [
+    {
+      "file": "main.rs",
+      "line": 4,
+      "name": "measure",
+      "nth": 1,
+      "expect": {
+        "resolution": "resolved",
+        "target": "lib.rs#function:measure"
+      }
+    }
+  ]
+}

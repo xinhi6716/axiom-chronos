@@ -12,7 +12,7 @@ use std::{
 };
 
 pub const BRIDGE: &str = "mcp__plugin_chronos_bridge__";
-pub const TOOLS: [&str; 14] = [
+pub const TOOLS: [&str; 15] = [
     "Agent",
     "Read",
     "Glob",
@@ -25,6 +25,7 @@ pub const TOOLS: [&str; 14] = [
     "mcp__plugin_chronos_bridge__memory_record",
     "mcp__plugin_chronos_bridge__memory_search",
     "mcp__plugin_chronos_bridge__memory_get",
+    "mcp__plugin_chronos_bridge__graph_explore",
     "mcp__plugin_chronos_bridge__memory_digest",
     "mcp__plugin_chronos_bridge__goal",
 ];
@@ -51,6 +52,10 @@ pub fn command(
     max_turns: Option<u32>,
     graph: bool,
 ) -> Res<Vec<String>> {
+    command_with_model(config, plugin_dir, max_turns, graph, "opus")
+}
+
+pub fn command_with_model(config: &Config, plugin_dir: &Path, max_turns: Option<u32>, graph: bool, model: &str) -> Res<Vec<String>> {
     let mut cmd = config.claude.clone().map_err(|e| {
         if e.kind == "not_installed" {
             Failure::new(
@@ -83,7 +88,7 @@ pub fn command(
         "--disallowedTools".into(),
         "PowerShell,ScheduleWakeup,CronCreate".into(),
         "--model".into(),
-        "opus".into(),
+        model.into(),
     ]);
     if graph {
         cmd.extend(["--mcp-config".into(), codegraph::claude_config()]);

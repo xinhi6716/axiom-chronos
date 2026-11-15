@@ -1,0 +1,60 @@
+{
+  "manifest_version": 1,
+  "research_id": "rawonly",
+  "research_version": "1",
+  "title": "Raw only",
+  "settings": {},
+  "versions": {},
+  "capabilities": [
+    "raw_measurements",
+    "dataset",
+    "evidence",
+    "pilot",
+    "acceptance"
+  ],
+  "artifacts": [
+    {
+      "id": "raw_measurements",
+      "role": "raw_measurements",
+      "path": "data/raw_measurements.csv",
+      "format": "csv"
+    },
+    {
+      "id": "evidence",
+      "role": "evidence",
+      "path": "data/evidence.csv",
+      "format": "csv"
+    },
+    {
+      "id": "pilot",
+      "role": "pilot",
+      "path": "data/pilot.csv",
+      "format": "csv"
+    },
+    {
+      "id": "acceptance",
+      "role": "acceptance",
+      "path": "data/acceptance.csv",
+      "format": "csv"
+    },
+    {
+      "id": "run_a",
+      "role": "other",
+      "path": "runs/device_A.csv",
+      "format": "csv"
+    },
+    {
+      "id": "run_b",
+      "role": "other",
+      "path": "runs/device_B.jsonl",
+      "format": "jsonl"
+    }
+  ],
+  "groups": {
+    "pilot": "pilot",
+    "acceptance": "acceptance",
+    "by": {
+      "column": "lab"
+    }
+  }
+}
