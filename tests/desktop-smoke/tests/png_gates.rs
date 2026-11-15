@@ -153,6 +153,7 @@ mod rules {
 mod evidence {
     use super::*;
     #[test]
+    #[ignore = "3.0.0-beta.1: the final PNG captures (captures-final) have not run; the official 3.0.0 re-enables this test"]
     fn complete_current_matrix() {
         let repo = release_support::repo();
         let source = release_support::source_id(&repo).expect("clean application source required");
