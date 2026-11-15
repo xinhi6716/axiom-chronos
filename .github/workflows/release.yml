@@ -30,6 +30,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo 'CARGO_HOME=D:/cargo-home' >> "$GITHUB_ENV"
+      - run: python tools/laya/fetch.py --runtime
       - run: cargo test --locked
       - run: cargo build --release --locked
       - run: cp ${{ matrix.bin }} ${{ matrix.asset }}
