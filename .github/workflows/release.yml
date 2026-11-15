@@ -18,6 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tests/r11_merge.rs checks recorded merges against history
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
