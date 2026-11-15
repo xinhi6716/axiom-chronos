@@ -18,6 +18,12 @@ jobs:
       - run: python -m unittest discover -s tests -p test_readme_workflow_assets.py
       - run: python -m unittest discover -s tests -p test_package_release.py
       - uses: dtolnay/rust-toolchain@stable
+      - name: Keep the cargo registry out of the user profile on Windows
+        # tests/release.rs scans built binaries for user-profile paths; dependency sources
+        # in the runner's profile cargo home would be embedded otherwise.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'CARGO_HOME=D:/cargo-home' >> "$GITHUB_ENV"
       - run: cargo build --locked
       - run: python tools/laya/fetch.py --runtime
       - run: cargo test --locked
