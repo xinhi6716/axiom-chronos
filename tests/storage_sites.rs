@@ -237,15 +237,24 @@ fn unit_worker_cargo_env_and_worktree() {
                 .iter()
                 .any(|e| e.path == storage::ledger::normalize(scratch)));
         }
+        // Compare the path's tail, not its prefix: Windows CI runners give TEMP as an 8.3 short
+        // path (C:\Users\RUNNER~1\...) while the recorded path may use the long form.
+        let under_unit_scratch = |p: &str| {
+            let parts: Vec<String> = Path::new(p)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                .collect();
+            parts.len() >= 5 && parts[parts.len() - 5..parts.len() - 1] == ["orchestrate", "demo", "scratch", "u"]
+        };
+        assert!(store.ends_with("orchestrate/demo"));
         let attempt = records
             .iter()
             .find(|v| {
                 v["reason"] == "unit_ended"
                     && v["outcome"] == "done"
-                    && Path::new(v["path"].as_str().unwrap()).parent()
-                        == Some(store.join("scratch/u").as_path())
+                    && under_unit_scratch(v["path"].as_str().unwrap())
             })
-            .unwrap();
+            .unwrap_or_else(|| panic!("no unit_ended record under scratch/u: {records:?}"));
         let attempt_path = Path::new(attempt["path"].as_str().unwrap());
         assert!(!attempt_path.exists());
         assert!(!Ledger::open(home)
